@@ -601,13 +601,6 @@ impl ImportedConversationRepository {
 impl ImportedConversationStore for ImportedConversationRepository {
     type Error = ImportedConversationRepositoryError;
 
-    async fn resolve_or_insert(
-        &mut self,
-        conversation: ImportedConversation,
-    ) -> Result<ImportedConversationStoreOutcome, Self::Error> {
-        ImportedConversationRepository::resolve_or_insert(self, conversation).await
-    }
-
     async fn resolve_or_insert_with_drop_facts(
         &mut self,
         conversation: ImportedConversation,

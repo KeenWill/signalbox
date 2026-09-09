@@ -116,27 +116,16 @@ impl ImportedConversationStoreOutcome {
 ```rust
 pub trait ImportedConversationStore {
     type Error;
-    fn resolve_or_insert(
+    fn resolve_or_insert_with_drop_facts(
         &mut self,
         conversation: signalbox_domain::ImportedConversation,
+        dropped_records: ImportedConversationDropFacts,
     ) -> impl future::Future<
         Output = result::Result<
             ImportedConversationStoreOutcome,
             <Self as ImportedConversationStore>::Error,
         >,
     > + marker::Send;
-    fn resolve_or_insert_with_drop_facts(
-        &mut self,
-        conversation: signalbox_domain::ImportedConversation,
-        _dropped_records: ImportedConversationDropFacts,
-    ) -> impl future::Future<
-        Output = result::Result<
-            ImportedConversationStoreOutcome,
-            <Self as ImportedConversationStore>::Error,
-        >,
-    > + marker::Send {
-        /* provided */
-    }
 }
 ```
 

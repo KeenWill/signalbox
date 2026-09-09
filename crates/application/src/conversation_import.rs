@@ -165,20 +165,12 @@ pub trait ImportedConversationStore {
     /// Adapter-specific infrastructure, collision, or integrity failure.
     type Error;
 
-    /// Inserts a new snapshot or resolves its exact durable duplicate.
-    fn resolve_or_insert(
-        &mut self,
-        conversation: ImportedConversation,
-    ) -> impl Future<Output = Result<ImportedConversationStoreOutcome, Self::Error>> + Send;
-
-    /// Inserts with the durable summary of records dropped during conversion.
+    /// Inserts with the required durable summary of records dropped during conversion.
     fn resolve_or_insert_with_drop_facts(
         &mut self,
         conversation: ImportedConversation,
-        _dropped_records: ImportedConversationDropFacts,
-    ) -> impl Future<Output = Result<ImportedConversationStoreOutcome, Self::Error>> + Send {
-        self.resolve_or_insert(conversation)
-    }
+        dropped_records: ImportedConversationDropFacts,
+    ) -> impl Future<Output = Result<ImportedConversationStoreOutcome, Self::Error>> + Send;
 }
 
 /// Durable summary of source records dropped during conversion.
@@ -812,15 +804,6 @@ mod tests {
 
     impl ImportedConversationStore for FakeStore {
         type Error = FakeStoreError;
-
-        fn resolve_or_insert(
-            &mut self,
-            imported: ImportedConversation,
-        ) -> impl Future<Output = Result<ImportedConversationStoreOutcome, Self::Error>> + Send
-        {
-            self.observed.push(imported);
-            ready(self.response)
-        }
 
         fn resolve_or_insert_with_drop_facts(
             &mut self,

@@ -253,13 +253,6 @@ impl signalbox_application::ImportedConversationStore
     for conversation_import::ImportedConversationRepository
 {
     type Error = conversation_import::ImportedConversationRepositoryError;
-    async fn resolve_or_insert(
-        &mut self,
-        conversation: signalbox_domain::ImportedConversation,
-    ) -> result::Result<
-        signalbox_application::ImportedConversationStoreOutcome,
-        <Self as signalbox_application::ImportedConversationStore>::Error,
-    >;
     async fn resolve_or_insert_with_drop_facts(
         &mut self,
         conversation: signalbox_domain::ImportedConversation,
