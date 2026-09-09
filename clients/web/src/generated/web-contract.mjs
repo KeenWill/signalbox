@@ -5475,7 +5475,9 @@ const schemas = {
             },
             "required": [
               "type",
-              "generation"
+              "generation",
+              "settling_turn_id",
+              "abandoned_actions"
             ],
             "type": "object"
           },

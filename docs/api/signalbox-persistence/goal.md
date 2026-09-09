@@ -131,6 +131,11 @@ pub struct GoalRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl goal::GoalRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
+    #[must_use]
+    pub fn with_tool_dispatch_gate(
+        self,
+        gate: signalbox_application::InProcessToolDispatchGate,
+    ) -> Self;
     pub async fn execution_failure_recovery_cause(
         &self,
         session: signalbox_domain::SessionId,

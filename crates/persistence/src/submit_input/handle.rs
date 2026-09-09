@@ -41,7 +41,7 @@ use signalbox_domain::{
 use sqlx::PgConnection;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_in_transaction<
+pub(crate) async fn handle_in_transaction<
     NextTurn,
     NextToolCancellation,
     NextClosureDecision,

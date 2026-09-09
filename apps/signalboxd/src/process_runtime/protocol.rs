@@ -610,25 +610,13 @@ where
         )
     });
     let outcome = GoalRepository::new(services.pool.clone())
+        .with_tool_dispatch_gate(services.tool_dispatch_gate.clone())
         .handle_user_command(command, candidates, |alias| {
             services.model_configuration.resolve_alias(alias)
         })
         .await;
     match outcome {
         Ok(GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(event))) => {
-            if !schedules_turn
-                && interrupt_for_goal_stop(services, session, event.ordinal())
-                    .await
-                    .is_err()
-            {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::mutation_commit_ambiguous(),
-                )
-                .await;
-            }
             let termination = if !schedules_turn {
                 match recorded_termination(
                     &services.pool,
@@ -643,9 +631,7 @@ where
             } else {
                 None
             };
-            if schedules_turn {
-                let _ = services.eligibility_nudge.nudge(session);
-            }
+            let _ = services.eligibility_nudge.nudge(session);
             write_message(
                 writer,
                 version,
@@ -930,52 +916,6 @@ struct CommittedTurnInterrupt {
     cascade_root_kind: ParentTerminationKind,
     command_id: DurableCommandId,
     content: &'static str,
-}
-
-async fn interrupt_for_goal_stop(
-    services: &ConnectionServices,
-    session: SessionId,
-    event: signalbox_domain::GoalEventOrdinal,
-) -> Result<(), ()> {
-    let repository = GoalRepository::new(services.pool.clone());
-    let stop = repository
-        .load_stop_settlements(session)
-        .await
-        .map_err(|_| ())?
-        .into_iter()
-        .find(|stop| stop.event == event)
-        .ok_or(())?;
-    if stop.abandoned_actions.is_some() {
-        return Ok(());
-    }
-    let live_turn = stop.turn.ok_or(())?;
-    let result = interrupt_for_committed_turn(
-        &services.pool,
-        &services.model_configuration,
-        &services.eligibility_nudge,
-        &services.tool_dispatch_gate,
-        CommittedTurnInterrupt {
-            session,
-            live_turn,
-            expected_version: stop.defaults_version,
-            descendant_scope: DescendantTerminationScope::ParentAlone,
-            cascade_root_kind: ParentTerminationKind::Stopped,
-            command_id: stop.interrupt_command,
-            content: "The goal was stopped.",
-        },
-    )
-    .await;
-    if result.is_err()
-        && repository
-            .load_stop_settlements(session)
-            .await
-            .map_err(|_| ())?
-            .iter()
-            .any(|settled| settled.event == event && settled.abandoned_actions.is_some())
-    {
-        return Ok(());
-    }
-    result
 }
 
 async fn interrupt_for_committed_turn(

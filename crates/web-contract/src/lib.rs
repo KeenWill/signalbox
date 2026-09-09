@@ -1313,7 +1313,11 @@ pub enum WebTimelineGoalEvent {
     },
     UserStopped {
         generation: WebPositiveU64,
+        #[serde(deserialize_with = "deserialize_present_option")]
+        #[schemars(required, schema_with = "nullable_schema::<WebUuid>")]
         settling_turn_id: Option<WebUuid>,
+        #[serde(deserialize_with = "deserialize_present_option")]
+        #[schemars(required, schema_with = "nullable_schema::<WebU64>")]
         abandoned_actions: Option<WebU64>,
     },
     SessionClosed {
@@ -1797,6 +1801,10 @@ pub struct WebSessionTimelineDetailPage {
     pub items: Vec<WebSessionTimelineDetail>,
     pub projected_body_bytes: u32,
     pub continuation: Option<WebTimelineDetailContinuation>,
+}
+
+fn nullable_schema<T: JsonSchema>(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    generator.subschema_for::<Option<T>>()
 }
 
 fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -5341,6 +5349,20 @@ mod tests {
             .expect("generated web-contract artifact is checked in");
 
         assert_eq!(checked_in, artifact.contents);
+    }
+
+    #[test]
+    fn goal_stop_accounting_requires_explicit_nullable_fields() {
+        let value = serde_json::json!({
+            "type": "user_stopped", "generation": "1",
+            "settling_turn_id": null, "abandoned_actions": null,
+        });
+        assert!(serde_json::from_value::<super::WebTimelineGoalEvent>(value.clone()).is_ok());
+        for field in ["settling_turn_id", "abandoned_actions"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().expect("event object").remove(field);
+            assert!(serde_json::from_value::<super::WebTimelineGoalEvent>(missing).is_err());
+        }
     }
 
     #[test]

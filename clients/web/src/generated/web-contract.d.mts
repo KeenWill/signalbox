@@ -634,9 +634,9 @@ export type WebTimelineGoalEvent = {
   readonly text: WebTimelineTextExcerpt;
   readonly type: "achieved";
 } | {
-  readonly abandoned_actions?: WebU64 | null;
+  readonly abandoned_actions: WebU64 | null;
   readonly generation: WebPositiveU64;
-  readonly settling_turn_id?: WebUuid | null;
+  readonly settling_turn_id: WebUuid | null;
   readonly type: "user_stopped";
 } | {
   readonly generation: WebPositiveU64;

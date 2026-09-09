@@ -1853,12 +1853,11 @@ async fn stopped_queued_goal_is_absent_from_reconciliation_hints() -> Result<(),
     Ok(())
 }
 
-/// retiring a queued replacement keeps its immutable tail position
-/// while excluding its turn from runtime scheduling.
+/// stopping a replacement retains the retired positions before independent work.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn stopped_replacement_does_not_corrupt_the_active_acceptance_tail()
--> Result<(), Box<dyn Error>> {
+async fn stopped_replacement_preserves_acceptance_order_for_new_work() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1902,32 +1901,39 @@ async fn stopped_replacement_does_not_corrupt_the_active_acceptance_tail()
         )
         .await?;
 
-    SubmitInputRepository::new(pool.clone())
+    let subsequent = SubmitInputRepository::new(pool.clone())
         .handle_with_candidates(
             SubmitInput::new(
                 command(STEER_COMMAND),
                 session(SESSION),
-                UserContent::try_text(String::from("steer the still-active original turn"))
-                    .expect("fixture steering content is admitted"),
-                DeliveryRequest::NextSafePoint {
-                    expected_active_turn: active.turn(),
+                UserContent::try_text(String::from("start independent work after the stop"))
+                    .expect("fixture input content is admitted"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: PerInputConfigurationChoices::new(
+                        SessionConfigurationDefaultsVersion::first(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
                 },
             ),
             AcceptedInputId::from_uuid(Uuid::from_u128(0xe61)),
-            None,
+            Some(TurnId::from_uuid(Uuid::from_u128(0xe62))),
             CancelledModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xf61)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xf62)),
             ),
-            |_| panic!("steering cannot be reclassified while its source remains active"),
-            |_| {
-                panic!("steering cannot cancel a tool request without a terminal model observation")
-            },
+            |_| panic!("new input has no steering to reclassify"),
+            |_| panic!("new input has no tool batch to cancel"),
         )
         .await?;
-    let pending_position: i64 = sqlx::query_scalar(
+    assert!(matches!(
+        subsequent,
+        signalbox_persistence::submit_input::SubmitInputHandlingOutcome::Recorded(
+            SubmitInputResult::Applied(_)
+        )
+    ));
+    let next_position: i64 = sqlx::query_scalar(
         "SELECT acceptance_position::bigint FROM accepted_input
-          WHERE accepting_command_id = $1 AND disposition_kind = 'pending_steering'",
+          WHERE accepting_command_id = $1",
     )
     .bind(Uuid::from_u128(STEER_COMMAND))
     .fetch_one(&pool)
@@ -1939,13 +1945,13 @@ async fn stopped_replacement_does_not_corrupt_the_active_acceptance_tail()
             .fetch_one(&pool)
             .await?;
 
-    assert_eq!(pending_position, 3);
+    assert_eq!(next_position, 4);
     assert!(!replacement_runtime_relevant);
     let transcript = ProcessReadRepository::new(pool.clone())
         .read_transcript(session(SESSION))
         .await?
         .expect("the session transcript exists");
-    assert_eq!(transcript.turns().len(), 1);
+    assert_eq!(transcript.turns().len(), 2);
     assert_eq!(transcript.turns()[0].turn(), active.turn());
 
     pool.close().await;
@@ -5437,53 +5443,11 @@ async fn request_goal_stop(
         result
     );
     let stop = goals.load_stop_settlements(session(SESSION)).await?[0];
-    let turn = stop.turn.expect("fixture turn is active");
-    assert_eq!(stop.abandoned_actions, None);
-    let result = SubmitInputRepository::new(pool.clone())
-        .handle_with_candidates_alias_resolver_as(
-            SubmitInput::new(
-                stop.interrupt_command,
-                session(SESSION),
-                UserContent::try_text("The goal was stopped.".to_owned())
-                    .expect("fixture stop content"),
-                DeliveryRequest::Interrupt {
-                    expected_active_turn: turn,
-                    descendant_scope: DescendantTerminationScope::ParentAlone,
-                    configuration: PerInputConfigurationChoices::new(
-                        stop.defaults_version,
-                        ModelSelectionOverride::UseSessionDefault,
-                    ),
-                },
-            ),
-            CommandPrincipal::Core,
-            ParentTerminationKind::Stopped,
-            AcceptedInputId::from_uuid(Uuid::now_v7()),
-            Some(TurnId::from_uuid(Uuid::now_v7())),
-            CancelledModelCallTurnIdentities::new(
-                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
-                ContextFrontierId::from_uuid(Uuid::now_v7()),
-            ),
-            |_| panic!("no steering"),
-            |requests| {
-                (
-                    requests
-                        .iter()
-                        .map(|_| SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()))
-                        .collect(),
-                    ContextFrontierId::from_uuid(Uuid::now_v7()),
-                )
-            },
-            || DurableCommandId::from_uuid(Uuid::now_v7()),
-            || TurnAttemptId::from_uuid(Uuid::now_v7()),
-            |_| None,
-        )
-        .await?;
-    assert!(matches!(
-        result,
-        signalbox_persistence::submit_input::SubmitInputHandlingOutcome::Recorded(
-            SubmitInputResult::Applied(_)
-        )
-    ));
+    let interrupt = SubmitInputRepository::new(pool.clone())
+        .load(stop.interrupt_command)
+        .await?
+        .expect("goal command atomically records its interrupt");
+    assert!(matches!(interrupt.result(), SubmitInputResult::Applied(_)));
     Ok(stop)
 }
 
@@ -5803,6 +5767,69 @@ async fn goal_stop_counts_a_prepared_action_as_abandoned_before_authorization()
             .fetch_one(&pool)
             .await?;
     assert_eq!(error, "preauthorization_rejected");
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn goal_stop_rolls_back_when_interrupt_admission_fails() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let (_calls, _issued) = goal_stop_fixture(&pool).await?;
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_stop_input() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'injected interrupt admission failure'; END; $$;
+         CREATE TRIGGER reject_stop_input BEFORE INSERT ON accepted_input
+         FOR EACH ROW EXECUTE FUNCTION reject_stop_input();",
+    )
+    .execute(&pool)
+    .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let result = repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(STOP_COMMAND),
+                session(SESSION),
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await;
+    assert!(result.is_err());
+    assert!(
+        repository
+            .load_command(command(STOP_COMMAND))
+            .await?
+            .is_none()
+    );
+    assert!(
+        repository
+            .load_stop_settlements(session(SESSION))
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        repository
+            .load_goal(session(SESSION))
+            .await?
+            .expect("fixture goal")
+            .current()
+            .state(),
+        &GoalState::Pursuing
+    );
+    let stopped: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM turn_attempt WHERE state_kind = 'stop_requested'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stopped, 0);
+    sqlx::query("DROP TRIGGER reject_stop_input ON accepted_input")
+        .execute(&pool)
+        .await?;
+    request_goal_stop(&pool).await?;
     pool.close().await;
     drop(container);
     Ok(())
