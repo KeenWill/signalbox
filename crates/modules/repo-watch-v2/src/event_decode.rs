@@ -2,7 +2,7 @@ use crate::observation_decode::{
     conclusion, context, mergeable, reaction_subject, review_state, text,
 };
 use serde_json::Value;
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     BranchName, CheckRunName, ChecksOutcome, CommitSha, LabelName, ReactionChange, ReactionContent,
     RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1, RepositorySlug,
     ReviewThreadId, WorkflowName,
