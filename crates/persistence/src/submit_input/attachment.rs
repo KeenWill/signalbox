@@ -736,9 +736,7 @@ pub(super) async fn prepare_attachment_authority_rejection(
         return Ok(None);
     }
 
-    let maximum_bytes = maximum_bytes.ok_or(SubmitInputCorruption::Inconsistent(
-        "attachment authority maximum is unavailable",
-    ))?;
+    let maximum_bytes = maximum_bytes.ok_or(SubmitInputRepositoryError::BlobStorageUnavailable)?;
     for digest in digests {
         let row = sqlx::query(
             "SELECT blob.byte_length,

@@ -802,3 +802,65 @@ async fn blob_verified_delivery_retries_after_skip_and_page_failures() -> Result
     assert_eq!(primary.verified_opens.load(Ordering::SeqCst), 2);
     fixture.stop().await
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn blob_attachment_without_storage_is_unavailable_without_claiming_command()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let command_id = command()?;
+    connection
+        .request(
+            2,
+            ClientRequest::SubmitInput {
+                command_id,
+                session_id,
+                content: UserInputContent::from_parts(vec![UserInputPart::Attachment {
+                    digest: CanonicalBlobDigest::from_digest(BlobDigest::digest(b"attachment")),
+                    kind: UserAttachmentKind::File,
+                    media_type: String::from("application/octet-stream"),
+                    display_filename: None,
+                }]),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::Error {
+            code: ErrorCode::Unavailable,
+            message: String::from("the requested operation is unavailable"),
+            detail: ErrorDetail::none(),
+        },
+    );
+    let claimed: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(command_id.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(claimed, 0);
+
+    connection
+        .request(
+            3,
+            ClientRequest::SubmitInput {
+                command_id,
+                session_id,
+                content: UserInputContent::text(String::from("text remains available")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    assert_eq!(
+        submitted_session(connection.response().await?.message()),
+        session_id
+    );
+    drop(connection);
+    runtime.stop().await
+}
