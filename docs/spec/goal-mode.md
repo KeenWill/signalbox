@@ -107,6 +107,9 @@ the session is adopted, the daemon appends an effective-need overlay naming the
 scheduled resumption under the session lock and arms it; the blocked event
 itself is unchanged.
 
+Adoption of a pursuing goal reconciles its completed turn and queues the next
+turn through the ordinary completion path.
+
 The automatic-resumption run is the trailing alternation of execution-failure
 blocks and the resumptions that answered them; every other event ends it, and a
 resume carrying any identity other than the derived one is an operator's and

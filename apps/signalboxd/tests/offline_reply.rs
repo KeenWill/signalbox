@@ -1091,6 +1091,143 @@ async fn adopt_session(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// Adoption queues the successor of a turn completed after ownership release.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn adoption_continues_a_goal_completed_while_unmonitored() -> Result<(), Box<dyn Error>> {
+    let runtime = ScriptedModel::following([goal_completion_script()]);
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
+    // Selection identity declared by GOAL_MODEL_CONFIGURATION.
+    const CONFIGURED_SELECTION: u128 = 0x2001;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(CONFIGURED_SELECTION));
+    let mut create = CreateSessionService::new(
+        UuidV7SessionIdGenerator,
+        CreateSessionRepository::new(pool.clone(), configuration.session_credential_pin()),
+    );
+    let CreateSessionOutcome::Applied(created) = create
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )?)
+        .await?
+    else {
+        panic!("the unique fixture command must create its session")
+    };
+    let session = created.session();
+    let first_turn = GoalTurnCandidates::new(
+        AcceptedInputId::from_uuid(Uuid::now_v7()),
+        TurnId::from_uuid(Uuid::now_v7()),
+    );
+    let goal_repository = GoalRepository::new(pool.clone());
+    let attached = goal_repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+                GoalUserAction::Attach(goal_statement("finish the commissioned task")),
+            ),
+            Some(first_turn),
+            |_| None,
+        )
+        .await?;
+    assert_goal_command_applied(attached);
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let _ = nudge.nudge(session);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let provider =
+        RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog(), None);
+    let credential_reference = ModelCallCredentialReference::new("scripted-goal-test");
+    let (execution, fatal_execution) = FatalExecutionSupervisor::new(
+        PostgresProviderModelExecution::new(
+            PostgresModelCallRepository::new(
+                pool.clone(),
+                configuration.target_catalog(),
+                credential_reference,
+            ),
+            InProcessAttemptDispatchGate::default(),
+            provider,
+            None,
+        )
+        .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor)
+        .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+            pool.clone(),
+            None,
+            Vec::new(),
+        )),
+    );
+    let disposition = PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration,
+        nudge,
+        GoalModeNumericBounds::new(None, None, None, None, None),
+    );
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) = activation.execute(session).await? else {
+        panic!("the owned goal turn must activate before release")
+    };
+    let released =
+        signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository::new(
+            pool.clone(),
+        )
+        .handle(
+            signalbox_domain::SessionLifecycleCommand::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+                signalbox_domain::SessionLifecycleOperation::Release,
+            ),
+            signalbox_domain::CommandPrincipal::Operator,
+        )
+        .await?;
+    assert!(matches!(
+        released,
+        signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandHandlingOutcome::Recorded(
+            signalbox_domain::SessionLifecycleCommandResult::Applied(_)
+        )
+    ));
+    execution.execute(activated).await?;
+    disposition.reconcile_success(session).await?;
+    assert_eq!(
+        goal_repository
+            .load_goal(session)
+            .await?
+            .expect("attached goal")
+            .current()
+            .state(),
+        &GoalState::Pursuing,
+    );
+    assert_eq!(goal_repository.recovery_progress(session).await?.turns(), 1);
+
+    adopt_session(&pool, session).await?;
+    disposition.arm_adopted_goal_resumption(session);
+    timeout(
+        Duration::from_secs(10),
+        wait_for_goal_recovery_count(&goal_repository, session, GoalRecoveryProgress::turns, 2),
+    )
+    .await??;
+    // Replaying adoption must leave the same queued successor.
+    adopt_session(&pool, session).await?;
+    disposition.reconcile_success(session).await?;
+    let queued: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'queued'",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(queued.len(), 1, "adoption queues exactly one successor");
+    assert_ne!(queued[0], first_turn.turn().into_uuid());
+    assert_eq!(goal_repository.recovery_progress(session).await?.turns(), 2);
+    assert!(!fatal_execution.is_triggered());
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Adopting a session whose goal is blocked arms the resumption the
 /// unmonitored block was not owed.
 #[tokio::test(flavor = "multi_thread")]
@@ -1117,7 +1254,7 @@ async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Err
         nudge,
         GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
     )
-    .arm_blocked_goal_resumption(session);
+    .arm_adopted_goal_resumption(session);
 
     let resumed = resumed_goal(&pool, session).await?;
 
@@ -1167,7 +1304,7 @@ async fn automatic_resume_persists_strategy_guidance_for_a_chargeable_failure()
         nudge,
         GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
     )
-    .arm_blocked_goal_resumption(session);
+    .arm_adopted_goal_resumption(session);
 
     let resumed = resumed_goal(&pool, session).await?;
     let input = resumed_goal_input(&pool, &resumed).await?;
@@ -1222,7 +1359,7 @@ async fn automatic_resume_preserves_the_statement_for_an_exempt_provider_failure
         nudge,
         GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
     )
-    .arm_blocked_goal_resumption(session);
+    .arm_adopted_goal_resumption(session);
 
     let resumed = resumed_goal(&pool, session).await?;
     let input = resumed_goal_input(&pool, &resumed).await?;
@@ -1262,7 +1399,7 @@ async fn adopting_a_blocked_goal_persists_its_scheduled_need() -> Result<(), Box
         nudge,
         GoalModeNumericBounds::new(Some(Duration::from_secs(60)), None, None, None, None),
     )
-    .arm_blocked_goal_resumption(session);
+    .arm_adopted_goal_resumption(session);
 
     let armed = armed_goal(&pool, session).await?;
 
