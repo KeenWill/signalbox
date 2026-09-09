@@ -477,6 +477,8 @@ async fn kickoff_replays_after_provisioning_and_after_input_commit() -> Result<(
     )
     .execute(&fixture.core)
     .await?;
+    // Replay retains the publication instruction even when push becomes available.
+    fixture.enable_push()?;
     // A later observation cannot rewrite dispatch-time instructions during replay.
     sqlx::query("UPDATE repository_state SET comparison_baseline = jsonb_set(comparison_baseline, '{pull_requests}', '[]')")
         .execute(&fixture.module).await?;
@@ -497,6 +499,7 @@ async fn kickoff_replays_after_provisioning_and_after_input_commit() -> Result<(
         .single_text()
         .expect("kickoff text")
         .as_str();
+    assert!(text.contains("This session has no Git push authority."));
     assert!(text.contains("No unresolved review threads were present at dispatch time."));
     assert!(text.contains("one-turn convergence check of mergeability and gating checks"));
     assert!(text.contains("Post a plain reply on the pull request"));
@@ -553,6 +556,7 @@ async fn kickoff_with_unresolved_threads_requests_repair_and_thread_replies()
         )],
     )
     .await?;
+    fixture.enable_push()?;
     fixture.dispatch().await;
     let text: String =
         sqlx::query_scalar("SELECT kickoff_text FROM dispatch_ledger WHERE command_id = $1")
@@ -561,7 +565,9 @@ async fn kickoff_with_unresolved_threads_requests_repair_and_thread_replies()
             .await?;
     assert!(text.contains("fix every unresolved review thread"));
     assert!(text.contains("push with git_push_configured to the head branch"));
-    assert!(text.contains("Reply on each thread naming the fixing commit and resolve it"));
+    assert!(
+        text.contains("Reply on each addressed thread naming the fixing commit and resolve it")
+    );
     assert!(!text.contains("No unresolved review threads"));
     Ok(())
 }
@@ -571,6 +577,7 @@ async fn kickoff_with_unresolved_threads_requests_repair_and_thread_replies()
 async fn kickoff_for_renovate_requests_the_template_merge_forward() -> Result<(), Box<dyn Error>> {
     let mut fixture =
         CheckoutFixture::with_rule("checkout/project", "renovate-merge-forward").await?;
+    fixture.enable_push()?;
     fixture.dispatch().await;
     let text: String =
         sqlx::query_scalar("SELECT kickoff_text FROM dispatch_ledger WHERE command_id = $1")
@@ -580,13 +587,106 @@ async fn kickoff_for_renovate_requests_the_template_merge_forward() -> Result<()
     assert!(
         text.contains("base branch forward into its head branch, resolve only merge conflicts")
     );
-    assert!(text.contains("validate, commit, and push with git_push_configured"));
+    assert!(text.contains("push with git_push_configured to the head branch"));
     assert!(text.contains("intended change survives the merge"));
     assert!(text.contains("For each conflict hunk, report which side was retained"));
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn kickoff_without_push_credentials_requests_a_reviewable_diff() -> Result<(), Box<dyn Error>>
+{
+    let mut fixture = CheckoutFixture::with_threads(
+        "checkout/project",
+        "labeled-review-response",
+        vec![RepoWatchThreadObservation::new(
+            ReviewThreadId::try_new("fixture-thread".to_owned())?,
+            RepoWatchThreadState::Open,
+        )],
+    )
+    .await?;
+    assert!(
+        fixture
+            .sink
+            .models
+            .repository_watch()
+            .expect("configuration")
+            .repositories()[0]
+            .push_credential_file()
+            .is_none()
+    );
+    fixture.dispatch().await;
+    let text: String =
+        sqlx::query_scalar("SELECT kickoff_text FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    assert!(text.contains("fix every unresolved review thread"));
+    assert!(text.contains("This session has no Git push authority. Do not push."));
+    assert!(text.contains(
+        "Provide any fix as a reviewable diff in a plain pull request reply and finish cleanly."
+    ));
+    assert!(text.contains("Leave unresolved review threads open"));
+    assert!(!text.contains("push with git_push_configured"));
+    assert!(!text.contains("and resolve it"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn kickoff_for_a_fork_head_requests_a_diff_despite_configured_push_credentials()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture =
+        CheckoutFixture::with_rule("contributor/project", "renovate-merge-forward").await?;
+    fixture.enable_push()?;
+    assert!(
+        fixture
+            .sink
+            .models
+            .repository_watch()
+            .expect("configuration")
+            .repositories()[0]
+            .push_credential_file()
+            .is_some()
+    );
+    fixture.dispatch().await;
+    let text: String =
+        sqlx::query_scalar("SELECT kickoff_text FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    assert!(
+        text.contains("base branch forward into its head branch, resolve only merge conflicts")
+    );
+    assert!(text.contains("This session has no Git push authority. Do not push."));
+    assert!(text.contains(
+        "Provide any fix as a reviewable diff in a plain pull request reply and finish cleanly."
+    ));
+    assert!(!text.contains("push with git_push_configured"));
+    assert!(!text.contains("and resolve it"));
+    Ok(())
+}
+
 impl CheckoutFixture {
+    fn enable_push(&mut self) -> Result<PathBuf, Box<dyn Error>> {
+        let credential = self._files.path().join("push-token");
+        std::fs::write(&credential, "push-fixture-token")?;
+        std::fs::set_permissions(
+            &credential,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
+        let catalog_text = self.catalog.replace(
+            "credential_file =",
+            &format!(
+                "push_credential_file = \"{}\"\ncredential_file =",
+                credential.display()
+            ),
+        );
+        self.sink.models = Arc::new(HubModelConfiguration::parse(&catalog_text)?);
+        Ok(credential)
+    }
+
     async fn new() -> Result<Self, Box<dyn Error>> {
         Self::with_head_repository("checkout/project").await
     }
@@ -1157,20 +1257,7 @@ async fn dispatched_push_advances_only_its_retained_head_and_survives_recomposit
             )
             .is_none()
     );
-    let credential = fixture._files.path().join("push-token");
-    std::fs::write(&credential, "push-fixture-token")?;
-    std::fs::set_permissions(
-        &credential,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )?;
-    let catalog_text = fixture.catalog.replace(
-        "credential_file =",
-        &format!(
-            "push_credential_file = \"{}\"\ncredential_file =",
-            credential.display()
-        ),
-    );
-    fixture.sink.models = Arc::new(HubModelConfiguration::parse(&catalog_text)?);
+    let credential = fixture.enable_push()?;
     fixture.dispatch().await;
     let session = fixture.session().await;
     let root = fixture.root(session);

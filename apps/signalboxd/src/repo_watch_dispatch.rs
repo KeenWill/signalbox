@@ -317,9 +317,21 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 return Err(RepositoryWatchCommandError::CoreCommandFailed);
             }
         } else if !checkout.removed {
+            use signalbox_module_repo_watch_v2::checkout::KickoffPushAuthority;
+            let push_authority = match crate::repo_watch_runtime::git_push_repository(
+                self.configuration,
+                &checkout.event,
+            ) {
+                Some(_) => KickoffPushAuthority::Available,
+                None => KickoffPushAuthority::Unavailable,
+            };
             if let Some((kickoff, text)) = self
                 .store
-                .retain_dispatch_kickoff(id, DurableCommandId::from_uuid(Uuid::now_v7()))
+                .retain_dispatch_kickoff(
+                    id,
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    push_authority,
+                )
                 .await
                 .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
             {

@@ -7,6 +7,8 @@ use signalbox_session_ownership::{
 };
 use uuid::Uuid;
 
+pub use crate::kickoff::KickoffPushAuthority;
+
 /// Closed terminal reasons for a checkout dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CheckoutRetirementReason {
@@ -83,15 +85,18 @@ pub struct CheckoutRemovalCandidate {
 }
 
 impl RepoWatchStore {
-    /// Retains one kickoff identity after provisioning, returning the frozen dispatch text.
+    /// Freezes publication instructions with the kickoff identity after provisioning.
     pub async fn retain_dispatch_kickoff(
         &self,
         creation: DurableCommandId,
         candidate: DurableCommandId,
+        push_authority: KickoffPushAuthority,
     ) -> Result<Option<(DurableCommandId, String)>, StoreError> {
         let row: Option<(Uuid, String)> = sqlx::query_as(
             "UPDATE dispatch_ledger
-             SET kickoff_command_id = COALESCE(kickoff_command_id, $2)
+             SET kickoff_command_id = COALESCE(kickoff_command_id, $2),
+                 kickoff_text = CASE WHEN kickoff_command_id IS NULL
+                     THEN $3 || kickoff_text ELSE kickoff_text END
              WHERE command_id = $1 AND kickoff_text IS NOT NULL
                AND checkout_head_sha IS NOT NULL AND checkout_retired_reason IS NULL
                AND NOT checkout_removed
@@ -99,6 +104,7 @@ impl RepoWatchStore {
         )
         .bind(creation.into_uuid())
         .bind(candidate.into_uuid())
+        .bind(push_authority.instruction())
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|(id, text)| (DurableCommandId::from_uuid(id), text)))
