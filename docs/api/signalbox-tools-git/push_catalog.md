@@ -23,6 +23,13 @@ impl<Transport> GitPushTools<Transport> {
 }
 ```
 
+## git_push_catalog
+
+```rust
+pub fn git_push_catalog(
+) -> result::Result<signalbox_application::CompiledToolCatalog, GitPushToolsConstructionError>;
+```
+
 ## GitPushToolsConstructionError
 
 ```rust

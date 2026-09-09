@@ -2,7 +2,7 @@
 
 This committed unbuilt design extends [eval-system](../spec/eval-system.md)
 using the daemon host, immutable input, journal and terminal result of
-[workflows](program-substrate.md).
+[workflows](workflows.md).
 
 ## Manifest and identity
 
@@ -95,7 +95,7 @@ ambiguous trial stops that run without a scorecard or seal. Cancelled, faulted
 or interrupted execution before sealing retains its manifest and journal and
 does not report a complete evaluation. Workflow cancellation, restart and
 unavailable-native-revision behavior follow the
-[workflows contract](program-substrate.md).
+[workflows contract](workflows.md).
 
 ## Launch boundary
 

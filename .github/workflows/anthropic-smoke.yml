@@ -76,7 +76,7 @@ env:
 jobs:
   gate:
     name: Anthropic smoke eligibility
-    runs-on: signalbox
+    runs-on: signalbox-orchestration
     timeout-minutes: 5
     permissions:
       contents: read
@@ -152,7 +152,7 @@ jobs:
     # ref; main pushes never cancel. A concurrent real exchange
     # costs a small fraction of a cent; required-check integrity is worth more
     # than serializing that spend.
-    runs-on: signalbox
+    runs-on: signalbox-builds
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -208,7 +208,7 @@ jobs:
     name: Anthropic smoke compatibility
     needs: [gate, smoke]
     if: ${{ always() }}
-    runs-on: signalbox
+    runs-on: signalbox-orchestration
     timeout-minutes: 5
     env:
       EVENT_NAME: ${{ github.event_name }}

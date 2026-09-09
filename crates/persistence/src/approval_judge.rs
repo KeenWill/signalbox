@@ -1337,15 +1337,15 @@ fn decode_dispatch_authority(
 /// guarantee. The generation recorded for the turn is therefore the binding
 /// whenever the turn has one.
 ///
-/// A turn with no such record resolves to no statement, and the judge
-/// escalates. A goal session runs turns the goal machinery did not schedule —
+/// A turn with no such record resolves to no statement. Goals only narrow the
+/// frozen system prompt's authority; an absent statement alone does not require
+/// escalation. A goal session runs turns the goal machinery did not schedule —
 /// an ordinary input submitted into a session that has a goal — and the
 /// generation states nothing about those, so reading one against the session's
-/// lineage would let a goal attached after the turn already existed supply
-/// authority it never covered. A commissioned dispatch supplies its judged
-/// request without such a goal-machinery turn record: the turn carrying its
-/// tagged context is the commissioned generation's own turn and carries the
-/// dispatch authority.
+/// lineage would apply a later goal's restrictions to a turn it never covered.
+/// A commissioned dispatch supplies its judged request without such a
+/// goal-machinery turn record: the turn carrying its tagged context is the
+/// commissioned generation's own turn and carries the dispatch authority.
 ///
 /// This is what the judge reads while it is prepared. Completion asks a
 /// different question of the same lineage and uses

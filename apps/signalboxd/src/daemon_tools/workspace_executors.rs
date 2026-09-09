@@ -41,6 +41,7 @@ pub(super) struct SessionWorkspaceExecutors<
     ExecRunner: ProcessRunner,
 > {
     roots: SessionWorkspaceRoots,
+    pub(super) repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
     git_identity: GitIdentity,
     exec_runner: ExecRunner,
     cargo_registry_cache: Option<PathBuf>,
@@ -56,6 +57,7 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
     fn clone(&self) -> Self {
         Self {
             roots: self.roots.clone(),
+            repository_watch: self.repository_watch.clone(),
             git_identity: self.git_identity.clone(),
             exec_runner: self.exec_runner.clone(),
             cargo_registry_cache: self.cargo_registry_cache.clone(),
@@ -96,6 +98,7 @@ where
         let failure_details = SessionWorkspaceFailureDetails::try_new()?;
         Ok(Self {
             roots,
+            repository_watch: None,
             git_identity,
             exec_runner,
             cargo_registry_cache,
@@ -384,6 +387,48 @@ where
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, DaemonToolExecutorError> {
         let session = invocation.correlation().session();
+        if invocation.request().name().as_str() == signalbox_tools_git::GIT_PUSH_CONFIGURED_NAME {
+            let authority = match &self.repository_watch {
+                Some(watch) => watch
+                    .git_push_authority(session)
+                    .await
+                    .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
+                None => None,
+            };
+            let Some((repository, branch, commit)) = authority else {
+                return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                    detail: signalbox_domain::ToolExecutionErrorDetail::try_new(
+                        "configured Git push is unavailable for this session".to_owned(),
+                    )
+                    .ok(),
+                }));
+            };
+            let root = self
+                .resolve_workspace_instruction_root(session)
+                .await
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+            if root != self.roots.derived_path(session) {
+                return Err(DaemonToolExecutorError::pre_dispatch());
+            }
+            let filesystem = FileSystem::pin_further_root(&root)
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+            let mut executor = WorkspaceBoundFamilies::git_push(
+                &root,
+                &repository,
+                branch,
+                commit,
+                self.exec_runner.clone(),
+                &filesystem,
+            )
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+            self.resolve_workspace_instruction_root(session)
+                .await
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+            return executor
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error));
+        }
         let mut executors = match self.resolve(session).await {
             Ok(executors) => executors,
             Err(failure) => {

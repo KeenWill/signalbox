@@ -163,7 +163,7 @@
     {
       // deno_error is not an independent dependency: its sole use is naming
       // deno_core's error type (use deno_error::JsErrorBox in
-      // crates/program-runtime), and every deno_core release since 0.388.0
+      // crates/workflow-runtime), and every deno_core release since 0.388.0
       // pins deno_error exactly — 0.409.0, 0.410.0 and 0.411.0 all require
       // "=0.7.1". It can only ever move when deno_core moves, so Renovate must
       // not propose it on its own — that produced the unresolvable PR #921
