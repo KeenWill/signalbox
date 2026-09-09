@@ -101,6 +101,9 @@ worker; each worker runs one partition per binary at a time with 16 test
 threads. The Rust workflow calls `bazel.yml` and binds its ordinary and
 PostgreSQL results to `validate` under the Rust change-scope gate.
 
+PostgreSQL shards additionally run only for their Rust source, configuration,
+build, and workflow path scope; manual Bazel workflow dispatches run all shards.
+
 The checker job runs its Python suites with
 `bazel test //:python_checker_tests`. Bazel supplies Python 3.14, packages from
 `tooling/requirements-mdformat.txt`, and the shared Rustfmt toolchain. The Git
