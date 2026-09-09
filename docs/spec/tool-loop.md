@@ -270,7 +270,9 @@ goal, when present, may narrow that scope but cannot independently grant or
 widen it. Goal absence does not require escalation. The judge applies the first
 matching rule: escalate human-reserved actions or truncated authority or
 undecodable arguments, deny requests explicitly outside scope, approve plainly
-covered requests and their ordinary constituents, otherwise escalate.
+covered requests and their ordinary constituents, otherwise escalate. Exec
+pushes require both a dispatch fence and an immutable permitted remote in the
+frozen prompt; a mutable remote alias alone does not establish the destination.
 
 Outside a turn judged under the commissioned generation's dispatch authority, an
 `EscalateToHuman` result for a request still admissible stores the completed

@@ -438,14 +438,14 @@ automatic resumption of an execution-failure block are specified in
   not vendored. Blocks only external-corpus evaluation, not the synthetic corpus
   or eval harness.
 - **Turn-origin instructions in the approval-judge request.** The delegated
-  request context carries session-scoped authority — the goal generation the
-  judged turn is bound to, the template name, and the system prompt frozen for
-  that turn — but no turn-origin content. A delegation-origin child turn's exact
-  parent-supplied task is therefore not shown, so a child created from a broad
-  template may ask for an effect its delegated task never covered while the
-  judge sees only the wider session authority. Freezing that task alongside the
-  session-level fields is undecided, because each added field is further
-  attacker-influenced text placed inside the judge's own prompt, and the
+  request context carries the system prompt frozen for the judged turn, the
+  bound goal generation as narrowing scope, and the template name as a
+  non-authorizing label, but no turn-origin content. A delegation-origin child
+  turn's exact parent-supplied task is therefore not shown, so a child with a
+  broad frozen prompt may ask for an effect its delegated task never covered
+  while the judge sees only the wider frozen-prompt grant. Freezing that task
+  alongside the session-level fields is undecided, because each added field is
+  further attacker-influenced text placed inside the judge's own prompt, and the
   injection posture is what makes any session-derived context admissible at all.
   Recorded as a design question rather than a blocker; authority the context
   does not settle escalates rather than approves.
