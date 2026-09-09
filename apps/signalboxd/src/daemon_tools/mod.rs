@@ -152,6 +152,7 @@ impl<Clock>
         exec_supervisor_executable: &Path,
         cargo_registry_cache: Option<&Path>,
         sandbox: &signalbox_tools_exec::SandboxConfiguration,
+        sandboxed_exec_timeout_bound: Option<std::time::Duration>,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let MappedDaemonCredentialInputs {
@@ -187,12 +188,14 @@ impl<Clock>
                 exec_runner.clone(),
                 cargo_registry_cache,
                 sandbox,
+                sandboxed_exec_timeout_bound,
             )?,
             roots: SessionWorkspaceRoots::try_new(workspace_root)?,
             git_identity,
             exec_runner,
             cargo_registry_cache: cargo_registry_cache.map(Path::to_path_buf),
             sandbox: sandbox.clone(),
+            sandboxed_exec_timeout_bound,
         };
         let conversations =
             ConversationTools::try_new(PostgresConversationIntrospection::new(pool.clone()))
@@ -355,12 +358,14 @@ where
                 exec_runner.clone(),
                 None,
                 &Default::default(),
+                None,
             )?,
             roots: SessionWorkspaceRoots::try_new(workspace_root)?,
             git_identity,
             exec_runner,
             cargo_registry_cache: None,
             sandbox: Default::default(),
+            sandboxed_exec_timeout_bound: None,
         };
         let conversations = ConversationTools::try_new(conversation_port)
             .map_err(|_| DaemonToolsConstructionError::Conversations)?;
