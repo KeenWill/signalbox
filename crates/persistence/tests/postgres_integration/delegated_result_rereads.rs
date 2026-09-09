@@ -1940,18 +1940,25 @@ async fn successive_foreground_results_resume_the_same_tool_batch() -> Result<()
         "mode": "foreground",
     })
     .to_string();
-    let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
+    let (fixture, model_repository, _, requests) = checkpoint_confirmed_tool_batch(
         &pool,
         seed,
         &[
             ("spawn_session", "{}"),
             ("await_session", wait_arguments.as_str()),
             ("await_session", wait_arguments.as_str()),
+            ("read_file", "{}"),
         ],
     )
     .await?;
-    let [spawning_request, awaiting_request, later_awaiting_request] = requests.as_slice() else {
-        panic!("the foreground fixture has one spawn and two await requests")
+    let [
+        spawning_request,
+        awaiting_request,
+        later_awaiting_request,
+        trailing_request,
+    ] = requests.as_slice()
+    else {
+        panic!("the foreground fixture has one spawn, two awaits, and one read")
     };
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(seed + 0x100, seed + 0x101, direct(seed + 5)))
@@ -1975,7 +1982,7 @@ async fn successive_foreground_results_resume_the_same_tool_batch() -> Result<()
                 *awaiting_request,
                 ToolApprovalDecision::Approve,
             ),
-            || panic!("the second approval still leaves the final await undecided"),
+            || panic!("the second approval leaves the later requests undecided"),
         )
         .await?;
     repository
@@ -1983,6 +1990,16 @@ async fn successive_foreground_results_resume_the_same_tool_batch() -> Result<()
             decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd2)),
                 *later_awaiting_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || panic!("the third approval leaves the read undecided"),
+        )
+        .await?;
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd3)),
+                *trailing_request,
                 ToolApprovalDecision::Approve,
             ),
             || issuing_attempt,
@@ -2268,6 +2285,66 @@ async fn successive_foreground_results_resume_the_same_tool_batch() -> Result<()
             turn_attempt: later_continuation,
         }
     );
+
+    let read_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe6));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            read_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the ordinary tool follows both delivered child results");
+    let authorized_read = repository
+        .authorize_attempt(fixture.session, fixture.turn, read_attempt)
+        .await?;
+    repository
+        .commit_observation(
+            authorized_read
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("read after both children"))
+                            .expect("bounded read result"),
+                    ),
+                }),
+        )
+        .await?;
+
+    let outcome = model_repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x300)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x301)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x302)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x30a)),
+                ],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x303)),
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0x304)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x305)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x306)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x307)),
+            ),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x308)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 0x309)),
+                )
+            },
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(_)
+    ));
 
     pool.close().await;
     drop(container);

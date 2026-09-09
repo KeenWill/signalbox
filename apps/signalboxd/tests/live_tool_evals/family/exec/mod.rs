@@ -256,7 +256,7 @@ impl FamilySuite {
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::other("the exec supervisor path is missing"))?;
         let runner = TokioProcessRunner::try_new(supervisor)?;
-        let sandboxed = SandboxedExecTool::try_new(runner.clone(), workspace.path())?;
+        let sandboxed = SandboxedExecTool::try_new(runner.clone(), workspace.path(), None)?;
         let unsandboxed = UnsandboxedExecTool::try_new(runner.clone(), workspace.path())?;
         let diagnostics = CargoDiagnosticsTool::try_new(runner, workspace.path())?;
         let (sandboxed_catalog, sandboxed_executor) = sandboxed.into_parts();
