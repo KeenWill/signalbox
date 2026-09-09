@@ -308,28 +308,94 @@ const fn push_infrastructure(certainty: PushCommitCertainty) -> GitPushExecutorE
     }
 }
 
+#[derive(Serialize)]
+struct MergeDroppedDetail<'a> {
+    error: &'static str,
+    files: Vec<&'a str>,
+    omitted_files: usize,
+    hunks: Vec<MergeDroppedHunk<'a>>,
+    omitted_hunks: usize,
+}
+
+#[derive(Serialize)]
+struct MergeDroppedHunk<'a> {
+    file: &'a str,
+    first_dropped_hunk: String,
+    truncated: bool,
+}
+
 fn merge_dropped_detail(
     files: &[crate::push_merge::DroppedBaseChanges],
 ) -> Result<ToolExecutionErrorDetail, GitPushExecutorError> {
-    let encoded = serde_json::to_string(&serde_json::json!({
-        "error": "MergeDroppedBaseChanges",
-        "files": files,
-    }))
-    .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))?;
-    let sanitized: String = encoded
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                character.escape_default().to_string()
-            } else {
-                character.to_string()
+    // ToolExecutionErrorDetail's existing admission bound.
+    const MAX_DETAIL_BYTES: usize = 4096;
+    let mut detail = MergeDroppedDetail {
+        error: "MergeDroppedBaseChanges",
+        files: Vec::new(),
+        omitted_files: files.len(),
+        hunks: Vec::new(),
+        omitted_hunks: files.len(),
+    };
+    for file in files {
+        detail.files.push(&file.file);
+        detail.omitted_files -= 1;
+        if encode_merge_dropped_detail(&detail)?.len() > MAX_DETAIL_BYTES {
+            detail.files.pop();
+            detail.omitted_files += 1;
+            break;
+        }
+    }
+    for file in files.iter().take(detail.files.len()) {
+        detail.hunks.push(MergeDroppedHunk {
+            file: &file.file,
+            first_dropped_hunk: String::new(),
+            truncated: !file.first_dropped_hunk.is_empty(),
+        });
+        detail.omitted_hunks -= 1;
+        if encode_merge_dropped_detail(&detail)?.len() > MAX_DETAIL_BYTES {
+            detail.hunks.pop();
+            detail.omitted_hunks += 1;
+            break;
+        }
+    }
+    let mut encoded = encode_merge_dropped_detail(&detail)?;
+    for (index, file) in files.iter().take(detail.hunks.len()).enumerate() {
+        let limit =
+            encoded.len() + (MAX_DETAIL_BYTES - encoded.len()) / (detail.hunks.len() - index);
+        // bounded_text cannot account for JSON escaping or preserve its delimiters.
+        for character in file.first_dropped_hunk.chars() {
+            let hunk = &mut detail.hunks[index];
+            hunk.first_dropped_hunk.push(character);
+            hunk.truncated = hunk.first_dropped_hunk.len() != file.first_dropped_hunk.len();
+            let candidate = encode_merge_dropped_detail(&detail)?;
+            if candidate.len() > limit {
+                let hunk = &mut detail.hunks[index];
+                hunk.first_dropped_hunk.pop();
+                hunk.truncated = true;
+                break;
             }
-        })
-        .collect();
-    // The tool-loop's ToolExecutionErrorDetail admission limit is 4096 bytes.
-    let (detail, _) = crate::bounded::bounded_text(&sanitized, 4096);
-    ToolExecutionErrorDetail::try_new(detail)
+            encoded = candidate;
+        }
+    }
+    ToolExecutionErrorDetail::try_new(encoded)
         .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))
+}
+
+fn encode_merge_dropped_detail(
+    detail: &MergeDroppedDetail<'_>,
+) -> Result<String, GitPushExecutorError> {
+    let encoded = serde_json::to_string(detail)
+        .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))?;
+    // serde_json leaves Unicode C1 controls literal; the tool detail forbids them.
+    let mut sanitized = String::with_capacity(encoded.len());
+    for character in encoded.chars() {
+        if character.is_control() {
+            sanitized.push_str(&format!("\\u{:04x}", u32::from(character)));
+        } else {
+            sanitized.push(character);
+        }
+    }
+    Ok(sanitized)
 }
 
 #[cfg(test)]
@@ -356,11 +422,83 @@ mod tests {
             value,
             serde_json::json!({
                 "error": "MergeDroppedBaseChanges",
-                "files": [
-                    { "file": "one.txt", "first_dropped_hunk": "-base\n+branch\n" },
-                    { "file": "two.txt", "first_dropped_hunk": "-keep\n" },
+                "files": ["one.txt", "two.txt"],
+                "omitted_files": 0,
+                "hunks": [
+                    { "file": "one.txt", "first_dropped_hunk": "-base\n+branch\n", "truncated": false },
+                    { "file": "two.txt", "first_dropped_hunk": "-keep\n", "truncated": false },
                 ],
+                "omitted_hunks": 0,
             })
+        );
+    }
+
+    #[test]
+    fn large_merge_hunk_keeps_all_filenames_and_explicitly_truncated_valid_json() {
+        let large_hunk = "\"\\\n\u{85}é".repeat(1024);
+        let files = vec![
+            DroppedBaseChanges {
+                file: "one.txt".to_owned(),
+                first_dropped_hunk: large_hunk.clone(),
+            },
+            DroppedBaseChanges {
+                file: "two.txt".to_owned(),
+                first_dropped_hunk: "-keep\n".to_owned(),
+            },
+        ];
+        let detail = merge_dropped_detail(&files).expect("bounded model-visible refusal");
+        let value: serde_json::Value =
+            serde_json::from_str(detail.as_str()).expect("complete JSON");
+
+        assert!(detail.as_str().len() <= 4096);
+        assert_eq!(value["error"], "MergeDroppedBaseChanges");
+        assert_eq!(value["files"], serde_json::json!(["one.txt", "two.txt"]));
+        assert_eq!(value["omitted_files"], 0);
+        assert_eq!(value["omitted_hunks"], 0);
+        assert!(
+            detail.as_str().find("\"files\":").expect("files field")
+                < detail.as_str().find("\"hunks\":").expect("hunks field")
+        );
+        let preview = value["hunks"][0]["first_dropped_hunk"]
+            .as_str()
+            .expect("hunk preview");
+        assert!(!preview.is_empty());
+        assert!(preview.len() < large_hunk.len());
+        assert!(large_hunk.starts_with(preview));
+        assert_eq!(value["hunks"][0]["truncated"], true);
+        assert_eq!(
+            value["hunks"][1],
+            serde_json::json!({
+                "file": "two.txt", "first_dropped_hunk": "-keep\n", "truncated": false,
+            })
+        );
+    }
+
+    #[test]
+    fn merge_refusal_explicitly_counts_filenames_that_cannot_fit() {
+        let files = vec![
+            DroppedBaseChanges {
+                file: "visible.txt".to_owned(),
+                first_dropped_hunk: "-keep\n".to_owned(),
+            },
+            DroppedBaseChanges {
+                file: "long".repeat(4096),
+                first_dropped_hunk: "-keep\n".to_owned(),
+            },
+        ];
+        let detail = merge_dropped_detail(&files).expect("bounded model-visible refusal");
+        let value: serde_json::Value =
+            serde_json::from_str(detail.as_str()).expect("complete JSON");
+
+        assert!(detail.as_str().len() <= 4096);
+        assert_eq!(value["files"], serde_json::json!(["visible.txt"]));
+        assert_eq!(value["omitted_files"], 1);
+        assert_eq!(value["omitted_hunks"], 1);
+        assert_eq!(
+            value["hunks"],
+            serde_json::json!([
+                { "file": "visible.txt", "first_dropped_hunk": "-keep\n", "truncated": false },
+            ])
         );
     }
 }

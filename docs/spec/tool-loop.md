@@ -161,11 +161,12 @@ URL and confirms the remote branch equals the resolved commit before
 acknowledging success. Before pushing a merge, the executor compares each
 zero-context hunk relative to its merged base parent against the branch's hunks
 relative to the parents' merge base, ignoring line offsets. A hunk absent from
-the branch diff refuses the push with `MergeDroppedBaseChanges`, naming each
-file and its first dropped hunk within the tool-error detail bound. Verification
-refuses a merge above `MAX_MERGE_PARENTS` with `MergeParentLimitExceeded` before
-comparing parents, and retains only the first dropped hunk per file across
-parents. Non-merge pushes are unaffected.
+the branch diff refuses the push with `MergeDroppedBaseChanges`. Its bounded
+JSON detail lists filenames before hunk previews, marks each shortened preview
+with `truncated`, and counts omitted filenames and previews explicitly when they
+cannot fit. Verification refuses a merge above `MAX_MERGE_PARENTS` with
+`MergeParentLimitExceeded` before comparing parents, and retains only the first
+dropped hunk per file across parents. Non-merge pushes are unaffected.
 
 The seven local Git tools perform no remote operation.
 
