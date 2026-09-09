@@ -35,13 +35,8 @@ struct Fixture {
 }
 impl Fixture {
     fn new(pool: sqlx::PgPool) -> Self {
-        let configuration = Arc::new(
-            HubModelConfiguration::parse(include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../config/signalboxd.example.toml"
-            )))
-            .unwrap(),
-        );
+        let configuration =
+            Arc::new(crate::configuration::checked_in_example_configuration().unwrap());
         let provider = ScriptedModel::following([script("approve"), script("deny")]);
         let model = Arc::new(RuntimeApprovalJudgeModel::new(
             provider.clone(),
@@ -198,9 +193,9 @@ async fn judge_answer_preserves_call_identity_rationale_and_usage() {
         signalbox_approval_judge_eval::ApprovalDisposition::Approve
     );
     assert_eq!(rationale, RATIONALE);
-    assert_eq!(usage.input_tokens.as_deref(), Some("80"));
-    assert_eq!(usage.output_tokens.as_deref(), Some("20"));
-    assert_eq!(usage.cache_read_input_tokens.as_deref(), Some("10"));
+    assert_eq!(usage.input_tokens, Some(80));
+    assert_eq!(usage.output_tokens, Some(20));
+    assert_eq!(usage.cache_read_input_tokens, Some(10));
     assert_eq!(usage.cache_creation_input_tokens, None);
 }
 
@@ -606,4 +601,48 @@ fn live_case_codec_preserves_full_width_pull_request_identity() {
         "18446744073709551615"
     );
     assert_eq!(decode::<Case>(&bytes).unwrap(), case);
+}
+
+#[test]
+fn usage_codec_refuses_lossy_or_noncanonical_counts() {
+    for input in [
+        serde_json::json!(9007199254740993_u64),
+        serde_json::json!("01"),
+        serde_json::json!("18446744073709551616"),
+    ] {
+        let bytes = serde_json::to_vec(&serde_json::json!({"input_tokens": input, "output_tokens": null, "cache_creation_input_tokens": null, "cache_read_input_tokens": null})).unwrap();
+        assert!(decode::<Usage>(&bytes).is_err());
+    }
+}
+
+#[tokio::test]
+async fn invalid_provider_decision_retains_failure_classification_and_usage() {
+    let mut fixture = Fixture::lazy();
+    let provider = ScriptedModel::single(script("invalid"));
+    fixture.services.model = Arc::new(RuntimeApprovalJudgeModel::new(
+        provider.clone(),
+        fixture.services.configuration.runtime_model_catalog(),
+    ));
+    let answer = fixture
+        .services
+        .judge(&fixture.manifest, TrialRequest { trial: 0 })
+        .await
+        .unwrap();
+    let JudgeAnswer::Failed {
+        call, cause, usage, ..
+    } = answer
+    else {
+        panic!("invalid decision must remain a failed measurement");
+    };
+    assert_eq!(cause, "invalid_decision");
+    assert_eq!(
+        call,
+        Some(
+            provider.received_operations()[0]
+                .correlation
+                .into_uuid()
+                .to_string()
+        )
+    );
+    assert_eq!(usage.output_tokens, Some(20));
 }

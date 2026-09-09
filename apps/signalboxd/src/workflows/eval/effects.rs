@@ -367,12 +367,10 @@ fn eval_case(case: &Case) -> ApprovalJudgeEvalCase {
 
 fn usage_record(usage: TokenUsage) -> Usage {
     Usage {
-        input_tokens: usage.input_tokens.map(|count| count.to_string()),
-        output_tokens: usage.output_tokens.map(|count| count.to_string()),
-        cache_creation_input_tokens: usage
-            .cache_creation_input_tokens
-            .map(|count| count.to_string()),
-        cache_read_input_tokens: usage.cache_read_input_tokens.map(|count| count.to_string()),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens,
+        cache_read_input_tokens: usage.cache_read_input_tokens,
     }
 }
 

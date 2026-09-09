@@ -71,6 +71,7 @@ rust_library(
     proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     deps = [
         "//crates/application:signalbox_application",
+        "//crates/approval-judge-eval:signalbox_approval_judge_eval",
         "//crates/blob-store:signalbox_blob_store",
         "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
         "//crates/blob-store-s3:signalbox_blob_store_s3",

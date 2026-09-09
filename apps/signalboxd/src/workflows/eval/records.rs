@@ -168,32 +168,45 @@ pub enum JudgeAnswer {
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Usage {
-    pub input_tokens: Option<String>,
-    pub output_tokens: Option<String>,
-    pub cache_creation_input_tokens: Option<String>,
-    pub cache_read_input_tokens: Option<String>,
+    #[serde(with = "optional_count")]
+    pub input_tokens: Option<u64>,
+    #[serde(with = "optional_count")]
+    pub output_tokens: Option<u64>,
+    #[serde(with = "optional_count")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(with = "optional_count")]
+    pub cache_read_input_tokens: Option<u64>,
+}
+
+mod optional_count {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        value: &Option<u64>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.map(|count| count.to_string()).serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<u64>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|value| {
+                let count: u64 = value.parse().map_err(serde::de::Error::custom)?;
+                if count.to_string() != value {
+                    return Err(serde::de::Error::custom("noncanonical token count"));
+                }
+                Ok(count)
+            })
+            .transpose()
+    }
 }
 
 impl Usage {
-    pub(super) fn domain(&self) -> Result<ProviderReportedTokenUsage, NativeProgramError> {
-        fn count(value: &Option<String>) -> Result<Option<u64>, NativeProgramError> {
-            value
-                .as_ref()
-                .map(|value| {
-                    let count: u64 = value.parse().map_err(|error: std::num::ParseIntError| {
-                        NativeProgramError::new(error.to_string())
-                    })?;
-                    if count.to_string() != *value {
-                        return Err(NativeProgramError::new("noncanonical token count"));
-                    }
-                    Ok(count)
-                })
-                .transpose()
-        }
-        Ok(ProviderReportedTokenUsage::unreported()
-            .with_input_tokens(count(&self.input_tokens)?)
-            .with_output_tokens(count(&self.output_tokens)?)
-            .with_cache_creation_input_tokens(count(&self.cache_creation_input_tokens)?)
-            .with_cache_read_input_tokens(count(&self.cache_read_input_tokens)?))
+    pub(super) fn domain(&self) -> ProviderReportedTokenUsage {
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(self.input_tokens)
+            .with_output_tokens(self.output_tokens)
+            .with_cache_creation_input_tokens(self.cache_creation_input_tokens)
+            .with_cache_read_input_tokens(self.cache_read_input_tokens)
     }
 }

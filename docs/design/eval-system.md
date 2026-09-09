@@ -23,12 +23,12 @@ trial executes; enumeration follows case order, then repeat order. A measured
 repeat is a new trial; crash replay consumes the same trial's journal evidence.
 Equal start retries require the same run, registration and exact input bytes.
 
-The corpus is a digest-addressed immutable artifact. Its storage, access,
-redaction, retention and deletion remain undecided under
-[Corpus governance](../open-questions.md#graded-approval-judging); the blob
-catalog is a storage candidate. Reference artifacts use immutable blob catalog
-entries pinned and read by digest under [blob storage](../spec/blob-storage.md),
-without paths or aliases. There is no mutable corpus registry.
+The corpus is a digest-addressed immutable blob. Its access, redaction,
+retention and deletion remain undecided under
+[Corpus governance](../open-questions.md#graded-approval-judging). Reference
+artifacts use immutable blob catalog entries pinned and read by digest under
+[blob storage](../spec/blob-storage.md), without paths or aliases. There is no
+mutable corpus registry.
 
 An evaluation session creation effect verifies the calling run and trial
 membership against that run's retained immutable manifest, then records an

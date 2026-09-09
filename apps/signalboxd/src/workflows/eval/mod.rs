@@ -144,7 +144,7 @@ fn score(
                             recommendation: recommendation(*actual),
                             rationale: rationale.clone(),
                             provider_reported_model: provider_reported_model.clone(),
-                            usage: usage.domain()?,
+                            usage: usage.domain(),
                         }),
                         JudgeAnswer::Failed { cause, .. } => failures.push(cause.clone()),
                         JudgeAnswer::Ambiguous => failures.push("ambiguous".into()),
