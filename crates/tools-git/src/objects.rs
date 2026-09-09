@@ -4,7 +4,6 @@ use crate::{
     pack_install::{ObjectPublicationLock, install_packed_object_pair, pack_installation_mode},
     pinning::{PinnedObjectDatabase, PinnedRepository, RepositoryShell},
 };
-use git2::Odb;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy)]
@@ -16,8 +15,6 @@ pub(super) enum PackRoot {
 pub(super) fn persist_objects(
     authority: &PinnedRepository,
     repository: &RepositoryShell,
-    _persistent_objects: &Odb<'_>,
-    _object_database: &Odb<'_>,
     pinned_objects: &PinnedObjectDatabase,
     roots: &[PackRoot],
 ) -> Result<(), LocalGitFailure> {

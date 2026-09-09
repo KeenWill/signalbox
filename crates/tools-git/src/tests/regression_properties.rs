@@ -40,11 +40,6 @@ fn failed_unborn_commit_removes_its_new_reference_directories() {
         .expect("pinned unborn repository opens");
     let pinned_objects =
         PinnedObjectDatabase::capture(&executor.repository_authority).expect("fixture objects pin");
-    let persistent_object_database = Odb::new_ext(executor.repository_authority.object_format)
-        .expect("fixture persistent object database constructs");
-    pinned_objects
-        .add_to(&persistent_object_database)
-        .expect("fixture persistent objects attach");
     let object_database = Odb::new_ext(executor.repository_authority.object_format)
         .expect("fixture object database constructs");
     pinned_objects
@@ -64,11 +59,7 @@ fn failed_unborn_commit_removes_its_new_reference_directories() {
             message: MODEL_MESSAGE.to_owned(),
         },
         &executor.repository_authority,
-        (
-            &persistent_object_database,
-            &object_database,
-            &pinned_objects,
-        ),
+        &pinned_objects,
         || Err(LocalGitFailure::Repository),
     )
     .expect_err("final validation rejects unborn commit");

@@ -109,7 +109,6 @@ fn branch_create_rejects_an_alternates_fifo_planted_after_object_pinning() {
     let failure = branch_create(
         &repository,
         &executor.repository_authority,
-        &object_database,
         &pinned_objects,
         GitBranchCreateArguments {
             name: FIX_BRANCH.to_owned(),
@@ -158,16 +157,12 @@ fn branch_create_revalidates_the_injected_root_before_publication() {
         .repository_authority
         .repository()
         .expect("pinned original repository opens");
-    let object_database = repository
-        .odb()
-        .expect("original object database opens before replacement");
     let pinned_objects =
         PinnedObjectDatabase::capture(&executor.repository_authority).expect("fixture objects pin");
 
     let failure = branch_create(
         &repository,
         &executor.repository_authority,
-        &object_database,
         &pinned_objects,
         GitBranchCreateArguments {
             name: FIX_BRANCH.to_owned(),

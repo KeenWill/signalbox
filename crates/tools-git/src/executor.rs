@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use git2::{Index, IndexEntry, IndexTime, Mempack, Odb};
+use git2::{Index, IndexEntry, IndexTime, Odb};
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, openat, renameat_with, statat};
 use rustix::io::dup;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -151,13 +151,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         }
         let mut repository = self.repository_authority.repository()?;
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
-        let persistent_object_database = Odb::new_ext(self.repository_authority.object_format)
-            .map_err(|_| LocalGitFailure::Operation)?;
-        pinned_objects.add_to(&persistent_object_database)?;
         let object_database = Odb::new_ext(self.repository_authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&object_database)?;
-        let mempack = object_database
+        let _mempack = object_database
             .add_new_mempack_backend(1000)
             .map_err(|_| LocalGitFailure::Operation)?;
         repository
@@ -170,12 +167,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             LocalOperation::Stage(arguments) => {
                 let result = LocalGitResult::Stage(self.stage_with_pinned_objects(
                     &repository,
-                    (
-                        &persistent_object_database,
-                        &object_database,
-                        &mempack,
-                        &pinned_objects,
-                    ),
+                    &pinned_objects,
                     arguments,
                     || {},
                     || {},
@@ -188,11 +180,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &self.identity,
                     arguments,
                     &self.repository_authority,
-                    (
-                        &persistent_object_database,
-                        &object_database,
-                        &pinned_objects,
-                    ),
+                    &pinned_objects,
                     || {
                         before_commit_publish();
                         pinned_objects.validate_live(&self.repository_authority)?;
@@ -205,7 +193,6 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 let result = LocalGitResult::BranchCreate(branch_create(
                     &repository,
                     &self.repository_authority,
-                    &object_database,
                     &pinned_objects,
                     arguments,
                     || {
@@ -304,26 +291,18 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         AfterPublish: FnOnce(),
     {
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
-        let persistent_object_database = Odb::new_ext(self.repository_authority.object_format)
-            .map_err(|_| LocalGitFailure::Operation)?;
-        pinned_objects.add_to(&persistent_object_database)?;
         let object_database = Odb::new_ext(self.repository_authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&object_database)?;
         repository
             .set_odb(&object_database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;
-        let mempack = object_database
+        let _mempack = object_database
             .add_new_mempack_backend(1000)
             .map_err(|_| LocalGitFailure::Operation)?;
         self.stage_with_pinned_objects(
             repository,
-            (
-                &persistent_object_database,
-                &object_database,
-                &mempack,
-                &pinned_objects,
-            ),
+            &pinned_objects,
             arguments,
             before_publish,
             after_publish,
@@ -333,7 +312,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     fn stage_with_pinned_objects<BeforePublish, AfterPublish>(
         &self,
         repository: &RepositoryShell,
-        object_databases: (&Odb<'_>, &Odb<'_>, &Mempack<'_>, &PinnedObjectDatabase),
+        pinned_objects: &PinnedObjectDatabase,
         arguments: GitStageArguments,
         before_publish: BeforePublish,
         after_publish: AfterPublish,
@@ -342,8 +321,6 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         BeforePublish: FnOnce(),
         AfterPublish: FnOnce(),
     {
-        let (persistent_object_database, object_database, _mempack, pinned_objects) =
-            object_databases;
         let (mut index_lock, mut index) =
             IndexLock::acquire_for_repository(&self.repository_authority)?;
         validate_index_entry_count(&index)?;
@@ -455,8 +432,6 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         persist_objects(
             &self.repository_authority,
             repository,
-            persistent_object_database,
-            object_database,
             pinned_objects,
             &written_objects,
         )?;

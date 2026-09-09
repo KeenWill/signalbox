@@ -29,7 +29,6 @@ use crate::result::BranchResult;
 pub(super) fn branch_create<ValidateRoot>(
     repository: &RepositoryShell,
     authority: &PinnedRepository,
-    captured_objects: &Odb<'_>,
     pinned_objects: &PinnedObjectDatabase,
     arguments: GitBranchCreateArguments,
     validate_root_before_publish: ValidateRoot,
@@ -46,13 +45,9 @@ where
     let (commit, revision_snapshot) =
         resolve_bounded_commit(repository, authority, &arguments.start)?;
     let head = commit.id().to_string();
-    let absent_objects =
-        Odb::new_ext(authority.object_format).map_err(|_| LocalGitFailure::Operation)?;
     persist_objects(
         authority,
         repository,
-        &absent_objects,
-        captured_objects,
         pinned_objects,
         &[PackRoot::Commit(commit.id())],
     )?;

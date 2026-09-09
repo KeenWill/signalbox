@@ -70,11 +70,6 @@ fn object_publication_lock_serializes_installation() {
     let executor = fixture.executor();
     let pinned_objects =
         PinnedObjectDatabase::capture(&executor.repository_authority).expect("fixture objects pin");
-    let persistent_object_database =
-        Odb::new().expect("fixture persistent object database constructs");
-    pinned_objects
-        .add_to(&persistent_object_database)
-        .expect("persistent fixture objects attach");
     let object_database = Odb::new().expect("fixture object database constructs");
     pinned_objects
         .add_to(&object_database)
@@ -101,8 +96,6 @@ fn object_publication_lock_serializes_installation() {
     let failure = persist_objects(
         &executor.repository_authority,
         &repository,
-        &persistent_object_database,
-        &object_database,
         &pinned_objects,
         &[PackRoot::Object(object)],
     )

@@ -304,7 +304,6 @@ fn branch_create_rejects_a_start_reference_changed_before_publication() {
     let failure = branch_create(
         &repository,
         &executor.repository_authority,
-        &object_database,
         &pinned_objects,
         GitBranchCreateArguments {
             name: FIX_BRANCH.to_owned(),
