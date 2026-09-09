@@ -5,6 +5,7 @@
     reason = "standalone PostgreSQL integration fixtures use assertion panics"
 )]
 
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::error::Error;
 
 use expect_test::expect;
@@ -20,8 +21,6 @@ use signalbox_persistence::{
     create_session::{
         CreateSessionCorruption, CreateSessionRepository, CreateSessionRepositoryError,
     },
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels, local_test_connection_options, migrate,
     process_read::{
         ProcessReadCorruption, ProcessReadError, ProcessReadRepository, ProcessScopedTranscriptRead,
     },
@@ -31,18 +30,8 @@ use signalbox_persistence::{
         SessionPlacementRepositoryOutcome,
     },
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
+use sqlx::{PgPool, types::Uuid};
 
-#[path = "../../../tooling/postgres_test_image.rs"]
-mod postgres_test_image;
-use postgres_test_image::POSTGRES_IMAGE_TAG;
-const DATABASE_NAME: &str = "signalbox_placement";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const RESULT_SHAPE_CONSTRAINT: &str = "update_session_placement_command_result_shape";
 const ARBITRARY_DEFAULT_MODEL_SELECTION_ID_SEED: u128 = 0x1000;
 const ARBITRARY_ROOT_CREATION_COMMAND_ID_SEED: u128 = 0x101;
@@ -128,31 +117,14 @@ struct PlacementHistoryRow {
     event_kind: String,
 }
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool))
+async fn migrated_postgres() -> Result<(TestDatabase, PgPool), Box<dyn Error>> {
+    let (database, pool, _) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(8).await?;
+    Ok((database, pool))
 }
 
 struct ScopedReadFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     expected_refusal: SessionReadScopeRefusal,
     requester: SessionId,
@@ -610,7 +582,7 @@ async fn pathless_creation_keeps_the_legacy_unscoped_value() -> Result<(), Box<d
 }
 
 struct PlacementUpdateFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     repository: SessionPlacementRepository,
     update: UpdateSessionPlacement,
@@ -673,7 +645,7 @@ async fn placement_update_appends_created_and_updated_history() -> Result<(), Bo
 }
 
 struct MissingPlacementHeadFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     session: SessionId,
     creation: signalbox_domain::PreparedCreateSession,
@@ -767,7 +739,7 @@ async fn creation_replay_rejects_a_missing_current_placement_head() -> Result<()
 }
 
 struct InitialPlacementEventShapeFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     session: SessionId,
     creation: signalbox_domain::PreparedCreateSession,
@@ -873,7 +845,7 @@ async fn native_creation_replay_rejects_initial_placement_event_kind() -> Result
 }
 
 struct StatefulRejectionReceiptFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     repository: SessionPlacementRepository,
     update: UpdateSessionPlacement,
@@ -1073,7 +1045,7 @@ async fn creation_replay_rejects_cross_wired_placement_provenance() -> Result<()
 }
 
 struct CorruptCreationPlacementProvenanceFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     session: SessionId,
     creation: signalbox_domain::PreparedCreateSession,
@@ -1178,7 +1150,7 @@ async fn cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Error>
 }
 
 struct CorruptPlacementPredecessorFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     session: SessionId,
 }
@@ -1319,7 +1291,7 @@ async fn session_summary_rejects_a_corrupt_placement_predecessor() -> Result<(),
 }
 
 struct CorruptPlacementUpdateReceiptFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     session: SessionId,
 }
@@ -1504,7 +1476,7 @@ async fn applied_update_replay_requires_the_event_to_reach_the_current_head()
 }
 
 struct LaggingPlacementHeadFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     session: SessionId,
     creation_command: DurableCommandId,
@@ -2193,7 +2165,7 @@ async fn update_handle_rejects_conflicting_reuse() -> Result<(), Box<dyn Error>>
 
 async fn placement_authentication_fixture() -> Result<
     (
-        ContainerAsync<Postgres>,
+        TestDatabase,
         PgPool,
         SessionPlacementRepository,
         UpdateSessionPlacement,

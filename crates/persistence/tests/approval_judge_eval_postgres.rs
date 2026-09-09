@@ -6,6 +6,7 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::error::Error;
 
 use rust_decimal::Decimal;
@@ -106,7 +107,14 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box
     Ok((container, pool))
 }
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+async fn migrated_postgres() -> Result<(TestDatabase, PgPool), Box<dyn Error>> {
+    let (database, pool, _) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+    Ok((database, pool))
+}
+
+async fn dedicated_migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>>
+{
     let (container, pool) = unmigrated_postgres().await?;
     migrate(&pool).await?;
     Ok((container, pool))
@@ -837,7 +845,7 @@ async fn call_ordinals_outside_the_run_repeats_are_rejected() -> Result<(), Box<
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recording_requires_insert_privileges() -> Result<(), Box<dyn Error>> {
-    let (container, pool) = migrated_postgres().await?;
+    let (container, pool) = dedicated_migrated_postgres().await?;
     // Fixture DDL interpolates only this file's constants, never external
     // input, so asserting SQL safety is sound here.
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(

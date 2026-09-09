@@ -18,16 +18,9 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, create_session::CreateSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels, local_test_connection_options,
     submit_input::SubmitInputRepository,
 };
 use signalbox_web_contract::WebSessionRates;
-use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ImageExt, runners::AsyncRunner},
-};
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
@@ -42,26 +35,8 @@ impl signalbox_application::EligibilityNudge for TestNudge {
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn rates_read_counts_only_the_requested_sessions() -> Result<(), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name("signalbox_web")
-        .with_user("signalbox")
-        .with_password("signalbox-test-only")
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag("18.4-alpine3.23")
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let url = format!(
-        "postgres://signalbox:signalbox-test-only@{}:{}/signalbox_web",
-        container.get_host().await?,
-        container.get_host_port_ipv4(5432).await?
-    );
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(local_test_connection_options(&url)?)
-        .await?;
-    signalbox_persistence::migrate(&pool).await?;
+    let (container, pool, _url) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(8).await?;
     let session = SessionId::from_uuid(Uuid::from_u128(27));
     let command = CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(28)),

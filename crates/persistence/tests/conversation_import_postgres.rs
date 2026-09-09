@@ -5,6 +5,7 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::{
     collections::VecDeque,
     env,
@@ -41,21 +42,10 @@ use signalbox_persistence::{
         ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
         ImportedEntryWindowAnchor,
     },
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels, local_test_connection_options, migrate,
+    local_test_connection_options,
 };
 use sqlx::{PgPool, Transaction, postgres::PgPoolOptions, types::Uuid};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
 
-#[path = "../../../tooling/postgres_test_image.rs"]
-mod postgres_test_image;
-use postgres_test_image::POSTGRES_IMAGE_TAG;
-const DATABASE_NAME: &str = "signalbox_import_integration";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const ARBITRARY_LINEAGE_ENTRY_ID_START: u128 = 1;
 
 enum EntryIdentitySupply {
@@ -157,27 +147,8 @@ impl ImportedConversationIdGenerator for SequentialIds {
     }
 }
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool, database_url))
+async fn migrated_postgres() -> Result<(TestDatabase, PgPool, String), Box<dyn Error>> {
+    signalbox_persistence::test_support::postgres::migrated_postgres(4).await
 }
 
 #[derive(Clone, Copy)]
@@ -920,7 +891,7 @@ async fn committed_seed_rejects_late_prefix_inserts() -> Result<(), Box<dyn Erro
 }
 
 struct ImportRoundTripFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     database_url: String,
     winner: ImportedConversationId,
