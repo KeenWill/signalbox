@@ -996,7 +996,7 @@ pub(crate) mod tests {
     {
         let (mut client, server) = UnixStream::pair()?;
         let (reader, _writer) = server.into_split();
-        let mut reader = BufReader::new(reader);
+        let mut reader = BufReader::new(super::client_io::ArrivalReader::new(reader));
         client.write_all(b"pipelined request").await?;
         assert_eq!(reader.fill_buf().await?, b"pipelined request");
         drop(client);

@@ -365,6 +365,8 @@ pub use runtime::{
 #[cfg(test)]
 use runtime::{nudge_eligible_outbox_wake, observe_outbox_metrics_once};
 mod client_io;
+
+type ClientReader = BufReader<client_io::ArrivalReader<OwnedReadHalf>>;
 mod connection;
 pub use connection::shared_snapshot_reader_budget;
 use connection::*;

@@ -10,7 +10,7 @@ use signalbox_persistence::runner_protocol::{
 };
 
 pub(super) async fn handle_runner_recovery<Writer: AsyncWrite + Unpin>(
-    reader: &BufReader<OwnedReadHalf>,
+    reader: &ClientReader,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -184,7 +184,7 @@ pub(super) async fn handle_runner_recovery<Writer: AsyncWrite + Unpin>(
 }
 
 async fn wait_for_runner_recovery(
-    reader: &BufReader<OwnedReadHalf>,
+    reader: &ClientReader,
     notifications: &mut watch::Receiver<()>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> bool {
@@ -252,7 +252,7 @@ mod tests {
         for _ in 0..MAX_ACTIVE_CONNECTIONS {
             let (mut client, server) = tokio::net::UnixStream::pair()?;
             let (reader, _) = server.into_split();
-            let mut reader = BufReader::new(reader);
+            let mut reader = BufReader::new(client_io::ArrivalReader::new(reader));
             client.write_all(b"pipelined request").await?;
             assert_eq!(reader.fill_buf().await?, b"pipelined request");
             let mut notification = notifications.subscribe();
@@ -279,7 +279,7 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         let (mut client, server) = tokio::net::UnixStream::pair()?;
         let (reader, _writer) = server.into_split();
-        let reader = BufReader::new(reader);
+        let reader = BufReader::new(client_io::ArrivalReader::new(reader));
         let (notifications, mut notification) = watch::channel(());
         let (_shutdown, mut shutdown) = watch::channel(false);
         client.shutdown().await?;

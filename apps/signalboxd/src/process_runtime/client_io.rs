@@ -25,6 +25,10 @@ impl<Reader> ArrivalReader<Reader> {
             received_at: Instant::now(),
         }
     }
+
+    pub(super) fn get_ref(&self) -> &Reader {
+        &self.reader
+    }
 }
 
 impl<Reader: AsyncRead + Unpin> AsyncRead for ArrivalReader<Reader> {
