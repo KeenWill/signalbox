@@ -11,12 +11,14 @@ file in the same pull request.
 | `signalbox-builds`            | Required Rust builds/tests, documentation, formatting, web checks, supply-chain checks, and provider compatibility smokes |
 | `signalbox-integration-tests` | Required PostgreSQL suites needing Docker/testcontainers                                                                  |
 | `signalbox-reports`           | Non-Docker API digest, instruction-count, and web-smoke reports                                                           |
-| `signalbox-coverage`          | Docker coverage, live tool smokes, and report-only tool-eval families                                                     |
+| `signalbox-coverage`          | Instrumented Rust coverage                                                                                                |
+| `signalbox-smokes`            | Docker-dependent smoke checks and report-only tool-eval families                                                          |
 | `ubuntu-latest`               | GitHub-hosted fallbacks and host-dependent jobs below                                                                     |
 | `macos-latest`                | macOS jobs                                                                                                                |
 
 The self-hosted ARC scale sets are managed outside this repository. Only
-`signalbox-integration-tests` and `signalbox-coverage` provide Docker.
+`signalbox-integration-tests`, `signalbox-coverage`, and `signalbox-smokes`
+provide Docker.
 
 `rust.yml` calls `bazel.yml` for ordinary Rust tests on `signalbox-builds` and
 manifest PostgreSQL suites on `signalbox-integration-tests`. Its
@@ -70,8 +72,8 @@ the tool-eval and tool-smoke jobs are report-only:
 | Provider smoke workflows — `gate`, `required`        | `signalbox-orchestration` | `gate` checks out the head for path inspection without executing it; `required` reports the binding result |
 | Provider smoke workflows — `smoke`                   | `signalbox-builds`        | Skips fork pull requests using the same-repository check only; same-repository bot pull requests still run |
 | `tool-evals.yml` — `eligibility`                     | `signalbox-orchestration` | Excludes fork pull requests and Dependabot/Renovate authors                                                |
-| `tool-evals.yml` — git/workspace/web `eval` families | `signalbox-coverage`      | Requires same-repository pull requests whose author is neither Dependabot nor Renovate                     |
-| `tool-smokes.yml` — `live-smokes`                    | `signalbox-coverage`      | Requires same-repository pull requests whose author is neither Dependabot nor Renovate                     |
+| `tool-evals.yml` — git/workspace/web `eval` families | `signalbox-smokes`        | Requires same-repository pull requests whose author is neither Dependabot nor Renovate                     |
+| `tool-smokes.yml` — `live-smokes`                    | `signalbox-smokes`        | Requires same-repository pull requests whose author is neither Dependabot nor Renovate                     |
 | `tool-smokes.yml` — `web-smoke`                      | `signalbox-reports`       | Disabled; retains the same-repository and Dependabot/Renovate author gate                                  |
 
 ## Jobs pinned to GitHub-hosted runners
