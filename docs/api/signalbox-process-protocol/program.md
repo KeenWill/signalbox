@@ -2,6 +2,90 @@
 
 # program
 
+## ProgramExecutableInput
+
+```rust
+pub enum ProgramExecutableInput {
+    JavaScript {
+        source: vec::Vec<u8>,
+        artifact: string::String,
+    },
+    Native {
+        entry: string::String,
+        revision: string::String,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## ProgramGrant
+
+```rust
+pub enum ProgramGrant {
+    Time,
+    Random,
+    Sleep,
+    Subscribe,
+    Session,
+    Judge,
+    ExecStage,
+    Corpus,
+    EvalRecord,
+    Blob,
+    Register,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## ProgramRegistrationInput
+
+```rust
+pub struct ProgramRegistrationInput {
+    pub name: string::String,
+    pub revision: string::String,
+    pub executable: ProgramExecutableInput,
+    pub grants: vec::Vec<ProgramGrant>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## ProgramByteExtent
+
+```rust
+pub enum ProgramByteExtent {
+    Complete {},
+    Truncated { total_bytes: u64 },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## ProgramRunState
+
+```rust
+pub enum ProgramRunState {
+    Running {},
+    Cancelled {},
+    Faulted {},
+    Succeeded {
+        result: vec::Vec<u8>,
+        result_extent: ProgramByteExtent,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## ProgramRun
+
+```rust
+pub struct ProgramRun {
+    pub registration_id: CanonicalUuid,
+    pub input: vec::Vec<u8>,
+    pub input_extent: ProgramByteExtent,
+    pub outcome: ProgramRunState,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## ProgramRunCancelledState
 
 ```rust
@@ -15,9 +99,16 @@ pub enum ProgramRunCancelledState {
 
 ```rust
 pub enum ProgramRunTerminalState {
-    Cancelled { result: () },
-    Faulted { result: () },
-    Succeeded { result: vec::Vec<u8> },
+    Cancelled {
+        result: (),
+    },
+    Faulted {
+        result: (),
+    },
+    Succeeded {
+        result: vec::Vec<u8>,
+        result_extent: ProgramByteExtent,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
