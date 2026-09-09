@@ -1,10 +1,6 @@
 //! Approval judge preparation and the approval guard over user, delegate, and automatic decisions.
 
 use crate::*;
-use signalbox_application::{
-    ApprovalJudgeDispatchAuthority, ApprovalJudgeDispatchProvenance,
-    ApprovalJudgePullRequestAuthority, ApprovalJudgePullRequestAuthorityInput,
-};
 use signalbox_domain::DecideToolRequestRejectedResult;
 use signalbox_persistence::approval_judge::ApprovalJudgeRepositoryError;
 
@@ -15,57 +11,6 @@ const JUDGED_TOOL_NAME: &str = "current_weather";
 const FAILURE_ENTRY_ID_OFFSET: u128 = 0x1_000;
 const TERMINAL_FRONTIER_ID_OFFSET: u128 = 0x1_001;
 const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn approval_judge_loads_repo_watch_authority_before_ledger_settlement()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _) = migrated_postgres().await?;
-    const ARBITRARY_SEED: u128 = 0x7f80;
-    let (fixture, model_repository, _, _) = checkpoint_tool_batch_with_approval(
-        &pool,
-        ARBITRARY_SEED,
-        APPROVAL_PROPOSAL,
-        InitialToolApproval::Delegated,
-    )
-    .await?;
-    let authority =
-        ApprovalJudgePullRequestAuthority::new(ApprovalJudgePullRequestAuthorityInput {
-            dispatch: ApprovalJudgeDispatchProvenance::RepoWatch(
-                signalbox_domain::RepoWatchDispatchId::from_uuid(next_test_submit_uuid()),
-            ),
-            repository: signalbox_domain::RepositorySlug::try_new("namespace/repo".to_owned())?,
-            pull_request: signalbox_domain::PullRequestNumber::new(NonZeroU64::MIN),
-            head_sha: signalbox_domain::CommitSha::try_new(
-                "1111111111111111111111111111111111111111".to_owned(),
-            )?,
-            head_repository: signalbox_domain::RepositorySlug::try_new("fork/repo".to_owned())?,
-            head_branch: signalbox_domain::BranchName::try_new("topic/review".to_owned())?,
-            base_branch: signalbox_domain::BranchName::try_new("main".to_owned())?,
-        });
-    retain_repo_watch_authority(&pool, fixture.session, &authority).await?;
-
-    let prepared = ready_approval_judge(
-        model_repository
-            .approval_judge_repository()
-            .prepare(
-                fixture.session,
-                fixture.turn,
-                ModelCallId::from_uuid(next_test_submit_uuid()),
-                None,
-            )
-            .await?,
-    );
-
-    assert_eq!(prepared.session_context().goal(), None);
-    assert_eq!(
-        prepared.session_context().dispatch(),
-        Some(&ApprovalJudgeDispatchAuthority::PullRequest(authority)),
-    );
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -96,103 +41,6 @@ async fn approval_judge_has_no_dispatch_authority_for_an_interactive_session()
     assert_eq!(prepared.session_context().dispatch(), None);
     pool.close().await;
     drop(container);
-    Ok(())
-}
-
-/// Restates creation provenance for a parked-request fixture and retains the
-/// matching rule event and pending create action, before ledger settlement.
-async fn retain_repo_watch_authority(
-    pool: &PgPool,
-    session: SessionId,
-    authority: &ApprovalJudgePullRequestAuthority,
-) -> Result<(), Box<dyn Error>> {
-    let event = next_test_submit_uuid();
-    let payload = serde_json::to_vec(&serde_json::json!({
-        "repository": authority.repository().as_str(),
-        "kind": { "name": "pull_request_opened" },
-        "target": {
-            "kind": "pull_request",
-            "number": authority.pull_request().get(),
-            "head_sha": authority.head_sha().as_str(),
-            "head_repository": authority.head_repository().as_str(),
-            "head_branch": authority.head_branch().as_str(),
-            "base_branch": authority.base_branch().as_str(),
-            "title": "Review fixture", "body": "", "labels": [],
-            "draft": false, "author": null,
-        },
-    }))?;
-    let mut transaction = pool.begin().await?;
-    sqlx::raw_sql(
-        "ALTER TABLE session DISABLE TRIGGER ALL;
-         ALTER TABLE create_session_command DISABLE TRIGGER ALL;",
-    )
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "UPDATE session SET creation_cause = 'module_dispatched',
-                dispatching_module = 'repo_watch', dispatch_ref = $2
-          WHERE session_id = $1",
-    )
-    .bind(session.into_uuid())
-    .bind(authority.dispatch().into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "UPDATE create_session_command SET creation_cause = 'module_dispatched',
-                dispatching_module = 'repo_watch', dispatch_ref = $2
-          WHERE created_session_id = $1",
-    )
-    .bind(session.into_uuid())
-    .bind(authority.dispatch().into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::raw_sql(
-        "ALTER TABLE session ENABLE TRIGGER ALL;
-         ALTER TABLE create_session_command ENABLE TRIGGER ALL;",
-    )
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO mod_repo_watch.rule_revision
-            (repository, rule_id, revision, content_digest, activated_at,
-             activated_after_event_ordinal)
-         VALUES ($1, 'review-fixture', 1, $2, now(), 0)",
-    )
-    .bind(authority.repository().as_str())
-    .bind(vec![0_u8; 32])
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO mod_repo_watch.gh_event
-            (event_id, content_identity, repository, event_kind, target_kind,
-             pull_request_number, normalized_payload, recorded_at, producer,
-             repository_event_ordinal, frontier_generation, event_ordinal)
-         VALUES ($1, $2, $3, 'pull_request_opened', 'pull_request', $4, $5,
-                 now(), 'poll', 1, 1, 1)",
-    )
-    .bind(event)
-    .bind(vec![0_u8; 32])
-    .bind(authority.repository().as_str())
-    .bind(Decimal::from(authority.pull_request().get()))
-    .bind(payload)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO mod_repo_watch.dispatch_ledger
-            (dispatch_ref, action_ordinal, command_id, repository, rule_id,
-             rule_revision, event_id, command_kind, command_payload, status, issued_at)
-         SELECT $1, 1, command_id, $2, 'review-fixture', 1, $3,
-                'create_session', $4, 'pending', now()
-           FROM create_session_command WHERE created_session_id = $5",
-    )
-    .bind(authority.dispatch().into_uuid())
-    .bind(authority.repository().as_str())
-    .bind(event)
-    .bind(Vec::<u8>::new())
-    .bind(session.into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
     Ok(())
 }
 

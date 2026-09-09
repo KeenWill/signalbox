@@ -105,6 +105,14 @@ pub struct RepositoryWatchRuntime {
     state: Arc<Mutex<RuntimeState>>,
 }
 
+impl std::fmt::Debug for RepositoryWatchRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryWatchRuntime")
+            .finish_non_exhaustive()
+    }
+}
+
 enum WorkerState {
     Prepared,
     Running,
@@ -141,6 +149,69 @@ pub(crate) struct PreparedRepositoryWatchReload {
 }
 
 impl RepositoryWatchRuntime {
+    /// Loads the pull-request fence retained for the session's creation dispatch.
+    pub async fn approval_judge_authority(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> Result<
+        Option<signalbox_application::ApprovalJudgeDispatchAuthority>,
+        signalbox_module_repo_watch_v2::StoreError,
+    > {
+        use signalbox_application::{
+            ApprovalJudgeDispatchAuthority, ApprovalJudgeDispatchProvenance,
+            ApprovalJudgePullRequestAuthority, ApprovalJudgePullRequestAuthorityInput,
+        };
+        use signalbox_module_repo_watch_v2::StoreError;
+        let (store, core) = {
+            let state = self.state.lock().await;
+            (state.store.clone(), state.core_pool.clone())
+        };
+        #[derive(sqlx::FromRow)]
+        struct CreationDispatch {
+            dispatch_ref: uuid::Uuid,
+            command_id: uuid::Uuid,
+        }
+        let origin: Option<CreationDispatch> = sqlx::query_as(
+            "SELECT session.dispatch_ref, creation.command_id
+               FROM session
+               JOIN create_session_command AS creation
+                 ON creation.created_session_id = session.session_id
+              WHERE session.session_id = $1
+                AND session.creation_cause = 'module_dispatched'
+                AND session.dispatching_module = 'repo_watch'",
+        )
+        .bind(session.into_uuid())
+        .fetch_optional(&core)
+        .await?;
+        let Some(origin) = origin else {
+            return Ok(None);
+        };
+        let checkout = store
+            .dispatch_checkout(signalbox_domain::DurableCommandId::from_uuid(
+                origin.command_id,
+            ))
+            .await?
+            .ok_or(StoreError::InvalidRetainedCommand)?;
+        if checkout.dispatch.into_uuid() != origin.dispatch_ref {
+            return Err(StoreError::InvalidRetainedCommand);
+        }
+        let signalbox_domain::RepoWatchEventTarget::PullRequest(context) = checkout.event.target()
+        else {
+            return Ok(None);
+        };
+        Ok(Some(ApprovalJudgeDispatchAuthority::PullRequest(
+            ApprovalJudgePullRequestAuthority::new(ApprovalJudgePullRequestAuthorityInput {
+                dispatch: ApprovalJudgeDispatchProvenance::RepoWatch(checkout.dispatch),
+                repository: checkout.event.repository().clone(),
+                pull_request: context.number(),
+                head_sha: context.head_sha().clone(),
+                head_repository: context.head_repository().clone(),
+                head_branch: context.head_branch().clone(),
+                base_branch: context.base_branch().clone(),
+            }),
+        )))
+    }
+
     pub(crate) fn ingestion_measurements(
         &self,
         repository: &RepositorySlug,

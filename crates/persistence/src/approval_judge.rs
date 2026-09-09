@@ -15,10 +15,9 @@ use signalbox_domain::{
     DelegateApprovalRecommendation, DelegateToolApproval, DirectModelSelection,
     FrozenModelSelection, GoalGeneration, GoalGenerationSnapshot, GoalStatement, ModelCallId,
     ModelTargetCatalog, ProviderModelIdentity, ProviderReportedTokenUsage, PullRequestNumber,
-    RepoWatchDispatchId, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef, SessionId, SessionSystemPrompt, SessionTemplateName,
-    ToolApprovalPosture, ToolDecisionRationale, ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
-    TurnTerminalCause,
+    RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
+    SessionId, SessionSystemPrompt, SessionTemplateName, ToolApprovalPosture,
+    ToolDecisionRationale, ToolRequest, ToolRequestId, TurnAttemptId, TurnId, TurnTerminalCause,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -1198,72 +1197,23 @@ async fn load_session_authority_context(
     )
 }
 
-/// Reads the dispatch authority in force for one judged turn.
+/// Reads the commissioned-dispatch authority in force for one judged turn.
 ///
 /// A commissioned dispatch commissions generation one of the session it
 /// creates and owns nothing else in it. Binding by session alone would judge a
 /// later unrelated successor goal against the stale commissioned fence.
 ///
-/// Repository-watch authority is bound to the session's creation dispatch.
+/// A turn no generation recorded is not dispatched work either, and resolves to
+/// no authority for the same reason.
 async fn load_dispatch_authority(
     connection: &mut PgConnection,
     session: SessionId,
     generation: Option<GoalGeneration>,
 ) -> Result<Option<ApprovalJudgeDispatchAuthority>, ApprovalJudgeRepositoryError> {
-    if let Some(authority) = load_repo_watch_dispatch_authority(&mut *connection, session).await? {
-        return Ok(Some(authority));
-    }
     if generation != Some(DISPATCH_COMMISSIONED_GENERATION) {
         return Ok(None);
     }
     load_commissioned_dispatch_authority(&mut *connection, session).await
-}
-
-async fn load_repo_watch_dispatch_authority(
-    connection: &mut PgConnection,
-    session: SessionId,
-) -> Result<Option<ApprovalJudgeDispatchAuthority>, ApprovalJudgeRepositoryError> {
-    let Some(row) = sqlx::query(
-        "SELECT DISTINCT ledger.dispatch_ref, ledger.repository, event.target_kind,
-                event.pull_request_number,
-                convert_from(event.normalized_payload, 'UTF8')::jsonb
-                    -> 'target' ->> 'head_sha' AS head_sha,
-                convert_from(event.normalized_payload, 'UTF8')::jsonb
-                    -> 'target' ->> 'head_repository' AS head_repository,
-                convert_from(event.normalized_payload, 'UTF8')::jsonb
-                    -> 'target' ->> 'head_branch' AS head_branch,
-                convert_from(event.normalized_payload, 'UTF8')::jsonb
-                    -> 'target' ->> 'base_branch' AS base_branch
-           FROM session AS s
-           JOIN mod_repo_watch.dispatch_ledger AS ledger
-             ON ledger.dispatch_ref = s.dispatch_ref
-           JOIN mod_repo_watch.gh_event AS event
-             ON event.event_id = ledger.event_id AND event.repository = ledger.repository
-          WHERE s.session_id = $1 AND s.creation_cause = 'module_dispatched'
-            AND s.dispatching_module = 'repo_watch'
-            AND ledger.command_kind = 'create_session'
-            AND event.target_kind = 'pull_request'",
-    )
-    .bind(session_id_to_uuid(session))
-    .fetch_optional(connection)
-    .await?
-    else {
-        return Ok(None);
-    };
-    decode_dispatch_authority(DispatchAuthorityRow {
-        dispatch: ApprovalJudgeDispatchProvenance::RepoWatch(RepoWatchDispatchId::from_uuid(
-            required(&row, "dispatch_ref")?,
-        )),
-        repository: required(&row, "repository")?,
-        target_kind: required(&row, "target_kind")?,
-        pull_request_number: row.try_get("pull_request_number")?,
-        head_sha: row.try_get("head_sha")?,
-        head_repository: row.try_get("head_repository")?,
-        head_branch: row.try_get("head_branch")?,
-        base_branch: row.try_get("base_branch")?,
-        branch: None,
-    })
-    .map(Some)
 }
 
 /// Reads the commissioned fence recorded for one operator-commissioned session.
