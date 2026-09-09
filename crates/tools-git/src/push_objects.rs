@@ -467,6 +467,7 @@ impl ObjectSource {
     }
 
     fn publish_private_packs(&self, destination: &Path) -> Result<(), LocalGitFailure> {
+        let mut objects = Vec::new();
         for directory in fs::read_dir(self.directory.path()).map_err(rejected)? {
             let directory = directory.map_err(rejected)?;
             for entry in fs::read_dir(directory.path()).map_err(rejected)? {
@@ -479,9 +480,24 @@ impl ObjectSource {
                 );
                 let oid =
                     parse_full_object_id(&hex, self.format).ok_or(LocalGitFailure::Repository)?;
-                let mut content = self.decode_loose(File::open(entry.path()).map_err(rejected)?)?;
-                crate::streamed_object::write_pack(&mut content, oid, self.format, destination)?;
+                objects.push(oid);
+                if objects.len() > MAX_REPOSITORY_INSPECTIONS {
+                    return Err(LocalGitFailure::Repository);
+                }
             }
+        }
+        if !objects.is_empty() {
+            crate::streamed_object::write_pack(
+                &objects,
+                |oid| {
+                    self.check_deadline()?;
+                    let hex = oid.to_string();
+                    let path = self.directory.path().join(&hex[..2]).join(&hex[2..]);
+                    self.decode_loose(File::open(path).map_err(rejected)?)
+                },
+                self.format,
+                destination,
+            )?;
         }
         Ok(())
     }

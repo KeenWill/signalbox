@@ -29,7 +29,7 @@ pub(super) fn persist_objects(
         })
         .collect::<Vec<_>>();
     let mut inserted = BTreeSet::new();
-    let mut packs = Vec::new();
+    let mut objects = Vec::new();
     while let Some(oid) = pending.pop() {
         if !inserted.insert(oid) || pinned_objects.contains(oid)? {
             continue;
@@ -64,22 +64,21 @@ pub(super) fn persist_objects(
             git2::ObjectType::Blob => {}
             _ => return Err(LocalGitFailure::Operation),
         }
-        let mut content = repository.object_content(oid)?;
-        packs.push(crate::streamed_object::write_pack(
-            &mut content,
-            oid,
-            authority.object_format,
-            directory.path(),
-        )?);
+        objects.push(oid);
     }
-    pinned_objects.validate_live(authority)?;
-    if packs.is_empty() {
+    if objects.is_empty() {
+        pinned_objects.validate_live(authority)?;
         return Ok(());
     }
+    let (pack, index) = crate::streamed_object::write_pack(
+        &objects,
+        |oid| repository.object_content(oid),
+        authority.object_format,
+        directory.path(),
+    )?;
+    pinned_objects.validate_live(authority)?;
     let publication = ObjectPublicationLock::acquire(pinned_objects)?;
     let mode = pack_installation_mode(&publication.directory)?;
-    for (pack, index) in packs {
-        install_packed_object_pair(&publication.directory, &pack, &index, mode)?;
-    }
+    install_packed_object_pair(&publication.directory, &pack, &index, mode)?;
     Ok(())
 }

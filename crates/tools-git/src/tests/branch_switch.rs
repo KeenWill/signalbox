@@ -21,6 +21,50 @@ use crate::tests::support::{
     raw_commit_with_tree,
 };
 
+#[test]
+fn branch_switch_rejects_a_directory_appearing_at_a_deleted_file() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository opens");
+    let empty_tree = repository
+        .treebuilder(None)
+        .expect("empty tree")
+        .write()
+        .expect("tree writes");
+    let target = raw_commit_with_tree(&repository, empty_tree, fixture.initial);
+    repository
+        .branch(
+            FIX_BRANCH,
+            &repository.find_commit(target).expect("target commit"),
+            false,
+        )
+        .expect("target branch");
+    let executor = fixture.executor();
+    let failure = executor.branch_switch_with_quarantine_hook(
+        GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        },
+        || {
+            fs::remove_file(fixture.root().join(TRACKED_PATH)).expect("tracked file retires");
+            fs::create_dir(fixture.root().join(TRACKED_PATH)).expect("foreign directory appears");
+            fs::write(
+                fixture.root().join(TRACKED_PATH).join("foreign.txt"),
+                b"foreign",
+            )
+            .expect("foreign content");
+        },
+    );
+    assert!(failure.is_err());
+    assert_eq!(
+        repository.head().expect("HEAD remains").target(),
+        Some(fixture.initial)
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH).join("foreign.txt"))
+            .expect("foreign file preserved"),
+        b"foreign"
+    );
+}
+
 fn create_over_depth_quarantine_chain(root: PathBuf) {
     let _deepest = (0..=MAX_QUARANTINE_DEPTH).fold(root, |parent, index| {
         let child = parent.join(format!("d{index}"));

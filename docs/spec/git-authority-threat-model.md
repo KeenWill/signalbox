@@ -106,6 +106,8 @@ or open descriptors, or survive a compromised kernel or library.
 Scans and result text remain bounded; worktree, staging, and object-database
 content have no aggregate byte ceiling. Patches preview bounded content prefixes
 with truncation markers, and status identifies renames by exact object identity.
+Worktree streams pin one descriptor and revalidate its identity around each
+page; object publication streams each batch into one pack and index pair.
 Unsupported layouts and formats, exhausted bounds, allocation failure, and host
 I/O failure are rejected, and the tool does not repair a corrupt repository. The
 configured `max_git_object_bytes` limit (`"none"` for unbounded) applies to the

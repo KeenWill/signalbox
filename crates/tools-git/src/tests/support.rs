@@ -221,6 +221,19 @@ impl WorkspaceFileSystem for ReplacingRootFileSystem {
 }
 
 impl WorkspaceFileSystem for ObservingIndexLockFileSystem {
+    fn open_file_stream(
+        &self,
+        root: &WorkspaceRoot,
+        path: &Path,
+    ) -> Result<signalbox_tools_workspace::WorkspaceFileReader, WorkspaceResolveError> {
+        let reader = LocalWorkspaceFileSystem.open_file_stream(root, path)?;
+        self.lock_observed.store(
+            self.root_path.join(".git/index.lock").is_file(),
+            Ordering::SeqCst,
+        );
+        Ok(reader)
+    }
+
     fn open_root(&self, root: &Path) -> Result<WorkspaceRoot, WorkspaceRootError> {
         LocalWorkspaceFileSystem.open_root(root)
     }

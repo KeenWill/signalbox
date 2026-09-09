@@ -31,5 +31,6 @@ mod stage_removal;
 mod status;
 mod status_reference;
 mod status_report;
+mod streamed_content;
 pub(crate) mod support;
 mod worktree_entries;

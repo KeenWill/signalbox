@@ -212,56 +212,90 @@ impl Write for PackWriter<'_> {
 }
 
 pub(super) fn write_pack(
-    content: &mut ObjectContent,
-    oid: Oid,
+    objects: &[Oid],
+    mut content_for: impl FnMut(Oid) -> Result<ObjectContent, LocalGitFailure>,
     format: ObjectFormat,
     directory: &std::path::Path,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), LocalGitFailure> {
-    // Git pack-format and index-format v2: one streamed object per published pair.
+    // Git pack-format and index-format v2. One publication batch owns one pair.
+    if objects.len() > crate::limits::MAX_REPOSITORY_INSPECTIONS {
+        return Err(LocalGitFailure::Operation);
+    }
     let mut temporary = tempfile::NamedTempFile::new_in(directory).map_err(failed)?;
-    let header = b"PACK\0\0\0\x02\0\0\0\x01";
-    temporary.write_all(header).map_err(failed)?;
+    let mut header = b"PACK\0\0\0\x02".to_vec();
+    header.extend_from_slice(&u32::try_from(objects.len()).map_err(failed)?.to_be_bytes());
+    temporary.write_all(&header).map_err(failed)?;
     let mut hash = ObjectHash::new(format);
-    hash.update(header);
+    hash.update(&header);
     let mut writer = PackWriter {
         file: temporary.as_file_mut(),
         hash,
         crc: crc32fast::Hasher::new(),
     };
-    let mut size = content.size;
-    let mut first = (content.kind as u8) << 4 | (size & 15) as u8;
-    size >>= 4;
-    if size != 0 {
-        first |= 128;
-    }
-    writer.write_all(&[first]).map_err(failed)?;
-    while size != 0 {
-        let mut byte = (size & 127) as u8;
-        size >>= 7;
+    let mut entries = Vec::with_capacity(objects.len());
+    for &oid in objects {
+        let offset = writer.file.stream_position().map_err(failed)?;
+        let mut content = content_for(oid)?;
+        let mut size = content.size;
+        let mut first = (content.kind as u8) << 4 | (size & 15) as u8;
+        size >>= 4;
         if size != 0 {
-            byte |= 128;
+            first |= 128;
         }
-        writer.write_all(&[byte]).map_err(failed)?;
+        writer.write_all(&[first]).map_err(failed)?;
+        while size != 0 {
+            let mut byte = (size & 127) as u8;
+            size >>= 7;
+            if size != 0 {
+                byte |= 128;
+            }
+            writer.write_all(&[byte]).map_err(failed)?;
+        }
+        let mut encoder = ZlibEncoder::new(writer, Compression::default());
+        content.file.rewind().map_err(failed)?;
+        std::io::copy(&mut content.file, &mut encoder).map_err(failed)?;
+        writer = encoder.finish().map_err(failed)?;
+        let crc = std::mem::replace(&mut writer.crc, crc32fast::Hasher::new()).finalize();
+        entries.push((oid, crc, offset));
     }
-    let mut encoder = ZlibEncoder::new(writer, Compression::default());
-    content.file.rewind().map_err(failed)?;
-    std::io::copy(&mut content.file, &mut encoder).map_err(failed)?;
-    let writer = encoder.finish().map_err(failed)?;
-    let crc = writer.crc.finalize();
     let checksum = writer.hash.finish()?;
     temporary.write_all(checksum.as_bytes()).map_err(failed)?;
     let stem = format!("pack-{checksum}");
     let pack = directory.join(format!("{stem}.pack"));
     temporary.persist(&pack).map_err(failed)?;
+    entries.sort_unstable_by_key(|(oid, _, _)| *oid);
     let mut index = b"\xfftOc\0\0\0\x02".to_vec();
+    let mut count = 0usize;
     for prefix in 0..256 {
-        index.extend_from_slice(
-            &(u32::from(prefix >= usize::from(oid.as_bytes()[0]))).to_be_bytes(),
-        );
+        while count < entries.len() && usize::from(entries[count].0.as_bytes()[0]) <= prefix {
+            count += 1;
+        }
+        index.extend_from_slice(&u32::try_from(count).map_err(failed)?.to_be_bytes());
     }
-    index.extend_from_slice(oid.as_bytes());
-    index.extend_from_slice(&crc.to_be_bytes());
-    index.extend_from_slice(&12u32.to_be_bytes());
+    for (oid, _, _) in &entries {
+        index.extend_from_slice(oid.as_bytes());
+    }
+    for (_, crc, _) in &entries {
+        index.extend_from_slice(&crc.to_be_bytes());
+    }
+    let mut large_offset_index = 0u32;
+    // Index v2 uses the high bit as an indirection into its 64-bit offset table.
+    const LARGE_OFFSET: u64 = 1 << 31;
+    for (_, _, offset) in &entries {
+        let encoded = if *offset < LARGE_OFFSET {
+            *offset as u32
+        } else {
+            let encoded = (LARGE_OFFSET as u32) | large_offset_index;
+            large_offset_index += 1;
+            encoded
+        };
+        index.extend_from_slice(&encoded.to_be_bytes());
+    }
+    for (_, _, offset) in &entries {
+        if *offset >= LARGE_OFFSET {
+            index.extend_from_slice(&offset.to_be_bytes());
+        }
+    }
     index.extend_from_slice(checksum.as_bytes());
     let mut hash = ObjectHash::new(format);
     hash.update(&index);
@@ -282,33 +316,28 @@ pub(super) fn worktree_content<FileSystem: signalbox_tools_workspace::WorkspaceF
         path: path.to_owned(),
         source,
     };
-    let mut page = filesystem.read_file_prefix(root, path, IO_BYTES)?;
-    let size = usize::try_from(page.total_bytes)
+    let mut source = filesystem.open_file_stream(root, path)?;
+    let size = usize::try_from(source.len())
         .map_err(|_| io_error(std::io::Error::other("file size does not fit host")))?;
     if limit.is_some_and(|limit| size > limit) {
         return Err(io_error(std::io::Error::other(
             "configured object limit exceeded",
         )));
     }
-    let mode = page.mode;
+    let mode = source.mode();
     let mut file = tempfile::tempfile().map_err(io_error)?;
-    let mut offset = 0usize;
+    let mut buffer = [0u8; IO_BYTES];
+    let mut copied = 0usize;
     loop {
-        if page.total_bytes != size as u64 || page.mode != mode {
-            return Err(io_error(std::io::Error::other(
-                "worktree file changed during read",
-            )));
-        }
-        let count = page.bytes.len().min(size.saturating_sub(offset));
-        file.write_all(&page.bytes[..count]).map_err(io_error)?;
-        offset += count;
-        if offset == size {
+        let count = source.read(&mut buffer).map_err(io_error)?;
+        if count == 0 {
             break;
         }
-        if count == 0 {
-            return Err(io_error(std::io::Error::other("incomplete worktree read")));
-        }
-        page = filesystem.read_file_range(root, path, offset as u64, IO_BYTES)?;
+        file.write_all(&buffer[..count]).map_err(io_error)?;
+        copied += count;
+    }
+    if copied != size {
+        return Err(io_error(std::io::Error::other("incomplete worktree read")));
     }
     file.rewind().map_err(io_error)?;
     Ok((
@@ -363,7 +392,7 @@ pub(super) fn checkout_paths(
     let root = File::open(destination).map_err(failed)?;
     let files = crate::bounded::tree_files(repository, tree)?;
     for path in paths {
-        if !files.contains_key(path) && !destination.join(path).is_dir() {
+        if !files.contains_key(path) {
             match crate::rollback::open_worktree_parent(&root, path) {
                 Ok((parent, leaf)) => match unlinkat(&parent, &leaf, AtFlags::empty()) {
                     Ok(()) => updated(path)?,
