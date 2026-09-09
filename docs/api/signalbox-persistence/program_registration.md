@@ -88,6 +88,7 @@ impl program_registration::ProgramRegistrationRepository {
     >;
     pub async fn find(
         &self,
+        id: signalbox_domain::ProgramRegistrationId,
         content: &signalbox_domain::program_registration::ProgramRegistrationContent,
     ) -> result::Result<
         option::Option<signalbox_domain::program_registration::ProgramRegistration>,
