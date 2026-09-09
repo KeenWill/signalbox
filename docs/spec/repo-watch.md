@@ -333,5 +333,5 @@ creates no turn.
 
 ## Planned
 
-- Repository-watch orchestration through workflows
+- Repository-watch orchestration through [workflows](../design/workflows.md)
   ([design](../design/repo-watch.md)).

@@ -1,7 +1,7 @@
 # Repository watch design
 
 This committed unbuilt design extends [repository watch](../spec/repo-watch.md)
-with programs on the [workflows host](program-substrate.md).
+with programs on the [workflows host](workflows.md).
 
 ## Goal
 
@@ -28,7 +28,7 @@ Programs sequence checked operations and pure matcher/reaction planning through
 `WorkflowContext`. Adapters own I/O, identities, time, template resolution and
 command encoding; no database, provider, credential or filesystem handle enters
 program code. The module retains its pure reducers and SQL under the existing
-ownership seam (`docs/spec/repo-watch.md:267`); it acquires no dependency on the
+ownership seam (`docs/spec/repo-watch.md:272`); it acquires no dependency on the
 workflow runtime or core persistence.
 
 ### Effects and receipts
@@ -49,7 +49,7 @@ idempotent as a whole.
 | `repo.commitEvaluation`                          | Revalidate the exact event/revision and proposed pure action plan against module authority. Mint identities and freeze complete resolved commands host-side; acquire the existing singleton and commit commands, outcome receipt and evaluation cursor together. Retain the exact nonmatch, suppression or dispatch result on evaluation/dispatch records until journal adoption, without recomputing from changed configuration. Existing command retention and singleton admission remain authoritative (`docs/spec/repo-watch.md:184`, `docs/spec/repo-watch.md:198`). |
 | `repo.submitPending`                             | Submit the retained command identity and exact bytes through core handlers, adopt core command receipts, and complete retained follow-ups before reporting completion. Preserve ordered actions, settlement and synchronous conflict rejection (`crates/modules/repo-watch-v2/src/dispatch.rs:304`).                                                                                                                                                                                                                                                                      |
 | `repo.provisionCheckout`, `repo.cleanupCheckout` | Use the existing adapter and ledger evidence for location, core session, ownership, provisioned SHA, retirement and removal. Provisioning remains a follow-up of held creation before submission completes; cleanup can run independently. Recovery adopts or resumes only from retained location and ownership evidence (`apps/signalboxd/src/repo_watch_dispatch.rs:160`, `docs/spec/repo-watch.md:222`).                                                                                                                                                               |
-| `repo.nextLifecycle`, `repo.commitReaction`      | Journal retained core/seam or close/merge facts and original dispatch context; revalidate terminal state and commit exact release/stop commands and settlement before advancing the module cursor, then acknowledge the seam source. Retain the outcome for lost-answer adoption, including no reaction (`crates/modules/repo-watch-v2/src/dispatch.rs:149`, `apps/signalboxd/src/repo_watch_runtime.rs:660`).                                                                                                                                                            |
+| `repo.nextLifecycle`, `repo.commitReaction`      | Journal retained core/seam or close/merge facts and original dispatch context; revalidate terminal state and commit exact release/stop commands and settlement before advancing the module cursor, then acknowledge the seam source. Retain the outcome for lost-answer adoption, including no reaction (`crates/modules/repo-watch-v2/src/dispatch.rs:149`, `apps/signalboxd/src/repo_watch_runtime.rs:716`).                                                                                                                                                            |
 
 Receipt additions belong to the existing module frontier, evaluation and
 dispatch records; there is no second dispatch ledger or singleton table. A
@@ -65,17 +65,17 @@ start-to-start deadlines and queued webhook wakes
 The authenticated webhook listener persists deliveries and retains its
 primary/shadow meaning; polling credentials remain repository-scoped daemon
 inputs (`docs/spec/repo-watch.md:126`, `docs/spec/repo-watch.md:163`,
-`apps/signalboxd/src/repo_watch_credentials.rs:55`). Provider paging,
+`apps/signalboxd/src/repo_watch_credentials.rs:63`). Provider paging,
 normalization, complete-observation rejection, conditional caches and reviewer
 invalidation remain behind `repo.observe` (`docs/spec/repo-watch.md:141`,
-`docs/spec/repo-watch.md:307`). Programs receive checked observations and
+`docs/spec/repo-watch.md:312`). Programs receive checked observations and
 events, not raw webhook bodies or provider JSON.
 
 `mod_repo_watch` retains its dedicated role, schema authority, accepted events,
-revisions, cursors and dispatch lineage (`docs/spec/repo-watch.md:278`). Created
+revisions, cursors and dispatch lineage (`docs/spec/repo-watch.md:283`). Created
 sessions keep the module actor and repository-watch creation cause, with the
 same dispatch reference and origin projection; they do not become
-workflow-created sessions (`docs/spec/repo-watch.md:320`). The separate
+workflow-created sessions (`docs/spec/repo-watch.md:325`). The separate
 convergence sweep retains its fenced commissions, retry/park behavior and nudge
 handoff (`docs/spec/repo-watch.md:79`).
 
@@ -83,9 +83,8 @@ The daemon's model execution path retains automatic context compaction and the
 repository-watch successor turn at the context limit
 (`docs/spec/model-call-execution.md:48`). Dispatched sessions push through the
 configured `git_push_configured` tool, owned by daemon tool composition and its
-approval-gated transport; workflows add no push effect. The executor boundary
-exists at `crates/tools-git/src/push_executor.rs:24`; production registration is
-unbuilt at this baseline (`docs/spec/tool-loop.md:156`).
+approval-gated transport; workflows add no push effect
+(`docs/spec/tool-loop.md:156`).
 
 ## Compatibility constraints
 
@@ -94,7 +93,7 @@ activation tails, singleton scopes and cooldowns (`docs/spec/repo-watch.md:30`,
 `docs/spec/repo-watch.md:198`). Complete template defaults remain frozen in held
 creation without initial input or a turn; checkout clones the watched repository
 at the derived workspace root with the retained branch/SHA before submission
-completes (`docs/spec/repo-watch.md:222`, `docs/spec/repo-watch.md:326`).
+completes (`docs/spec/repo-watch.md:222`, `docs/spec/repo-watch.md:331`).
 
 Goal commissioning/resumption releases the held start; goal achievement or user
 stop issues a parent-only sticky stop. A close/merge event later than the
@@ -144,7 +143,7 @@ cursor and checkout interruption.
 
 Reload stops and joins the previous engine before starting its replacement from
 retained cursors, receipts and accepted webhook/event backlog. It preserves the
-existing listener reload and cleanup contracts (`docs/spec/repo-watch.md:296`).
+existing listener reload and cleanup contracts (`docs/spec/repo-watch.md:301`).
 Cutover and rollback tests include a pending command, webhook backlog, removed
 rule, live held session and pending checkout removal; restart resumes one owner.
 The flag stays false until observation, dispatch, lifecycle and restart parity
