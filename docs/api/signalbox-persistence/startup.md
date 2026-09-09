@@ -107,7 +107,7 @@ impl signalbox_application::StartupScanRepository for startup::PostgresStartupSc
         boxed::Box<[signalbox_domain::SessionId]>,
         <Self as signalbox_application::StartupScanRepository>::Error,
     >;
-    async fn park_corrupt_session(
+    async fn record_corrupt_session(
         &mut self,
         session: signalbox_domain::SessionId,
         error: &<Self as signalbox_application::StartupScanRepository>::Error,

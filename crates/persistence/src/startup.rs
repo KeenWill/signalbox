@@ -233,13 +233,13 @@ impl StartupScanRepository for PostgresStartupScanRepository {
         PostgresStartupScanRepository::sessions(self).await
     }
 
-    async fn park_corrupt_session(
+    async fn record_corrupt_session(
         &mut self,
         session: SessionId,
         error: &Self::Error,
     ) -> Result<(), Self::Error> {
         crate::session_lifecycle::SessionLifecycleRepository::new(self.pool.clone())
-            .park_supervision_failure(session, error)
+            .record_supervision_failure(session, error)
             .await
             .map_err(|failure| match failure {
                 crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source) => {

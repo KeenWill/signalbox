@@ -1,6 +1,8 @@
 //! Read-only lifecycle projections for the operator status command.
 
-use sqlx::{PgPool, Postgres, Transaction};
+use crate::session_lifecycle::{SessionSupervisionFailureRecord, decode_supervision_failure};
+use signalbox_domain::SessionId;
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::lifecycle_metrics::{
     DECLARE_DEADLINE_VIOLATIONS_CURSOR, DECLARE_WEEKLY_METRICS_CURSOR, LifecycleDeadlineViolation,
@@ -17,6 +19,12 @@ pub enum ProcessOperatorStatusItem {
     LifecycleWeek(LifecycleWeeklyMetrics),
     /// One owned non-terminal session past its §1 deadline obligation.
     LifecycleDeadlineViolation(LifecycleDeadlineViolation),
+    /// Pending supervision evidence, including skipped terminal sessions.
+    SessionSupervision {
+        session: SessionId,
+        terminal: bool,
+        failure: SessionSupervisionFailureRecord,
+    },
 }
 
 #[derive(signalbox_derive::Accessors)]
@@ -28,6 +36,8 @@ pub struct ProcessOperatorStatusCounts {
     /// Returns the `nonterminal_past_deadline` alarm value, target zero.
     #[get(copy)]
     lifecycle_deadline_violations: u64,
+    #[get(copy)]
+    session_supervision: u64,
 }
 
 /// PostgreSQL-backed operator-status read boundary.
@@ -62,6 +72,7 @@ impl ProcessOperatorStatusRepository {
 enum ProcessOperatorStatusPhase {
     LifecycleWeeks,
     LifecycleDeadlineViolations,
+    SessionSupervision,
     Complete,
 }
 
@@ -92,6 +103,10 @@ impl ProcessOperatorStatusReader {
                 ),
                 ProcessOperatorStatusPhase::LifecycleDeadlineViolations => (
                     "FETCH NEXT FROM operator_status_lifecycle_deadline_violations",
+                    ProcessOperatorStatusPhase::SessionSupervision,
+                ),
+                ProcessOperatorStatusPhase::SessionSupervision => (
+                    "FETCH NEXT FROM operator_status_session_supervision",
                     ProcessOperatorStatusPhase::Complete,
                 ),
                 ProcessOperatorStatusPhase::Complete => {
@@ -135,6 +150,23 @@ impl ProcessOperatorStatusReader {
                         })?,
                     )
                 }
+                ProcessOperatorStatusPhase::SessionSupervision => {
+                    self.counts.session_supervision =
+                        increment(self.counts.session_supervision, "session supervision count")?;
+                    ProcessOperatorStatusItem::SessionSupervision {
+                        session: SessionId::from_uuid(row.try_get("session_id")?),
+                        terminal: row.try_get("terminal")?,
+                        failure: decode_supervision_failure(&row)
+                            .map_err(|_| {
+                                ProcessOperatorStatusCorruption::Inconsistent(
+                                    "session supervision failure",
+                                )
+                            })?
+                            .ok_or(ProcessOperatorStatusCorruption::Missing(
+                                "session supervision failure",
+                            ))?,
+                    }
+                }
                 ProcessOperatorStatusPhase::Complete => {
                     return Err(ProcessOperatorStatusCorruption::Inconsistent(
                         "operator status cursor phase",
@@ -170,7 +202,15 @@ fn lifecycle_read_failure(
 async fn declare_status_cursors(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), sqlx::Error> {
-    // Both lifecycle-metric reads share the same repeatable-read snapshot.
+    sqlx::query(
+        "DECLARE operator_status_session_supervision NO SCROLL CURSOR FOR
+        SELECT session_id, state_kind = 'terminal' AS terminal, supervision_failure_class,
+               supervision_cause_code, supervision_pending
+        FROM session_lifecycle WHERE supervision_pending ORDER BY session_id",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    // All status reads share the same repeatable-read snapshot.
     sqlx::query(DECLARE_WEEKLY_METRICS_CURSOR)
         .bind(MAX_REPORTED_WEEKS)
         .execute(&mut **transaction)

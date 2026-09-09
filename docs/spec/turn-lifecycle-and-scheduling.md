@@ -300,9 +300,11 @@ resumable work for a scheduler pass. In the two failing branches only, one
 failure entry is appended, preceded in the tool branch by one correlated result
 entry per request in proposal order. Identity collisions are retried with fresh
 candidates. The startup inventory covers every session. A session that fails
-reconstitution is parked with a durable operator cause and skipped; other
-sessions continue. Infrastructure failures stop startup visibly. Recovery is
-idempotent, and a stale observation rolls back.
+reconstitution receives a durable operator item and is skipped; non-terminal
+sessions are parked, while terminal sessions retain their outcome. Operator
+status exposes both kinds of pending supervision item. Other sessions continue.
+Infrastructure failures stop startup visibly. Recovery is idempotent, and a
+stale observation rolls back.
 
 Every terminal transition of a source turn, whether by interrupt, model-call
 outcome, startup recovery, or the watchdog, reclassifies its pending steering

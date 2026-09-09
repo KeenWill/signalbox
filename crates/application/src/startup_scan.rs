@@ -104,8 +104,8 @@ pub trait StartupScanRepository {
     /// Reads the finite startup inventory in deterministic order.
     fn sessions(&mut self) -> impl Future<Output = Result<Box<[SessionId]>, Self::Error>> + Send;
 
-    /// Records a durable operator park for one failed reconstitution.
-    fn park_corrupt_session(
+    /// Records a durable operator item for one failed reconstitution.
+    fn record_corrupt_session(
         &mut self,
         session: SessionId,
         error: &Self::Error,
@@ -293,7 +293,7 @@ where
                             == OperatorFailureClass::FailClosedCorruption =>
                     {
                         self.repository
-                            .park_corrupt_session(session, &error)
+                            .record_corrupt_session(session, &error)
                             .await
                             .map_err(|error| StartupScanError::recovery(session, error))?;
                         skipped_corrupt_sessions.push(session);
@@ -392,7 +392,7 @@ mod tests {
             ready(self.inventory.take().expect("one inventory response"))
         }
 
-        async fn park_corrupt_session(
+        async fn record_corrupt_session(
             &mut self,
             session: SessionId,
             _error: &Self::Error,

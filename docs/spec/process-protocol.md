@@ -288,6 +288,14 @@ The reader budget leaves at least two pool connections outside snapshot work.
 The imported seed frontier is selected only when no persisted turn-start lineage
 exists; a queued but unstarted first native turn does not hide it.
 
+Operator status streams `session_supervision` records after lifecycle deadline
+violations and before repository ingestion. Each carries `session_id`,
+`terminal`, `failure_class`, and `cause_code`; its closed failure vocabulary is
+`infrastructure`, `commit_ambiguous`, `corruption`, `identity_collision`, and
+`bug`. The end message carries `session_supervision_count`. The client validates
+the section order and count and presents each pending item, including corrupt
+terminal sessions skipped at startup.
+
 Operator status includes one `repository_ingestion` record per configured
 watched repository and a `repository_ingestion_count` in its end message. A
 repository attempt that exhausts its request budget or leaves failed targeted

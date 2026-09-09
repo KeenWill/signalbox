@@ -74,7 +74,7 @@ pub trait StartupScanRepository {
             <Self as StartupScanRepository>::Error,
         >,
     > + marker::Send;
-    fn park_corrupt_session(
+    fn record_corrupt_session(
         &mut self,
         session: signalbox_domain::SessionId,
         error: &<Self as StartupScanRepository>::Error,

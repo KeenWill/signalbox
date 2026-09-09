@@ -576,6 +576,38 @@ impl FatalRecoveryReporter {
         });
     }
 
+    async fn record_session_failure<Write, Outcome>(
+        &self,
+        session: SessionId,
+        mut write: Write,
+    ) -> Result<(), signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError>
+    where
+        Write: FnMut() -> Outcome,
+        Outcome: std::future::Future<
+                Output = Result<
+                    (),
+                    signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError,
+                >,
+            >,
+    {
+        use signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError;
+        let mut result = write().await;
+        if matches!(
+            result,
+            Err(SessionLifecycleRepositoryError::CommitAmbiguous(_))
+        ) {
+            // Recording is idempotent. A second commit acknowledges the durable park
+            // before local suspension can mask a later operator resume.
+            result = write().await;
+        }
+        if result.is_ok() {
+            self.fatal_signal.send_modify(|state| {
+                state.suspended.remove(&session);
+            });
+        }
+        result
+    }
+
     /// Records session failures in the operator queue while other sessions execute.
     pub async fn park_failed_sessions(&self, pool: sqlx::PgPool) {
         let repository =
@@ -591,7 +623,11 @@ impl FatalRecoveryReporter {
                 true
             });
             for (session, failure) in pending {
-                let result = repository.park_supervision_failure(session, &failure).await;
+                let result = self
+                    .record_session_failure(session, || {
+                        repository.record_supervision_failure(session, &failure)
+                    })
+                    .await;
                 tracing::error!(
                     session = %session.as_uuid(),
                     failure_class = ?failure.class,
@@ -599,11 +635,6 @@ impl FatalRecoveryReporter {
                     persisted = result.is_ok(),
                     "session execution suspended for operator recovery"
                 );
-                if result.is_ok() {
-                    self.fatal_signal.send_modify(|state| {
-                        state.suspended.remove(&session);
-                    });
-                }
             }
             if changed.changed().await.is_err() {
                 return;
@@ -4666,6 +4697,58 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn supervision_retries_an_ambiguous_park_before_releasing_local_suspension() {
+        use signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError;
+        let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
+        let reporter = execution.recovery_reporter();
+        let session = SessionId::from_uuid(Uuid::from_u128(144));
+        reporter.report_session_recovery_required(session);
+        let mut durable_park = false;
+        let mut writes = 0;
+        reporter
+            .record_session_failure(session, || {
+                writes += 1;
+                let already_parked = std::mem::replace(&mut durable_park, true);
+                ready(if already_parked {
+                    Ok(())
+                } else {
+                    Err(SessionLifecycleRepositoryError::CommitAmbiguous(
+                        sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+                    ))
+                })
+            })
+            .await
+            .expect("idempotent retry acknowledges the committed park");
+        assert_eq!(writes, 2);
+        assert!(durable_park);
+        durable_park = false; // The operator durably resumes after the acknowledgement.
+        assert!(!durable_park && !execution.session_is_suspended(session));
+    }
+
+    #[tokio::test]
+    async fn supervision_keeps_local_suspension_when_the_park_cannot_be_recorded() {
+        use signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError;
+        let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
+        let reporter = execution.recovery_reporter();
+        let session = SessionId::from_uuid(Uuid::from_u128(145));
+        reporter.report_session_recovery_required(session);
+        let mut writes = 0;
+        assert!(
+            reporter
+                .record_session_failure(session, || {
+                    writes += 1;
+                    ready(Err(SessionLifecycleRepositoryError::Database(
+                        sqlx::Error::PoolClosed,
+                    )))
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(writes, 1);
+        assert!(execution.session_is_suspended(session));
     }
 
     #[tokio::test]

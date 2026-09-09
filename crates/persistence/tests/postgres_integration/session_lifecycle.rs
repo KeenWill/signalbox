@@ -3223,10 +3223,21 @@ async fn startup_skips_corrupt_session_while_healthy_turn_reconstitutes()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let corrupt = creation_session(101);
+    let corrupt_terminal = creation_session(103);
     let healthy = creation_session(102);
     let create = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create.handle(interactive_creation(101)).await?;
     create.handle(interactive_creation(102)).await?;
+    create.handle(dispatched_creation(103)).await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .close(
+            corrupt_terminal,
+            SessionTerminalOutcome::Retired {
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
+            },
+            LifecycleActor::Watchdog,
+        )
+        .await?;
     let healthy_turn = activate_first_turn(&pool, healthy, 102).await?;
     sqlx::query("DROP TRIGGER session_is_append_only ON session")
         .execute(&pool)
@@ -3234,8 +3245,8 @@ async fn startup_skips_corrupt_session_while_healthy_turn_reconstitutes()
     sqlx::query("ALTER TABLE session DROP CONSTRAINT session_creation_cause_shape,
         DROP CONSTRAINT session_spawning_request_fk, DROP CONSTRAINT session_delegation_relation_fk")
         .execute(&pool).await?;
-    sqlx::query("UPDATE session SET spawning_tool_request_id = $2 WHERE session_id = $1")
-        .bind(corrupt.into_uuid())
+    sqlx::query("UPDATE session SET spawning_tool_request_id = $2 WHERE session_id = ANY($1)")
+        .bind(vec![corrupt.into_uuid(), corrupt_terminal.into_uuid()])
         .bind(Uuid::now_v7())
         .execute(&pool)
         .await?;
@@ -3246,7 +3257,10 @@ async fn startup_skips_corrupt_session_while_healthy_turn_reconstitutes()
 
     let outcome = scan.execute().await?;
 
-    assert_eq!(outcome.skipped_corrupt_sessions(), &[corrupt]);
+    assert_eq!(
+        outcome.skipped_corrupt_sessions(),
+        &[corrupt, corrupt_terminal]
+    );
     assert_eq!(outcome.recovered_turn_count(), 1);
     let healthy_terminal: bool =
         sqlx::query_scalar("SELECT state_kind = 'terminal' FROM turn_lifecycle WHERE turn_id = $1")
@@ -3265,8 +3279,39 @@ async fn startup_skips_corrupt_session_while_healthy_turn_reconstitutes()
         OperatorFailureClass::FailClosedCorruption
     );
     assert!(parked.supervision_failure().unwrap().pending);
+    let terminal = lifecycle.load(corrupt_terminal).await?.unwrap();
+    assert!(matches!(
+        terminal.state(),
+        SessionLifecycleState::Terminal { .. }
+    ));
+    let terminal_mutation = sqlx::query("UPDATE session_lifecycle SET ended_at = ended_at + interval '1 second' WHERE session_id = $1")
+        .bind(corrupt_terminal.into_uuid()).execute(&pool).await.expect_err("operator evidence does not permit changing terminal lifecycle facts");
+    assert_eq!(
+        terminal_mutation
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let mut status =
+        signalbox_persistence::operator_status::ProcessOperatorStatusRepository::new(pool.clone())
+            .open()
+            .await?;
+    let mut reported = Vec::new();
+    while let Some(item) = status.next_item().await? {
+        if let signalbox_persistence::operator_status::ProcessOperatorStatusItem::SessionSupervision { session, terminal, failure } = item {
+            assert_eq!(failure.class, OperatorFailureClass::FailClosedCorruption);
+            assert!(failure.pending);
+            reported.push((session, terminal));
+        }
+    }
+    assert_eq!(reported, vec![(corrupt, false), (corrupt_terminal, true)]);
+    assert_eq!(status.counts().unwrap().session_supervision(), 2);
     let repeated = scan.execute().await?;
-    assert_eq!(repeated.skipped_corrupt_sessions(), &[corrupt]);
+    assert_eq!(
+        repeated.skipped_corrupt_sessions(),
+        &[corrupt, corrupt_terminal]
+    );
     assert!(
         lifecycle.resume(corrupt).await.is_err(),
         "unreconstitutable evidence cannot resume"
@@ -3277,6 +3322,27 @@ async fn startup_skips_corrupt_session_while_healthy_turn_reconstitutes()
         .bind(corrupt.into_uuid())
         .execute(&pool)
         .await?;
+    lifecycle
+        .record_supervision_failure(
+            corrupt,
+            &signalbox_persistence::startup::StartupScanRepositoryError::from(
+                signalbox_persistence::startup::StartupScanCorruption::Missing(
+                    "fixture corruption",
+                ),
+            ),
+        )
+        .await?;
+    lifecycle
+        .record_supervision_failure(
+            corrupt,
+            &signalbox_persistence::startup::StartupScanRepositoryError::from(
+                signalbox_persistence::startup::StartupScanCorruption::Missing(
+                    "fixture corruption",
+                ),
+            ),
+        )
+        .await?;
+    let replayed = lifecycle.load(corrupt).await?.unwrap();
     lifecycle.resume(corrupt).await?;
     let resumed = lifecycle.load(corrupt).await?.unwrap();
     assert!(!resumed.state().is_parked());
@@ -3284,7 +3350,7 @@ async fn startup_skips_corrupt_session_while_healthy_turn_reconstitutes()
     assert!(!retained.pending);
     assert_eq!(
         retained.cause_code,
-        parked.supervision_failure().unwrap().cause_code
+        replayed.supervision_failure().unwrap().cause_code
     );
     pool.close().await;
     drop(container);

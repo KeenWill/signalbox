@@ -309,8 +309,9 @@ impl SessionLifecycleRepository {
         Ok(parked)
     }
 
-    /// Parks a failed session without changing ownership or its execution evidence.
-    pub async fn park_supervision_failure(
+    /// Records a pending operator item and parks a non-terminal failed session.
+    /// Terminal sessions retain their outcome and remain visible through operator status.
+    pub async fn record_supervision_failure(
         &self,
         session: SessionId,
         failure: &(impl ClassifyOperatorFailure + Sync),
@@ -1764,7 +1765,7 @@ fn encode_actor(
     }
 }
 
-fn decode_supervision_failure(
+pub(crate) fn decode_supervision_failure(
     row: &PgRow,
 ) -> Result<Option<SessionSupervisionFailureRecord>, SessionLifecycleRepositoryError> {
     let class: Option<String> = row.try_get("supervision_failure_class")?;

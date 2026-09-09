@@ -135,7 +135,7 @@ impl session_lifecycle::SessionLifecycleRepository {
         signalbox_domain::SessionLifecycleState,
         session_lifecycle::SessionLifecycleRepositoryError,
     >;
-    pub async fn park_supervision_failure(
+    pub async fn record_supervision_failure(
         &self,
         session: signalbox_domain::SessionId,
         failure: &(impl signalbox_application::ClassifyOperatorFailure + marker::Sync),
