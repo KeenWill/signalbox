@@ -10,6 +10,10 @@ dispatch behavior and recovery.
 
 ## Design
 
+Path A is committed: the module store remains authoritative, workflows own
+orchestration, and one temporary `repository_watch.workflows_enabled` flag
+selects the engine during cutover.
+
 ### Boundary
 
 Compiled Rust programs and checked effect adapters live in
