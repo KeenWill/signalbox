@@ -45,6 +45,7 @@ pub(super) struct SessionWorkspaceExecutors<
     git_identity: GitIdentity,
     exec_runner: ExecRunner,
     cargo_registry_cache: Option<PathBuf>,
+    sandbox: signalbox_tools_exec::SandboxConfiguration,
     configured: WorkspaceBoundExecutors<FileSystem, ExecRunner>,
     failure_details: SessionWorkspaceFailureDetails,
     state: Arc<Mutex<SessionWorkspaceState<WorkspaceBoundExecutors<FileSystem, ExecRunner>>>>,
@@ -60,6 +61,7 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
             git_identity: self.git_identity.clone(),
             exec_runner: self.exec_runner.clone(),
             cargo_registry_cache: self.cargo_registry_cache.clone(),
+            sandbox: self.sandbox.clone(),
             configured: self.configured.clone(),
             failure_details: self.failure_details.clone(),
             state: Arc::clone(&self.state),
@@ -91,6 +93,7 @@ where
             git_identity,
             exec_runner,
             cargo_registry_cache,
+            sandbox,
         } = composition;
         let failure_details = SessionWorkspaceFailureDetails::try_new()?;
         Ok(Self {
@@ -99,6 +102,7 @@ where
             git_identity,
             exec_runner,
             cargo_registry_cache,
+            sandbox,
             configured: families.executors,
             failure_details,
             state: Arc::new(Mutex::new(SessionWorkspaceState::new())),
@@ -289,6 +293,7 @@ where
             self.git_identity.clone(),
             self.exec_runner.clone(),
             self.cargo_registry_cache.as_deref(),
+            &self.sandbox,
         )
         .map_err(SessionWorkspaceFailure::Composition)?;
         // Every family above resolved the derived pathname independently, and

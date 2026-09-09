@@ -3842,13 +3842,15 @@ function assertTimelineDetailPage(value) {{
         }}
         if (
           item.body.working_directory !== undefined &&
-          item.body.working_directory !== null &&
-          new TextEncoder().encode(item.body.working_directory).byteLength > 4096
+          item.body.working_directory !== null
         ) {{
-          fail(
-            `${{path}}.body.working_directory`,
-            "at most 4096 UTF-8 bytes",
-          );
+          textBytes = new TextEncoder().encode(item.body.working_directory).byteLength;
+          if (textBytes > 4096) {{
+            fail(
+              `${{path}}.body.working_directory`,
+              "at most 4096 UTF-8 bytes",
+            );
+          }}
         }}
         break;
       case "delegation": {{
@@ -4188,10 +4190,10 @@ function assertTimelineDetailPage(value) {{
     if (expectedBodyContinuation !== null) {{
       fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
     }}
-    if (previousAddress === null) {{
-      fail("timeline_detail_page.continuation", "absent on an empty page");
-    }}
-    if (BigInt(value.continuation.address.event_sequence) <= previousAddress) {{
+    if (
+      previousAddress !== null &&
+      BigInt(value.continuation.address.event_sequence) <= previousAddress
+    ) {{
       fail("timeline_detail_page.continuation.address", "after the final returned item");
     }}
   }}

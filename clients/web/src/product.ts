@@ -89,17 +89,6 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
   settings: { kind: 'browser-local', authority: 'browser preferences' },
 }
 
-export const productSurfaceCacheLabel = (surface: ProductRouteId): string | null => {
-  switch (productSurfaceStates[surface].kind) {
-    case 'browser-local':
-      return 'Local settings'
-    case 'server-backed':
-      return 'Bounded query'
-    case 'committed-unimplemented':
-      return null
-  }
-}
-
 export interface ProductTransport {
   readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
   readSessions(
@@ -1307,10 +1296,11 @@ async function readSessionTextPage(
       }
     }
     cursor = page.continuation ?? null
+    const last = page.items.at(-1)
+    if (!last) break
     if (
       cursor?.type === 'more_at' &&
-      BigInt(cursor.address.event_sequence) <=
-        BigInt(page.items.at(-1)?.address.event_sequence ?? through)
+      BigInt(cursor.address.event_sequence) <= BigInt(last.address.event_sequence)
     ) {
       throw new TypeError('Transcript continuation does not advance')
     }

@@ -16,6 +16,7 @@ use signalbox_domain::{
 };
 use signalbox_model_provider_runtime::{ContextCompactionModel, RuntimeModelCatalog};
 use signalbox_persistence::{
+    context_compaction::{AppliedContextCompaction, ContextCompactionRepository},
     goal::GoalExecutionFailureRecoveryCause,
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
     start_eligible_turn::{
@@ -156,6 +157,7 @@ struct ReportedUsageCompactionCandidate {
     preview: PreparedActivationPreview,
     turn: TurnId,
     continuation_selection: Option<DirectModelSelection>,
+    summary_exceeds_headroom: bool,
 }
 
 impl fmt::Debug for ReportedUsageCompaction {
@@ -226,7 +228,7 @@ impl ReportedUsageCompaction {
         Ok(())
     }
 
-    /// Compacts once when the newest terminal call proves reserved headroom is gone.
+    /// Compacts bounded prefixes until the queued continuation regains reserved headroom.
     pub async fn compact_if_needed(
         &self,
         session: SessionId,
@@ -243,16 +245,92 @@ impl ReportedUsageCompaction {
         observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
         include_anthropic: bool,
     ) -> Result<(), ReportedUsageCompactionError> {
-        let Some(candidate) = self
+        let Some(mut candidate) = self
             .compaction_candidate(session, include_anthropic)
             .await?
         else {
             return Ok(());
         };
+        loop {
+            let continuation_selection = candidate.continuation_selection;
+            let turn = candidate.turn;
+            if self
+                .compact_candidate(session, candidate, observe_prepared)
+                .await?
+                .is_none()
+            {
+                return Ok(());
+            }
+            let Some(remaining) = self
+                .compaction_candidate(session, include_anthropic)
+                .await?
+            else {
+                return Ok(());
+            };
+            if remaining.turn != turn {
+                return Ok(());
+            }
+            if !remaining.summary_exceeds_headroom {
+                let frontier = ContextCompactionRepository::new(self.model_calls.pool().clone())
+                    .preview_automatic_range(session)
+                    .await
+                    .map_err(|error| ReportedUsageCompactionError::Compaction {
+                        turn: remaining.turn,
+                        failure_class: error.operator_failure_class(),
+                        cause_code: error.operator_failure_cause_code(),
+                    })?;
+                if frontier.is_some_and(|frontier| frontier.members().len() > 1) {
+                    candidate = ReportedUsageCompactionCandidate {
+                        continuation_selection,
+                        ..remaining
+                    };
+                    continue;
+                }
+            }
+            let remaining_turn = remaining.turn;
+            return match close_failed_compaction_turn(
+                &self.activation,
+                &self.model_calls,
+                remaining.preview,
+                TurnTerminalCause::ReportedUsageContextStillExceeded,
+                None,
+            )
+            .await
+            .map_err(|source| {
+                ReportedUsageCompactionError::CompactionFailureClosure {
+                    turn: remaining_turn,
+                    source,
+                }
+            })? {
+                CommitCompactionFailurePreviewOutcome::Failed(_) => {
+                    tracing::warn!(
+                        cause_code = "reported_usage_context_still_exceeded",
+                        session_id = %session.as_uuid(),
+                        turn_id = %remaining_turn.as_uuid(),
+                        "automatic compaction did not restore reserved context headroom; the queued turn was closed before provider dispatch"
+                    );
+                    Err(ReportedUsageCompactionError::Compaction {
+                        turn: remaining_turn,
+                        failure_class: OperatorFailureClass::CallerOrHubBug,
+                        cause_code: "reported_usage_context_still_exceeded",
+                    })
+                }
+                CommitCompactionFailurePreviewOutcome::Stale => Ok(()),
+            };
+        }
+    }
+
+    async fn compact_candidate(
+        &self,
+        session: SessionId,
+        candidate: ReportedUsageCompactionCandidate,
+        observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
+    ) -> Result<Option<AppliedContextCompaction>, ReportedUsageCompactionError> {
         let ReportedUsageCompactionCandidate {
             preview,
             turn,
             continuation_selection,
+            ..
         } = candidate;
         let applied = match compact_automatically(
             &self.model_calls,
@@ -292,7 +370,7 @@ impl ReportedUsageCompaction {
                             cause_code: "reported_usage_context_compaction_exhausted",
                         });
                     }
-                    CommitCompactionFailurePreviewOutcome::Stale => return Ok(()),
+                    CommitCompactionFailurePreviewOutcome::Stale => return Ok(None),
                 }
             }
             Err(error) => {
@@ -318,7 +396,7 @@ impl ReportedUsageCompaction {
                         ReportedUsageCompactionError::CompactionFailureClosure { turn, source }
                     })? {
                         CommitCompactionFailurePreviewOutcome::Failed(_) => {}
-                        CommitCompactionFailurePreviewOutcome::Stale => return Ok(()),
+                        CommitCompactionFailurePreviewOutcome::Stale => return Ok(None),
                     }
                 }
                 return Err(ReportedUsageCompactionError::Compaction {
@@ -335,42 +413,7 @@ impl ReportedUsageCompaction {
             context_compaction_id = %applied.compaction.into_uuid(),
             "provider-reported usage exhausted reserved context headroom; queued turn compacted before activation"
         );
-        let Some(remaining) = self
-            .compaction_candidate(session, include_anthropic)
-            .await?
-        else {
-            return Ok(());
-        };
-        let remaining_turn = remaining.turn;
-        match close_failed_compaction_turn(
-            &self.activation,
-            &self.model_calls,
-            remaining.preview,
-            TurnTerminalCause::ReportedUsageContextStillExceeded,
-            None,
-        )
-        .await
-        .map_err(
-            |source| ReportedUsageCompactionError::CompactionFailureClosure {
-                turn: remaining_turn,
-                source,
-            },
-        )? {
-            CommitCompactionFailurePreviewOutcome::Failed(_) => {
-                tracing::warn!(
-                    cause_code = "reported_usage_context_still_exceeded",
-                    session_id = %session.as_uuid(),
-                    turn_id = %remaining_turn.as_uuid(),
-                    "automatic compaction did not restore reserved context headroom; the queued turn was closed before provider dispatch"
-                );
-                Err(ReportedUsageCompactionError::Compaction {
-                    turn: remaining_turn,
-                    failure_class: OperatorFailureClass::CallerOrHubBug,
-                    cause_code: "reported_usage_context_still_exceeded",
-                })
-            }
-            CommitCompactionFailurePreviewOutcome::Stale => Ok(()),
-        }
+        Ok(Some(applied))
     }
 
     async fn compaction_candidate(
@@ -403,6 +446,7 @@ impl ReportedUsageCompaction {
                 preview,
                 turn,
                 continuation_selection: Some(selection),
+                summary_exceeds_headroom: false,
             }));
         }
         let prospective = self
@@ -501,6 +545,15 @@ impl ReportedUsageCompaction {
             )
             .await
             .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?;
+        let summary_exceeds_headroom = reported.as_ref().is_some_and(|reported| {
+            !reported.input_is_retained()
+                && reported
+                    .usage()
+                    .output_tokens()
+                    .unwrap_or(0)
+                    .saturating_add(u64::from(definition.max_output_tokens()))
+                    > u64::from(definition.context_window_tokens())
+        });
         let reported_requires_compaction = reported.is_some_and(|reported| {
             reported_usage_requires_compaction(
                 reported.usage(),
@@ -539,6 +592,7 @@ impl ReportedUsageCompaction {
             preview,
             turn,
             continuation_selection: None,
+            summary_exceeds_headroom,
         }))
     }
 }

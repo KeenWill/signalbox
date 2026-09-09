@@ -11,8 +11,8 @@
 use signalbox_test_bin::test_bin_path;
 use signalbox_tools_exec::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecutionConfinement, OutputEncoding,
-    ProcessOutcome, ProcessSpawnFailure, SandboxProcessNamespace, SandboxedCommandRunner,
-    TokioProcessRunner,
+    ProcessOutcome, ProcessSpawnFailure, SandboxConfiguration, SandboxNetwork,
+    SandboxProcessNamespace, SandboxedCommandRunner, TokioProcessRunner,
 };
 
 const BWRAP_PROCESS_NAMESPACE_ENVIRONMENT: &str = "SIGNALBOX_BWRAP_PROCESS_NAMESPACE";
@@ -350,4 +350,210 @@ fn task_children_read_other_errors_remain_genuine_unavailability() {
         classify_task_children_read(&denied),
         TaskChildrenReadOutcome::Unavailable
     );
+}
+
+#[tokio::test]
+async fn configured_host_runtime_validates_inside_real_bwrap()
+-> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("SIGNALBOX_RUN_BWRAP_INTEGRATION").is_none() {
+        return Ok(());
+    }
+    let workspace = tempfile::tempdir()?;
+    let runtime = tempfile::tempdir()?;
+    let bin = runtime.path().join("bin");
+    std::fs::create_dir(&bin)?;
+    for program in ["cargo", "node"] {
+        let source = host_output("sh", &["-c", &format!("command -v {program}")])?;
+        std::fs::copy(source, bin.join(program))?;
+    }
+    let rustup_home = std::path::PathBuf::from(host_output("rustup", &["show", "home"])?);
+    let rustc = std::path::PathBuf::from(host_output(
+        "rustup",
+        &["which", "--toolchain", "stable", "rustc"],
+    )?);
+    let toolchain = rustc
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or("toolchain directory missing")?;
+    let toolchain_name = toolchain
+        .file_name()
+        .ok_or("toolchain name missing")?
+        .to_str()
+        .ok_or("toolchain name is not UTF-8")?;
+    let npm = std::path::PathBuf::from(host_output("sh", &["-c", "command -v npm"])?);
+    let node_bin = npm.parent().ok_or("npm bin directory missing")?;
+    let node_profile = node_bin.parent().ok_or("node profile missing")?;
+    let configuration = SandboxConfiguration {
+        network: SandboxNetwork::Host,
+        read_only_binds: vec![
+            runtime.path().to_owned(),
+            rustup_home.clone(),
+            node_profile.to_owned(),
+        ],
+        path_prepend: vec![bin.clone(), toolchain.join("bin"), node_bin.to_owned()],
+        rustup_home: Some(rustup_home),
+        rustup_toolchain: Some(toolchain_name.to_owned()),
+    };
+    let process_runner = TokioProcessRunner::try_new(test_bin_path!("signalbox-exec-supervisor"))?;
+    let runner = SandboxedCommandRunner::try_new_with_process_namespace(
+        process_runner,
+        workspace.path(),
+        bwrap_process_namespace_from_environment()?,
+    )?;
+    let mut isolated = runner.clone();
+    for program in ["cargo", "node"] {
+        let result = isolated
+            .try_run(ExecArguments {
+                program: bin.join(program).to_string_lossy().into_owned(),
+                arguments: vec![String::from("--version")],
+                working_directory: String::from("."),
+                timeout_seconds: 30,
+            })
+            .await?;
+        assert_eq!(
+            result.confinement,
+            ExecutionConfinement::FilesystemConfined,
+            "{result:?}"
+        );
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::NotFound
+            },
+            "{result:?}"
+        );
+    }
+    let mut configured = runner.with_sandbox_configuration(configuration.clone());
+    run_successfully(&mut configured, "cargo", &["--version"], ".").await?;
+    run_successfully(&mut configured, "node", &["--version"], ".").await?;
+    let runtime_assertions = format!(
+        concat!(
+            "test ! -e /root && ! touch '{}/write-probe' && ",
+            "test \"$(command -v cargo)\" = '{}/cargo' && ",
+            "test \"$(command -v node)\" = '{}/node' && ",
+            "test \"$CARGO_HOME\" = /workspace/.cargo && ",
+            "test \"$npm_config_cache\" = /workspace/.npm && ",
+            "test \"$RUSTUP_AUTO_INSTALL\" = 0"
+        ),
+        runtime.path().display(),
+        bin.display(),
+        bin.display(),
+    );
+    run_successfully(&mut configured, "sh", &["-c", &runtime_assertions], ".").await?;
+    std::fs::create_dir(workspace.path().join("src"))?;
+    std::fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[package]\nname = \"sandbox-validation\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    std::fs::write(
+        workspace.path().join("src/lib.rs"),
+        "#[test]\nfn arithmetic() {\n    assert_eq!(2 + 2, 4);\n}\n",
+    )?;
+    run_successfully(
+        &mut configured,
+        "cargo",
+        &["fmt", "--all", "--", "--check"],
+        ".",
+    )
+    .await?;
+    run_successfully(&mut configured, "cargo", &["check"], ".").await?;
+    run_successfully(&mut configured, "cargo", &["test", "--no-fail-fast"], ".").await?;
+    run_successfully(
+        &mut configured,
+        "curl",
+        &[
+            "--fail",
+            "--max-time",
+            "30",
+            "-sI",
+            "https://index.crates.io/config.json",
+        ],
+        ".",
+    )
+    .await?;
+    std::fs::create_dir_all(workspace.path().join("clients/web"))?;
+    std::fs::write(
+        workspace.path().join("clients/web/package.json"),
+        r#"{"name":"sandbox-validation","version":"0.1.0","dependencies":{"left-pad":"1.3.0"}}"#,
+    )?;
+    run_successfully(
+        &mut configured,
+        "npm",
+        &["install", "--package-lock-only"],
+        "clients/web",
+    )
+    .await?;
+    assert!(
+        workspace
+            .path()
+            .join("clients/web/package-lock.json")
+            .is_file()
+    );
+    let mut no_network = configured.with_sandbox_configuration(SandboxConfiguration {
+        network: SandboxNetwork::None,
+        ..configuration
+    });
+    let result = no_network
+        .try_run(ExecArguments {
+            program: String::from("curl"),
+            arguments: [
+                "--fail",
+                "--max-time",
+                "5",
+                "-sI",
+                "https://index.crates.io/config.json",
+            ]
+            .map(String::from)
+            .to_vec(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        })
+        .await?;
+    assert_eq!(
+        result.confinement,
+        ExecutionConfinement::FilesystemConfined,
+        "{result:?}"
+    );
+    assert!(
+        matches!(result.outcome, ProcessOutcome::Exited { code: Some(code) } if code != 0),
+        "{result:?}"
+    );
+    Ok(())
+}
+
+fn host_output(program: &str, arguments: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    let output = std::process::Command::new(program)
+        .args(arguments)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!("{program} {arguments:?}: {output:?}").into());
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+async fn run_successfully(
+    runner: &mut SandboxedCommandRunner<TokioProcessRunner>,
+    program: &str,
+    arguments: &[&str],
+    working_directory: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = runner
+        .try_run(ExecArguments {
+            program: program.to_owned(),
+            arguments: arguments.iter().map(|value| (*value).to_owned()).collect(),
+            working_directory: working_directory.to_owned(),
+            timeout_seconds: 300,
+        })
+        .await?;
+    assert_eq!(
+        result.confinement,
+        ExecutionConfinement::FilesystemConfined,
+        "{program} {arguments:?}: {result:?}"
+    );
+    assert_eq!(
+        result.outcome,
+        ProcessOutcome::Exited { code: Some(0) },
+        "{program} {arguments:?}: {result:?}"
+    );
+    Ok(())
 }

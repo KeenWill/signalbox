@@ -201,6 +201,7 @@ test_suite(
 
 rust_unit_test(
     name = "unit_tests",
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate = ":signalbox_persistence",
     crate_features = [
         "default",

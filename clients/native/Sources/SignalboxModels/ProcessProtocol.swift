@@ -16,6 +16,8 @@ public enum SignalboxProcessProtocol {
   public static let maximumImportedConversationTitleScalars = 256
   public static let maximumImportedTextPreviewUTF8Bytes = 256
   public static let maximumModelAliasCatalogEntries = 10_000
+  // crates/process-protocol/src/scalars.rs: MAX_MODEL_CAPABILITY_CATALOG_ENTRIES.
+  public static let maximumModelCapabilityCatalogEntries = 10_000
   public static let maximumStreamedTextUTF8Bytes = 8 * 1024 * 1024
   public static let maximumUserInputParts = 256
   public static let maximumUserInputTextUTF8Bytes = 1_048_576
@@ -378,7 +380,7 @@ public struct SignalboxRequestID: Codable, Hashable, Sendable {
   }
 }
 
-public enum SignalboxModelSelection: Codable, Equatable, Sendable {
+public enum SignalboxModelSelection: Codable, Hashable, Sendable {
   case direct(selectionID: SignalboxCanonicalUUID)
   case alias(aliasID: SignalboxCanonicalUUID)
 
@@ -535,22 +537,6 @@ public enum SignalboxDescendantTerminationScope: String, Codable, Equatable, Sen
   case parentAndDescendants = "parent_and_descendants"
 }
 
-private struct SignalboxInheritedModelSettingsOverlay: Encodable {
-  let reasoningLevel = SignalboxInheritedSettingOverlay()
-  let fastMode = SignalboxInheritedSettingOverlay()
-  let serviceTier = SignalboxInheritedSettingOverlay()
-
-  private enum CodingKeys: String, CodingKey {
-    case reasoningLevel = "reasoning_level"
-    case fastMode = "fast_mode"
-    case serviceTier = "service_tier"
-  }
-}
-
-private struct SignalboxInheritedSettingOverlay: Encodable {
-  let kind = "inherit"
-}
-
 public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
   case createSession(
     commandID: SignalboxCommandID,
@@ -562,7 +548,8 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     commandID: SignalboxCommandID,
     sessionID: SignalboxCanonicalUUID,
     content: String,
-    expectedDefaultsVersion: SignalboxCanonicalUInt64
+    expectedDefaultsVersion: SignalboxCanonicalUInt64,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   )
   case readCredentialPoolPolicy(sessionID: SignalboxCanonicalUUID, turnID: SignalboxCanonicalUUID, poolPolicyID: SignalboxCanonicalUUID)
   case readTranscript(sessionID: SignalboxCanonicalUUID)
@@ -594,7 +581,8 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     sessionID: SignalboxCanonicalUUID,
     expectedActiveTurnID: SignalboxCanonicalUUID,
     content: String,
-    expectedDefaultsVersion: SignalboxCanonicalUInt64
+    expectedDefaultsVersion: SignalboxCanonicalUInt64,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   )
   case stopTurn(
     commandID: SignalboxCommandID,
@@ -602,7 +590,8 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     expectedActiveTurnID: SignalboxCanonicalUUID,
     content: String,
     expectedDefaultsVersion: SignalboxCanonicalUInt64,
-    descendantScope: SignalboxDescendantTerminationScope
+    descendantScope: SignalboxDescendantTerminationScope,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   )
   case overrideDeniedToolRequest(
     commandID: SignalboxCommandID,
@@ -627,6 +616,13 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     after: SignalboxConversationCursor?
   )
   case listModelAliases
+  case listModelCapabilities
+  case replaceSessionDefaults(
+    commandID: SignalboxCommandID,
+    defaults: SignalboxSessionDefaultsRead,
+    modelSelection: SignalboxModelSelection,
+    modelSettings: SignalboxModelSettingsOverlay
+  )
 
   public func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: SignalboxDynamicCodingKey.self)
@@ -635,17 +631,17 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode("create_session", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
       try container.encode(selection, forKey: "initial_model_selection")
-      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+      try container.encode(SignalboxModelSettingsOverlay.inheritAll, forKey: "model_settings")
       try container.encode(systemPrompt, forKey: "system_prompt")
     case .listSessions:
       try container.encode("list_sessions", forKey: "type")
-    case .submitInput(let commandID, let sessionID, let content, let expectedVersion):
+    case .submitInput(let commandID, let sessionID, let content, let expectedVersion, let modelSettings):
       try container.encode("submit_input", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
       try container.encode(sessionID, forKey: "session_id")
       try container.encode(SignalboxUserInputContent.text(content), forKey: "content")
       try container.encode(expectedVersion, forKey: "expected_defaults_version")
-      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+      try container.encode(modelSettings, forKey: "model_settings")
     case .readCredentialPoolPolicy(let sessionID, let turnID, let poolPolicyID):
       try container.encode("read_credential_pool_policy", forKey: "type")
       try container.encode(sessionID, forKey: "session_id")
@@ -692,13 +688,14 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(throughPosition, forKey: "through_position")
       try container.encode(relationship, forKey: "relationship")
       try container.encode(selection, forKey: "initial_model_selection")
-      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+      try container.encode(SignalboxModelSettingsOverlay.inheritAll, forKey: "model_settings")
     case .reconcileTurn(
       let commandID,
       let sessionID,
       let activeTurnID,
       let content,
-      let expectedDefaultsVersion
+      let expectedDefaultsVersion,
+      let modelSettings
     ):
       try container.encode("reconcile_turn", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
@@ -706,14 +703,15 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(activeTurnID, forKey: "expected_active_turn_id")
       try container.encode(SignalboxUserInputContent.text(content), forKey: "content")
       try container.encode(expectedDefaultsVersion, forKey: "expected_defaults_version")
-      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+      try container.encode(modelSettings, forKey: "model_settings")
     case .stopTurn(
       let commandID,
       let sessionID,
       let activeTurnID,
       let content,
       let expectedDefaultsVersion,
-      let descendantScope
+      let descendantScope,
+      let modelSettings
     ):
       try container.encode("stop_turn", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
@@ -722,7 +720,7 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(SignalboxUserInputContent.text(content), forKey: "content")
       try container.encode(expectedDefaultsVersion, forKey: "expected_defaults_version")
       try container.encode(descendantScope, forKey: "descendant_scope")
-      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+      try container.encode(modelSettings, forKey: "model_settings")
     case .overrideDeniedToolRequest(let commandID, let sessionID, let toolRequestID):
       try container.encode("override_denied_tool_request", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
@@ -745,6 +743,17 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(archived, forKey: "include_archived")
       try container.encode(pageSize, forKey: "page_size")
       try container.encode(after, forKey: "after")
+    case .listModelCapabilities:
+      try container.encode("list_model_capabilities", forKey: "type")
+    case .replaceSessionDefaults(let commandID, let defaults, let selection, let settings):
+      try container.encode("replace_session_defaults", forKey: "type")
+      try container.encode(commandID, forKey: "command_id")
+      try container.encode(defaults.sessionID, forKey: "session_id")
+      try container.encode(defaults.defaultsVersion, forKey: "expected_defaults_version")
+      try container.encode(selection, forKey: "model_selection")
+      try container.encode(settings, forKey: "model_settings")
+      try container.encode(defaults.dangerousToolAutoApproval, forKey: "dangerous_tool_auto_approval")
+      try container.encode(defaults.systemPrompt, forKey: "system_prompt")
     case .listModelAliases:
       try container.encode("list_model_aliases", forKey: "type")
     }
@@ -1041,6 +1050,10 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case toolRequestDecided(SignalboxToolRequestDecided)
   case toolDenialOverridden(toolRequestID: SignalboxCanonicalUUID)
   case sessionDefaults(SignalboxSessionDefaultsRead)
+  case sessionDefaultsReplaced(SignalboxSessionDefaultsRead)
+  case modelCapabilitiesStart
+  case modelCapabilityItem(SignalboxModelCapabilityItem)
+  case modelCapabilitiesEnd(capabilityCount: SignalboxCanonicalUInt64)
   case sessionsStart
   case sessionSummary(SignalboxProcessSessionSummary)
   case sessionsEnd(sessionCount: SignalboxCanonicalUInt64)
@@ -1129,6 +1142,16 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         self = .toolDenialOverridden(toolRequestID: try decoder.decode("tool_request_id"))
       case "tool_request_decided":
         self = .toolRequestDecided(try SignalboxToolRequestDecided(from: decoder))
+      case "model_capabilities_start":
+        try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
+        self = .modelCapabilitiesStart
+      case "model_capability_item":
+        self = .modelCapabilityItem(try SignalboxModelCapabilityItem(from: decoder))
+      case "model_capabilities_end":
+        try tagged.rejectUnadmittedFields(["type", "capability_count"], decoder: decoder)
+        self = .modelCapabilitiesEnd(capabilityCount: try decoder.decode("capability_count"))
+      case "session_defaults_replaced":
+        self = .sessionDefaultsReplaced(try SignalboxSessionDefaultsRead(from: decoder))
       case "session_defaults":
         self = .sessionDefaults(try SignalboxSessionDefaultsRead(from: decoder))
       case "sessions_start":
@@ -1314,18 +1337,14 @@ public struct SignalboxToolRequestDecided: Decodable, Equatable, Sendable {
 }
 
 /// A strictly validated version-one model-settings snapshot.
-///
-/// The native settings UI is intentionally unimplemented. Retaining the
-/// closed wire value here keeps session-default decoding wire-real without
-/// introducing a presentation contract ahead of that work.
 public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
   public let rawValue: [String: SignalboxJSONValue]
-  private let precedence: SignalboxModelSettingsPrecedenceShape
-  private let effective: SignalboxEffectiveModelSettingsShape
-  private let reasoningSource: SignalboxModelSettingSourceShape?
-  private let fastModeSource: SignalboxModelSettingSourceShape?
-  private let serviceTierSource: SignalboxModelSettingSourceShape?
-  private let validatedForSelectionID: SignalboxCanonicalUUID?
+  public let precedence: SignalboxModelSettingsPrecedence
+  public let effective: SignalboxEffectiveModelSettings
+  public let reasoningSource: SignalboxModelSettingSource?
+  public let fastModeSource: SignalboxModelSettingSource?
+  public let serviceTierSource: SignalboxModelSettingSource?
+  public let validatedForSelectionID: SignalboxCanonicalUUID?
 
   public init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
@@ -1335,13 +1354,13 @@ public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
     ]
     try payload.rejectUnadmittedFields(fields, decoder: decoder)
     try payload.requireFields(fields, decoder: decoder)
-    let precedence: SignalboxModelSettingsPrecedenceShape = try decoder.decode("precedence")
-    let effective: SignalboxEffectiveModelSettingsShape = try decoder.decode("effective")
-    let reasoningSource: SignalboxModelSettingSourceShape? =
+    let precedence: SignalboxModelSettingsPrecedence = try decoder.decode("precedence")
+    let effective: SignalboxEffectiveModelSettings = try decoder.decode("effective")
+    let reasoningSource: SignalboxModelSettingSource? =
       try decoder.decodeIfPresent("reasoning_source")
-    let fastModeSource: SignalboxModelSettingSourceShape? =
+    let fastModeSource: SignalboxModelSettingSource? =
       try decoder.decodeIfPresent("fast_mode_source")
-    let serviceTierSource: SignalboxModelSettingSourceShape? =
+    let serviceTierSource: SignalboxModelSettingSource? =
       try decoder.decodeIfPresent("service_tier_source")
     let validatedFor: SignalboxCanonicalUUID? =
       try decoder.decodeIfPresent("validated_for_selection_id")
@@ -1393,11 +1412,11 @@ public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
       || (validatedForSelectionID == nil && precedence == .providerDefaults)
   }
 
-  fileprivate func carries(perCallOverride: SignalboxModelSettingsOverlayShape) -> Bool {
+  fileprivate func carries(perCallOverride: SignalboxModelSettingsOverlay) -> Bool {
     precedence.perCall == perCallOverride
   }
 
-  fileprivate func admits(_ adjustments: [SignalboxModelChangeAdjustmentShape]) -> Bool {
+  fileprivate func admits(_ adjustments: [SignalboxModelChangeAdjustment]) -> Bool {
     adjustments.allSatisfy { adjustment in
       switch adjustment {
       case .reasoningLevelClamped(let from, let to):
@@ -1428,52 +1447,86 @@ public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
 
   fileprivate func preservesChangeProvenance(
     from prior: Self,
-    callerOverride: SignalboxModelSettingsOverlayShape,
-    adjustments: [SignalboxModelChangeAdjustmentShape]
+    callerOverride: SignalboxModelSettingsOverlay,
+    adjustments: [SignalboxModelChangeAdjustment]
   ) -> Bool {
-    let unadjusted = SignalboxModelSettingsPrecedenceShape(
+    changePrecedence(from: prior, callerOverride: callerOverride).applying(adjustments) == precedence
+  }
+
+  func matchesReplacement(from prior: Self, callerOverride: SignalboxModelSettingsOverlay) -> Bool {
+    let unadjusted = changePrecedence(from: prior, callerOverride: callerOverride).resolve().effective
+    var adjustments: [SignalboxModelChangeAdjustment] = []
+    if unadjusted.reasoningLevel != effective.reasoningLevel {
+      guard let from = unadjusted.reasoningLevel else { return false }
+      if let to = effective.reasoningLevel {
+        adjustments.append(.reasoningLevelClamped(from: from, to: to))
+      } else {
+        adjustments.append(.reasoningLevelCleared(from: from))
+      }
+    }
+    if unadjusted.fastMode != effective.fastMode { adjustments.append(.fastModeDisabled) }
+    if unadjusted.serviceTier != effective.serviceTier {
+      guard let from = unadjusted.serviceTier else { return false }
+      adjustments.append(.serviceTierCleared(from: from))
+    }
+    return (adjustments.isEmpty || validationIdentityDiffers(from: prior))
+      && callerOverride.admitsAutomaticAdjustments(adjustments)
+      && admits(adjustments)
+      && preservesChangeProvenance(from: prior, callerOverride: callerOverride, adjustments: adjustments)
+  }
+
+  private func changePrecedence(
+    from prior: Self, callerOverride: SignalboxModelSettingsOverlay
+  ) -> SignalboxModelSettingsPrecedence {
+    SignalboxModelSettingsPrecedence(
       perCall: prior.precedence.perCall,
       session: callerOverride.inheriting(from: prior.precedence.session),
       profile: precedence.profile,
       globalDefault: precedence.globalDefault
     )
-    return unadjusted.applying(adjustments) == precedence
   }
 }
 
-private enum SignalboxReasoningLevelShape: String, Decodable, Equatable, Sendable {
+public enum SignalboxReasoningLevel: String, Codable, Hashable, CaseIterable, Sendable {
   case none, minimal, low, medium, high, xhigh, max, ultra
 }
 
-private enum SignalboxFastModeShape: String, Decodable, Equatable, Sendable {
+public enum SignalboxFastMode: String, Codable, Hashable, CaseIterable, Sendable {
   case disabled, enabled
 }
 
-private enum SignalboxModelSettingSourceShape: String, Decodable, Equatable, Sendable {
+public enum SignalboxModelSettingSource: String, Decodable, Equatable, Sendable {
   case perCall = "per_call"
   case session, profile
   case globalDefault = "global_default"
 }
 
-private enum SignalboxAnthropicServiceTierShape: String, Decodable, Equatable, Sendable {
+public enum SignalboxAnthropicServiceTier: String, Codable, Hashable, CaseIterable, Sendable {
   case auto
   case standardOnly = "standard_only"
 }
 
-private enum SignalboxOpenAIServiceTierShape: String, Decodable, Equatable, Sendable {
+public enum SignalboxOpenAIServiceTier: String, Codable, Hashable, CaseIterable, Sendable {
   case auto, `default`, flex, scale, priority, fast
 }
 
-private enum SignalboxCodexCLIServiceTierShape: String, Decodable, Equatable, Sendable {
+public enum SignalboxCodexCLIServiceTier: String, Codable, Hashable, CaseIterable, Sendable {
   case `default`, priority, flex
 }
 
-private enum SignalboxServiceTierShape: Decodable, Equatable, Sendable {
-  case anthropic(SignalboxAnthropicServiceTierShape)
-  case openAI(SignalboxOpenAIServiceTierShape)
-  case codexCLI(SignalboxCodexCLIServiceTierShape)
+public enum SignalboxServiceTier: Codable, Hashable, CaseIterable, Sendable {
+  case anthropic(SignalboxAnthropicServiceTier)
+  case openAI(SignalboxOpenAIServiceTier)
+  case codexCLI(SignalboxCodexCLIServiceTier)
 
-  init(from decoder: Decoder) throws {
+  // Canonical wire order follows the enum declarations in crates/process-protocol/src/settings.rs.
+  public static var allCases: [Self] {
+    SignalboxAnthropicServiceTier.allCases.map(Self.anthropic)
+      + SignalboxOpenAIServiceTier.allCases.map(Self.openAI)
+      + SignalboxCodexCLIServiceTier.allCases.map(Self.codexCLI)
+  }
+
+  public init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let fields: Set<String> = ["provider", "value"]
     try payload.rejectUnadmittedFields(fields, decoder: decoder)
@@ -1502,16 +1555,22 @@ private enum SignalboxServiceTierShape: Decodable, Equatable, Sendable {
     case .codexCLI(let value): return ("codex_cli", value.rawValue)
     }
   }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: SignalboxDynamicCodingKey.self)
+    try container.encode(wireValue.provider, forKey: "provider")
+    try container.encode(wireValue.value, forKey: "value")
+  }
 }
 
-private enum SignalboxSettingOverlayShape<Value: Decodable & Equatable & Sendable>:
-  Decodable, Equatable, Sendable
+public enum SignalboxSettingOverlay<Value: Codable & Hashable & Sendable>:
+  Codable, Hashable, Sendable
 {
   case inherit
   case providerDefault
   case value(Value)
 
-  init(from decoder: Decoder) throws {
+  public init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let kind: String = try decoder.decode("kind")
     switch kind {
@@ -1531,13 +1590,24 @@ private enum SignalboxSettingOverlayShape<Value: Decodable & Equatable & Sendabl
       )
     }
   }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: SignalboxDynamicCodingKey.self)
+    switch self {
+    case .inherit: try container.encode("inherit", forKey: "kind")
+    case .providerDefault: try container.encode("provider_default", forKey: "kind")
+    case .value(let value):
+      try container.encode("value", forKey: "kind")
+      try container.encode(value, forKey: "value")
+    }
+  }
 }
 
-private enum SignalboxFastModeOverlayShape: Decodable, Equatable, Sendable {
+public enum SignalboxFastModeOverlay: Codable, Hashable, Sendable {
   case inherit
-  case value(SignalboxFastModeShape)
+  case value(SignalboxFastMode)
 
-  init(from decoder: Decoder) throws {
+  public init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let kind: String = try decoder.decode("kind")
     switch kind {
@@ -1557,14 +1627,24 @@ private enum SignalboxFastModeOverlayShape: Decodable, Equatable, Sendable {
       )
     }
   }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: SignalboxDynamicCodingKey.self)
+    switch self {
+    case .inherit: try container.encode("inherit", forKey: "kind")
+    case .value(let value):
+      try container.encode("value", forKey: "kind")
+      try container.encode(value, forKey: "value")
+    }
+  }
 }
 
-private struct SignalboxModelSettingsOverlayShape: Decodable, Equatable, Sendable {
-  let reasoningLevel: SignalboxSettingOverlayShape<SignalboxReasoningLevelShape>
-  let fastMode: SignalboxFastModeOverlayShape
-  let serviceTier: SignalboxSettingOverlayShape<SignalboxServiceTierShape>
+public struct SignalboxModelSettingsOverlay: Codable, Hashable, Sendable {
+  public var reasoningLevel: SignalboxSettingOverlay<SignalboxReasoningLevel>
+  public var fastMode: SignalboxFastModeOverlay
+  public var serviceTier: SignalboxSettingOverlay<SignalboxServiceTier>
 
-  init(from decoder: Decoder) throws {
+  public init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let fields: Set<String> = ["reasoning_level", "fast_mode", "service_tier"]
     try payload.rejectUnadmittedFields(fields, decoder: decoder)
@@ -1574,16 +1654,16 @@ private struct SignalboxModelSettingsOverlayShape: Decodable, Equatable, Sendabl
     serviceTier = try decoder.decode("service_tier")
   }
 
-  static let inheritAll = SignalboxModelSettingsOverlayShape(
+  public static let inheritAll = SignalboxModelSettingsOverlay(
     reasoningLevel: .inherit,
     fastMode: .inherit,
     serviceTier: .inherit
   )
 
-  fileprivate init(
-    reasoningLevel: SignalboxSettingOverlayShape<SignalboxReasoningLevelShape>,
-    fastMode: SignalboxFastModeOverlayShape,
-    serviceTier: SignalboxSettingOverlayShape<SignalboxServiceTierShape>
+  public init(
+    reasoningLevel: SignalboxSettingOverlay<SignalboxReasoningLevel>,
+    fastMode: SignalboxFastModeOverlay,
+    serviceTier: SignalboxSettingOverlay<SignalboxServiceTier>
   ) {
     self.reasoningLevel = reasoningLevel
     self.fastMode = fastMode
@@ -1599,7 +1679,7 @@ private struct SignalboxModelSettingsOverlayShape: Decodable, Equatable, Sendabl
   }
 
   fileprivate func replacingReasoningLevel(
-    _ replacement: SignalboxSettingOverlayShape<SignalboxReasoningLevelShape>
+    _ replacement: SignalboxSettingOverlay<SignalboxReasoningLevel>
   ) -> Self {
     Self(
       reasoningLevel: replacement,
@@ -1608,7 +1688,7 @@ private struct SignalboxModelSettingsOverlayShape: Decodable, Equatable, Sendabl
     )
   }
 
-  fileprivate func replacingFastMode(_ replacement: SignalboxFastModeOverlayShape) -> Self {
+  fileprivate func replacingFastMode(_ replacement: SignalboxFastModeOverlay) -> Self {
     Self(
       reasoningLevel: reasoningLevel,
       fastMode: replacement,
@@ -1617,7 +1697,7 @@ private struct SignalboxModelSettingsOverlayShape: Decodable, Equatable, Sendabl
   }
 
   fileprivate func replacingServiceTier(
-    _ replacement: SignalboxSettingOverlayShape<SignalboxServiceTierShape>
+    _ replacement: SignalboxSettingOverlay<SignalboxServiceTier>
   ) -> Self {
     Self(
       reasoningLevel: reasoningLevel,
@@ -1627,7 +1707,7 @@ private struct SignalboxModelSettingsOverlayShape: Decodable, Equatable, Sendabl
   }
 
   func admitsAutomaticAdjustments(
-    _ adjustments: [SignalboxModelChangeAdjustmentShape]
+    _ adjustments: [SignalboxModelChangeAdjustment]
   ) -> Bool {
     adjustments.allSatisfy { adjustment in
       switch adjustment {
@@ -1640,15 +1720,22 @@ private struct SignalboxModelSettingsOverlayShape: Decodable, Equatable, Sendabl
       }
     }
   }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: SignalboxDynamicCodingKey.self)
+    try container.encode(reasoningLevel, forKey: "reasoning_level")
+    try container.encode(fastMode, forKey: "fast_mode")
+    try container.encode(serviceTier, forKey: "service_tier")
+  }
 }
 
-private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Sendable {
-  let perCall: SignalboxModelSettingsOverlayShape
-  let session: SignalboxModelSettingsOverlayShape
-  let profile: SignalboxModelSettingsOverlayShape
-  let globalDefault: SignalboxModelSettingsOverlayShape
+public struct SignalboxModelSettingsPrecedence: Decodable, Equatable, Sendable {
+  public let perCall: SignalboxModelSettingsOverlay
+  public let session: SignalboxModelSettingsOverlay
+  public let profile: SignalboxModelSettingsOverlay
+  public let globalDefault: SignalboxModelSettingsOverlay
 
-  init(from decoder: Decoder) throws {
+  public init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let fields: Set<String> = ["per_call", "session", "profile", "global_default"]
     try payload.rejectUnadmittedFields(fields, decoder: decoder)
@@ -1659,7 +1746,7 @@ private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Send
     globalDefault = try decoder.decode("global_default")
   }
 
-  static let providerDefaults = SignalboxModelSettingsPrecedenceShape(
+  static let providerDefaults = SignalboxModelSettingsPrecedence(
     perCall: .inheritAll,
     session: .inheritAll,
     profile: .inheritAll,
@@ -1667,10 +1754,10 @@ private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Send
   )
 
   fileprivate init(
-    perCall: SignalboxModelSettingsOverlayShape,
-    session: SignalboxModelSettingsOverlayShape,
-    profile: SignalboxModelSettingsOverlayShape,
-    globalDefault: SignalboxModelSettingsOverlayShape
+    perCall: SignalboxModelSettingsOverlay,
+    session: SignalboxModelSettingsOverlay,
+    profile: SignalboxModelSettingsOverlay,
+    globalDefault: SignalboxModelSettingsOverlay
   ) {
     self.perCall = perCall
     self.session = session
@@ -1679,7 +1766,7 @@ private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Send
   }
 
   fileprivate func applying(
-    _ adjustments: [SignalboxModelChangeAdjustmentShape]
+    _ adjustments: [SignalboxModelChangeAdjustment]
   ) -> Self? {
     let resolved = resolve()
     var adjusted = self
@@ -1716,8 +1803,8 @@ private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Send
   }
 
   private func replacingReasoningLevel(
-    _ replacement: SignalboxSettingOverlayShape<SignalboxReasoningLevelShape>,
-    at source: SignalboxModelSettingSourceShape
+    _ replacement: SignalboxSettingOverlay<SignalboxReasoningLevel>,
+    at source: SignalboxModelSettingSource
   ) -> Self {
     Self(
       perCall: source == .perCall ? perCall.replacingReasoningLevel(replacement) : perCall,
@@ -1729,8 +1816,8 @@ private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Send
   }
 
   private func replacingFastMode(
-    _ replacement: SignalboxFastModeOverlayShape,
-    at source: SignalboxModelSettingSourceShape
+    _ replacement: SignalboxFastModeOverlay,
+    at source: SignalboxModelSettingSource
   ) -> Self {
     Self(
       perCall: source == .perCall ? perCall.replacingFastMode(replacement) : perCall,
@@ -1742,8 +1829,8 @@ private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Send
   }
 
   private func replacingServiceTier(
-    _ replacement: SignalboxSettingOverlayShape<SignalboxServiceTierShape>,
-    at source: SignalboxModelSettingSourceShape
+    _ replacement: SignalboxSettingOverlay<SignalboxServiceTier>,
+    at source: SignalboxModelSettingSource
   ) -> Self {
     Self(
       perCall: source == .perCall ? perCall.replacingServiceTier(replacement) : perCall,
@@ -1754,8 +1841,8 @@ private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Send
     )
   }
 
-  func resolve() -> SignalboxResolvedModelSettingsShape {
-    let layers: [(SignalboxModelSettingSourceShape, SignalboxModelSettingsOverlayShape)] = [
+  fileprivate func resolve() -> SignalboxResolvedModelSettingsShape {
+    let layers: [(SignalboxModelSettingSource, SignalboxModelSettingsOverlay)] = [
       (.perCall, perCall), (.session, session), (.profile, profile),
       (.globalDefault, globalDefault),
     ]
@@ -1763,7 +1850,7 @@ private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Send
     let fastMode = resolveFastMode(layers.map { ($0.0, $0.1.fastMode) })
     let serviceTier = resolveSetting(layers.map { ($0.0, $0.1.serviceTier) })
     return SignalboxResolvedModelSettingsShape(
-      effective: SignalboxEffectiveModelSettingsShape(
+      effective: SignalboxEffectiveModelSettings(
         reasoningLevel: reasoning.0,
         fastMode: fastMode.0,
         serviceTier: serviceTier.0
@@ -1775,12 +1862,12 @@ private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Send
   }
 }
 
-private struct SignalboxEffectiveModelSettingsShape: Decodable, Equatable, Sendable {
-  let reasoningLevel: SignalboxReasoningLevelShape?
-  let fastMode: SignalboxFastModeShape
-  let serviceTier: SignalboxServiceTierShape?
+public struct SignalboxEffectiveModelSettings: Decodable, Equatable, Sendable {
+  public let reasoningLevel: SignalboxReasoningLevel?
+  public let fastMode: SignalboxFastMode
+  public let serviceTier: SignalboxServiceTier?
 
-  init(from decoder: Decoder) throws {
+  public init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let fields: Set<String> = ["reasoning_level", "fast_mode", "service_tier"]
     try payload.rejectUnadmittedFields(fields, decoder: decoder)
@@ -1790,16 +1877,16 @@ private struct SignalboxEffectiveModelSettingsShape: Decodable, Equatable, Senda
     serviceTier = try decoder.decodeIfPresent("service_tier")
   }
 
-  static let providerDefaults = SignalboxEffectiveModelSettingsShape(
+  static let providerDefaults = SignalboxEffectiveModelSettings(
     reasoningLevel: nil,
     fastMode: .disabled,
     serviceTier: nil
   )
 
   init(
-    reasoningLevel: SignalboxReasoningLevelShape?,
-    fastMode: SignalboxFastModeShape,
-    serviceTier: SignalboxServiceTierShape?
+    reasoningLevel: SignalboxReasoningLevel?,
+    fastMode: SignalboxFastMode,
+    serviceTier: SignalboxServiceTier?
   ) {
     self.reasoningLevel = reasoningLevel
     self.fastMode = fastMode
@@ -1808,15 +1895,15 @@ private struct SignalboxEffectiveModelSettingsShape: Decodable, Equatable, Senda
 }
 
 private struct SignalboxResolvedModelSettingsShape {
-  let effective: SignalboxEffectiveModelSettingsShape
-  let reasoningSource: SignalboxModelSettingSourceShape?
-  let fastModeSource: SignalboxModelSettingSourceShape?
-  let serviceTierSource: SignalboxModelSettingSourceShape?
+  let effective: SignalboxEffectiveModelSettings
+  let reasoningSource: SignalboxModelSettingSource?
+  let fastModeSource: SignalboxModelSettingSource?
+  let serviceTierSource: SignalboxModelSettingSource?
 }
 
-private func resolveSetting<Value: Decodable & Equatable & Sendable>(
-  _ layers: [(SignalboxModelSettingSourceShape, SignalboxSettingOverlayShape<Value>)]
-) -> (Value?, SignalboxModelSettingSourceShape?) {
+private func resolveSetting<Value: Codable & Hashable & Sendable>(
+  _ layers: [(SignalboxModelSettingSource, SignalboxSettingOverlay<Value>)]
+) -> (Value?, SignalboxModelSettingSource?) {
   for (source, overlay) in layers {
     switch overlay {
     case .inherit:
@@ -1831,8 +1918,8 @@ private func resolveSetting<Value: Decodable & Equatable & Sendable>(
 }
 
 private func resolveFastMode(
-  _ layers: [(SignalboxModelSettingSourceShape, SignalboxFastModeOverlayShape)]
-) -> (SignalboxFastModeShape, SignalboxModelSettingSourceShape?) {
+  _ layers: [(SignalboxModelSettingSource, SignalboxFastModeOverlay)]
+) -> (SignalboxFastMode, SignalboxModelSettingSource?) {
   for (source, overlay) in layers {
     switch overlay {
     case .inherit:
@@ -2944,11 +3031,26 @@ public struct SignalboxTranscriptTurn: Decodable, Equatable, Sendable {
   public let turnID: SignalboxCanonicalUUID
   public let acceptancePosition: SignalboxCanonicalUInt64
   public let state: SignalboxTranscriptTurnState
+  public let settingsAdjustments: [SignalboxModelChangeAdjustment]?
 
-  private enum CodingKeys: String, CodingKey {
-    case turnID = "turn_id"
-    case acceptancePosition = "acceptance_position"
-    case state
+  public init(from decoder: Decoder) throws {
+    turnID = try decoder.decode("turn_id")
+    acceptancePosition = try decoder.decode("acceptance_position")
+    state = try decoder.decode("state")
+    let settings: SignalboxTurnModelSettingsEvidence? = try decoder.decodeIfPresent("model_settings")
+    if let settings {
+      let inputMatches: Bool
+      if case .queued(let acceptedInputID, _) = state {
+        inputMatches = acceptedInputID == settings.acceptedInputID
+      } else {
+        inputMatches = true
+      }
+      guard settings.turnID == turnID, inputMatches else {
+        throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+          debugDescription: "Turn model-settings evidence belongs to another origin."))
+      }
+    }
+    settingsAdjustments = settings?.adjustments
   }
 }
 
@@ -4044,16 +4146,16 @@ public struct SignalboxFollowedSessionEvent: Decodable, Equatable, Sendable {
   }
 }
 
-private enum SignalboxModelChangeAdjustmentShape: Decodable, Equatable, Sendable {
+public enum SignalboxModelChangeAdjustment: Decodable, Equatable, Sendable {
   case reasoningLevelClamped(
-    from: SignalboxReasoningLevelShape,
-    to: SignalboxReasoningLevelShape
+    from: SignalboxReasoningLevel,
+    to: SignalboxReasoningLevel
   )
-  case reasoningLevelCleared(from: SignalboxReasoningLevelShape)
+  case reasoningLevelCleared(from: SignalboxReasoningLevel)
   case fastModeDisabled
-  case serviceTierCleared(from: SignalboxServiceTierShape)
+  case serviceTierCleared(from: SignalboxServiceTier)
 
-  init(from decoder: Decoder) throws {
+  public init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     switch tagged.kind {
     case "reasoning_level_clamped":
@@ -4098,6 +4200,7 @@ private enum SignalboxModelChangeAdjustmentShape: Decodable, Equatable, Sendable
 }
 
 private struct SignalboxSessionModelSettingsChangedShape: Decodable {
+  let adjustments: [SignalboxModelChangeAdjustment]
   init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     try tagged.rejectUnadmittedFields(
@@ -4117,9 +4220,10 @@ private struct SignalboxSessionModelSettingsChangedShape: Decodable {
     let priorSettings: SignalboxModelSettingsSnapshot = try decoder.decode("prior_settings")
     let installedSettings: SignalboxModelSettingsSnapshot =
       try decoder.decode("installed_settings")
-    let callerOverride: SignalboxModelSettingsOverlayShape =
+    let callerOverride: SignalboxModelSettingsOverlay =
       try decoder.decode("caller_override")
-    let adjustments: [SignalboxModelChangeAdjustmentShape] = try decoder.decode("adjustments")
+    let adjustments: [SignalboxModelChangeAdjustment] = try decoder.decode("adjustments")
+    self.adjustments = adjustments
     let nextVersion = priorVersion.rawValue.addingReportingOverflow(1)
     guard
       priorVersion.rawValue != 0,
@@ -4130,7 +4234,7 @@ private struct SignalboxSessionModelSettingsChangedShape: Decodable {
       installedSettings.isDefaultsShape,
       priorSettings.matches(priorModel),
       installedSettings.matches(installedModel),
-      SignalboxModelChangeAdjustmentShape.areCanonical(adjustments),
+      SignalboxModelChangeAdjustment.areCanonical(adjustments),
       adjustments.isEmpty || installedSettings.validationIdentityDiffers(from: priorSettings),
       callerOverride.admitsAutomaticAdjustments(adjustments),
       installedSettings.admits(adjustments),
@@ -4150,28 +4254,37 @@ private struct SignalboxSessionModelSettingsChangedShape: Decodable {
   }
 }
 
-private struct SignalboxTurnModelSettingsResolvedShape: Decodable {
+private struct SignalboxTurnModelSettingsEvidence: Decodable {
+  let acceptedInputID: SignalboxCanonicalUUID
+  let turnID: SignalboxCanonicalUUID
+  let adjustments: [SignalboxModelChangeAdjustment]
+
   init(from decoder: Decoder) throws {
-    let tagged = try SignalboxTaggedPayload(from: decoder)
-    try tagged.rejectUnadmittedFields(
-      [
-        "type", "accepted_input_id", "turn_id", "defaults_version", "requested_model",
+    try self.init(from: decoder, isEvent: false)
+  }
+
+  init(from decoder: Decoder, isEvent: Bool) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      Set([
+        "accepted_input_id", "turn_id", "defaults_version", "requested_model",
         "selected_direct_id", "per_call_override", "settings", "adjusted_from_selection_id",
         "adjustments",
-      ],
+      ] + (isEvent ? ["type"] : [])),
       decoder: decoder
     )
-    let _: SignalboxCanonicalUUID = try decoder.decode("accepted_input_id")
-    let _: SignalboxCanonicalUUID = try decoder.decode("turn_id")
+    acceptedInputID = try decoder.decode("accepted_input_id")
+    turnID = try decoder.decode("turn_id")
     let defaultsVersion: SignalboxCanonicalUInt64 = try decoder.decode("defaults_version")
     let requestedModel: SignalboxModelSelection = try decoder.decode("requested_model")
     let selectedDirectID: SignalboxCanonicalUUID = try decoder.decode("selected_direct_id")
-    let perCallOverride: SignalboxModelSettingsOverlayShape =
+    let perCallOverride: SignalboxModelSettingsOverlay =
       try decoder.decode("per_call_override")
     let settings: SignalboxModelSettingsSnapshot = try decoder.decode("settings")
     let adjustedFromSelectionID: SignalboxCanonicalUUID? =
       try decoder.decodeIfPresent("adjusted_from_selection_id")
-    let adjustments: [SignalboxModelChangeAdjustmentShape] = try decoder.decode("adjustments")
+    let adjustments: [SignalboxModelChangeAdjustment] = try decoder.decode("adjustments")
+    self.adjustments = adjustments
     let requestedModelMatches: Bool
     switch requestedModel {
     case .direct(let selectionID):
@@ -4187,7 +4300,7 @@ private struct SignalboxTurnModelSettingsResolvedShape: Decodable {
       requestedModelMatches,
       settings.matches(selectedDirectID: selectedDirectID),
       settings.carries(perCallOverride: perCallOverride),
-      SignalboxModelChangeAdjustmentShape.areCanonical(adjustments),
+      SignalboxModelChangeAdjustment.areCanonical(adjustments),
       adjustmentSourceMatches,
       settings.admits(adjustments)
     else {
@@ -4209,8 +4322,8 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
   case childResult(spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, outcome: SignalboxDelegationOutcome, content: String?, reason: SignalboxDelegationReason, provenance: SignalboxDelegationProvenance)
   case childLifecycleDisposition(spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, outcome: SignalboxDelegationOutcome, reason: SignalboxDelegationReason, provenance: SignalboxDelegationProvenance)
   case sessionCreated
-  case sessionModelSettingsChanged
-  case turnModelSettingsResolved
+  case sessionModelSettingsChanged(adjustments: [SignalboxModelChangeAdjustment])
+  case turnModelSettingsResolved(adjustments: [SignalboxModelChangeAdjustment])
   case inputAccepted(
     acceptedInputID: SignalboxCanonicalUUID, turnID: SignalboxCanonicalUUID,
     acceptancePosition: SignalboxCanonicalUInt64, content: SignalboxUserInputContent)
@@ -4318,11 +4431,11 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
         try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
         self = .sessionCreated
       case "session_model_settings_changed":
-        _ = try SignalboxSessionModelSettingsChangedShape(from: decoder)
-        self = .sessionModelSettingsChanged
+        let decoded = try SignalboxSessionModelSettingsChangedShape(from: decoder)
+        self = .sessionModelSettingsChanged(adjustments: decoded.adjustments)
       case "turn_model_settings_resolved":
-        _ = try SignalboxTurnModelSettingsResolvedShape(from: decoder)
-        self = .turnModelSettingsResolved
+        let decoded = try SignalboxTurnModelSettingsEvidence(from: decoder, isEvent: true)
+        self = .turnModelSettingsResolved(adjustments: decoded.adjustments)
       case "input_accepted":
         try tagged.rejectUnadmittedFields(
           ["type", "accepted_input_id", "turn_id", "acceptance_position", "content"],
@@ -4821,7 +4934,7 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
         ["type", "selection_id", "requested"],
         decoder: decoder
       )
-      let requested: SignalboxReasoningLevelShape = try decoder.decode("requested")
+      let requested: SignalboxReasoningLevel = try decoder.decode("requested")
       self = .unsupportedReasoningLevel(
         selectionID: try decoder.decode("selection_id"),
         requested: requested.rawValue
@@ -4837,7 +4950,7 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
         ["type", "selection_id", "requested"],
         decoder: decoder
       )
-      let requested: SignalboxServiceTierShape = try decoder.decode("requested")
+      let requested: SignalboxServiceTier = try decoder.decode("requested")
       self = .unsupportedServiceTier(
         selectionID: try decoder.decode("selection_id"),
         provider: requested.wireValue.provider,
@@ -5572,4 +5685,55 @@ extension SignalboxDelegationProvenance {
     default: return false
     }
   }
+}
+
+
+public struct SignalboxModelCapabilityItem: Decodable, Equatable, Identifiable, Sendable {
+  public let selectionID: SignalboxCanonicalUUID
+  public let capabilities: SignalboxModelCapabilities
+  public var id: SignalboxCanonicalUUID { selectionID }
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxTaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(["type", "selection_id", "capabilities"], decoder: decoder)
+    selectionID = try decoder.decode("selection_id")
+    capabilities = try decoder.decode("capabilities")
+  }
+}
+
+public struct SignalboxModelCapabilities: Decodable, Equatable, Sendable {
+  public let reasoningLevels: [SignalboxReasoningLevel]
+  public let fastModeSupported: Bool
+  public let serviceTiers: [SignalboxServiceTier]
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let fields: Set<String> = ["reasoning_levels", "fast_mode_supported", "service_tiers"]
+    try payload.rejectUnadmittedFields(fields, decoder: decoder)
+    try payload.requireFields(fields, decoder: decoder)
+    reasoningLevels = try decoder.decode("reasoning_levels")
+    fastModeSupported = try decoder.decode("fast_mode_supported")
+    serviceTiers = try decoder.decode("service_tiers")
+    guard SignalboxReasoningLevel.allCases.filter({ reasoningLevels.contains($0) }) == reasoningLevels,
+      SignalboxServiceTier.allCases.filter({ serviceTiers.contains($0) }) == serviceTiers
+    else {
+      throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+        debugDescription: "Model capabilities must contain unique values in canonical order."))
+    }
+  }
+
+  public static func selected(
+    _ selection: SignalboxModelSelection,
+    catalog: [SignalboxModelCapabilityItem],
+    aliases: [SignalboxModelAliasSummary]
+  ) -> SignalboxModelCapabilities? {
+    let directID: SignalboxCanonicalUUID?
+    switch selection {
+    case .direct(let id): directID = id
+    case .alias(let id): directID = aliases.first { $0.aliasID == id }?.selectionID
+    }
+    return catalog.first { $0.selectionID == directID }?.capabilities
+  }
+
+
 }

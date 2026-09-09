@@ -2986,7 +2986,7 @@ where
         let approval_judge_configuration = self.approval_judge_configuration.clone();
         let workspace_instructions = self.workspace_instructions.clone();
         let mut shutdown_checkpoint = self.shutdown_checkpoint.clone();
-        async move {
+        Box::pin(async move {
             if let Some(workspace_instructions) = workspace_instructions
                 && !workspace_instructions
                     .prepare(session, turn)
@@ -3157,7 +3157,7 @@ where
                     }
                 }
             }
-        }
+        })
     }
 }
 

@@ -298,6 +298,7 @@ async fn run_live_smoke() -> SmokeResult {
         git_identity,
         &exec_supervisor_executable,
         None,
+        &Default::default(),
         web_fetch_egress_policy,
     )?;
     let (tool_catalog, tool_executor) = tools.into_parts();

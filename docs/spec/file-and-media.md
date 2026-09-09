@@ -135,6 +135,10 @@ Archive validation fits the effective source-byte and range ceilings; entry
 decoding uses the remaining aggregate expansion allowance, with one byte to
 detect exhaustion.
 
+A single probe candidate above the effective validation envelope may return a
+typed malformed result from bounded validation, but cannot become a validated
+file.
+
 A stored source may be larger than a view's envelope. A streaming view requests
 it in bounded frames within its declared source work; a whole-decode view may
 reject it without changing the blob.

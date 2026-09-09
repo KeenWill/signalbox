@@ -231,6 +231,7 @@ mod tests {
     #[test]
     fn oauth_home_withholds_refresh_token_and_removes_material_on_drop() -> io::Result<()> {
         let temporary = tempfile::tempdir()?;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
         let root = OauthCredentialRoot::open(&temporary.path().join("root"))?;
         let home = root.install(material())?;
         let path = home.path.clone();
@@ -254,6 +255,7 @@ mod tests {
     fn oauth_startup_scavenges_owned_homes_and_rejects_symlinks_without_removing_anything()
     -> io::Result<()> {
         let temporary = tempfile::tempdir()?;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
         let path = temporary.path().join("root");
         let root = OauthCredentialRoot::open(&path)?;
         let home = root.install(material())?;
@@ -274,6 +276,7 @@ mod tests {
     #[test]
     fn oauth_startup_rejects_unowned_shapes_and_symlink_ancestors() -> io::Result<()> {
         let temporary = tempfile::tempdir()?;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
         let path = temporary.path().join("root");
         let root = OauthCredentialRoot::open(&path)?;
         let home = root.install(material())?;

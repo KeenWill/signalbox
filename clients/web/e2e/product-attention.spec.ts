@@ -547,7 +547,8 @@ test('applies the density preference to Attention rows', async ({ page }) => {
 
   const row = page.getByRole('listitem').first().getByRole('button')
   await expect(row).toHaveCSS('min-height', '62px')
-  await page.getByRole('button', { name: 'Use comfortable density' }).click()
+  await page.getByRole('main').focus()
+  await page.keyboard.press('Shift+D')
   await expect(row).toHaveCSS('min-height', '78px')
 })
 

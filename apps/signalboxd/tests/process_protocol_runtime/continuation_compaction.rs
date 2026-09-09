@@ -297,6 +297,138 @@ async fn exhausted_continuation(
     Ok((session, turn))
 }
 
+/// Sequential read rounds leave safe boundaries between their large results.
+async fn exhausted_read_heavy_continuation(
+    runtime: &RunningRuntime,
+) -> Result<(SessionId, TurnId), Box<dyn Error>> {
+    use signalbox_domain::{
+        DecideToolRequest, ToolApprovalDecision, ToolAttemptId, ToolAttemptObservation,
+        ToolEffectClass, ToolResultContent, TurnAttemptId,
+    };
+    let (session, turn) =
+        queued_continuation_session(runtime, ContinuationSession::RepositoryWatch).await?;
+    let (calls, mut authorized, mut producing_call) =
+        authorize_issued_model_call(&runtime.pool, CanonicalUuid::from_uuid(session.into_uuid()))
+            .await?;
+    // 41 * 16,000 bytes exceeds three summary-call input budgets in this fixture.
+    let result_text = "r".repeat(16_000);
+    for round in 0..41 {
+        let request = ToolRequestId::from_uuid(Uuid::now_v7());
+        let response =
+            ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+                ToolCallProposal::new(
+                    ToolName::try_new("fixture_read".to_owned()).expect("fixture read name"),
+                    NormalizedToolArguments::try_from_provider_text("{}".to_owned())
+                        .expect("fixture read arguments"),
+                ),
+            )])
+            .expect("one read proposal");
+        calls
+            .apply_terminal_observation(
+                session,
+                authorized
+                    .observation_correlation()
+                    .bind_terminal_observation_with_usage(
+                        ModelCallTerminalObservation::CompletedWithTools {
+                            response,
+                            retained_input_tokens: None,
+                            retained_output_tokens: None,
+                        },
+                        ProviderReportedTokenUsage::unreported().with_input_tokens(Some(300_000)),
+                    ),
+                ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                    vec![ToolResponsePartIdentity::tool_call(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                        request,
+                        InitialToolApproval::Confirm,
+                    )],
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    None,
+                )),
+                |_| panic!("no steering in the read fixture"),
+            )
+            .await?;
+        let tools = calls.tool_loop_repository();
+        tools
+            .decide(
+                DecideToolRequest::try_new(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    request,
+                    ToolApprovalDecision::Approve,
+                )
+                .expect("approve fixture read"),
+                || TurnAttemptId::from_uuid(Uuid::now_v7()),
+            )
+            .await?;
+        let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+        tools
+            .prepare_next_attempt(session, turn, attempt, ToolEffectClass::EffectFree)
+            .await?;
+        let authority = tools.authorize_attempt(session, turn, attempt).await?;
+        tools
+            .commit_observation(
+                authority
+                    .executor_fence()
+                    .bind(ToolAttemptObservation::Completed {
+                        result: ToolResultContent::Text(
+                            signalbox_domain::ToolResultText::try_new(result_text.clone())
+                                .expect("bounded read result"),
+                        ),
+                    }),
+            )
+            .await?;
+        let next_call = ModelCallId::from_uuid(Uuid::now_v7());
+        let continuation_calls = if round == 40 {
+            calls
+                .clone()
+                .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                    ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                        Uuid::from_u128(3),
+                    )),
+                    signalbox_domain::FastMode::Disabled,
+                    256,
+                    200_000,
+                )])
+        } else {
+            calls.clone()
+        };
+        let outcome = continuation_calls
+            .tool_loop_repository()
+            .prepare_continuation(
+                session,
+                turn,
+                producing_call,
+                signalbox_application::ToolContinuationIdentities::new(
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    next_call,
+                    FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                        ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    ),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                |_| panic!("no steering in the read fixture"),
+            )
+            .await?;
+        if round == 40 {
+            assert!(matches!(
+                outcome,
+                signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(_)
+            ));
+            break;
+        }
+        let AuthorizeModelCallOutcome::Authorized(next) =
+            calls.authorize_send(session, next_call).await?
+        else {
+            panic!("the next read round authorizes");
+        };
+        authorized = next;
+        producing_call = next_call;
+    }
+    Ok((session, turn))
+}
+
 fn continuation_compaction(
     runtime: &RunningRuntime,
     summary: ScriptedModel<ModelCallId>,
@@ -408,19 +540,27 @@ fn continuation_compaction_with_configuration(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn durable_sweep_recovers_repository_watch_continuation_and_completes_one_successor()
+async fn read_heavy_automatic_compaction_restores_headroom_and_completes_successor()
 -> Result<(), Box<dyn Error>> {
-    let runtime = RunningRuntime::start().await?;
-    let (session, original) =
-        exhausted_continuation(&runtime, ContinuationSession::RepositoryWatch).await?;
-    let summary = ScriptedModel::single(completed_script(
-        "fixture-model",
-        "The repository change remains unfinished.",
-        TokenUsage::default(),
-    ));
+    let configuration_text =
+        MODEL_CONFIGURATION.replace("adapter = \"anthropic\"", "adapter = \"openai\"");
+    let runtime = RunningRuntime::start_with_model_configuration(&configuration_text).await?;
+    let (session, original) = exhausted_read_heavy_continuation(&runtime).await?;
+    let summary = ScriptedModel::following((0..4).map(|_| {
+        completed_script(
+            "fixture-model",
+            "The repository change remains unfinished.",
+            TokenUsage {
+                input_tokens: Some(40_000),
+                output_tokens: Some(10),
+                ..TokenUsage::default()
+            },
+        )
+    }));
     let probe = summary.clone();
-    let compaction = continuation_compaction(&runtime, summary)?;
-    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let configuration = support::parse_model_configuration(&configuration_text)?;
+    let compaction =
+        continuation_compaction_with_configuration(&runtime, summary, configuration.clone())?;
     let runtime_models = configuration.runtime_model_catalog();
     let ordinary = compaction::RecordingCountedScriptedModel::following(
         [completed_script(
@@ -482,7 +622,14 @@ async fn durable_sweep_recovers_repository_watch_continuation_and_completes_one_
         .into_parts();
     assert!(remaining.is_empty(), "completed successors leave the sweep");
     assert_eq!(ordinary_probe.prepared_operations().len(), 1);
-    assert_eq!(probe.received_operations().len(), 1);
+    assert!(
+        probe.received_operations().len() > 1,
+        "one prefix leaves large read results visible"
+    );
+    assert!(
+        probe.received_operations().len() <= 4,
+        "the scripted summaries restore headroom"
+    );
     let (successor, command): (Uuid, Uuid) = sqlx::query_as(
         "SELECT origin_turn_id, accepting_command_id FROM accepted_input WHERE session_id = $1 ORDER BY acceptance_position DESC LIMIT 1",
     ).bind(session.into_uuid()).fetch_one(&runtime.pool).await?;
@@ -503,7 +650,7 @@ async fn durable_sweep_recovers_repository_watch_continuation_and_completes_one_
     );
     let summaries: i64 = sqlx::query_scalar("SELECT count(*) FROM compact_session_command WHERE session_id = $1 AND result_kind = 'applied'")
         .bind(session.into_uuid()).fetch_one(&runtime.pool).await?;
-    assert_eq!(summaries, 1);
+    assert!(summaries > 1);
     runtime.stop().await
 }
 
