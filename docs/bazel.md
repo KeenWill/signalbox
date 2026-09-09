@@ -176,3 +176,14 @@ lockfile supplies package versions; its pnpm translation is generated input. The
 browser runtime follows the locked Playwright package, with image checksums
 retained in the Bazel lockfile and declared DejaVu fonts. Browser evidence is
 retained in the test's undeclared outputs. The web CI job uses the shared cache.
+
+CI uses `.github/actions/setup-bazel` to configure build-result and archive
+download caching from `BAZEL_REMOTE_CACHE` on self-hosted runners. Downloads
+fall back to the origin if the proxy cannot serve them. Local builds can use the
+same service through `.bazelrc.local`:
+
+```text
+build --remote_cache=grpc://cache.example:9092
+build --experimental_remote_downloader=grpc://cache.example:9092
+build --experimental_remote_downloader_local_fallback
+```

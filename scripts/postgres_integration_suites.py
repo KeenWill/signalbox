@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shlex
 import subprocess
@@ -294,9 +293,6 @@ def run_suite(suites: tuple[Suite, ...], name: str, shard_index: int) -> int:
         f"--test_env=SIGNALBOX_TEST_TOTAL_SHARDS={suite.shards}",
         "--test_env=DOCKER_HOST=unix:///var/run/docker.sock",
     ]
-    cache = os.environ.get("BAZEL_REMOTE_CACHE")
-    if os.environ.get("RUNNER_ENVIRONMENT") == "self-hosted" and cache:
-        command.append(f"--remote_cache={cache}")
     command.append("//:postgres_" + suite.name.replace("-", "_"))
     return subprocess.run(command, check=False).returncode
 
