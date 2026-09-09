@@ -5735,7 +5735,7 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
                         ToolExecutionErrorKind::ExecutionFailed,
                         Some(
                             ToolExecutionErrorDetail::try_new(
-                                "\\\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES),
+                                "\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES),
                             )
                             .expect("maximally escaped bounded fixture detail"),
                         ),

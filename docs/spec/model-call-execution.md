@@ -55,11 +55,11 @@ next response's output, the following call's output ceiling, and two rounds of
 result envelope framing plus maximum bounded failure content for the second
 round. Oversized text is truncated at a UTF-8 boundary with an explicit marker
 naming the retained and dropped byte counts; JSON escaping and the marker count
-against the share. The admitted text is durable and used by
-ordinary rendering, compaction, and headroom accounting; exact executor text
-remains observation evidence. When even framing and empty-prefix markers or
-other indivisible content cannot fit the first safe prefix, no call is prepared
-and one transaction fails the turn as a last-resort compaction wall. Automatic
+against the share. The admitted text is durable and used by ordinary rendering,
+compaction, and headroom accounting; exact executor text remains observation
+evidence. When even framing and empty-prefix markers or other indivisible
+content cannot fit the first safe prefix, no call is prepared and one
+transaction fails the turn as a last-resort compaction wall. Automatic
 compaction targets the first safe boundary at or beyond half the rendered bytes
 and falls back to the latest safe boundary that fits. At two points a headroom
 guard adds the newest reported input for the pinned target, a byte allowance for
