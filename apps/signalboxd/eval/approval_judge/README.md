@@ -19,10 +19,16 @@ Every call spends real provider quota against the configuration's
 CI, and nothing in the daemon reaches it. Use `--filter` or `--limit` to bound a
 run while iterating.
 
+For Sol through the Codex CLI subscription adapter, copy
+[`config/approval-judge-eval-codex.example.toml`](../../../../config/approval-judge-eval-codex.example.toml),
+set its executable, working-directory, and login-home paths, and pass the copy
+to `--config`.
+
 The scorecard (JSON on stdout) reports, per category and overall: majority
 accuracy against `expected`, verdict stability across repeats (a case is
 unstable when its repeats disagree), and per-case rationales for reading why a
-verdict moved.
+verdict moved. Each successful repeat includes provider-reported token usage;
+unreported fields are null. Codex input tokens include cache-read tokens.
 
 ## Recording runs (`--database-url`)
 
