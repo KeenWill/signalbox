@@ -14,13 +14,14 @@ with the code that builds the design.
 
 - Keep transport, decoding, synchronization, state projection, and presentation
   as distinct modules with distinct types.
-- The implementing stack's owning specification decides the browser contract,
-  client language, and validation approach. Consume that implemented contract;
-  do not hand-maintain a second protocol.
+- The implementing stack's committed design decides new browser contracts,
+  client language, and validation approach; the specification records built
+  behavior. Consume the implemented contract; do not hand-maintain a second
+  protocol.
 - Components never open network connections directly. They invoke typed client
   services or commands and subscribe through selectors.
-- When the owning specification selects the JavaScript stack recorded in issue
-  #988:
+- When the committed design or specification selects the JavaScript stack in
+  issue #988:
   - React renders projections; it does not own transport, protocol recovery, or
     synchronization authority.
   - Redux Toolkit owns explicit control and application transitions.
@@ -53,8 +54,8 @@ that skill rather than restating its evidence contract here.
 
 ## Dependencies
 
-If the implementing specification selects the JavaScript client, issue #988
-records its initial React, Vite, TanStack, Redux, shadcn/Radix, Tailwind,
+If the committed design or specification selects the JavaScript client, issue
+#988 records its initial React, Vite, TanStack, Redux, shadcn/Radix, Tailwind,
 Lucide, and Playwright stack. Otherwise follow the selected client-language
 stack. Explain focused dependency choices in the pull-request description. Ask
 before adding another large or architecturally constraining dependency.
