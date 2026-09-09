@@ -144,6 +144,25 @@ release one admits exactly `@signalbox/program-sdk/v1`. The module loader in the
 workflow-runtime crate resolves that specifier alone and rejects every other
 import, including relative files and the unversioned name.
 
+The SDK's `defineProgram` decodes input bytes before calling the program body
+and encodes its result through explicit runtime codecs. `jsonCodec` checks JSON
+values during decoding and encoding. Decoding passes a frozen snapshot of own
+data properties to the validator. Encoding serializes a frozen snapshot of
+validated own data properties; SDK payload intrinsics are captured before
+program evaluation. Typed `register`, `session.create`, and `session.turn`
+wrappers validate method inputs and answer records; refusals and cancellation
+remain typed deliveries. Session defaults versions are decimal strings in
+TypeScript and encode as exact JSON integers without conversion through
+`Number`.
+
+[`tooling/programs`](../../tooling/programs/package.json) owns SDK declarations
+and strict TypeScript examples. `pnpm --dir tooling/programs run check` checks
+their types; `pnpm --dir tooling/programs run build` emits each example as one
+JavaScript module. `pnpm --dir tooling/programs run check:fixtures` builds into
+a clean temporary directory and compares the complete emitted file inventory and
+contents with the isolate fixtures. CI checks types and fixture drift and runs
+the fixture checker's regression tests.
+
 Every nondeterministic act a program performs crosses the typed frame protocol
 and is recorded as an immutable journal row. No capability answers a program
 outside the journal. No single enforcer spans every capability; the frame types
