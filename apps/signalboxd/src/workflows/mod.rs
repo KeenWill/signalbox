@@ -208,6 +208,7 @@ mod tests {
             registrations: ProgramRegistrationRepository::new(pool.clone()),
             wake,
             clock_executable: None,
+            eval_executable: None,
         };
         let command = CancelProgramRun {
             command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
