@@ -8,7 +8,7 @@ use crate::{
     layout::parse_full_object_id,
     limits::{
         MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
-        MAX_REPOSITORY_INSPECTIONS,
+        MAX_REPOSITORY_INSPECTIONS, MAX_SHALLOW_ENTRIES,
     },
     pinning::{PinnedRepository, RepositoryShell},
 };
@@ -83,8 +83,11 @@ impl PushObjectSnapshot {
                 .as_ref()
                 .is_some_and(|ancestors| ancestors.contains(&commit))
             {
-                retain_boundary(&repository, &mut source, commit, &mut excluded)?;
                 boundaries.insert(commit);
+                if boundaries.len() > MAX_SHALLOW_ENTRIES {
+                    return Err(LocalGitFailure::Repository);
+                }
+                retain_boundary(&repository, &mut source, commit, &mut excluded)?;
                 continue;
             }
             source.capture(&database, commit)?;
