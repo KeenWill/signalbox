@@ -141,11 +141,13 @@ A synthesized statement's template is system-authored, but the identifiers it
 renders come from the watched repository, so a consumer that places it in a
 model prompt quotes it as it quotes any session text.
 
-An achievement is gated on the session's finish check: a failing verdict appends
-a block for the failed check with the check's result as its need, a passing
-verdict commits a verified achievement to the session's terminal handoff in the
-same transaction, and a declaration no check verifies commits a declared
-achievement.
+The session lock covers transition validation, reading and evaluating the finish
+condition, and committing its result. Rejected declarations do not run the
+finish check. An achievement is gated on the session's finish check: a failing
+verdict appends a block for the failed check with the check's result as its
+need, a passing verdict commits a verified achievement to the session's terminal
+handoff in the same transaction, and a declaration no check verifies commits a
+declared achievement.
 
 The command claim and replay protocol and the attribution rule are stated on
 [identity and commands](identity-and-commands.md), the lock order on
