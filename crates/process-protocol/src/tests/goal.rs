@@ -309,3 +309,24 @@ fn goal_history_rejects_model_provenance_for_execution_failure() {
         FrameValidationError::GoalShape
     );
 }
+
+#[test]
+fn goal_stop_accounting_requires_explicit_nullable_fields() -> Result<(), Box<dyn std::error::Error>>
+{
+    let event = GoalHistoryEvent::UserStopped {
+        command_id: command(7)?,
+        settling_turn_id: None,
+        abandoned_actions: None,
+    };
+    let value = serde_json::to_value(&event)?;
+    assert_eq!(
+        serde_json::from_value::<GoalHistoryEvent>(value.clone())?,
+        event
+    );
+    for field in ["settling_turn_id", "abandoned_actions"] {
+        let mut missing = value.clone();
+        missing.as_object_mut().expect("event object").remove(field);
+        assert!(serde_json::from_value::<GoalHistoryEvent>(missing).is_err());
+    }
+    Ok(())
+}

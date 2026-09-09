@@ -7,6 +7,7 @@
 
 mod support;
 
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::error::Error;
 
 use support::{blocked_backends_reached, record_empty_instruction_manifest};
@@ -48,14 +49,11 @@ use signalbox_persistence::{
         PrepareContextCompactionRequest,
     },
     create_session::CreateSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels,
     goal::{
         GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository,
         GoalRepositoryError, GoalTransitionOutcome,
     },
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
-    local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     outbox::{
         DispatchedDelegationOutcome, DispatchedDelegationProvenance, DispatchedDelegationReason,
@@ -75,18 +73,8 @@ use signalbox_persistence::{
     startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
+use sqlx::{PgPool, types::Uuid};
 
-#[path = "../../../tooling/postgres_test_image.rs"]
-mod postgres_test_image;
-use postgres_test_image::POSTGRES_IMAGE_TAG;
-const DATABASE_NAME: &str = "signalbox_goal";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const SESSION: u128 = 0x701;
 const CREATE_COMMAND: u128 = 0x801;
 const ATTACH_COMMAND: u128 = 0x901;
@@ -96,27 +84,10 @@ const REATTACH_COMMAND: u128 = 0x904;
 const STEER_COMMAND: u128 = 0x905;
 const RESUME_COMMAND: u128 = 0x906;
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool))
+async fn migrated_postgres() -> Result<(TestDatabase, PgPool), Box<dyn Error>> {
+    let (database, pool, _) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(8).await?;
+    Ok((database, pool))
 }
 
 fn session(value: u128) -> SessionId {
@@ -1853,12 +1824,11 @@ async fn stopped_queued_goal_is_absent_from_reconciliation_hints() -> Result<(),
     Ok(())
 }
 
-/// retiring a queued replacement keeps its immutable tail position
-/// while excluding its turn from runtime scheduling.
+/// stopping a replacement retains the retired positions before independent work.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn stopped_replacement_does_not_corrupt_the_active_acceptance_tail()
--> Result<(), Box<dyn Error>> {
+async fn stopped_replacement_preserves_acceptance_order_for_new_work() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1902,32 +1872,39 @@ async fn stopped_replacement_does_not_corrupt_the_active_acceptance_tail()
         )
         .await?;
 
-    SubmitInputRepository::new(pool.clone())
+    let subsequent = SubmitInputRepository::new(pool.clone())
         .handle_with_candidates(
             SubmitInput::new(
                 command(STEER_COMMAND),
                 session(SESSION),
-                UserContent::try_text(String::from("steer the still-active original turn"))
-                    .expect("fixture steering content is admitted"),
-                DeliveryRequest::NextSafePoint {
-                    expected_active_turn: active.turn(),
+                UserContent::try_text(String::from("start independent work after the stop"))
+                    .expect("fixture input content is admitted"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: PerInputConfigurationChoices::new(
+                        SessionConfigurationDefaultsVersion::first(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
                 },
             ),
             AcceptedInputId::from_uuid(Uuid::from_u128(0xe61)),
-            None,
+            Some(TurnId::from_uuid(Uuid::from_u128(0xe62))),
             CancelledModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xf61)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xf62)),
             ),
-            |_| panic!("steering cannot be reclassified while its source remains active"),
-            |_| {
-                panic!("steering cannot cancel a tool request without a terminal model observation")
-            },
+            |_| panic!("new input has no steering to reclassify"),
+            |_| panic!("new input has no tool batch to cancel"),
         )
         .await?;
-    let pending_position: i64 = sqlx::query_scalar(
+    assert!(matches!(
+        subsequent,
+        signalbox_persistence::submit_input::SubmitInputHandlingOutcome::Recorded(
+            SubmitInputResult::Applied(_)
+        )
+    ));
+    let next_position: i64 = sqlx::query_scalar(
         "SELECT acceptance_position::bigint FROM accepted_input
-          WHERE accepting_command_id = $1 AND disposition_kind = 'pending_steering'",
+          WHERE accepting_command_id = $1",
     )
     .bind(Uuid::from_u128(STEER_COMMAND))
     .fetch_one(&pool)
@@ -1939,13 +1916,13 @@ async fn stopped_replacement_does_not_corrupt_the_active_acceptance_tail()
             .fetch_one(&pool)
             .await?;
 
-    assert_eq!(pending_position, 3);
+    assert_eq!(next_position, 4);
     assert!(!replacement_runtime_relevant);
     let transcript = ProcessReadRepository::new(pool.clone())
         .read_transcript(session(SESSION))
         .await?
         .expect("the session transcript exists");
-    assert_eq!(transcript.turns().len(), 1);
+    assert_eq!(transcript.turns().len(), 2);
     assert_eq!(transcript.turns()[0].turn(), active.turn());
 
     pool.close().await;
@@ -5354,5 +5331,477 @@ async fn descendant_cascade_terminates_recovery_parked_children() -> Result<(), 
         pool.close().await;
         drop(container);
     }
+    Ok(())
+}
+
+async fn goal_stop_fixture(
+    pool: &PgPool,
+) -> Result<
+    (
+        PostgresModelCallRepository,
+        Box<signalbox_domain::AuthorizedModelCall>,
+    ),
+    Box<dyn Error>,
+> {
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(ATTACH_COMMAND),
+                session(SESSION),
+                GoalUserAction::Attach(statement("finish the task")),
+            ),
+            Some(turn_candidates(0xb61)),
+            |_| None,
+        )
+        .await?;
+    activate_goal_turn(pool, 0xd61).await?;
+    record_empty_instruction_manifest(pool, session(SESSION)).await?;
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(0xa01)),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0xa02))),
+    )])
+    .expect("fixture model target");
+    let calls = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("goal-stop-fixture"),
+    );
+    let call = ModelCallId::from_uuid(Uuid::now_v7());
+    let prepared = calls
+        .prepare_initial_call(
+            session(SESSION),
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            ContextFrontierId::from_uuid(Uuid::now_v7()),
+            |_| panic!("no steering"),
+        )
+        .await?;
+    assert!(matches!(
+        prepared,
+        PrepareInitialModelCallOutcome::Checkpointed(_)
+    ));
+    let AuthorizeModelCallOutcome::Authorized(issued) =
+        calls.authorize_send(session(SESSION), call).await?
+    else {
+        panic!("fixture call must authorize");
+    };
+    Ok((calls, issued))
+}
+
+async fn request_goal_stop(
+    pool: &PgPool,
+) -> Result<signalbox_persistence::goal::GoalStopSettlement, Box<dyn Error>> {
+    let goals = GoalRepository::new(pool.clone());
+    let stop = GoalUserCommand::new(
+        command(STOP_COMMAND),
+        session(SESSION),
+        GoalUserAction::Stop {
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+        },
+    );
+    let result = goals
+        .handle_user_command(stop.clone(), None, |_| None)
+        .await?;
+    assert_applied_command(result.clone());
+    assert_eq!(
+        goals.handle_user_command(stop, None, |_| None).await?,
+        result
+    );
+    let stop = goals.load_stop_settlements(session(SESSION)).await?[0];
+    let interrupt = SubmitInputRepository::new(pool.clone())
+        .load(stop.interrupt_command)
+        .await?
+        .expect("goal command atomically records its interrupt");
+    assert!(matches!(interrupt.result(), SubmitInputResult::Applied(_)));
+    Ok(stop)
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn goal_stop_settles_an_active_turn_without_a_model_call() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(ATTACH_COMMAND),
+                session(SESSION),
+                GoalUserAction::Attach(statement("finish the task")),
+            ),
+            Some(turn_candidates(0xb61)),
+            |_| None,
+        )
+        .await?;
+    activate_goal_turn(&pool, 0xd61).await?;
+    request_goal_stop(&pool).await?;
+    let stop = GoalRepository::new(pool.clone())
+        .load_stop_settlements(session(SESSION))
+        .await?[0];
+    assert_eq!(stop.abandoned_actions, Some(0));
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turn_lifecycle WHERE session_id = $1 AND state_kind <> 'terminal'",
+    )
+    .bind(session(SESSION).into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(live, 0);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn goal_stop_settles_after_cancellation_evidence_without_leaving_active_or_queued_work()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let (calls, issued) = goal_stop_fixture(&pool).await?;
+    let stop = request_goal_stop(&pool).await?;
+    let goals = GoalRepository::new(pool.clone());
+    assert_eq!(
+        goals.load_stop_settlements(session(SESSION)).await?[0].abandoned_actions,
+        None
+    );
+    let outcome = calls
+        .apply_terminal_observation(
+            session(SESSION),
+            issued
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Cancelled),
+            ModelCallTerminalIdentities::PhysicalCancellation(
+                signalbox_domain::PhysicalCancellationModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+            ),
+            |_| panic!("no steering"),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        signalbox_domain::ModelCallTerminalOutcome::Cancelled(_)
+    ));
+    let settled = goals.load_stop_settlements(session(SESSION)).await?[0];
+    assert_eq!(settled.turn, stop.turn);
+    assert_eq!(settled.abandoned_actions, Some(0));
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turn_lifecycle WHERE session_id = $1 AND state_kind <> 'terminal'",
+    )
+    .bind(session(SESSION).into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(live, 0);
+    let next = turn_candidates(0xb62);
+    goals
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                session(SESSION),
+                GoalUserAction::Attach(statement("start a separate task")),
+            ),
+            Some(next),
+            |_| None,
+        )
+        .await?;
+    assert_eq!(activate_goal_turn(&pool, 0xd62).await?, next.turn());
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn goal_stop_abandons_and_counts_approved_unexecuted_actions() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        AssistantResponsePart, DecideToolRequest, InitialToolApproval, NormalizedToolArguments,
+        ToolApprovalDecision, ToolCallProposal, ToolDenialReason, ToolName,
+        ToolResponsePartIdentity, ToolRoundModelCallIdentities, ToolUsingAssistantResponse,
+    };
+    let (container, pool) = migrated_postgres().await?;
+    let (calls, issued) = goal_stop_fixture(&pool).await?;
+    let requests = [
+        ToolRequestId::from_uuid(Uuid::now_v7()),
+        ToolRequestId::from_uuid(Uuid::now_v7()),
+    ];
+    let response = ToolUsingAssistantResponse::try_from_parts(
+        requests
+            .iter()
+            .map(|_| {
+                AssistantResponsePart::ToolCall(ToolCallProposal::new(
+                    ToolName::try_new("unsandboxed_exec".to_owned()).unwrap(),
+                    NormalizedToolArguments::try_from_provider_text(
+                        r#"{"program":"true"}"#.to_owned(),
+                    )
+                    .unwrap(),
+                ))
+            })
+            .collect(),
+    )
+    .expect("fixture tool response");
+    calls
+        .apply_terminal_observation(
+            session(SESSION),
+            issued.observation_correlation().bind_terminal_observation(
+                ModelCallTerminalObservation::CompletedWithTools {
+                    response,
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
+                },
+            ),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                requests
+                    .iter()
+                    .map(|request| {
+                        ToolResponsePartIdentity::tool_call(
+                            SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                            *request,
+                            InitialToolApproval::Confirm,
+                        )
+                    })
+                    .collect(),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                None,
+            )),
+            |_| panic!("no steering"),
+        )
+        .await?;
+    calls
+        .tool_loop_repository()
+        .decide(
+            DecideToolRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                requests[0],
+                ToolApprovalDecision::Approve,
+            )
+            .expect("fixture approval command"),
+            || TurnAttemptId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    let goals = GoalRepository::new(pool.clone());
+    let stopped = goals
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(STOP_COMMAND),
+                session(SESSION),
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    assert_eq!(
+        stopped,
+        GoalCommandHandlingOutcome::StopAwaitingApproval {
+            turn: turn_candidates(0xb61).turn(),
+            request: requests[1],
+        }
+    );
+    assert_eq!(
+        goals
+            .load_goal(session(SESSION))
+            .await?
+            .unwrap()
+            .current()
+            .state(),
+        &GoalState::Pursuing
+    );
+    assert!(goals.load_command(command(STOP_COMMAND)).await?.is_none());
+    assert!(
+        goals
+            .load_stop_settlements(session(SESSION))
+            .await?
+            .is_empty()
+    );
+    let decisions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tool_approval_decision WHERE request_id = $1")
+            .bind(requests[1].into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(decisions, 0);
+    calls
+        .tool_loop_repository()
+        .decide(
+            DecideToolRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                requests[1],
+                ToolApprovalDecision::Deny {
+                    reason: Some(
+                        ToolDenialReason::try_new("stop the tool round".to_owned()).unwrap(),
+                    ),
+                },
+            )
+            .unwrap(),
+            || TurnAttemptId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    request_goal_stop(&pool).await?;
+    let stop = GoalRepository::new(pool.clone())
+        .load_stop_settlements(session(SESSION))
+        .await?[0];
+    assert_eq!(stop.abandoned_actions, Some(1));
+    let closed: i64 = sqlx::query_scalar("SELECT count(*) FROM semantic_transcript_entry WHERE tool_result_request_id = $1 AND payload_kind = 'tool_closed_by_turn_end'")
+        .bind(requests[0].into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(closed, 1);
+    let attempts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tool_attempt WHERE session_id = $1")
+            .bind(session(SESSION).into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(attempts, 0);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn goal_stop_counts_a_prepared_action_as_abandoned_before_authorization()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        AssistantResponsePart, DecideToolRequest, InitialToolApproval, NormalizedToolArguments,
+        ToolApprovalDecision, ToolAttemptId, ToolCallProposal, ToolEffectClass, ToolName,
+        ToolResponsePartIdentity, ToolRoundModelCallIdentities, ToolUsingAssistantResponse,
+    };
+    let (container, pool) = migrated_postgres().await?;
+    let (calls, issued) = goal_stop_fixture(&pool).await?;
+    let request = ToolRequestId::from_uuid(Uuid::now_v7());
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new("unsandboxed_exec".to_owned()).expect("fixture tool name"),
+                NormalizedToolArguments::try_from_provider_text(r#"{"program":"true"}"#.to_owned())
+                    .expect("fixture tool arguments"),
+            ),
+        )])
+        .expect("fixture tool response");
+    calls
+        .apply_terminal_observation(
+            session(SESSION),
+            issued.observation_correlation().bind_terminal_observation(
+                ModelCallTerminalObservation::CompletedWithTools {
+                    response,
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
+                },
+            ),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    request,
+                    InitialToolApproval::Confirm,
+                )],
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                None,
+            )),
+            |_| panic!("no steering"),
+        )
+        .await?;
+    let tools = calls.tool_loop_repository();
+    tools
+        .decide(
+            DecideToolRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                request,
+                ToolApprovalDecision::Approve,
+            )
+            .expect("fixture approval command"),
+            || TurnAttemptId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    tools
+        .prepare_next_attempt(
+            session(SESSION),
+            turn_candidates(0xb61).turn(),
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    request_goal_stop(&pool).await?;
+    let stop = GoalRepository::new(pool.clone())
+        .load_stop_settlements(session(SESSION))
+        .await?[0];
+    assert_eq!(stop.abandoned_actions, Some(1));
+    let error: String =
+        sqlx::query_scalar("SELECT error_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(attempt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(error, "preauthorization_rejected");
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn goal_stop_rolls_back_when_interrupt_admission_fails() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let (_calls, _issued) = goal_stop_fixture(&pool).await?;
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_stop_input() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'injected interrupt admission failure'; END; $$;
+         CREATE TRIGGER reject_stop_input BEFORE INSERT ON accepted_input
+         FOR EACH ROW EXECUTE FUNCTION reject_stop_input();",
+    )
+    .execute(&pool)
+    .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let result = repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(STOP_COMMAND),
+                session(SESSION),
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await;
+    assert!(result.is_err());
+    assert!(
+        repository
+            .load_command(command(STOP_COMMAND))
+            .await?
+            .is_none()
+    );
+    assert!(
+        repository
+            .load_stop_settlements(session(SESSION))
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        repository
+            .load_goal(session(SESSION))
+            .await?
+            .expect("fixture goal")
+            .current()
+            .state(),
+        &GoalState::Pursuing
+    );
+    let stopped: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM turn_attempt WHERE state_kind = 'stop_requested'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stopped, 0);
+    sqlx::query("DROP TRIGGER reject_stop_input ON accepted_input")
+        .execute(&pool)
+        .await?;
+    request_goal_stop(&pool).await?;
+    pool.close().await;
+    drop(container);
     Ok(())
 }

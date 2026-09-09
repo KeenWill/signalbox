@@ -20,7 +20,8 @@ use std::{collections::BTreeMap, collections::BTreeSet};
 pub(super) fn scheduling_record_is_terminal(record: &AcceptedInputTurnSchedulingRecord) -> bool {
     matches!(
         &record.state,
-        AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }
+        AcceptedInputTurnSchedulingRecordState::Retired
+            | AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }
             | AcceptedInputTurnSchedulingRecordState::TerminalCompleted { .. }
             | AcceptedInputTurnSchedulingRecordState::TerminalRefused { .. }
             | AcceptedInputTurnSchedulingRecordState::TerminalCancelled { .. }
@@ -86,6 +87,7 @@ fn terminal_record_interrupt(
             AutomaticReconciliationAuthority::AutomaticRecovery { .. } => None,
         },
         AcceptedInputTurnSchedulingRecordState::Queued
+        | AcceptedInputTurnSchedulingRecordState::Retired
         | AcceptedInputTurnSchedulingRecordState::Active { .. }
         | AcceptedInputTurnSchedulingRecordState::TerminalFailed {
             terminal_execution: None,

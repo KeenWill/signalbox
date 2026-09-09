@@ -2422,6 +2422,7 @@ test("generated descriptor decoder rejects a fact beyond u64", () => {
   assert.throws(
     () =>
       decodeWebSessionTimelineDescriptor({
+        workspace_root_kind: null,
         session_id: "00000000-0000-0000-0000-000000000991",
         repository_watch: null,
         sizes: {
@@ -3079,6 +3080,7 @@ test("generated descriptor decoder rejects an invalid session ID", () => {
   assert.throws(
     () =>
       decodeWebSessionTimelineDescriptor({
+        workspace_root_kind: null,
         session_id: "not-a-uuid",
         repository_watch: null,
         sizes: {
@@ -3221,7 +3223,7 @@ test("tool batches accept only tool-produced goal events", () => {
   for (const goal of [
     { ...event, type: "commissioned" },
     { ...event, type: "resumed" },
-    { generation: "1", type: "user_stopped" },
+    { generation: "1", type: "user_stopped", settling_turn_id: null, abandoned_actions: null },
     { ...event, type: "superseded" },
     { generation: "1", type: "session_closed", outcome: "stopped" },
     { ...event, type: "blocked", reason: "execution_failure" },
@@ -3239,7 +3241,7 @@ test("goal evidence belongs to the enclosing detail session", () => {
   const page = userInputDetailPage();
   page.items[0].kind = "goal_changed";
   page.items[0].body = { type: "goal_event", session_id: page.session_id,
-    event: { type: "user_stopped", generation: "1" } };
+    event: { type: "user_stopped", generation: "1", settling_turn_id: null, abandoned_actions: null } };
   page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
   assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
   page.items[0].body.session_id = "00000000-0000-0000-0000-000000000992";
@@ -3351,6 +3353,7 @@ test("delegation messages require distinct sender and recipient sessions", () =>
 
 test("repository watch provenance preserves exact ledger identities and rejects unknown events", () => {
   const descriptor = {
+    workspace_root_kind: null,
     session_id: "00000000-0000-0000-0000-000000000001",
     repository_watch: {
       dispatch_id: "00000000-0000-0000-0000-000000000063",
@@ -3403,5 +3406,21 @@ test("runner detail accounts for working directory UTF-8 bytes", () => {
       page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
       assert.throws(() => decodeWebSessionTimelineDetailPage(page), /projected_body_bytes must be the computed/);
     }
+  }
+});
+
+
+test("goal stop accounting fields require explicit presence", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "goal_changed";
+  page.items[0].body = { type: "goal_event", session_id: page.session_id, event: {
+    type: "user_stopped", generation: "1", settling_turn_id: null, abandoned_actions: null,
+  } };
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  for (const field of ["settling_turn_id", "abandoned_actions"]) {
+    const malformed = structuredClone(page);
+    delete malformed.items[0].body.event[field];
+    assert.throws(() => decodeWebSessionTimelineDetailPage(malformed));
   }
 });

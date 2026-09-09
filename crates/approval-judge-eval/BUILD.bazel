@@ -1,12 +1,15 @@
 load("//tooling/bazel:package.bzl", "rust_package")
-load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_quality_tests", "rust_unit_test")
+load("//tooling/bazel:rust.bzl", "rust_library")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_COMPILE_DATA = ["corpora/seed-v1.json"]
 
 CRATE_PROC_MACRO_DEPS = ["//crates/derive:signalbox_derive"]
 
-rust_package()
+rust_package(exports = [
+    "Cargo.toml",
+    "corpora/seed-v1.json",
+])
 
 rust_library(
     name = "signalbox_approval_judge_eval",
@@ -14,24 +17,7 @@ rust_library(
     crate_root = "src/lib.rs",
     proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     deps = [
-        "//apps/signalboxd:signalboxd_lib",
         "//crates/domain:signalbox_domain",
-        "//crates/model-provider-runtime:signalbox_model_provider_runtime",
-        "//crates/model-runtime:signalbox_model_runtime",
-    ],
-)
-
-rust_binary(
-    name = "signalbox-approval-judge-eval",
-    compile_data = CRATE_COMPILE_DATA,
-    crate_root = "src/main.rs",
-    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
-    deps = [
-        ":signalbox_approval_judge_eval",
-        "//apps/signalboxd:signalboxd_lib",
-        "//crates/domain:signalbox_domain",
-        "//crates/model-provider-runtime:signalbox_model_provider_runtime",
-        "//crates/model-runtime:signalbox_model_runtime",
     ],
 )
 
@@ -40,9 +26,9 @@ rust_unit_test(
     crate = ":signalbox_approval_judge_eval",
 )
 
-rust_unit_test(
-    name = "signalbox_approval_judge_eval_unit_tests",
-    crate = ":signalbox-approval-judge-eval",
+rust_api_json(
+    name = "api_json",
+    crate = ":signalbox_approval_judge_eval",
 )
 
 rust_doc_test(
@@ -52,5 +38,4 @@ rust_doc_test(
 
 rust_quality_tests(documented_crates = [
     ":signalbox_approval_judge_eval",
-    ":signalbox-approval-judge-eval",
 ])

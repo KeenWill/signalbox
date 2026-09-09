@@ -1775,12 +1775,15 @@ pub(crate) fn git_loose_object_relative_path(id: Oid) -> PathBuf {
 
 pub(crate) fn publish_git_object_pack_for_test(
     repository: &Repository,
-    ids: &[Oid],
+    blobs: &[&[u8]],
     baseline: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
 ) -> EvalResult {
-    let mut builder = repository.packbuilder()?;
-    for id in ids {
-        builder.insert_object(*id, None)?;
+    let source = tempfile::tempdir()?;
+    let source_repository = Repository::init_bare(source.path())?;
+    let mut builder = source_repository.packbuilder()?;
+    for content in blobs {
+        let id = source_repository.blob(content)?;
+        builder.insert_object(id, None)?;
     }
     let mut buffer = git2::Buf::new();
     builder.write_buf(&mut buffer)?;
@@ -1798,25 +1801,6 @@ pub(crate) fn publish_git_object_pack_for_test(
     )?;
     std::io::Write::write_all(&mut indexer, &buffer)?;
     indexer.commit()?;
-    let mut removable_parents = BTreeSet::new();
-    for id in ids {
-        let relative = git_loose_object_relative_path(*id);
-        fs::remove_file(
-            repository
-                .path()
-                .join(GIT_OBJECTS_DIRECTORY)
-                .join(&relative),
-        )?;
-        let parent = relative
-            .parent()
-            .ok_or_else(|| io::Error::other("a loose object has no fanout directory"))?;
-        if !baseline.contains_key(parent) {
-            removable_parents.insert(parent.to_path_buf());
-        }
-    }
-    for parent in removable_parents {
-        fs::remove_dir(repository.path().join(GIT_OBJECTS_DIRECTORY).join(parent))?;
-    }
     Ok(())
 }
 
@@ -2887,12 +2871,16 @@ pub(crate) fn git_metadata_extended_attributes_match(
 ) -> EvalResult<bool> {
     let actual = git_metadata_extended_attributes(root)?;
     let baseline = pre_execution.unwrap_or(&seed_fixture.metadata_extended_attributes);
+    let creation_attributes = creation_extended_attributes(baseline);
     let expected = actual
         .keys()
         .map(|path| {
             (
                 path.clone(),
-                baseline.get(path).cloned().unwrap_or_default(),
+                baseline
+                    .get(path)
+                    .cloned()
+                    .unwrap_or_else(|| creation_attributes.clone()),
             )
         })
         .collect::<BTreeMap<_, _>>();

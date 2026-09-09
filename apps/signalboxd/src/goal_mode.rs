@@ -1013,6 +1013,13 @@ impl PostgresGoalPassDisposition {
                 );
                 ResumeAttempt::Settled
             }
+            Ok(GoalCommandHandlingOutcome::StopAwaitingApproval { .. }) => {
+                tracing::error!(
+                    session = %session.into_uuid(),
+                    "automatic goal resume returned a stop-only rejection"
+                );
+                ResumeAttempt::InfrastructureUnsettled
+            }
             Ok(GoalCommandHandlingOutcome::LineageMoved) => {
                 tracing::info!(
                     session = %session.into_uuid(),
@@ -1552,14 +1559,6 @@ fn continuation_disposition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use signalbox_persistence::{
-        disposable_postgres_server_args, disposable_postgres_state_tmpfs,
-        disposable_test_container_labels, local_test_connection_options, migrate,
-    };
-    use testcontainers_modules::{
-        postgres::Postgres as TestPostgres,
-        testcontainers::{self, ImageExt, runners::AsyncRunner},
-    };
 
     use std::num::NonZeroU64;
 
@@ -2665,34 +2664,18 @@ context_window_tokens = 200000
         );
     }
 
-    const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-    const DATABASE_NAME: &str = "signalbox_goal_park";
     const PARKED_GOAL_STATEMENT: &str = "Continue after the park clears";
-    const DATABASE_USER: &str = "signalbox";
-    const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
-    async fn migrated_postgres()
-    -> Result<(testcontainers::ContainerAsync<TestPostgres>, PgPool), Box<dyn Error>> {
-        let container = TestPostgres::default()
-            .with_db_name(DATABASE_NAME)
-            .with_user(DATABASE_USER)
-            .with_password(DATABASE_PASSWORD)
-            .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs(None))
-            .with_tag(POSTGRES_IMAGE_TAG)
-            .with_labels(disposable_test_container_labels())
-            .start()
-            .await?;
-        let host = container.get_host().await?;
-        let port = container.get_host_port_ipv4(5432).await?;
-        let database_url =
-            format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(local_test_connection_options(&database_url)?)
-            .await?;
-        migrate(&pool).await?;
-        Ok((container, pool))
+    async fn migrated_postgres() -> Result<
+        (
+            signalbox_persistence::test_support::postgres::TestDatabase,
+            PgPool,
+        ),
+        Box<dyn Error>,
+    > {
+        let (database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        Ok((database, pool))
     }
 
     #[tokio::test(flavor = "multi_thread")]

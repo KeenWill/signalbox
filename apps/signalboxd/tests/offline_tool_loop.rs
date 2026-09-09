@@ -6,6 +6,7 @@
 
 mod support;
 
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::{
     error::Error,
     fmt, fs,
@@ -49,9 +50,7 @@ use signalbox_model_runtime::{
     ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName, ToolResultRecord,
 };
 use signalbox_persistence::{
-    create_session::CreateSessionRepository, disposable_postgres_server_args,
-    disposable_postgres_state_tmpfs_from_example, disposable_test_container_labels,
-    local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
+    create_session::CreateSessionRepository, model_execution::PostgresModelCallRepository,
     process_read::ProcessReadRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
@@ -97,12 +96,8 @@ use signalboxd::{
     WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse,
     WebFetchTransport, WebFetchTransportFailure,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgPool, types::Uuid};
 use tempfile::tempdir;
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
@@ -110,10 +105,6 @@ use tokio::{
     time::timeout,
 };
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-const DATABASE_NAME: &str = "signalboxd_tool_loop_e2e";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const GIT_AUTHOR_NAME: &str = "Signalbox Daemon";
 const GIT_AUTHOR_EMAIL: &str = "signalbox@example.test";
 const OFFLINE_SANDBOX_LAUNCHER: &str = "/bin/sh";
@@ -276,7 +267,7 @@ impl ModelRuntime<ModelCallId> for RecordingScriptedModel {
 }
 
 struct ToolLoopFixture {
-    _container: ContainerAsync<Postgres>,
+    _container: TestDatabase,
     pool: PgPool,
     session: SessionId,
     turn: TurnId,
@@ -725,27 +716,10 @@ impl ToolLoopFixture {
     }
 }
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool))
+async fn migrated_postgres() -> Result<(TestDatabase, PgPool), Box<dyn Error>> {
+    let (database, pool, _) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(8).await?;
+    Ok((database, pool))
 }
 
 const fn default_configuration() -> PerInputConfigurationChoices {

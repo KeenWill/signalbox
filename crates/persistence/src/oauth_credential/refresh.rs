@@ -206,33 +206,12 @@ mod tests {
         CredentialPoolRuntimePolicy,
     };
     use std::num::NonZeroU32;
-    use testcontainers_modules::{
-        postgres::Postgres,
-        testcontainers::{ImageExt, runners::AsyncRunner},
-    };
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn quarantine_reads_lock_only_registered_oauth_pool_members()
     -> Result<(), Box<dyn std::error::Error>> {
-        let container = Postgres::default()
-            // Same PostgreSQL image as tests/postgres_integration/main.rs.
-            .with_tag("18.4-alpine3.23")
-            .with_cmd(crate::disposable_postgres_server_args())
-            .with_mount(crate::disposable_postgres_state_tmpfs_from_example()?)
-            .with_labels(crate::disposable_test_container_labels())
-            .start()
-            .await?;
-        let url = format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            container.get_host().await?,
-            container.get_host_port_ipv4(5432).await?,
-        );
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(crate::local_test_connection_options(&url)?)
-            .await?;
-        crate::migrate(&pool).await?;
+        let (_container, pool, _) = crate::test_support::postgres::migrated_postgres(4).await?;
         let repository = OauthCredentialRepository::new(pool.clone());
         let registration = OauthRegistration {
             client_id: "fixture-client".into(),

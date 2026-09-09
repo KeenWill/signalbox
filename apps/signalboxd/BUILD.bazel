@@ -16,6 +16,7 @@ CRATE_PROC_MACRO_DEPS = ["//crates/tool-schema-derive:signalbox_tool_schema_deri
 CRATE_DEPS = [
     ":signalboxd_lib",
     "//crates/application:signalbox_application",
+    "//crates/approval-judge-eval:signalbox_approval_judge_eval",
     "//crates/blob-store:signalbox_blob_store",
     "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
     "//crates/blob-store-s3:signalbox_blob_store_s3",
@@ -109,6 +110,15 @@ rust_binary(
 )
 
 rust_binary(
+    name = "signalbox-approval-judge-eval",
+    compile_data = CRATE_COMPILE_DATA + ["//crates/approval-judge-eval:corpora/seed-v1.json"],
+    crate_features = CRATE_FEATURES,
+    crate_root = "src/bin/signalbox-approval-judge-eval.rs",
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS + ["//crates/derive:signalbox_derive"],
+    deps = CRATE_DEPS,
+)
+
+rust_binary(
     name = "signalbox-debug",
     compile_data = CRATE_COMPILE_DATA,
     crate_features = CRATE_FEATURES,
@@ -156,6 +166,13 @@ rust_unit_test(
 rust_unit_test(
     name = "approval_judge_eval_unit_tests",
     crate = ":approval-judge-eval",
+    crate_features = CRATE_FEATURES,
+    deps = TEST_DEPS,
+)
+
+rust_unit_test(
+    name = "signalbox_approval_judge_eval_unit_tests",
+    crate = ":signalbox-approval-judge-eval",
     crate_features = CRATE_FEATURES,
     deps = TEST_DEPS,
 )
@@ -536,6 +553,7 @@ rust_integration_test(
 rust_quality_tests(documented_crates = [
     ":signalboxd_lib",
     ":approval-judge-eval",
+    ":signalbox-approval-judge-eval",
     ":signalbox-debug",
     ":signalboxd",
 ])
