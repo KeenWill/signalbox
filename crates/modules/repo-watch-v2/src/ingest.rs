@@ -157,7 +157,7 @@ impl RepoWatchStore {
             .iter()
             .map(|entry| entry.state.clone())
             .collect::<Vec<_>>();
-        let occurrences = derive_repo_watch_events_with_merged_baselines(
+        let mut occurrences = derive_repo_watch_events_with_merged_baselines(
             &observed.repository,
             baseline.observation.as_ref(),
             &previous_merged,
@@ -166,6 +166,18 @@ impl RepoWatchStore {
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .map_err(|_| StoreError::InvalidComparisonBaseline)?;
+        let initial_facts = initial_facts_baseline(baseline, &observed.observation)?;
+        occurrences.extend(
+            derive_repo_watch_events_with_merged_baselines(
+                &observed.repository,
+                Some(&initial_facts),
+                &[],
+                &observed.observation,
+                &mut frontier,
+                &mut UuidV7RepoWatchEventIdGenerator,
+            )
+            .map_err(|_| StoreError::InvalidComparisonBaseline)?,
+        );
         let mut merged_baselines = baseline.merged_baselines.clone();
         for current in observed.observation.state().pull_requests() {
             merged_baselines
@@ -373,6 +385,69 @@ pub(crate) async fn queue_webhook_pulls(
         .await?;
     }
     Ok(())
+}
+
+// Compare only unseen PR facts against empty collections without committing a synthetic state.
+fn initial_facts_baseline(
+    baseline: &IngestBaseline,
+    current: &RepoWatchObservation,
+) -> Result<RepoWatchObservation, StoreError> {
+    use signalbox_session_ownership::{
+        PullRequestEventContext, PullRequestEventContextInput, RepoWatchPullRequestState,
+        RepoWatchPullRequestStateInput,
+    };
+    let pull_requests = current
+        .state()
+        .pull_requests()
+        .iter()
+        .map(|pull| {
+            let context = pull.context();
+            let known = baseline.observation.as_ref().is_some_and(|prior| {
+                prior
+                    .state()
+                    .pull_requests()
+                    .iter()
+                    .any(|prior| prior.context().number() == context.number())
+            }) || baseline
+                .merged_baselines
+                .iter()
+                .any(|prior| prior.state.number() == context.number());
+            if known {
+                return Ok(pull.clone());
+            }
+            RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+                context: PullRequestEventContext::new(PullRequestEventContextInput {
+                    number: context.number(),
+                    head_sha: context.head_sha().clone(),
+                    head_repository: context.head_repository().clone(),
+                    base_branch: context.base_branch().clone(),
+                    head_branch: context.head_branch().clone(),
+                    title: context.title().clone(),
+                    body: context.body().clone(),
+                    labels: Vec::new(),
+                    draft: context.draft(),
+                    author: context.author().cloned(),
+                }),
+                lifecycle: pull.lifecycle(),
+                mergeable_state: pull.mergeable_state(),
+                completed_check_suites: Vec::new(),
+                completed_check_runs: Vec::new(),
+                reviews: Vec::new(),
+                threads: Vec::new(),
+                reactions: pull.reactions().to_vec(),
+            })
+            .map_err(|_| StoreError::InvalidComparisonBaseline)
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    Ok(RepoWatchObservation::new(
+        current.signal_reviewers().to_vec(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests,
+            branch_heads: current.state().branch_heads().to_vec(),
+            workflow_runs: current.state().workflow_runs().to_vec(),
+        })
+        .map_err(|_| StoreError::InvalidComparisonBaseline)?,
+    ))
 }
 
 #[cfg(test)]

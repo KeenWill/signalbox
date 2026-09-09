@@ -278,13 +278,13 @@ where
         let result = self.observe(producer).await;
         use crate::measurements::PollOutcome;
         attempt.finish(match &result {
-            Ok(()) => PollOutcome::Succeeded,
+            Ok(outcome) => *outcome,
             Err(RepositoryAttemptError::Client(_)) => PollOutcome::ClientFailed,
             Err(RepositoryAttemptError::Observation(_)) => PollOutcome::ObservationFailed,
             Err(RepositoryAttemptError::Store(_)) => PollOutcome::StoreFailed,
             Err(RepositoryAttemptError::FrontierConflict) => PollOutcome::FrontierConflict,
         });
-        result
+        result.map(|_| ())
     }
 }
 
@@ -292,14 +292,14 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
     async fn observe(
         &mut self,
         producer: EventProducer,
-    ) -> Result<(), RepositoryAttemptError<Loader::Error>> {
+    ) -> Result<crate::measurements::PollOutcome, RepositoryAttemptError<Loader::Error>> {
         let client = self
             .clients
             .load_client()
             .await
             .map_err(RepositoryAttemptError::Client)?;
         if producer == EventProducer::Webhook {
-            crate::poll_cache::observe_webhook_pulls(
+            return crate::poll_cache::observe_webhook_pulls(
                 &client,
                 &self.store,
                 &self.repository,
@@ -307,8 +307,7 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
                 self.subject_retention,
             )
             .await
-            .map_err(RepositoryAttemptError::Observation)?;
-            return Ok(());
+            .map_err(RepositoryAttemptError::Observation);
         }
         let admission = crate::poll_cache::poll_with_cache(
             &client,
@@ -324,7 +323,9 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
             error => RepositoryAttemptError::Observation(error),
         })?;
         match admission {
-            FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged => Ok(()),
+            FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged => {
+                Ok(crate::measurements::PollOutcome::Succeeded)
+            }
             FrontierEventAdmission::Stale | FrontierEventAdmission::ConflictingReuse => {
                 Err(RepositoryAttemptError::FrontierConflict)
             }

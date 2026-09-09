@@ -1001,7 +1001,7 @@ pub async fn observe_webhook_pulls(
     repository: &RepositorySlug,
     reviewers: &[RepoWatchAuthorLogin],
     retention: std::time::Duration,
-) -> Result<(), ObservationError> {
+) -> Result<crate::measurements::PollOutcome, ObservationError> {
     use rust_decimal::{Decimal, prelude::ToPrimitive};
     let pending: Vec<(Decimal, uuid::Uuid)> = sqlx::query_as(
         "SELECT pull_request_number, delivery_id FROM webhook_pull_wake
@@ -1013,6 +1013,7 @@ pub async fn observe_webhook_pulls(
     .await
     .map_err(StoreError::from)
     .map_err(ObservationError::Cache)?;
+    let mut outcome = crate::measurements::PollOutcome::Succeeded;
     for (number, delivery) in pending {
         let pull = number
             .to_u64()
@@ -1052,6 +1053,7 @@ pub async fn observe_webhook_pulls(
         Ok(())
         }.await;
         if let Err(error) = result {
+            outcome = crate::measurements::PollOutcome::Partial;
             sqlx::query("UPDATE webhook_pull_wake SET failed_attempts=failed_attempts+1, last_failure=$4 WHERE repository=$1 AND pull_request_number=$2 AND delivery_id=$3")
                 .bind(repository.as_str()).bind(number).bind(delivery).bind(error.to_string())
                 .execute(&store.pool).await.map_err(StoreError::from).map_err(ObservationError::Cache)?;
@@ -1062,7 +1064,7 @@ pub async fn observe_webhook_pulls(
         sqlx::query("DELETE FROM webhook_pull_wake WHERE repository=$1 AND pull_request_number=$2 AND delivery_id=$3")
             .bind(repository.as_str()).bind(number).bind(delivery).execute(&store.pool).await.map_err(StoreError::from).map_err(ObservationError::Cache)?;
     }
-    Ok(())
+    Ok(outcome)
 }
 
 struct ObservationReadCounts<'a, T> {
