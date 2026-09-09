@@ -614,12 +614,14 @@ async fn production_runner_reaps_new_session_target_after_process_group_kill()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
         let pid_file = TemporaryPath::new("signalbox-exec-process-group-kill-pid")?;
+        // The PID is published only after the child has entered its new session.
         let script = format!(
-            "{} {} -c \"printf %s \\$\\$ > {}; exec {} 30\" & {} 0.05; kill -KILL 0",
+            "{} {} -c \"printf %s \\$\\$ > {}; exec {} 30\" & while [ ! -s {} ]; do {} 0.01; done; kill -KILL 0",
             fixture_program("setsid")?.display(),
             fixture_program("sh")?.display(),
             pid_file.as_path().display(),
             fixture_program("sleep")?.display(),
+            pid_file.as_path().display(),
             fixture_program("sleep")?.display()
         );
         let request = shell_request(&script, Duration::from_secs(5), std::env::current_dir()?)?;
