@@ -267,7 +267,15 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
         failures.append(f"{WORKFLOW} bazel-postgres must be blocking")
     if _resolved_runs_on(run.get("runs-on", "")) != "signalbox-integration-tests":
         failures.append(f"{WORKFLOW} bazel-postgres must run on signalbox-integration-tests")
+    gate = "github.event_name == 'workflow_dispatch' || inputs.postgres"
+    for name in ("postgres-matrix", "bazel-postgres"):
+        if jobs.get(name, {}).get("if") != gate:
+            failures.append(f"{WORKFLOW} {name} does not use the PostgreSQL scope gate")
+    if run.get("needs") != "postgres-matrix":
+        failures.append(f"{WORKFLOW} bazel-postgres does not depend on postgres-matrix")
     rust_jobs = workflow_document((root / RUST_WORKFLOW).read_text(encoding="utf-8")).get("jobs", {})
+    if rust_jobs.get("bazel", {}).get("with", {}).get("postgres") != "${{ needs.rust-change-scope.outputs.postgres == 'true' }}":
+        failures.append(f"{RUST_WORKFLOW} does not pass the PostgreSQL change scope")
     if rust_jobs.get("bazel", {}).get("uses") != "./.github/workflows/bazel.yml":
         failures.append(f"{RUST_WORKFLOW} does not call the Bazel workflow")
     aggregate = rust_jobs.get("validate", {})
@@ -286,8 +294,8 @@ def run_suite(suites: tuple[Suite, ...], name: str, shard_index: int) -> int:
     if not 0 <= shard_index < suite.shards:
         raise ManifestError(f"suite `{name}` has no shard {shard_index}")
     command = [
-        "bazel", "test", "--keep_going", "--flaky_test_attempts=2", "--jobs=4",
-        "--local_resources=cpu=4", "--local_resources=memory=4096",
+        "bazel", "test", "--keep_going", "--flaky_test_attempts=2", "--jobs=8",
+        "--local_resources=cpu=8", "--local_resources=memory=12288",
         "--local_test_jobs=1", "--test_sharding_strategy=disabled",
         f"--test_env=SIGNALBOX_TEST_SHARD_INDEX={shard_index}",
         f"--test_env=SIGNALBOX_TEST_TOTAL_SHARDS={suite.shards}",

@@ -11,6 +11,7 @@ use std::{
 pub enum PollOutcome {
     InProgress,
     Succeeded,
+    Partial,
     ClientFailed,
     ObservationFailed,
     StoreFailed,

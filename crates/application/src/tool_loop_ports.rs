@@ -40,6 +40,8 @@ pub enum ResolvedToolConversationEntry {
         attempt: EndedToolAttempt,
         /// Text admitted to model context; terminal executor evidence remains exact.
         context_text: Option<signalbox_domain::ToolResultText>,
+        /// Durable bounded detail used for provider context; the attempt retains exact evidence.
+        context_error_detail: Option<signalbox_domain::ToolExecutionErrorDetail>,
     },
     /// The user decision and request referenced by one denial entry.
     Denied {

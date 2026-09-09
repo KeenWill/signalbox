@@ -351,7 +351,7 @@ impl ProcessReadRepository {
                 result_attempt.terminal_disposition_kind AS result_disposition,
                 result_attempt.context_result_text AS result_text,
                 result_attempt.error_kind AS result_error_kind,
-                result_attempt.error_detail AS result_error_detail,
+                result_attempt.context_error_detail AS result_error_detail,
                 transcript_approval.decision_kind AS transcript_decision_kind,
                 EXISTS (
                     SELECT 1 FROM tool_approval_user_override AS recorded

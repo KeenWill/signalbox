@@ -1765,6 +1765,10 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartEligibleTurnR
         SubmitInputRepositoryError::ModelExecution(_) => {
             StartEligibleTurnCorruption::Inconsistent("origin command application").into()
         }
+        SubmitInputRepositoryError::CheckoutProvisioningPending => {
+            StartEligibleTurnCorruption::Inconsistent("admission deferral while loading origin")
+                .into()
+        }
     }
 }
 
