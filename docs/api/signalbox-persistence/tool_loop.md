@@ -89,6 +89,23 @@ impl tool_loop::PostgresToolLoopRepository {
         option::Option<signalbox_domain::ToolBatch>,
         tool_loop::ToolLoopRepositoryError,
     >;
+    pub async fn expire_human_approval_wait(
+        &self,
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+        timeout: option::Option<time::Duration>,
+    ) -> result::Result<bool, tool_loop::ToolLoopRepositoryError>;
+    pub async fn pending_human_approval_waits(
+        &self,
+        session: option::Option<signalbox_domain::SessionId>,
+    ) -> result::Result<
+        vec::Vec<(
+            signalbox_domain::ToolRequestId,
+            signalbox_domain::SessionId,
+            time::Duration,
+        )>,
+        tool_loop::ToolLoopRepositoryError,
+    >;
     pub async fn find_resumable_turn(
         &self,
         session: signalbox_domain::SessionId,
