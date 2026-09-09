@@ -595,7 +595,7 @@ test('keeps a derived-artifact search projection virtualized', async ({ page }) 
   expect(Number(await results.getAttribute('data-mounted-rows'))).toBeLessThan(
     searchUsageFixture.mountedRowsCeiling,
   )
-  await expect(results.getByRole('option').first()).toContainText('Extracted text')
+  await expect(results.getByRole('option').first()).toContainText('Derived text')
   await expect(
     results.getByRole('option').first().getByText('needle', { exact: true }),
   ).toBeVisible()

@@ -82,7 +82,7 @@ const labels = new Map<string, string>(
     deny: 'Deny',
     derivative: 'Preview',
     derived_artifact: 'Converted file',
-    derived_text_artifact: 'Extracted text',
+    derived_text_artifact: 'Derived text',
     direct: 'Direct',
     disabled: 'Disabled',
     dispatched: 'Dispatched',

@@ -624,7 +624,7 @@ export const commandRegistry = [
   {
     id: 'detail.results',
     title: 'Show transcript results',
-    description: 'Show only inputs and results.',
+    description: 'Show inputs, results and warnings.',
     category: 'View',
     bindings: [],
     available: transcriptDetail,
