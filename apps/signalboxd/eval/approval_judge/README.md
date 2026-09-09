@@ -19,6 +19,18 @@ Every call spends real provider quota against the configuration's
 CI, and nothing in the daemon reaches it. Use `--filter` or `--limit` to bound a
 run while iterating.
 
+The offline seed replays scripted responses through the judge adapter and scores
+them without provider calls:
+
+```sh
+cargo run -p signalboxd --bin signalbox-approval-judge-eval -- \
+    crates/approval-judge-eval/corpora/seed-v1.json \
+    crates/approval-judge-eval/corpora/seed-responses-v1.json
+```
+
+Its expected output is
+[`seed-scorecard-v1.json`](../../../../crates/approval-judge-eval/corpora/seed-scorecard-v1.json).
+
 For Sol through the Codex CLI subscription adapter, copy
 [`config/approval-judge-eval-codex.example.toml`](../../../../config/approval-judge-eval-codex.example.toml),
 set its executable, working-directory, and login-home paths, and pass the copy

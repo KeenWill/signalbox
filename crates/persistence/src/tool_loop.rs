@@ -3766,9 +3766,7 @@ async fn persist_batch_decision(
             ));
         }
     }
-    if applied.resolution().decider().is_some()
-        || applied.resolution().source() == signalbox_domain::ToolDecisionSource::RuntimeSafety
-    {
+    if applied.resolution().decider().is_some() {
         outbox::append(
             connection,
             OutboxEvent::ToolApprovalDecided {

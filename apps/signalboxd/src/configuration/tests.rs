@@ -6207,6 +6207,24 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
 }
 
 #[test]
+fn checked_in_example_admits_unlisted_web_origins() {
+    use signalbox_application::ToolCatalog;
+    let configuration = super::checked_in_example_configuration().expect("example parses");
+    let (catalog, _) = signalbox_tools_web::WebFetchTool::try_new_production(
+        configuration.web_fetch_egress_policy(),
+    )
+    .expect("web transport constructs")
+    .into_parts();
+    let name =
+        signalbox_domain::ToolName::try_new(String::from(WEB_FETCH_NAME)).expect("valid name");
+    let arguments = signalbox_domain::NormalizedToolArguments::try_from_provider_text(
+        String::from(r#"{"url":"https://unlisted.example/documentation"}"#),
+    )
+    .expect("valid arguments");
+    assert_eq!(catalog.validate_arguments(&name, &arguments), Ok(()));
+}
+
+#[test]
 fn human_approval_wait_accepts_a_duration_or_none() {
     let timed = HubModelConfiguration::parse(&format!(
         "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"2m\"\n"

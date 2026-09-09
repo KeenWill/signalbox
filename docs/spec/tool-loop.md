@@ -177,10 +177,6 @@ Each tool family owns its bounded capture, truncation, and completeness
 evidence; no universal true-size field exists, because a traversal cannot always
 know it.
 
-The loop's bounds are on durable content, not on wall-clock time, so one
-model-controlled chain cannot hold the progressing slot indefinitely or exhaust
-daemon memory.
-
 Human approval waits use `tool_settings.approval_wait_timeout` (ten minutes by
 default, or `none`). The first human wait records its deadline durably; restart
 retains it. Expiry records a core-issued `RuntimeSafety` denial with reason

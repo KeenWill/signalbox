@@ -58,6 +58,11 @@ impl ToolBatch {
         command: DecideToolRequest,
         continuation_attempt: option::Option<TurnAttemptId>,
     ) -> result::Result<PreparedToolBatchDecision, ToolBatchDecisionError>;
+    pub fn prepare_approval_timeout(
+        self,
+        command: DecideToolRequest,
+        continuation_attempt: option::Option<TurnAttemptId>,
+    ) -> result::Result<PreparedToolBatchDecision, ToolBatchDecisionError>;
     pub fn prepare_delegate_decision(
         self,
         approval: DelegateToolApproval,

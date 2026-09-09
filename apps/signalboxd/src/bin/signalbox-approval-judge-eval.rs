@@ -246,6 +246,35 @@ mod approval_judge_tests {
     const ESCALATE_RATIONALE: &str = "The exact request has unsettled authority.";
 
     #[tokio::test]
+    async fn approval_judge_offline_seed_matches_expected_scorecard() {
+        let corpus = decode_corpus(include_bytes!(
+            "../../../../crates/approval-judge-eval/corpora/seed-v1.json"
+        ))
+        .expect("seed corpus is valid");
+        let responses: super::OfflineResponseFile = serde_json::from_slice(include_bytes!(
+            "../../../../crates/approval-judge-eval/corpora/seed-responses-v1.json"
+        ))
+        .expect("seed responses are valid");
+        let (model, binding) = fixture_model(
+            responses
+                .responses
+                .iter()
+                .map(|response| scripted_decision(response.disposition, &response.rationale)),
+        );
+        let scorecard = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect("seed replay succeeds");
+        let expected: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../../crates/approval-judge-eval/corpora/seed-scorecard-v1.json"
+        ))
+        .expect("expected scorecard is valid");
+        assert_eq!(
+            serde_json::to_value(scorecard).expect("scorecard serializes"),
+            expected
+        );
+    }
+
+    #[tokio::test]
     async fn scorer_reports_case_verdicts() {
         let corpus = decode_corpus(SCORING_CORPUS).expect("the scoring fixture is admitted");
         let response_fixture = [

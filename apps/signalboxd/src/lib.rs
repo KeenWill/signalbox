@@ -2197,7 +2197,7 @@ pub type PostgresProviderToolExecutionError<ExecutorError> =
 pub enum PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError> {
     /// Turn-start instruction discovery or durable recording failed.
     WorkspaceInstructions(WorkspaceInstructionRuntimeError),
-    /// Read-only active-turn or batch lookup failed.
+    /// Active-turn lookup or human approval wait expiry failed.
     ResumeLookup(ToolLoopRepositoryError),
     /// A found active turn failed while resumed execution was in progress.
     ResumeExecution {

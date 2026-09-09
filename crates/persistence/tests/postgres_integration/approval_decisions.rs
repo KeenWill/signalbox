@@ -4195,9 +4195,10 @@ async fn approval_timeout_denies_a_human_wait_and_resumes_the_turn() -> Result<(
     assert_eq!(
         denial.decision(),
         &ToolApprovalDecision::Deny {
-            reason: Some(ToolDenialReason::try_new(String::from(
-                "approval_wait_timeout"
-            ))?),
+            reason: Some(
+                ToolDenialReason::try_new(String::from("approval_wait_timeout"))
+                    .expect("timeout token is a valid denial reason")
+            ),
         }
     );
     assert_eq!(

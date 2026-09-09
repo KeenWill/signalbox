@@ -417,9 +417,9 @@ pub(super) fn parse_approval_wait_timeout(
     };
     let table = item
         .as_table()
-        .ok_or(HubModelConfigurationError::InvalidDaemonToolSettings)?;
+        .ok_or(HubModelConfigurationError::InvalidToolSettings)?;
     reject_unknown_fields(table, &["approval_wait_timeout"])
-        .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?;
+        .map_err(|_| HubModelConfigurationError::InvalidToolSettings)?;
     match table.get("approval_wait_timeout") {
         None => Ok(default),
         Some(item) if item.as_str() == Some("none") => Ok(None),
@@ -428,6 +428,6 @@ pub(super) fn parse_approval_wait_timeout(
             .and_then(super::numeric_bounds::parse_numeric_bound_duration)
             .filter(|duration| !duration.is_zero())
             .map(Some)
-            .ok_or(HubModelConfigurationError::InvalidDaemonToolSettings),
+            .ok_or(HubModelConfigurationError::InvalidToolSettings),
     }
 }

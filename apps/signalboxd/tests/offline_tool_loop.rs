@@ -5464,6 +5464,16 @@ async fn approval_timeout_continues_with_a_typed_denial() -> Result<(), Box<dyn 
     execution.resume_active(fixture.session).await?;
     assert!(executor.events().is_empty());
     assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_denied",
+            "assistant_text",
+            "turn_completed",
+        ]
+    );
+    assert_eq!(
         continuation_tool_exchange(&runtime)?,
         vec![
             expected_tool_call(request, TOOL_NAME, "{}"),
