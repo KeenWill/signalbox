@@ -174,11 +174,9 @@ impl AsyncBufRead for ArrivalReader {
             this.current = None;
             this.offset = 0;
             this.input.send_modify(|queued| {
-                let consumed = queued
-                    .chunks
-                    .pop_front()
-                    .expect("current input stays queued until consumed");
-                queued.bytes -= consumed.bytes.len();
+                if let Some(consumed) = queued.chunks.pop_front() {
+                    queued.bytes -= consumed.bytes.len();
+                }
             });
         }
     }
