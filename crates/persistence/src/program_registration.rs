@@ -272,20 +272,30 @@ impl ProgramRegistrationRepository {
         Ok(input.map(signalbox_domain::InlineFramePayload::new))
     }
 
-    /// Adopts an immutable registration only when its complete requested content matches.
+    /// Adopts an exact immutable registration, or reports a conflict at either unique key.
+    /// Returns `None` only when neither the identity nor name/revision is registered.
     pub async fn find(
         &self,
+        id: ProgramRegistrationId,
         content: &ProgramRegistrationContent,
     ) -> Result<Option<ProgramRegistration>, ProgramRegistrationError> {
-        let registered =
-            sqlx::query("SELECT * FROM program_registration WHERE name = $1 AND revision = $2")
-                .bind(&content.name)
-                .bind(&content.revision)
-                .fetch_optional(&self.pool)
-                .await?
-                .map(decode)
-                .transpose()?;
-        Ok(registered.filter(|registration| &registration.content == content))
+        let registered = sqlx::query(
+            "SELECT * FROM program_registration
+             WHERE registration_id = $1 OR (name = $2 AND revision = $3)",
+        )
+        .bind(id.into_uuid())
+        .bind(&content.name)
+        .bind(&content.revision)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(decode)
+        .transpose()?;
+        match registered {
+            Some(registration) if registration.id != id || &registration.content != content => {
+                Err(ProgramRegistrationError::RegistrationConflict { registration: id })
+            }
+            registration => Ok(registration),
+        }
     }
 
     pub async fn for_run(

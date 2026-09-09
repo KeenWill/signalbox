@@ -56,7 +56,10 @@ ungranted requests receive a journaled refusal before any executor acts.
 Recovery first adopts a proven durable outcome, reissues only operations
 declared idempotent, and otherwise journals an ambiguous answer. The register
 executor checks child-grant attenuation and adopts a matching immutable
-registration after a lost answer.
+registration after a lost answer. A recovered request that conflicts at either
+the registration identity or name/revision records the same `ProgramError` as a
+live conflict. If neither key is registered, recovery journals an ambiguous
+answer.
 
 `SessionEffects` composes host-side session creation and input services.
 Unsupported operations and invalid session requests receive a journaled refusal.
