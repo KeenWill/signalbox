@@ -658,6 +658,43 @@ fn merge_push_omits_history_shared_with_the_dispatch_fence() {
     );
 }
 
+#[test]
+fn merge_push_enforces_the_shallow_boundary_ceiling() {
+    use crate::failure::LocalGitFailure;
+    use crate::limits::{MAX_SHALLOW_BYTES, MAX_SHALLOW_ENTRIES};
+    use crate::tests::support::commit_with_parents;
+
+    for boundary_count in [MAX_SHALLOW_ENTRIES, MAX_SHALLOW_ENTRIES + 1] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository");
+        let mut boundaries = vec![fixture.initial];
+        while boundaries.len() < boundary_count {
+            let parent = *boundaries.last().expect("initial boundary exists");
+            // The label is arbitrary; parent identity distinguishes each commit.
+            boundaries.push(commit_with_parents(&repository, &[parent], "ancestor"));
+        }
+        let fence = *boundaries.last().expect("dispatch fence exists");
+        let merged = commit_with_parents(&repository, &boundaries, "merge");
+        let result = crate::push_objects::PushObjectSnapshot::capture(
+            &fixture.executor().repository_authority,
+            merged,
+            Some(fence),
+        );
+        if boundary_count == MAX_SHALLOW_ENTRIES {
+            let snapshot = result.expect("the admitted number of boundaries captures");
+            let shallow = fs::read_to_string(snapshot.repository.path().join("shallow"))
+                .expect("captured negotiation boundaries");
+            assert_eq!(shallow.lines().count(), boundary_count);
+            assert!(shallow.len() <= MAX_SHALLOW_BYTES);
+        } else {
+            assert!(
+                matches!(result, Err(LocalGitFailure::Repository)),
+                "one boundary beyond the existing ceiling must reject"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn push_range_ignores_unrelated_objects_in_one_or_multiple_pack_indexes() {
     use crate::limits::MAX_REPOSITORY_INSPECTIONS;

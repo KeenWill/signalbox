@@ -49,6 +49,7 @@ impl error::Error for submit_input::SubmitInputCorruption {
 
 ```rust
 pub enum SubmitInputRepositoryError {
+    CheckoutProvisioningPending,
     Database(error::Error),
     CommitAmbiguous(error::Error),
     DifferentCommandKind {

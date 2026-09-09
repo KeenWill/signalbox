@@ -223,21 +223,20 @@ impl ProcessRunner for CheckoutBarrierRunner {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn input_during_checkout_waits_for_provisioned_first_turn_git_tools()
--> Result<(), Box<dyn Error>> {
+async fn kickoff_precedes_input_deferred_during_checkout() -> Result<(), Box<dyn Error>> {
     assert_input_during_checkout_waits(None).await
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn release_start_during_checkout_cannot_activate_queued_input() -> Result<(), Box<dyn Error>>
-{
+async fn release_start_during_checkout_cannot_admit_input_ahead_of_kickoff()
+-> Result<(), Box<dyn Error>> {
     assert_input_during_checkout_waits(Some(SessionLifecycleOperation::ReleaseStart)).await
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn release_ownership_during_checkout_cannot_activate_queued_input()
+async fn release_ownership_during_checkout_cannot_admit_input_ahead_of_kickoff()
 -> Result<(), Box<dyn Error>> {
     assert_input_during_checkout_waits(Some(SessionLifecycleOperation::Release)).await
 }
@@ -258,7 +257,7 @@ async fn assert_input_during_checkout_waits(
     };
     use signalbox_persistence::{
         start_eligible_turn::{CommitActivationPreviewOutcome, StartEligibleTurnRepository},
-        submit_input::SubmitInputRepository,
+        submit_input::{SubmitInputRepository, SubmitInputRepositoryError},
     };
 
     // A reconciliation hint must not substitute for checkout completion's nudge.
@@ -326,30 +325,24 @@ async fn assert_input_during_checkout_waits(
             .await
             .expect("input count during clone");
         assert_eq!(inputs, 0, "kickoff waits until checkout is recorded");
-        let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(origin),
-        )) = submit
-            .execute(
-                SubmitInputRequest::try_new(
-                    DurableCommandId::from_uuid(Uuid::now_v7()),
-                    session,
-                    UserContent::try_text("Inspect the checkout".to_owned()).expect("input text"),
-                    DeliveryRequest::StartWhenNoActiveTurn {
-                        configuration: PerInputConfigurationChoices::new(
-                            SessionConfigurationDefaultsVersion::first(),
-                            ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(
-                                DirectModelSelection::from_uuid(Uuid::now_v7()),
-                            )),
-                        ),
-                    },
-                )
-                .expect("input request"),
-            )
-            .await
-            .expect("input submission")
-        else {
-            panic!("input must be accepted while checkout is pending");
-        };
+        let request = SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            session,
+            UserContent::try_text("Inspect the checkout".to_owned()).expect("input text"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(
+                        DirectModelSelection::from_uuid(Uuid::now_v7()),
+                    )),
+                ),
+            },
+        )
+        .expect("input request");
+        assert!(matches!(
+            submit.execute(request.clone()).await,
+            Err(SubmitInputRepositoryError::CheckoutProvisioningPending)
+        ));
         if let Some(operation) = early_release {
             use signalbox_domain::{CommandPrincipal, SessionLifecycleCommandResult};
             use signalbox_persistence::session_lifecycle_command::{
@@ -384,7 +377,18 @@ async fn assert_input_during_checkout_waits(
                 "the public command released the ordinary start gate"
             );
         }
-        assert_eq!(work.next().await.expect("input wake"), session);
+        assert!(matches!(
+            submit.execute(request.clone()).await,
+            Err(SubmitInputRepositoryError::CheckoutProvisioningPending)
+        ));
+        assert!(
+            SubmitInputRepository::new(fixture.core.clone())
+                .load(request.command_id())
+                .await
+                .expect("deferred command lookup")
+                .is_none(),
+            "deferred client input must not claim its command identity"
+        );
         assert_eq!(
             start.execute(session).await.expect("eligibility pass"),
             StartEligibleTurnOutcome::NoEligibleTurn
@@ -397,15 +401,39 @@ async fn assert_input_during_checkout_waits(
                 .is_none()
         );
         resume.notify_one();
-        (session, origin)
+        (session, request)
     };
-    let (provisioned, (session, origin)) = tokio::join!(provisioning, while_cloned);
+    let (provisioned, (session, request)) = tokio::join!(provisioning, while_cloned);
     provisioned.expect("checkout completes");
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), work.next()).await??,
         session,
         "checkout completion wakes queued input"
     );
+    let operator_command = request.command_id();
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(operator_origin),
+    )) = submit.execute(request).await?
+    else {
+        panic!("the deferred command is accepted after kickoff");
+    };
+    let kickoff: Uuid =
+        sqlx::query_scalar("SELECT kickoff_command_id FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    let recorded = SubmitInputRepository::new(fixture.core.clone())
+        .load(DurableCommandId::from_uuid(kickoff))
+        .await?
+        .expect("kickoff recorded");
+    let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(kickoff_origin)) =
+        recorded.result()
+    else {
+        panic!("kickoff owns the first queued turn");
+    };
+    let queued: Vec<Uuid> = sqlx::query_scalar("SELECT accepting_command_id FROM accepted_input WHERE session_id = $1 ORDER BY acceptance_position")
+        .bind(session.into_uuid()).fetch_all(&fixture.core).await?;
+    assert_eq!(queued, [kickoff, operator_command.into_uuid()]);
     let preview = repository
         .preview(session, identities)
         .await?
@@ -415,7 +443,8 @@ async fn assert_input_during_checkout_waits(
     else {
         panic!("first turn activates after provisioning");
     };
-    assert_eq!(activated.turn(), origin.turn());
+    assert_eq!(activated.turn(), kickoff_origin.turn());
+    assert_ne!(activated.turn(), operator_origin.turn());
     let status = run_git_tool(
         &catalog,
         &executor,

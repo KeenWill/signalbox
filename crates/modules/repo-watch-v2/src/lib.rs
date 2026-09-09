@@ -796,6 +796,7 @@ impl RepoWatchStore {
         if hook_id == 0 {
             return Err(StoreError::InvalidProviderIdentity);
         }
+        let mut transaction = self.pool.begin().await?;
         let updated = sqlx::query(
             "UPDATE webhook_disposition
                 SET disposition = $3, settled_at = $4
@@ -806,9 +807,14 @@ impl RepoWatchStore {
         .bind(delivery_id)
         .bind(disposition.storage())
         .bind(settled_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        Ok(updated.rows_affected() == 1)
+        let newly_settled = updated.rows_affected() == 1;
+        if newly_settled && disposition == WebhookDisposition::Applied {
+            crate::ingest::queue_webhook_pulls(&mut transaction, hook_id, delivery_id).await?;
+        }
+        transaction.commit().await?;
+        Ok(newly_settled)
     }
 
     /// Advances module-local application from the prior visible core event.

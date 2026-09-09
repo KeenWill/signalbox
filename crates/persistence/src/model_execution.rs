@@ -975,6 +975,9 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositor
         SubmitInputRepositoryError::ModelExecution(_) => {
             ModelCallCorruption::Inconsistent("origin command application").into()
         }
+        SubmitInputRepositoryError::CheckoutProvisioningPending => {
+            ModelCallCorruption::Inconsistent("admission deferral while loading origin").into()
+        }
     }
 }
 

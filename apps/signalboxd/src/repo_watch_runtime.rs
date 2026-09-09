@@ -762,10 +762,12 @@ impl RuntimeState {
                 let Some(wake) = self.wakes.get(repository.repository()).cloned() else {
                     continue;
                 };
+                wake.notify_one();
                 let task = GitHubRepositoryTask {
                     repository: repository.repository().clone(),
                     signal_reviewers: configuration.signal_reviewers().to_vec(),
                     subject_retention: configuration.webhook_retention(),
+                    poll_request_budget: configuration.poll_request_budget(),
                     clients: RepositoryWatchClientLoader::new(repository),
                     store: self.store.clone(),
                 };

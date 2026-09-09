@@ -21,6 +21,7 @@ use signalbox_workflow_runtime::{
     WorkflowHostProtocolError,
     effects::{EffectExecutor, EffectInvocation, EffectRecovery},
     native::NativeProgramError,
+    primitives::{PrimitiveClock, SystemPrimitiveClock},
 };
 use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot};
@@ -308,6 +309,12 @@ impl LiveDeliverySource for ClockSource {
                 .first()
                 .ok_or_else(|| LiveDeliveryFailure::new("clock source received no request"))?;
             match request.kind() {
+                RequestKind::Now(payload) if payload.as_bytes().is_empty() => {
+                    Ok(DeliveryKind::Answer {
+                        resolves: request.ordinal(),
+                        payload: SystemPrimitiveClock.now()?.encode(),
+                    })
+                }
                 RequestKind::Now(_) => {
                     let seconds = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -358,14 +365,47 @@ impl EffectExecutor for UnavailableEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use signalbox_domain::RequestOrdinal;
+    use signalbox_domain::{RequestOrdinal, program_primitives::UnixMillis};
 
     #[tokio::test]
-    async fn workflows_clock_answers_a_now_request_with_unix_seconds() {
+    async fn workflows_clock_answers_an_empty_now_request_with_typed_unix_milliseconds() {
         let frame = RequestFrame::new(
             RequestOrdinal::try_from_u64(1).unwrap(),
             None,
             RequestKind::Now(InlineFramePayload::default()),
+        );
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let delivery = ClockSource
+            .next_delivery(std::slice::from_ref(&frame))
+            .await
+            .unwrap();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let DeliveryKind::Answer { resolves, payload } = delivery else {
+            panic!("clock must answer")
+        };
+        assert_eq!(resolves, frame.ordinal());
+        let milliseconds = UnixMillis::decode(&payload).expect("typed SDK clock answer");
+        assert!((before..=after).contains(&u128::from(milliseconds.0)));
+    }
+
+    #[tokio::test]
+    async fn workflows_clock_answers_a_native_pilot_request_with_unix_seconds() {
+        use crate::workflows::ClockInput;
+        use signalbox_workflow_runtime::native::NativeValue;
+
+        const PILOT_INPUT: u64 = 731;
+        let frame = RequestFrame::new(
+            RequestOrdinal::try_from_u64(1).unwrap(),
+            None,
+            RequestKind::Now(InlineFramePayload::new(
+                ClockInput(PILOT_INPUT).encode().unwrap(),
+            )),
         );
         let before = SystemTime::now()
             .duration_since(UNIX_EPOCH)
