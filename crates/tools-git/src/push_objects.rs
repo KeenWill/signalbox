@@ -138,7 +138,7 @@ struct Pack {
     end: usize,
 }
 
-struct ObjectSource {
+pub(super) struct ObjectSource {
     objects: File,
     files: Vec<SourceFile>,
     packs: Vec<Pack>,
@@ -175,7 +175,7 @@ fn open_child(root: &File, path: &Path) -> Result<File, LocalGitFailure> {
 }
 
 impl ObjectSource {
-    fn open(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
+    pub(super) fn open(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
         authority.validate_object_layout()?;
         let objects = File::from(
             openat(
@@ -314,7 +314,7 @@ impl ObjectSource {
         Ok(())
     }
 
-    fn capture(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
+    pub(super) fn capture(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
         if database.exists(oid) {
             return Ok(());
         }
@@ -553,7 +553,7 @@ impl ObjectSource {
         Ok(())
     }
 
-    fn validate(&self, authority: &PinnedRepository) -> Result<(), LocalGitFailure> {
+    pub(super) fn validate(&self, authority: &PinnedRepository) -> Result<(), LocalGitFailure> {
         authority.validate_object_layout()?;
         let current = File::from(
             openat(
