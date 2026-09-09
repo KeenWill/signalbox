@@ -73,20 +73,35 @@ impl ProgramRegistrationRequest {
         ProgramRegistrationContent {
             name: self.name,
             revision: self.revision,
-            source_digest: ProgramContentDigest::of(&self.source),
-            artifact: self.artifact,
+            executable: ProgramExecutable::JavaScript {
+                source_digest: ProgramContentDigest::of(&self.source),
+                artifact: self.artifact,
+            },
             grants: self.grants,
         }
     }
 }
 
-/// Registration content; source and stripped artifact are hashed independently.
+/// The exact code selected by an immutable registration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProgramExecutable {
+    JavaScript {
+        source_digest: ProgramContentDigest,
+        artifact: String,
+    },
+    Native {
+        entry: String,
+        revision: String,
+        binary_digest: ProgramContentDigest,
+    },
+}
+
+/// Registration content with a language-specific executable identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProgramRegistrationContent {
     pub name: String,
     pub revision: String,
-    pub source_digest: ProgramContentDigest,
-    pub artifact: String,
+    pub executable: ProgramExecutable,
     pub grants: ProgramGrants,
 }
 
@@ -95,7 +110,6 @@ pub struct ProgramRegistrationContent {
 pub struct ProgramRegistration {
     pub id: ProgramRegistrationId,
     pub content: ProgramRegistrationContent,
-    pub artifact_digest: ProgramContentDigest,
 }
 
 #[cfg(test)]

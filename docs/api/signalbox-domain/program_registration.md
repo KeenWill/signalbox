@@ -46,14 +46,30 @@ impl program_registration::ProgramRegistrationRequest {
 }
 ```
 
+## ProgramExecutable
+
+```rust
+pub enum ProgramExecutable {
+    JavaScript {
+        source_digest: program_registration::ProgramContentDigest,
+        artifact: string::String,
+    },
+    Native {
+        entry: string::String,
+        revision: string::String,
+        binary_digest: program_registration::ProgramContentDigest,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## ProgramRegistrationContent
 
 ```rust
 pub struct ProgramRegistrationContent {
     pub name: string::String,
     pub revision: string::String,
-    pub source_digest: program_registration::ProgramContentDigest,
-    pub artifact: string::String,
+    pub executable: program_registration::ProgramExecutable,
     pub grants: program_registration::ProgramGrants,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -65,7 +81,6 @@ pub struct ProgramRegistrationContent {
 pub struct ProgramRegistration {
     pub id: ProgramRegistrationId,
     pub content: program_registration::ProgramRegistrationContent,
-    pub artifact_digest: program_registration::ProgramContentDigest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

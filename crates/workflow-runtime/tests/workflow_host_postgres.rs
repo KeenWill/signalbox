@@ -1,4 +1,4 @@
-//! PostgreSQL integration coverage for the JavaScript program host.
+//! PostgreSQL integration coverage for both workflow host adapters.
 
 #![allow(
     clippy::expect_used,
@@ -1898,6 +1898,593 @@ async fn retained_success_loads_without_executable_code_or_live_work() -> Result
     assert!(live.observed_outstanding.is_empty());
     assert_eq!(effects.executions, 0);
     assert_eq!(effects.adoptions, 0);
+    pool.close().await;
+    Ok(())
+}
+
+use signalbox_domain::program_registration::{ProgramExecutable, ProgramGrants};
+use signalbox_workflow_runtime::native::{
+    NativeCatalog, NativeProgram, NativeProgramError, NativeValue, WorkflowContext,
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NativeNumber(u64);
+
+impl NativeValue for NativeNumber {
+    fn decode(bytes: &[u8]) -> Result<Self, NativeProgramError> {
+        Ok(Self(u64::from_be_bytes(bytes.try_into().map_err(
+            |_| NativeProgramError::new("expected one big-endian u64"),
+        )?)))
+    }
+    fn encode(&self) -> Result<Vec<u8>, NativeProgramError> {
+        Ok(self.0.to_be_bytes().to_vec())
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ClockResult {
+    input: NativeNumber,
+    time: NativeNumber,
+}
+
+impl NativeValue for ClockResult {
+    fn decode(bytes: &[u8]) -> Result<Self, NativeProgramError> {
+        let (input, time) = bytes
+            .split_at_checked(size_of::<u64>())
+            .ok_or_else(|| NativeProgramError::new("missing clock input"))?;
+        Ok(Self {
+            input: NativeNumber::decode(input)?,
+            time: NativeNumber::decode(time)?,
+        })
+    }
+    fn encode(&self) -> Result<Vec<u8>, NativeProgramError> {
+        let mut bytes = self.input.encode()?;
+        bytes.extend(self.time.encode()?);
+        Ok(bytes)
+    }
+}
+
+struct ClockProgram;
+impl NativeProgram for ClockProgram {
+    type Input = NativeNumber;
+    type Output = ClockResult;
+    async fn run(
+        mut context: WorkflowContext,
+        input: Self::Input,
+    ) -> Result<Self::Output, NativeProgramError> {
+        let answer = context
+            .now(InlineFramePayload::new(input.encode()?))
+            .await?;
+        Ok(ClockResult {
+            input,
+            time: NativeNumber::decode(answer.as_bytes())?,
+        })
+    }
+}
+
+async fn native_fixture<P: NativeProgram>(
+    pool: &PgPool,
+    grants: ProgramGrants,
+    input: &[u8],
+) -> Result<(WorkflowHost, ProgramRunId), Box<dyn Error>> {
+    let mut catalog = NativeCatalog::new()?;
+    catalog.insert::<P>("fixture".into(), "one".into())?;
+    let executable = catalog
+        .executable("fixture", "one")
+        .expect("compiled entry");
+    let repository =
+        signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
+            pool.clone(),
+        );
+    let registration = repository
+        .register_executable_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            signalbox_domain::program_registration::ProgramRegistrationContent {
+                name: "fixture".into(),
+                revision: "one".into(),
+                executable,
+                grants,
+            },
+        )
+        .await?;
+    let run = ProgramRunId::from_uuid(Uuid::now_v7());
+    repository.start_run(run, registration.id, input).await?;
+    assert_eq!(repository.for_run(run).await?, Some(registration));
+    Ok((
+        WorkflowHost::new(ProgramJournalRepository::new(pool.clone())).with_native_catalog(catalog),
+        run,
+    ))
+}
+
+fn no_native_effects() -> EffectProbe {
+    EffectProbe {
+        policy: signalbox_workflow_runtime::effects::EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    }
+}
+
+/// The fixture input and clock reading are arbitrary distinct full-width values.
+const NATIVE_INPUT: NativeNumber = NativeNumber(u64::MAX - 1);
+const NATIVE_TIME: NativeNumber = NativeNumber(u64::MAX);
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn native_clock_retains_typed_result_without_resolving_code_on_retry()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (host, run) = native_fixture::<ClockProgram>(
+        &pool,
+        ProgramGrants::new([signalbox_domain::ProgramCapability::Time]),
+        &NATIVE_INPUT.encode()?,
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let mut clock = ScriptedDeliveries::new([DeliveryKind::Answer {
+        resolves: request(1, RequestKind::Now(InlineFramePayload::default())).ordinal(),
+        payload: InlineFramePayload::new(NATIVE_TIME.encode()?),
+    }]);
+    let mut effects = no_native_effects();
+    let outcome = host
+        .execute_registered(run, &mut clock, &mut effects)
+        .await?;
+    let ProgramExecutionOutcome::Completed(result) = &outcome else {
+        panic!("native clock completes: {outcome:?}")
+    };
+    assert_eq!(
+        ClockResult::decode(result.as_bytes())?,
+        ClockResult {
+            input: NATIVE_INPUT,
+            time: NATIVE_TIME
+        }
+    );
+    assert_eq!(
+        clock.observed_outstanding,
+        vec![vec![request(
+            1,
+            RequestKind::Now(InlineFramePayload::new(NATIVE_INPUT.encode()?))
+        )]]
+    );
+    let loaded = journal.load(run).await?.expect("retained clock journal");
+    assert_eq!(loaded.result(), Some(result));
+    assert_eq!(loaded.entries().len(), 4);
+    let mut no_live = ScriptedDeliveries::new([]);
+    assert_eq!(
+        WorkflowHost::new(journal.clone())
+            .execute_registered(run, &mut no_live, &mut effects)
+            .await?,
+        outcome
+    );
+    assert_eq!(
+        journal
+            .load(run)
+            .await?
+            .expect("retained journal")
+            .entries(),
+        loaded.entries()
+    );
+    assert!(no_live.observed_outstanding.is_empty());
+    assert_eq!(effects.executions, 0);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn native_partial_replay_resumes_a_request_without_its_answer() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (host, run) = native_fixture::<ClockProgram>(
+        &pool,
+        ProgramGrants::new([signalbox_domain::ProgramCapability::Time]),
+        &NATIVE_INPUT.encode()?,
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let recorded = journal
+        .append_request(
+            run,
+            None,
+            RequestKind::Now(InlineFramePayload::new(NATIVE_INPUT.encode()?)),
+        )
+        .await?;
+    let mut clock = ScriptedDeliveries::new([DeliveryKind::Answer {
+        resolves: recorded.ordinal(),
+        payload: InlineFramePayload::new(NATIVE_TIME.encode()?),
+    }]);
+    let outcome = host
+        .execute_registered(run, &mut clock, &mut no_native_effects())
+        .await?;
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::new(
+            ClockResult {
+                input: NATIVE_INPUT,
+                time: NATIVE_TIME
+            }
+            .encode()?
+        ))
+    );
+    assert_eq!(clock.observed_outstanding, vec![vec![recorded.clone()]]);
+    let loaded = journal.load(run).await?.expect("resumed journal");
+    assert_eq!(
+        loaded.entries().first().expect("original request").frame(),
+        &JournalFrame::Request(recorded)
+    );
+    assert_eq!(loaded.entries().len(), 4);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn native_partial_replay_consumes_a_recorded_clock_answer() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (host, run) = native_fixture::<ClockProgram>(
+        &pool,
+        ProgramGrants::new([signalbox_domain::ProgramCapability::Time]),
+        &NATIVE_INPUT.encode()?,
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let recorded = journal
+        .append_request(
+            run,
+            None,
+            RequestKind::Now(InlineFramePayload::new(NATIVE_INPUT.encode()?)),
+        )
+        .await?;
+    journal
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: recorded.ordinal(),
+                payload: InlineFramePayload::new(NATIVE_TIME.encode()?),
+            },
+        )
+        .await?;
+    let mut clock = ScriptedDeliveries::new([]);
+    assert_eq!(
+        host.execute_registered(run, &mut clock, &mut no_native_effects())
+            .await?,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::new(
+            ClockResult {
+                input: NATIVE_INPUT,
+                time: NATIVE_TIME
+            }
+            .encode()?
+        ))
+    );
+    assert!(clock.observed_outstanding.is_empty());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn native_missing_grant_records_refusal_before_any_live_clock_call()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (host, run) =
+        native_fixture::<ClockProgram>(&pool, ProgramGrants::new([]), &NATIVE_INPUT.encode()?)
+            .await?;
+    let mut clock = ScriptedDeliveries::new([]);
+    assert!(matches!(
+        host.execute_registered(run, &mut clock, &mut no_native_effects())
+            .await?,
+        ProgramExecutionOutcome::Faulted(ProgramFault::ProgramError(_))
+    ));
+    assert!(clock.observed_outstanding.is_empty());
+    let loaded = ProgramJournalRepository::new(pool.clone())
+        .load(run)
+        .await?
+        .expect("refused journal");
+    assert!(
+        matches!(loaded.entries()[1].frame(), JournalFrame::Delivery(frame) if matches!(frame.kind(), DeliveryKind::Reject { reason: signalbox_domain::RejectReason::CapabilityDenied, .. }))
+    );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn native_divergence_records_the_shared_nondeterminism_fault() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (host, run) = native_fixture::<ClockProgram>(
+        &pool,
+        ProgramGrants::new([signalbox_domain::ProgramCapability::Time]),
+        &NATIVE_INPUT.encode()?,
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let expected = journal
+        .append_request(run, None, RequestKind::Now(payload(b"different request")))
+        .await?;
+    let mut clock = ScriptedDeliveries::new([]);
+    let outcome = host
+        .execute_registered(run, &mut clock, &mut no_native_effects())
+        .await?;
+    assert!(
+        matches!(&outcome, ProgramExecutionOutcome::Faulted(ProgramFault::Nondeterminism { expected: frame, observed }) if frame == &expected && observed.kind() == &RequestKind::Now(InlineFramePayload::new(NATIVE_INPUT.encode()?)))
+    );
+    assert!(clock.observed_outstanding.is_empty());
+    assert_eq!(
+        WorkflowHost::new(journal)
+            .execute_registered(run, &mut clock, &mut no_native_effects())
+            .await?,
+        outcome
+    );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn native_invalid_input_faults_before_program_requests() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (host, run) = native_fixture::<ClockProgram>(
+        &pool,
+        ProgramGrants::new([signalbox_domain::ProgramCapability::Time]),
+        b"invalid",
+    )
+    .await?;
+    let mut clock = ScriptedDeliveries::new([]);
+    assert!(matches!(
+        host.execute_registered(run, &mut clock, &mut no_native_effects())
+            .await?,
+        ProgramExecutionOutcome::Faulted(ProgramFault::ProgramError(_))
+    ));
+    assert!(clock.observed_outstanding.is_empty());
+    assert_eq!(
+        ProgramJournalRepository::new(pool.clone())
+            .load(run)
+            .await?
+            .expect("faulted journal")
+            .entries()
+            .len(),
+        1
+    );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unavailable_native_revision_faults_without_executing_another_revision()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_host, run) = native_fixture::<ClockProgram>(
+        &pool,
+        ProgramGrants::new([signalbox_domain::ProgramCapability::Time]),
+        &NATIVE_INPUT.encode()?,
+    )
+    .await?;
+    let mut catalog = NativeCatalog::new()?;
+    catalog.insert::<ClockProgram>("fixture".into(), "different-revision".into())?;
+    let host =
+        WorkflowHost::new(ProgramJournalRepository::new(pool.clone())).with_native_catalog(catalog);
+    let mut clock = ScriptedDeliveries::new([]);
+    let outcome = host
+        .execute_registered(run, &mut clock, &mut no_native_effects())
+        .await?;
+    assert!(matches!(
+        &outcome,
+        ProgramExecutionOutcome::Faulted(ProgramFault::ContractRetired(_))
+    ));
+    assert_eq!(
+        host.execute_registered(run, &mut clock, &mut no_native_effects())
+            .await?,
+        outcome
+    );
+    assert!(clock.observed_outstanding.is_empty());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unavailable_native_binary_faults_even_when_entry_and_revision_match()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut catalog = NativeCatalog::new()?;
+    catalog.insert::<ClockProgram>("fixture".into(), "one".into())?;
+    let mut executable = catalog
+        .executable("fixture", "one")
+        .expect("compiled entry");
+    let ProgramExecutable::Native { binary_digest, .. } = &mut executable else {
+        panic!("native entry")
+    };
+    *binary_digest =
+        signalbox_domain::program_registration::ProgramContentDigest::of(b"different executable");
+    let repository =
+        signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
+            pool.clone(),
+        );
+    let registration = repository
+        .register_executable_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            signalbox_domain::program_registration::ProgramRegistrationContent {
+                name: "fixture".into(),
+                revision: "one".into(),
+                executable,
+                grants: ProgramGrants::new([signalbox_domain::ProgramCapability::Time]),
+            },
+        )
+        .await?;
+    let run = ProgramRunId::from_uuid(Uuid::now_v7());
+    repository
+        .start_run(run, registration.id, &NATIVE_INPUT.encode()?)
+        .await?;
+    let mut clock = ScriptedDeliveries::new([]);
+    assert!(matches!(
+        WorkflowHost::new(ProgramJournalRepository::new(pool.clone()))
+            .with_native_catalog(catalog)
+            .execute_registered(run, &mut clock, &mut no_native_effects())
+            .await?,
+        ProgramExecutionOutcome::Faulted(ProgramFault::ContractRetired(_))
+    ));
+    assert!(clock.observed_outstanding.is_empty());
+    pool.close().await;
+    Ok(())
+}
+
+struct ReceiptProgram;
+impl NativeProgram for ReceiptProgram {
+    type Input = NativeNumber;
+    type Output = NativeNumber;
+    async fn run(
+        mut context: WorkflowContext,
+        input: Self::Input,
+    ) -> Result<Self::Output, NativeProgramError> {
+        let answer = context
+            .effect(signalbox_domain::EffectRequest::new(
+                signalbox_domain::ProgramCapability::Judge,
+                "fixture".into(),
+                InlineFramePayload::new(input.encode()?),
+            ))
+            .await?;
+        NativeNumber::decode(answer.as_bytes())
+    }
+}
+
+struct LostAnswerEffect {
+    pool: PgPool,
+    executions: usize,
+    adoptions: usize,
+}
+impl signalbox_workflow_runtime::effects::EffectExecutor for LostAnswerEffect {
+    fn recovery(
+        &self,
+        _: &signalbox_domain::EffectRequest,
+    ) -> signalbox_workflow_runtime::effects::EffectRecovery {
+        signalbox_workflow_runtime::effects::EffectRecovery::Idempotent
+    }
+    fn adopt<'a>(
+        &'a mut self,
+        invocation: signalbox_workflow_runtime::effects::EffectInvocation<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<InlineFramePayload>, LiveDeliveryFailure>> + 'a>>
+    {
+        self.adoptions += 1;
+        Box::pin(async move {
+            let receipt: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT payload FROM native_effect_receipt WHERE run = $1 AND ordinal = $2",
+            )
+            .bind(invocation.run.into_uuid())
+            .bind(invocation.ordinal.as_u64() as i64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| LiveDeliveryFailure::new(error.to_string()))?;
+            Ok(receipt.map(InlineFramePayload::new))
+        })
+    }
+    fn execute<'a>(
+        &'a mut self,
+        invocation: signalbox_workflow_runtime::effects::EffectInvocation<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
+        self.executions += 1;
+        Box::pin(async move {
+            sqlx::query(
+                "INSERT INTO native_effect_receipt (run, ordinal, payload) VALUES ($1, $2, $3)",
+            )
+            .bind(invocation.run.into_uuid())
+            .bind(invocation.ordinal.as_u64() as i64)
+            .bind(invocation.request.payload().as_bytes())
+            .execute(&self.pool)
+            .await
+            .map_err(|error| LiveDeliveryFailure::new(error.to_string()))?;
+            Err(LiveDeliveryFailure::new("lost answer after effect commit"))
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn native_lost_answer_adoption_returns_the_committed_receipt_without_reexecution()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    sqlx::query("CREATE TABLE native_effect_receipt (run uuid, ordinal bigint, payload bytea NOT NULL, PRIMARY KEY (run, ordinal))").execute(&pool).await?;
+    let (host, run) = native_fixture::<ReceiptProgram>(
+        &pool,
+        ProgramGrants::new([signalbox_domain::ProgramCapability::Judge]),
+        &NATIVE_INPUT.encode()?,
+    )
+    .await?;
+    let mut effects = LostAnswerEffect {
+        pool: pool.clone(),
+        executions: 0,
+        adoptions: 0,
+    };
+    let mut clock = ScriptedDeliveries::new([]);
+    assert!(matches!(
+        host.execute_registered(run, &mut clock, &mut effects).await,
+        Err(WorkflowHostError::LiveDelivery(_))
+    ));
+    let journal = ProgramJournalRepository::new(pool.clone());
+    assert_eq!(
+        journal
+            .load(run)
+            .await?
+            .expect("unanswered effect")
+            .entries()
+            .len(),
+        1
+    );
+    let outcome = host
+        .execute_registered(run, &mut clock, &mut effects)
+        .await?;
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::new(NATIVE_INPUT.encode()?))
+    );
+    assert_eq!(effects.executions, 1);
+    assert_eq!(effects.adoptions, 1);
+    assert!(clock.observed_outstanding.is_empty());
+    assert_eq!(
+        WorkflowHost::new(journal)
+            .execute_registered(run, &mut clock, &mut effects)
+            .await?,
+        outcome
+    );
+    assert_eq!(effects.adoptions, 1);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn native_registration_adopts_equal_retries_and_refuses_changed_executable()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_host, run) =
+        native_fixture::<ClockProgram>(&pool, ProgramGrants::new([]), &NATIVE_INPUT.encode()?)
+            .await?;
+    let repository =
+        signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
+            pool.clone(),
+        );
+    let original = repository.for_run(run).await?.expect("native registration");
+    assert_eq!(
+        repository
+            .register_executable_user(original.id, original.content.clone())
+            .await?,
+        original
+    );
+    let mut changed = original.content.clone();
+    let ProgramExecutable::Native { revision, .. } = &mut changed.executable else {
+        panic!("native registration")
+    };
+    *revision = "different-revision".into();
+    assert!(matches!(repository.register_executable_user(original.id, changed).await, Err(signalbox_persistence::program_registration::ProgramRegistrationError::RegistrationConflict { .. })));
+    assert_eq!(repository.for_run(run).await?, Some(original));
+    let invalid = sqlx::query("INSERT INTO program_registration (registration_id, name, revision, executable_kind, artifact, native_entry, native_revision, binary_digest, grants) SELECT $1, 'mixed', revision, executable_kind, '', native_entry, native_revision, binary_digest, grants FROM program_registration")
+        .bind(Uuid::now_v7()).execute(&pool).await.expect_err("native and JavaScript columns cannot coexist");
+    assert_eq!(
+        invalid
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("program_registration_executable_shape")
+    );
     pool.close().await;
     Ok(())
 }

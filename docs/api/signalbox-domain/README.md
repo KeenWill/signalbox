@@ -4,7 +4,7 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
-| program_registration | 5 | 0 | 0 | [program_registration](program_registration.md) |
+| program_registration | 6 | 0 | 0 | [program_registration](program_registration.md) |
 | program_session | 6 | 1 | 0 | [program_session](program_session.md) |
 | accepted_input | 5 | 0 | 0 | [accepted_input](accepted_input.md) |
 | actor | 2 | 0 | 0 | [actor](actor.md) |

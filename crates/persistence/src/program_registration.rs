@@ -3,8 +3,8 @@
 use signalbox_domain::{
     ProgramRegistrationId, ProgramRunId,
     program_registration::{
-        ProgramContentDigest, ProgramGrants, ProgramRegistration, ProgramRegistrationContent,
-        ProgramRegistrationRequest,
+        ProgramContentDigest, ProgramExecutable, ProgramGrants, ProgramRegistration,
+        ProgramRegistrationContent, ProgramRegistrationRequest,
     },
 };
 use sqlx::{PgPool, Row, postgres::PgRow};
@@ -61,7 +61,8 @@ impl ProgramRegistrationRepository {
         registration: ProgramRegistrationId,
         request: ProgramRegistrationRequest,
     ) -> Result<ProgramRegistration, ProgramRegistrationError> {
-        self.insert(registration, request.into_content()).await
+        self.register_executable_user(registration, request.into_content())
+            .await
     }
 
     /// Resolves the registrant's grants only through its durable registration.
@@ -79,31 +80,38 @@ impl ProgramRegistrationRepository {
         if !parent.content.grants.permits_child(&content.grants) {
             return Err(ProgramRegistrationError::GrantsDenied);
         }
-        self.insert(registration, content).await
+        self.register_executable_user(registration, content).await
     }
 
-    async fn insert(
+    /// Stores an executable identity admitted at the user boundary.
+    pub async fn register_executable_user(
         &self,
         id: ProgramRegistrationId,
         content: ProgramRegistrationContent,
     ) -> Result<ProgramRegistration, ProgramRegistrationError> {
-        let registration = ProgramRegistration {
-            id,
-            artifact_digest: ProgramContentDigest::of(content.artifact.as_bytes()),
-            content,
-        };
+        let registration = ProgramRegistration { id, content };
+        let executable = ExecutableColumns::from(&registration.content.executable);
         let mut transaction = self.pool.begin().await?;
         let inserted = sqlx::query(
             "INSERT INTO program_registration
-            (registration_id, name, revision, source_digest, artifact_digest, artifact, grants)
-            VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+            (registration_id, name, revision, source_digest, artifact_digest, artifact, grants,
+             executable_kind, native_entry, native_revision, binary_digest)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT DO NOTHING",
         )
         .bind(registration.id.into_uuid())
         .bind(&registration.content.name)
         .bind(&registration.content.revision)
-        .bind(registration.content.source_digest.as_bytes().as_slice())
-        .bind(registration.artifact_digest.as_bytes().as_slice())
-        .bind(&registration.content.artifact)
+        .bind(
+            executable
+                .source_digest
+                .map(|digest| digest.as_bytes().to_vec()),
+        )
+        .bind(
+            executable
+                .artifact_digest
+                .map(|digest| digest.as_bytes().to_vec()),
+        )
+        .bind(executable.artifact)
         .bind(
             registration
                 .content
@@ -113,6 +121,14 @@ impl ProgramRegistrationRepository {
                 .copied()
                 .map(program_capability_to_str)
                 .collect::<Vec<_>>(),
+        )
+        .bind(executable.kind)
+        .bind(executable.entry)
+        .bind(executable.native_revision)
+        .bind(
+            executable
+                .binary_digest
+                .map(|digest| digest.as_bytes().to_vec()),
         )
         .execute(&mut *transaction)
         .await?;
@@ -240,32 +256,86 @@ fn decode(row: PgRow) -> Result<ProgramRegistration, ProgramRegistrationError> {
             program_capability_from_str(grant).ok_or(ProgramRegistrationError::Corruption("grant"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let source_digest: Vec<u8> = row.try_get("source_digest")?;
-    let artifact_digest: Vec<u8> = row.try_get("artifact_digest")?;
-    let artifact: String = row.try_get("artifact")?;
-    let artifact_digest = ProgramContentDigest::from_bytes(
-        artifact_digest
-            .try_into()
-            .map_err(|_| ProgramRegistrationError::Corruption("artifact digest"))?,
-    );
-    if artifact_digest != ProgramContentDigest::of(artifact.as_bytes()) {
-        return Err(ProgramRegistrationError::Corruption(
-            "artifact digest mismatch",
-        ));
-    }
+    let kind: String = row.try_get("executable_kind")?;
+    let executable = match kind.as_str() {
+        "javascript" => {
+            let artifact: String = row.try_get("artifact")?;
+            if digest(&row, "artifact_digest")? != ProgramContentDigest::of(artifact.as_bytes()) {
+                return Err(ProgramRegistrationError::Corruption(
+                    "artifact digest mismatch",
+                ));
+            }
+            ProgramExecutable::JavaScript {
+                source_digest: digest(&row, "source_digest")?,
+                artifact,
+            }
+        }
+        "native" => ProgramExecutable::Native {
+            entry: row.try_get("native_entry")?,
+            revision: row.try_get("native_revision")?,
+            binary_digest: digest(&row, "binary_digest")?,
+        },
+        _ => return Err(ProgramRegistrationError::Corruption("executable kind")),
+    };
     Ok(ProgramRegistration {
         id: ProgramRegistrationId::from_uuid(row.try_get("registration_id")?),
-        artifact_digest,
         content: ProgramRegistrationContent {
             name: row.try_get("name")?,
             revision: row.try_get("revision")?,
-            artifact,
-            source_digest: ProgramContentDigest::from_bytes(
-                source_digest
-                    .try_into()
-                    .map_err(|_| ProgramRegistrationError::Corruption("source digest"))?,
-            ),
+            executable,
             grants: ProgramGrants::new(grants),
         },
     })
+}
+
+fn digest(
+    row: &PgRow,
+    column: &'static str,
+) -> Result<ProgramContentDigest, ProgramRegistrationError> {
+    let bytes: Vec<u8> = row.try_get(column)?;
+    Ok(ProgramContentDigest::from_bytes(bytes.try_into().map_err(
+        |_| ProgramRegistrationError::Corruption(column),
+    )?))
+}
+
+struct ExecutableColumns<'a> {
+    kind: &'static str,
+    source_digest: Option<ProgramContentDigest>,
+    artifact_digest: Option<ProgramContentDigest>,
+    artifact: Option<&'a str>,
+    entry: Option<&'a str>,
+    native_revision: Option<&'a str>,
+    binary_digest: Option<ProgramContentDigest>,
+}
+
+impl<'a> From<&'a ProgramExecutable> for ExecutableColumns<'a> {
+    fn from(executable: &'a ProgramExecutable) -> Self {
+        match executable {
+            ProgramExecutable::JavaScript {
+                source_digest,
+                artifact,
+            } => Self {
+                kind: "javascript",
+                source_digest: Some(*source_digest),
+                artifact_digest: Some(ProgramContentDigest::of(artifact.as_bytes())),
+                artifact: Some(artifact),
+                entry: None,
+                native_revision: None,
+                binary_digest: None,
+            },
+            ProgramExecutable::Native {
+                entry,
+                revision,
+                binary_digest,
+            } => Self {
+                kind: "native",
+                source_digest: None,
+                artifact_digest: None,
+                artifact: None,
+                entry: Some(entry),
+                native_revision: Some(revision),
+                binary_digest: Some(*binary_digest),
+            },
+        }
+    }
 }
