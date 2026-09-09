@@ -839,10 +839,6 @@ pub(super) async fn load_frozen_epoch_system_prompt(
 }
 
 #[cfg(all(test, feature = "postgres-integration"))]
-#[path = "../../../../tooling/postgres_test_image.rs"]
-mod postgres_test_image;
-
-#[cfg(all(test, feature = "postgres-integration"))]
 mod preflight_tests {
     use super::*;
     use testcontainers_modules::{
@@ -855,7 +851,7 @@ mod preflight_tests {
     async fn tool_evidence_preflight_charges_every_retained_request_copy()
     -> Result<(), Box<dyn std::error::Error>> {
         let container = Postgres::default()
-            .with_tag(super::postgres_test_image::POSTGRES_IMAGE_TAG)
+            .with_tag(crate::test_support::postgres::POSTGRES_IMAGE_TAG)
             .with_cmd(crate::disposable_postgres_server_args())
             .with_mount(crate::disposable_postgres_state_tmpfs_from_example()?)
             .with_labels(crate::disposable_test_container_labels())

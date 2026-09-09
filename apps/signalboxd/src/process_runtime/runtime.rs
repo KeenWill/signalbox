@@ -644,46 +644,19 @@ fn observe_model_call_metrics(metrics: &TelemetryMetrics, state: DispatchedModel
 #[cfg(test)]
 mod runner_recovery_tests {
     use super::*;
-    use signalbox_persistence::{
-        disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-        disposable_test_container_labels, local_test_connection_options,
-    };
-    use testcontainers_modules::{
-        postgres::Postgres,
-        testcontainers::{ImageExt, runners::AsyncRunner},
-    };
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn recovery_waiters_share_one_listener_and_leave_pool_capacity_for_progress()
     -> Result<(), Box<dyn Error>> {
-        const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-        const DATABASE_USER: &str = "signalbox";
-        const DATABASE_PASSWORD: &str = "signalbox-test";
-        const DATABASE_NAME: &str = "signalbox";
         const POOL_CONNECTIONS: u32 = 2;
         const PENDING_REPLAYS: usize = 128;
         const COMPLETION_DEADLINE: Duration = Duration::from_secs(10);
-        let container = Postgres::default()
-            .with_db_name(DATABASE_NAME)
-            .with_user(DATABASE_USER)
-            .with_password(DATABASE_PASSWORD)
-            .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-            .with_tag(POSTGRES_IMAGE_TAG)
-            .with_labels(disposable_test_container_labels())
-            .start()
-            .await?;
-        let host = container.get_host().await?;
-        let port = container.get_host_port_ipv4(5432).await?;
-        let database_url =
-            format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(POOL_CONNECTIONS)
-            .connect_with(local_test_connection_options(&database_url)?)
-            .await?;
+        let (_container, pool, _database_url) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(POOL_CONNECTIONS)
+                .await?;
         let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
-        signalbox_persistence::migrate(&pool).await?;
+
         listener.listen("runner_recovery").await?;
         let (notifications, _) = watch::channel(());
         let mut waiters: Vec<_> = (0..PENDING_REPLAYS)
@@ -776,37 +749,21 @@ mod dispatcher_tests {
             CreateSession, SessionCreationCause, SessionCreationProvenance, TranscriptAncestry,
         };
         use signalbox_persistence::{
-            SessionCredentialPin, SessionModelCredential, disposable_postgres_server_args,
-            disposable_postgres_state_tmpfs_from_example, disposable_test_container_labels,
-            local_test_connection_options, migrate,
-        };
-        use testcontainers_modules::{
-            postgres::Postgres,
-            testcontainers::{ImageExt, runners::AsyncRunner},
+            SessionCredentialPin, SessionModelCredential, local_test_connection_options,
         };
 
-        const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
         const FIXTURE_FAMILY: &str = "fixture-family";
         const FIXTURE_CREDENTIAL: &str = "fixture-primary";
-        let container = Postgres::default()
-            .with_tag(POSTGRES_IMAGE_TAG)
-            .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-            .with_labels(disposable_test_container_labels())
-            .start()
-            .await?;
-        let url = format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            container.get_host().await?,
-            container.get_host_port_ipv4(5432).await?
-        );
+        let (container, pool, url) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(1).await?;
+        pool.close().await;
         let acquisition_timeout = Duration::from_millis(250);
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(acquisition_timeout)
             .connect_with(local_test_connection_options(&url)?)
             .await?;
-        migrate(&pool).await?;
+
         let session = SessionId::from_uuid(Uuid::now_v7());
         let command = CreateSession::new(
             DurableCommandId::from_uuid(Uuid::now_v7()),
