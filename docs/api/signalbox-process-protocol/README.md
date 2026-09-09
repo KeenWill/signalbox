@@ -5,7 +5,7 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | root | 1 | 0 | 0 | [root](root.md) |
-| program | 3 | 0 | 0 | [program](program.md) |
+| program | 9 | 0 | 0 | [program](program.md) |
 | credential_pool | 2 | 0 | 2 | [credential_pool](credential_pool.md) |
 | credential_exclusions | 2 | 0 | 0 | [credential_exclusions](credential_exclusions.md) |
 | delegation | 11 | 0 | 0 | [delegation](delegation.md) |

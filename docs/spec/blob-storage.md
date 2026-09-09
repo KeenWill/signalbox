@@ -77,11 +77,6 @@ There is no replica-retirement state. A recorded binding omitted from
 configuration remains an unavailable read candidate while other replicas can
 serve the blob.
 
-A `filesystem` store is admitted only on storage the host positively classifies
-as local, non-network, and non-userspace; network, userspace, and unclassified
-mounts fail startup. Why: a remote filesystem operation cannot be interrupted or
-bounded from inside the daemon.
-
 Several stores are enabled at once and routed by storage class; routing by media
 type or filename is inexpressible. Why: the daemon assigns the class, and a
 caller-supplied string must not select which infrastructure gains authority over
@@ -200,8 +195,8 @@ store I/O is owned by
 
 A model-call attachment check binds its cancellation to the call's authoritative
 cancellation; upload work binds cancellation to connection loss and daemon
-shutdown. Authoritative cancellation aborts store I/O without relabeling the
-cancellation as an attachment failure.
+shutdown. Authoritative cancellation ends the daemon's wait for store I/O
+without relabeling the cancellation as an attachment failure.
 
 Ingest publishes and verifies the object before it records the catalog rows,
 with no database transaction open across store I/O, as

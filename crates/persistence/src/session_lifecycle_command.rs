@@ -393,6 +393,11 @@ async fn apply(
             }
             let state =
                 session_lifecycle::resume_in_transaction(connection, session, actor).await?;
+            if state.is_parked() {
+                return Err(ApplyError::Rejected(
+                    SessionLifecycleCommandRejection::TransitionNotAdmitted,
+                ));
+            }
             Ok(SessionLifecycleApplication::Resumed { state })
         }
         SessionLifecycleOperation::Adopt { finish_condition } => {

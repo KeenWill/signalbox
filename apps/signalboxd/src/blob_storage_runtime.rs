@@ -58,24 +58,6 @@ impl BlobStoreRegistry {
         configuration: Option<&BlobStorageConfiguration>,
         pool: PgPool,
     ) -> Result<Option<Self>, BlobStoreRegistryError> {
-        Self::initialize_with_locality_policy(configuration, pool, true).await
-    }
-
-    /// Initializes a composed conformance fixture without relying on the test
-    /// host's backing-device classification.
-    #[cfg(feature = "test-support")]
-    pub async fn initialize_for_conformance(
-        configuration: Option<&BlobStorageConfiguration>,
-        pool: PgPool,
-    ) -> Result<Option<Self>, BlobStoreRegistryError> {
-        Self::initialize_with_locality_policy(configuration, pool, false).await
-    }
-
-    async fn initialize_with_locality_policy(
-        configuration: Option<&BlobStorageConfiguration>,
-        pool: PgPool,
-        require_local_backing: bool,
-    ) -> Result<Option<Self>, BlobStoreRegistryError> {
         let repository = BlobCatalogRepository::new(pool);
         let recorded = repository.recorded_store_bindings().await?;
         let Some(configuration) = configuration else {
@@ -86,10 +68,8 @@ impl BlobStoreRegistry {
         };
         validate_s3_locators(configuration)?;
 
-        let staging_root = open_blob_root(
-            configuration.staging_directory().to_path_buf(),
-            require_local_backing,
-        )?;
+        let staging_root =
+            OpenedFilesystemBlobRoot::open(configuration.staging_directory().to_path_buf())?;
         let mut opened_stores = Vec::new();
         let mut s3_stores = Vec::new();
         let mut bindings_to_register = BTreeSet::new();
@@ -112,7 +92,7 @@ impl BlobStoreRegistry {
                 } else {
                     NamespaceBindingState::New
                 };
-                match open_blob_root(root.to_path_buf(), require_local_backing) {
+                match OpenedFilesystemBlobRoot::open(root.to_path_buf()) {
                     Ok(opened) => {
                         opened_stores.push((
                             name.clone(),
@@ -357,22 +337,6 @@ impl BlobStore for UnavailableBlobStore {
         Box::pin(async move { Err(BlobStoreError::unavailable(self.cause)) })
     }
 }
-
-fn open_blob_root(
-    root: PathBuf,
-    require_local_backing: bool,
-) -> Result<OpenedFilesystemBlobRoot, FilesystemBlobStoreConstructionError> {
-    if require_local_backing {
-        return OpenedFilesystemBlobRoot::open(root);
-    }
-    #[cfg(feature = "test-support")]
-    {
-        OpenedFilesystemBlobRoot::open_without_locality_check_for_test(root)
-    }
-    #[cfg(not(feature = "test-support"))]
-    OpenedFilesystemBlobRoot::open(root)
-}
-
 /// Reports whether any semantic write route currently selects this store.
 ///
 /// The parsed route map is the authority, so a store named only by a storage

@@ -59,7 +59,7 @@ pub enum GoalLifecycleState {
     },
     Achieved {
         turn_id: CanonicalUuid,
-        tool_request_id: CanonicalUuid,
+        tool_request_id: option::Option<CanonicalUuid>,
     },
     UserStopped {},
     Superseded {
@@ -119,7 +119,7 @@ pub enum GoalHistoryEvent {
     Achieved {
         report: string::String,
         turn_id: CanonicalUuid,
-        tool_request_id: CanonicalUuid,
+        tool_request_id: option::Option<CanonicalUuid>,
     },
     UserStopped {
         command_id: CommandId,
