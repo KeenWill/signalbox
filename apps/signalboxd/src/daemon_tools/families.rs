@@ -25,6 +25,7 @@ use signalbox_tools_workspace::{
 use std::{
     fmt,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 /// The six executors one workspace root binds.
@@ -125,6 +126,7 @@ where
     /// The root stays construction input for each family exactly as before:
     /// the filesystem adapter is already bound to it, the execution suites
     /// capture its identity, and the Git suite validates its repository layout.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn try_new(
         filesystem: FileSystem,
         root: &Path,
@@ -133,6 +135,7 @@ where
         cargo_registry_cache: Option<&Path>,
         sandbox: &signalbox_tools_exec::SandboxConfiguration,
         max_git_object_bytes: Option<usize>,
+        sandboxed_exec_timeout_bound: Option<Duration>,
     ) -> Result<Self, DaemonToolsConstructionError> {
         // Each family below resolves the same pathname independently, so a
         // rename or replacement between two of them would leave one family
@@ -158,10 +161,15 @@ where
         let git_object_format = local_git.object_format();
         let pinned_directories = local_git.pinned_directories();
         let sandboxed_exec = match cargo_registry_cache {
-            Some(cache) => {
-                SandboxedExecTool::try_new_with_cargo_registry(exec_runner.clone(), root, cache)
+            Some(cache) => SandboxedExecTool::try_new_with_cargo_registry(
+                exec_runner.clone(),
+                root,
+                cache,
+                sandboxed_exec_timeout_bound,
+            ),
+            None => {
+                SandboxedExecTool::try_new(exec_runner.clone(), root, sandboxed_exec_timeout_bound)
             }
-            None => SandboxedExecTool::try_new(exec_runner.clone(), root),
         }
         .map_err(|_| DaemonToolsConstructionError::Exec)?;
         let sandboxed_exec = sandboxed_exec.with_sandbox_configuration(sandbox.clone());
@@ -252,6 +260,7 @@ pub(super) struct ConfiguredWorkspaceComposition<
     pub(super) cargo_registry_cache: Option<PathBuf>,
     pub(super) sandbox: signalbox_tools_exec::SandboxConfiguration,
     pub(super) max_git_object_bytes: Option<usize>,
+    pub(super) sandboxed_exec_timeout_bound: Option<Duration>,
 }
 
 /// Credential channels required by the daemon's base tool composition.

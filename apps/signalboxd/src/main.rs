@@ -1654,6 +1654,7 @@ async fn run_hub(
                 .integer("max_git_object_bytes")
                 .flatten()
                 .map(|bytes| bytes as usize),
+            tool_configuration.sandboxed_exec_timeout_bound(),
             model_configuration.web_fetch_egress_policy(),
         ),
         None => DaemonTools::try_new_without_tool_mappings(

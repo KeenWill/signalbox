@@ -28,7 +28,7 @@ use signalbox_tools_workspace::{
     WORKSPACE_MUTATION_TOOL_NAMES, WORKSPACE_READ_TOOL_NAMES, WorkspaceFileSystem,
     WorkspaceMutationFileSystem,
 };
-use std::{fmt, path::PathBuf, sync::Arc};
+use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
 #[allow(
@@ -105,6 +105,7 @@ pub(super) struct SessionWorkspaceExecutors<
     cargo_registry_cache: Option<PathBuf>,
     sandbox: signalbox_tools_exec::SandboxConfiguration,
     max_git_object_bytes: Option<usize>,
+    sandboxed_exec_timeout_bound: Option<Duration>,
     configured: WorkspaceBoundExecutors<FileSystem, ExecRunner>,
     failure_details: SessionWorkspaceFailureDetails,
     state: Arc<Mutex<SessionWorkspaceState<WorkspaceBoundExecutors<FileSystem, ExecRunner>>>>,
@@ -124,6 +125,7 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
             cargo_registry_cache: self.cargo_registry_cache.clone(),
             sandbox: self.sandbox.clone(),
             max_git_object_bytes: self.max_git_object_bytes,
+            sandboxed_exec_timeout_bound: self.sandboxed_exec_timeout_bound,
             configured: self.configured.clone(),
             failure_details: self.failure_details.clone(),
             state: Arc::clone(&self.state),
@@ -157,6 +159,7 @@ where
             cargo_registry_cache,
             sandbox,
             max_git_object_bytes,
+            sandboxed_exec_timeout_bound,
         } = composition;
         let failure_details = SessionWorkspaceFailureDetails::try_new()?;
         Ok(Self {
@@ -169,6 +172,7 @@ where
             cargo_registry_cache,
             sandbox,
             max_git_object_bytes,
+            sandboxed_exec_timeout_bound,
             configured: families.executors,
             failure_details,
             state: Arc::new(Mutex::new(SessionWorkspaceState::new())),
@@ -399,6 +403,7 @@ where
             self.cargo_registry_cache.as_deref(),
             &self.sandbox,
             self.max_git_object_bytes,
+            self.sandboxed_exec_timeout_bound,
         )
         .map_err(SessionWorkspaceFailure::Composition)?;
         // Every family above resolved the derived pathname independently, and

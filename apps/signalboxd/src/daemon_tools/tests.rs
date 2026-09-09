@@ -119,6 +119,7 @@ fn local_git_construction_telemetry_omits_the_workspace_path() {
                 None,
                 &Default::default(),
                 None,
+                None,
             ),
             Err(DaemonToolsConstructionError::LocalGit)
         ));
@@ -324,6 +325,7 @@ fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
             None,
             &Default::default(),
             None,
+            None,
         )
         .expect("workspace-bound tools compile"),
         roots: SessionWorkspaceRoots::try_new(workspace).expect("session workspace roots derive"),
@@ -332,6 +334,7 @@ fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
         cargo_registry_cache: None,
         sandbox: Default::default(),
         max_git_object_bytes: None,
+        sandboxed_exec_timeout_bound: None,
     };
     let conversations = ConversationTools::try_new(OfflineConversationPort)
         .expect("offline conversation tools compile");
@@ -415,6 +418,7 @@ fn production_constructor_matches_the_complete_mapped_catalog() {
         &std::env::current_exe().expect("test executable path is available"),
         None,
         &Default::default(),
+        None,
         None,
         WebFetchEgressPolicy::deny_all(),
     )
@@ -3112,7 +3116,12 @@ fn bridge_build_direct_invocation_fixture() {
 #[test]
 fn bridge_build_rejects_an_ambiguous_directly_invoked_test_binary() {
     let current = std::env::current_exe().expect("test executable path is available");
-    let artifact_layout = tempfile::tempdir().expect("synthetic artifact layout exists");
+    let artifact_layout = tempfile::tempdir_in(
+        current
+            .parent()
+            .expect("test executable has a parent directory"),
+    )
+    .expect("synthetic artifact layout exists");
     let ambiguous_artifact_directory = artifact_layout.path().join("target/debug/deps");
     fs::create_dir_all(&ambiguous_artifact_directory)
         .expect("ambiguous Cargo artifact directory exists");
@@ -3121,8 +3130,8 @@ fn bridge_build_rejects_an_ambiguous_directly_invoked_test_binary() {
             .file_name()
             .expect("test executable path has a file name"),
     );
-    fs::copy(&current, &ambiguous_artifact)
-        .expect("test executable is copied into the ambiguous artifact layout");
+    fs::hard_link(&current, &ambiguous_artifact)
+        .expect("test executable is linked into the ambiguous artifact layout");
     let invocation_directory =
         tempfile::tempdir().expect("synthetic direct invocation directory exists");
     let output = Command::new(ambiguous_artifact)
