@@ -535,7 +535,7 @@ async fn frontier_probe_reached(pool: &PgPool, key: i64) -> Result<bool, Box<dyn
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let waiting: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = 0 AND objid::bigint = $1)",
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND locktype = 'advisory' AND NOT granted AND classid = 0 AND objid::bigint = $1)",
         ).bind(key).fetch_one(pool).await?;
         if waiting {
             return Ok(true);

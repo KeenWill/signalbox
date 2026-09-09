@@ -5,7 +5,7 @@ use crate::*;
 /// Records one or two valid compactions over a completed fixture turn.
 async fn completed_compactions(
     count: u64,
-) -> Result<(ContainerAsync<Postgres>, PgPool, ContextCompactionId), Box<dyn Error>> {
+) -> Result<(TestDatabase, PgPool, ContextCompactionId), Box<dyn Error>> {
     const FIXTURE_SEED: u128 = 0x134900;
     let (container, pool, _) = migrated_postgres().await?;
     let (fixture, repository, authorized) =

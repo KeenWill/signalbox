@@ -1,6 +1,7 @@
 //! Shared test fixtures.
 
 use super::*;
+use signalbox_persistence::test_support::postgres::TestDatabase;
 
 #[path = "../../../../tooling/postgres_test_image.rs"]
 mod postgres_test_image;
@@ -19,9 +20,10 @@ pub(crate) fn test_session_credential_pin() -> signalbox_persistence::SessionCre
     .expect("test credential pin is valid")
 }
 
-pub(crate) async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>>
-{
-    migrated_postgres_with_max_connections(4).await
+pub(crate) async fn migrated_postgres() -> Result<(TestDatabase, PgPool), Box<dyn Error>> {
+    let (database, pool, _) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+    Ok((database, pool))
 }
 
 pub(crate) async fn migrated_postgres_with_max_connections(

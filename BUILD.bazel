@@ -19,6 +19,7 @@ exports_files([
     "config/signalbox-runner.example.toml",
     "tooling/codex-cli/release.json",
     "tooling/postgres_test_image.rs",
+    "tooling/postgres_test_container.py",
     ".github/postgres-integration-suites.toml",
     "tooling/requirements-mdformat.txt",
     "config/signalboxd.example.toml",
@@ -687,6 +688,7 @@ rust_postgres_suite(
         "//crates/workflow-runtime:unit_tests": "signalbox_workflow_runtime",
         "//crates/workflow-runtime:workflow_host_postgres": "workflow_host_postgres",
     },
+    tags = [],
 )
 
 DAEMON_TEST_BINARIES = {

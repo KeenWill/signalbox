@@ -1725,15 +1725,14 @@ async fn append_event(
     let exact: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1 FROM gh_event
-             WHERE content_identity = $2 AND normalized_payload = $3)
+             WHERE content_identity = $2)
             AND NOT EXISTS (
                 SELECT 1 FROM gh_event
                  WHERE event_id = $1
-                   AND (content_identity <> $2 OR normalized_payload <> $3))",
+                   AND content_identity <> $2)",
     )
     .bind(event.id().into_uuid())
     .bind(candidate.content_identity.as_bytes().as_slice())
-    .bind(payload.as_slice())
     .fetch_one(&mut **transaction)
     .await?;
     Ok(exact.then_some(EventAdmission::Replayed))

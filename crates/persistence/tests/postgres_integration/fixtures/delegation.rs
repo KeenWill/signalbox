@@ -990,7 +990,7 @@ pub(crate) fn constraint_name(error: &sqlx::Error) -> Option<&str> {
 
 pub(crate) async fn prepared_recipient_delivery_fixture(
     seed: u128,
-) -> Result<(ContainerAsync<Postgres>, PgPool, RawDelegationFixture), Box<dyn Error>> {
+) -> Result<(TestDatabase, PgPool, RawDelegationFixture), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = prepare_canonical_raw_delegation(&pool, seed).await?;
     let mut base = pool.begin().await?;
@@ -1001,7 +1001,7 @@ pub(crate) async fn prepared_recipient_delivery_fixture(
 
 pub(crate) async fn prepared_delegation_with_wait(
     seed: u128,
-) -> Result<(ContainerAsync<Postgres>, PgPool, RawDelegationFixture), Box<dyn Error>> {
+) -> Result<(TestDatabase, PgPool, RawDelegationFixture), Box<dyn Error>> {
     let (container, pool, fixture) = prepared_recipient_delivery_fixture(seed).await?;
     let mut setup = pool.begin().await?;
     insert_raw_wait_with_update(&mut setup, fixture).await?;

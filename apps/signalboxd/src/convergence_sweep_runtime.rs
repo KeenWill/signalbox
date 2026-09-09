@@ -1043,14 +1043,7 @@ mod tests {
         InProcessEligibilityWorkSource,
     };
     use signalbox_persistence::{
-        convergence_sweep::ConvergenceSweepFailureDisposition, disposable_postgres_server_args,
-        disposable_postgres_state_tmpfs, disposable_test_container_labels,
-        local_test_connection_options, migrate, scheduler::PostgresEligibilitySweep,
-    };
-    use sqlx::postgres::PgPoolOptions;
-    use testcontainers_modules::{
-        postgres::Postgres as TestPostgres,
-        testcontainers::{self, ImageExt, runners::AsyncRunner},
+        convergence_sweep::ConvergenceSweepFailureDisposition, scheduler::PostgresEligibilitySweep,
     };
 
     use super::*;
@@ -1110,10 +1103,6 @@ mod tests {
         );
     }
 
-    const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-    const DATABASE_NAME: &str = "signalbox_convergence_sweep";
-    const DATABASE_USER: &str = "signalbox";
-    const DATABASE_PASSWORD: &str = "signalbox-test-only";
     const FIXTURE_REPOSITORY: &str = "signalbox/repository";
     const FIXTURE_PULL_REQUEST: u64 = 892;
     const FIXTURE_HEAD_SHA: &str = "1111111111111111111111111111111111111111";
@@ -1123,28 +1112,16 @@ mod tests {
     const FIXTURE_TEMPLATE: &str = "review-response";
     const FIXTURE_UNRESOLVED_THREADS: u64 = 3;
 
-    async fn migrated_postgres()
-    -> Result<(testcontainers::ContainerAsync<TestPostgres>, PgPool), Box<dyn Error>> {
-        let container = TestPostgres::default()
-            .with_db_name(DATABASE_NAME)
-            .with_user(DATABASE_USER)
-            .with_password(DATABASE_PASSWORD)
-            .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs(None))
-            .with_tag(POSTGRES_IMAGE_TAG)
-            .with_labels(disposable_test_container_labels())
-            .start()
-            .await?;
-        let host = container.get_host().await?;
-        let port = container.get_host_port_ipv4(5432).await?;
-        let database_url =
-            format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(local_test_connection_options(&database_url)?)
-            .await?;
-        migrate(&pool).await?;
-        Ok((container, pool))
+    async fn migrated_postgres() -> Result<
+        (
+            signalbox_persistence::test_support::postgres::TestDatabase,
+            PgPool,
+        ),
+        Box<dyn Error>,
+    > {
+        let (database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        Ok((database, pool))
     }
 
     fn fixture_repository() -> RepositorySlug {

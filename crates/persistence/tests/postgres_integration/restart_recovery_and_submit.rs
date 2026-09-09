@@ -2485,7 +2485,7 @@ async fn submit_and_defaults_replacement_interleave_without_deadlock() -> Result
         let waiting: i64 = sqlx::query_scalar(
             "SELECT count(*)
              FROM pg_stat_activity
-             WHERE wait_event_type = 'Lock'
+             WHERE datname = current_database() AND wait_event_type = 'Lock'
                AND query LIKE '%FROM session_current_defaults%'",
         )
         .fetch_one(&pool)
