@@ -405,7 +405,7 @@ pub(super) fn checkout_paths(
             &parent,
             leaf,
             OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(mode & 0o777),
+            crate::descriptor::mode_from_metadata_bits(mode & 0o777),
         )
         .map_err(failed)?;
         let mut target = File::from(descriptor);
