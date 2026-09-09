@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { type ReactNode, useRef, useState } from 'react'
+import { AttachmentReferences } from './AttachmentReferences'
 import type {
   WebSessionTimelineDetailPage,
   WebSessionTimelineWindow,
@@ -358,23 +359,11 @@ const detailContent = (body: DetailBody): ReactNode => {
         />
       )
     case 'user_input': {
-      const visibleAttachments = body.attachments
       return (
         <>
           <Facts facts={[['Turn', body.turn_id]]} />
           <TextDetail label="User input" excerpt={body.text} />
-          {visibleAttachments.length > 0 && (
-            <ul className="session-detail-attachments" aria-label="Attachment references">
-              {visibleAttachments.map((attachment) => (
-                <li key={attachment.blob_id}>
-                  <code>{attachment.blob_id}</code>
-                  <span>
-                    {attachment.media_type ?? 'unknown media'} · {attachment.length_bytes} B
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
+          <AttachmentReferences attachments={body.attachments} />
         </>
       )
     }

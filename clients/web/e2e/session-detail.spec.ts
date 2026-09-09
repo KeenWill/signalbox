@@ -26,7 +26,12 @@ async function openDetails(
           ...item,
           kind: 'session_created' as const,
           projected_body_bytes: 128,
-          body: { type: 'session_created' as const, cause: creation, imported_evidence: null },
+          body: {
+            type: 'session_created' as const,
+            workspace_root_kind: null,
+            cause: creation,
+            imported_evidence: null,
+          },
         }
       : outcome === 'reconciliation' && index === 4
         ? {
@@ -215,6 +220,7 @@ async function openDetails(
         latest_address: { event_sequence: '5' },
         observed_through: '5',
         repository_watch: null,
+        workspace_root_kind: null,
         sizes: {
           item_count: '5',
           projected_text_bytes: '256',
@@ -331,6 +337,11 @@ test('reads tool arguments and output in conversation order with events hidden',
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
+  await expect(page.locator('.session-telemetry')).toBeHidden()
+  const references = conversation.getByRole('list', { name: 'Attachment references' })
+  await expect(references.getByRole('listitem')).toHaveCount(2)
+  await expect(references).toContainText('image/jpeg · 4 B')
+  await expect(references).toContainText('image/png · 4 B')
   await expect(conversation.getByRole('region', { name: 'Arguments', exact: true })).toContainText(
     'release status --json',
   )
@@ -355,6 +366,11 @@ test('reads tool arguments and output in conversation order with events hidden',
   await expect(conversation).toBeFocused()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(toolRow(page)).toBeVisible()
+  await expect(page.locator('.session-telemetry')).toBeVisible()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
+  await expect(references.getByRole('listitem')).toHaveCount(2)
+  await expect(references).toContainText('image/png · 4 B')
+  await expect(references).toContainText('image/jpeg · 4 B')
 })
 
 test('shows reconciliation-required turn outcomes with events hidden', async ({ page }) => {

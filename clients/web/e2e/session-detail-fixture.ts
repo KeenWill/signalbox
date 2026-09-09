@@ -41,7 +41,15 @@ export const detailItems: WebSessionTimelineDetail[] = [
     address: { event_sequence: '1' },
     kind: 'input_accepted',
     projected_body_bytes: 128 + Number(input.total_bytes),
-    body: { type: 'user_input', turn_id: detailTurnId, text: input, attachments: [] },
+    body: {
+      type: 'user_input',
+      turn_id: detailTurnId,
+      text: input,
+      attachments: [
+        { blob_id: `sha256:${'a'.repeat(64)}`, length_bytes: '4', media_type: 'image/png' },
+        { blob_id: `sha256:${'a'.repeat(64)}`, length_bytes: '4', media_type: 'image/jpeg' },
+      ],
+    },
   },
   {
     address: { event_sequence: '2' },

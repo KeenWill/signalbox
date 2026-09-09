@@ -19,6 +19,7 @@ use sqlx::{Postgres, Row, Transaction};
 /// reader early rolls its transaction back.
 #[derive(Debug)]
 pub struct ProcessTranscriptReader {
+    pub(super) workspace_root_kind: Option<signalbox_domain::SessionWorkspaceRootKind>,
     pub(super) transaction: Option<Transaction<'static, Postgres>>,
     pub(super) session: SessionId,
     pub(super) cursor: u64,
@@ -40,6 +41,10 @@ pub struct ProcessTranscriptReader {
 }
 
 impl ProcessTranscriptReader {
+    /// Returns the recorded daemon-local binding from this snapshot.
+    pub const fn workspace_root_kind(&self) -> Option<signalbox_domain::SessionWorkspaceRootKind> {
+        self.workspace_root_kind
+    }
     /// Returns the selected session while the reader is active.
     pub const fn session(&self) -> SessionId {
         self.session

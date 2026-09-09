@@ -101,6 +101,7 @@ pub async fn connect_repository_watch_pool(
 /// A reload handle and one serialized command worker for the compiled-in module.
 #[derive(Clone)]
 pub struct RepositoryWatchRuntime {
+    measurements_store: RepoWatchStore,
     state: Arc<Mutex<RuntimeState>>,
 }
 
@@ -140,6 +141,12 @@ pub(crate) struct PreparedRepositoryWatchReload {
 }
 
 impl RepositoryWatchRuntime {
+    pub(crate) fn ingestion_measurements(
+        &self,
+        repository: &RepositorySlug,
+    ) -> signalbox_module_repo_watch_v2::measurements::IngestionMeasurements {
+        self.measurements_store.ingestion_measurements(repository)
+    }
     pub(crate) async fn session_origin(
         &self,
         session: signalbox_domain::SessionId,
@@ -246,7 +253,9 @@ impl RepositoryWatchRuntime {
     /// Composes the idle supervisor without activating on-disk rules before recovery.
     pub fn unstarted(module_pool: PgPool, services: RepositoryWatchServices) -> Self {
         let (repository_shutdown, _) = watch::channel(false);
+        let store = RepoWatchStore::new(module_pool.clone());
         Self {
+            measurements_store: store.clone(),
             state: Arc::new(Mutex::new(RuntimeState {
                 workers: WorkerState::Prepared,
                 paused: true,
@@ -257,7 +266,7 @@ impl RepositoryWatchRuntime {
                 sweep: None,
                 prepared_sweep: None,
                 commands: None,
-                store: RepoWatchStore::new(module_pool.clone()),
+                store,
                 module_pool,
                 lifecycle: LifecycleEventSource::new(services.core_pool.clone()),
                 factory: RepositoryWatchCommandFactory(services.templates),

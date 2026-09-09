@@ -158,6 +158,7 @@ impl<'a> Output<'a> {
         {
             let mut staged = Output::new(&mut rendered_snapshot, &mut *self.stderr, self.raw);
             staged.snapshot_repository_watch(snapshot.repository_watch())?;
+            staged.snapshot_workspace_root(snapshot.workspace_root_kind())?;
             staged.snapshot_runner(snapshot.runner())?;
             staged.render_snapshot(snapshot, None, SnapshotSelection::All, true)?;
             staged.render_usage(snapshot)?;
@@ -173,8 +174,28 @@ impl<'a> Output<'a> {
         displayed: &mut SnapshotIdentitySet,
     ) -> Result<(), ClientError> {
         self.snapshot_repository_watch(snapshot.repository_watch())?;
+        self.snapshot_workspace_root(snapshot.workspace_root_kind())?;
         self.snapshot_runner(snapshot.runner())?;
         self.render_snapshot(snapshot, Some(displayed), SnapshotSelection::All, true)
+    }
+
+    fn snapshot_workspace_root(
+        &mut self,
+        kind: Option<signalbox_process_protocol::SessionWorkspaceRootKind>,
+    ) -> io::Result<()> {
+        use signalbox_process_protocol::SessionWorkspaceRootKind;
+        if let Some(kind) = kind {
+            writeln!(
+                self.stdout,
+                "workspace_root_kind={}",
+                match kind {
+                    SessionWorkspaceRootKind::Derived => "derived",
+                    SessionWorkspaceRootKind::Configured => "configured",
+                    SessionWorkspaceRootKind::Provisioned => "provisioned",
+                }
+            )?;
+        }
+        Ok(())
     }
 
     fn snapshot_repository_watch(

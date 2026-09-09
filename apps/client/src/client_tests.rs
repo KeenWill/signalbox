@@ -1256,6 +1256,7 @@ async fn queued_send_wait_uses_active_slot_not_acceptance_order_or_terminal_hist
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    workspace_root_kind: None,
                     repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
@@ -1419,6 +1420,7 @@ async fn selected_send_polls_after_an_automatic_recovery_transition() -> Result<
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    workspace_root_kind: None,
                     repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
@@ -1554,6 +1556,7 @@ async fn selected_send_recovery_poll_is_not_postponed_by_follow_traffic()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    workspace_root_kind: None,
                     repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
@@ -1717,6 +1720,7 @@ async fn selected_send_polls_after_an_automatic_tool_recovery_transition()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    workspace_root_kind: None,
                     repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
@@ -1858,6 +1862,7 @@ async fn send_wait_continues_after_a_superseded_runner_loss_event() -> Result<()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    workspace_root_kind: None,
                     repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
@@ -1991,6 +1996,7 @@ async fn send_wait_ignores_streamed_text_until_the_durable_terminal_event()
                 .map_err(io::Error::other)
         };
         let mut response = encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+            workspace_root_kind: None,
             repository_watch: None,
             session_id,
             cursor: CanonicalU64::new(0),
@@ -2083,6 +2089,7 @@ async fn send_wait_rejects_streamed_text_for_another_session() -> Result<(), Box
                 .map_err(io::Error::other)
         };
         let mut response = encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+            workspace_root_kind: None,
             repository_watch: None,
             session_id,
             cursor: CanonicalU64::new(0),
@@ -5911,7 +5918,8 @@ async fn credential_wait_failure_event_requires_its_terminal_snapshot_frontier()
                 &ClientRequest::ReadTranscript { session_id }
             );
             for message in [
-                ServerMessage::TranscriptSnapshotStart { session_id, cursor: CanonicalU64::new(1), runner: None, repository_watch: None },
+                ServerMessage::TranscriptSnapshotStart {
+ workspace_root_kind: None, session_id, cursor: CanonicalU64::new(1), runner: None, repository_watch: None },
                 ServerMessage::TranscriptTurn {
                     turn_id, acceptance_position: CanonicalU64::new(1), model_settings: None,
                     state: TurnState::FailedAfterCredentialWait {
@@ -5997,5 +6005,71 @@ async fn program_cancellation_presents_the_retained_successful_result() -> Resul
         serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":retained})
     );
     server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn operator_status_counts_and_displays_repository_ingestion() -> Result<(), Box<dyn Error>> {
+    use signalbox_process_protocol::{
+        OperatorStatusEndMessage, OperatorStatusMessage, OperatorStatusRepositoryIngestion,
+    };
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("status.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await?;
+        let request = decode_client_line(&line).map_err(io::Error::other)?;
+        assert_eq!(request.request(), &ClientRequest::ReadOperatorStatus {});
+        for message in [
+            OperatorStatusMessage::Start {},
+            OperatorStatusMessage::RepositoryIngestion(Box::new(
+                OperatorStatusRepositoryIngestion {
+                    repository: "evidence/project".to_owned(),
+                    last_successful_observation: None,
+                    last_poll: None,
+                    last_accepted_webhook: None,
+                    events_recorded: CanonicalU64::new(7),
+                },
+            )),
+            OperatorStatusMessage::End(Box::new(OperatorStatusEndMessage {
+                repository_ingestion_count: CanonicalU64::new(1),
+                lifecycle_week_count: CanonicalU64::new(0),
+                lifecycle_deadline_violation_count: CanonicalU64::new(0),
+            })),
+        ] {
+            let frame = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::OperatorStatus(Box::new(message)),
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&frame).map_err(io::Error::other)?)
+                .await?;
+        }
+        Ok::<_, io::Error>(())
+    });
+    let mut client = ProcessClient::new(socket);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    crate::follow_status::status(
+        &mut client,
+        &mut Output::new(&mut stdout, &mut stderr, false),
+    )
+    .await?;
+    server.await??;
+    let rendered = String::from_utf8(stdout)?;
+    let evidence = rendered
+        .lines()
+        .find_map(|line| line.strip_prefix("repository_ingestion "))
+        .expect("ingestion row is displayed");
+    let evidence: serde_json::Value = serde_json::from_str(evidence)?;
+    assert_eq!(evidence["repository"], "evidence/project");
+    assert_eq!(evidence["events_recorded"], "7");
+    assert!(evidence["last_successful_observation"].is_null());
     Ok(())
 }
