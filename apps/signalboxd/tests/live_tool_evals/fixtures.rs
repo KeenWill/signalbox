@@ -332,6 +332,17 @@ pub(crate) struct FilesystemIdentity {
 
 pub(crate) type ExtendedAttributeSnapshot = BTreeMap<Vec<u8>, Vec<u8>>;
 
+pub(crate) fn creation_extended_attributes(
+    seed: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+) -> ExtendedAttributeSnapshot {
+    // New entries carry the fixture's SELinux label on labeled filesystems.
+    let label = b"security.selinux";
+    seed.get(Path::new(""))
+        .and_then(|attributes| attributes.get(label.as_slice()))
+        .map(|value| BTreeMap::from([(label.to_vec(), value.clone())]))
+        .unwrap_or_default()
+}
+
 #[cfg(unix)]
 pub(crate) fn filesystem_identity(metadata: &fs::Metadata) -> Option<FilesystemIdentity> {
     Some(FilesystemIdentity {
