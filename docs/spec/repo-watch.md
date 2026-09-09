@@ -262,6 +262,11 @@ interruption of a live turn whose session is closing. Synchronous
 command-identity conflicts settle as rejected before submission continues to the
 next action.
 
+Dispatched pull-request sessions whose watched repository configures
+`push_credential_file` can use `git_push_configured` for their retained head
+branch on `origin` at `https://github.com/<owner>/<repo>.git`; fork heads are
+unavailable because that destination is the watched repository.
+
 ## Boundary contracts
 
 The v2 crate depends on the ownership seam as its only Signalbox dependency. It

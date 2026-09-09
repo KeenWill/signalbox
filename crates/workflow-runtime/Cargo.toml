@@ -1,5 +1,5 @@
 [package]
-name = "signalbox-program-runtime"
+name = "signalbox-workflow-runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -40,8 +40,8 @@ sqlx = { version = "0.9.0", default-features = false, features = [
 uuid = { version = "1.24.0", default-features = false, features = ["std"] }
 
 [[test]]
-name = "program_host_postgres"
-path = "tests/program_host_postgres.rs"
+name = "workflow_host_postgres"
+path = "tests/workflow_host_postgres.rs"
 required-features = ["postgres-integration"]
 
 [lints]

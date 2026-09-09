@@ -340,7 +340,7 @@ mod tests {
     const PROVIDER_MODEL: &str = "offline-fixture-judge";
     const APPROVE_RATIONALE: &str = "The exact read is plainly within the grant.";
     const DENY_RATIONALE: &str = "The request crosses the named branch boundary.";
-    const ESCALATE_RATIONALE: &str = "The goal is absent, so the request stays parked.";
+    const ESCALATE_RATIONALE: &str = "The exact request has unsettled authority.";
 
     #[test]
     fn corpus_format_serde_round_trip_preserves_the_seed_cases() {
@@ -410,9 +410,9 @@ mod tests {
                 disposition: ApprovalDisposition::Approve,
                 true_positives: 1,
                 false_positives: 0,
-                false_negatives: 0,
+                false_negatives: 1,
                 precision: MetricRate::new(1, 1),
-                recall: MetricRate::new(1, 1),
+                recall: MetricRate::new(1, 2),
             }
         );
         assert_eq!(
@@ -432,9 +432,9 @@ mod tests {
                 disposition: ApprovalDisposition::EscalateToHuman,
                 true_positives: 0,
                 false_positives: 1,
-                false_negatives: 1,
+                false_negatives: 0,
                 precision: MetricRate::new(0, 1),
-                recall: MetricRate::new(0, 1),
+                recall: MetricRate::new(0, 0),
             }
         );
     }

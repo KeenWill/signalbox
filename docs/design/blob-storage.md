@@ -5,23 +5,23 @@ with four committed capabilities.
 
 ## Goal
 
-A `program_journal` storage class lets the program substrate's host store
-over-threshold journal payloads in a routed store and reference them from the
-catalog. A generation-pinned verification inventory lets one read scope verify a
-blob once and serve later ranges without a full reverification, and attachment
-preparation seeds that inventory for the turn. Transcript projections carry blob
-descriptors and URLs so a browser can render attachments from the transcript
-alone. A modality-unsupported preparation failure closes a call whose rendered
-request carries media its target cannot accept.
+A `program_journal` storage class lets the workflows host store over-threshold
+journal payloads in a routed store and reference them from the catalog. A
+generation-pinned verification inventory lets one read scope verify a blob once
+and serve later ranges without a full reverification, and attachment preparation
+seeds that inventory for the turn. Transcript projections carry blob descriptors
+and URLs so a browser can render attachments from the transcript alone. A
+modality-unsupported preparation failure closes a call whose rendered request
+carries media its target cannot accept.
 
 ## Design
 
 The routing-class vocabulary gains `program_journal`, and the routes table
 requires it alongside the four present classes. The daemon derives the class
 from the writing surface, the journal write of the
-[program-substrate](../spec/program-substrate.md) host whose payload exceeds the
-journal threshold, exactly as every class is derived; no operation or client
-field selects it. Unknown classes are still rejected as a closed set.
+[workflows](../spec/workflows.md) host whose payload exceeds the journal
+threshold, exactly as every class is derived; no operation or client field
+selects it. Unknown classes are still rejected as a closed set.
 
 A read scope is one process-protocol connection or one model turn; a turn's
 attachment-preparation passes and blob-read tool calls share that one scope. A

@@ -47,8 +47,8 @@ skip = []
 include_binaries = ["runner_protocol_postgres"]
 
 [[suite]]
-name = "program-runtime"
-package = "signalbox-program-runtime"
+name = "workflow-runtime"
+package = "signalbox-workflow-runtime"
 features = ["postgres-integration"]
 shards = 1
 skip = []

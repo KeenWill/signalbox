@@ -1,9 +1,9 @@
 # Workflows design
 
 Workflows is the daemon layer for typed Rust and TypeScript programs. This
-committed unbuilt design extends
-[program substrate](../spec/program-substrate.md); program definitions,
-program-run identities and `@signalbox/program-sdk/v1` keep their names.
+committed unbuilt design extends [workflows](../spec/workflows.md); program
+definitions, program-run identities and `@signalbox/program-sdk/v1` keep their
+names.
 
 ## Trust model
 
@@ -16,11 +16,11 @@ or Tokio handle.
 
 The host locally polls one Rust root future with sequential context awaits,
 polling it to its next request or completion after each delivery. JavaScript
-retains the closed isolate and concurrent-promise semantics of `ProgramHost` in
-[`crates/program-runtime/src/lib.rs`](../../crates/program-runtime/src/lib.rs).
+retains the closed isolate and concurrent-promise semantics of `WorkflowHost` in
+[`crates/workflow-runtime/src/lib.rs`](../../crates/workflow-runtime/src/lib.rs).
 Both drivers share request admission, grants, exact-byte replay and delivery
 persistence; effects use `EffectExecutor` recovery in
-[`crates/program-runtime/src/effects.rs`](../../crates/program-runtime/src/effects.rs).
+[`crates/workflow-runtime/src/effects.rs`](../../crates/workflow-runtime/src/effects.rs).
 Requests commit before effects and deliveries commit before code resumes.
 
 ## Identities
@@ -90,7 +90,7 @@ identity and ordinal. Sleep admission persists its deadline; replay and restart
 reuse it. `AwaitEvent` names a typed source and durable position; delivery reads
 retained source events before listening and rechecks after wake. In-memory
 notifications are hints. Primitive deliveries use `LiveDeliverySource` in
-[`crates/program-runtime/src/lib.rs`](../../crates/program-runtime/src/lib.rs)
+[`crates/workflow-runtime/src/lib.rs`](../../crates/workflow-runtime/src/lib.rs)
 and the shared journal.
 
 The daemon retains incomplete run admission, serializes attempts for each run
