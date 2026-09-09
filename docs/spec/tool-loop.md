@@ -549,6 +549,8 @@ the hint until a full nudge buffer has capacity.
 
 ## Planned
 
+- Session-scoped fatal execution parking; see
+  [daemon survival design](../design/daemon-survival.md).
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a `ToolInadmissible`
