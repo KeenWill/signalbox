@@ -14,7 +14,8 @@ pub(crate) use postgres_test_image::POSTGRES_IMAGE_TAG;
 
 const CONTAINER_HELPER: &str = include_str!("../../../../tooling/postgres_test_container.py");
 
-/// Owns one test database. Dropping it disconnects its clients and removes it.
+/// Owns one test database. Dropping it disconnects its clients and removes it,
+/// unless `TESTCONTAINERS_COMMAND=keep` preserves it for inspection.
 #[derive(Debug)]
 pub struct TestDatabase {
     admin_url: String,
@@ -24,6 +25,11 @@ pub struct TestDatabase {
 
 impl Drop for TestDatabase {
     fn drop(&mut self) {
+        if std::env::var(crate::TESTCONTAINERS_COMMAND_VARIABLE).as_deref()
+            == Ok(crate::TESTCONTAINERS_KEEP_COMMAND)
+        {
+            return;
+        }
         let admin_url = self.admin_url.clone();
         let name = self.name.clone();
         // A fixture can drop inside a Tokio runtime, or after that runtime exits.
@@ -195,6 +201,52 @@ fn shared_server() -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn keep_mode_preserves_the_cloned_database_after_guard_drop() -> Result<(), Box<dyn Error>>
+    {
+        const ADMIN_URL_VARIABLE: &str = "SIGNALBOX_TEST_KEEP_DATABASE_URL";
+        const CHILD_TEST: &str = "test_support::postgres::tests::keep_mode_preserves_the_cloned_database_after_guard_drop";
+        const CHILD_EVIDENCE: &str = "kept database remains queryable";
+        if let Ok(admin_url) = std::env::var(ADMIN_URL_VARIABLE) {
+            let (database, pool, _) = clone_database(admin_url, 1, None).await?;
+            sqlx::raw_sql(
+                "CREATE TABLE fixture_keep_probe (value integer); INSERT INTO fixture_keep_probe VALUES (11)",
+            )
+            .execute(&pool)
+            .await?;
+            drop(database);
+            let retained: i32 = sqlx::query_scalar("SELECT value FROM fixture_keep_probe")
+                .fetch_one(&pool)
+                .await?;
+            assert_eq!(retained, 11);
+            pool.close().await;
+            println!("{CHILD_EVIDENCE}");
+            return Ok(());
+        }
+
+        // The parent owns the server; only the child requests database retention.
+        let (admin_url, _container) = dedicated_server().await?;
+        let executable = std::env::current_exe()?;
+        let output = tokio::task::spawn_blocking(move || {
+            Command::new(executable)
+                .args(["--ignored", "--exact", CHILD_TEST, "--nocapture"])
+                .env(ADMIN_URL_VARIABLE, admin_url)
+                .env(
+                    crate::TESTCONTAINERS_COMMAND_VARIABLE,
+                    crate::TESTCONTAINERS_KEEP_COMMAND,
+                )
+                .output()
+        })
+        .await??;
+        assert!(
+            output.status.success(),
+            "keep-mode child failed: {output:?}"
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains(CHILD_EVIDENCE));
+        Ok(())
+    }
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]

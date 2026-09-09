@@ -27,7 +27,7 @@ def main():
         container = docker("ps", "-q", "--filter", f"label={label}")
         if not container:
             ceiling = int(re.search(r"^disposable_postgres_state_ceiling_bytes = (\d+)$", config, re.M)[1])
-            threads = int(os.environ["NEXTEST_TEST_THREADS"])
+            threads = int(os.environ.get("NEXTEST_TEST_THREADS", len(os.sched_getaffinity(0))))
             labels = ["--label", label]
             keep = os.environ.get("TESTCONTAINERS_COMMAND") == "keep"
             if not keep:
