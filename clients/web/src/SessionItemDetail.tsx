@@ -301,7 +301,7 @@ const detailContent = (body: DetailBody): ReactNode => {
     case 'ownership':
       return <Facts facts={[['Ownership', enumLabel(body.transition)]]} />
     case 'event_fact':
-      return <p>Turn was cancelled before it started.</p>
+      return <p>Turn retired before it started.</p>
 
     case 'session_created':
       return (
@@ -414,7 +414,7 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Model call', body.producing_model_call_id],
               ['State', enumLabel(body.state.type)],
               [
-                body.state.type === 'recovery_required' ? 'Recovery attempt' : 'Position',
+                body.state.type === 'recovery_required' ? 'Recovery attempt' : 'Frontier ID',
                 body.state.type === 'recovery_required'
                   ? body.state.tool_attempt_id
                   : body.state.frontier_id,

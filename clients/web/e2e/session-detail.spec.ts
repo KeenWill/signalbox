@@ -414,7 +414,9 @@ test('shows retired goal turns in conversation order with events hidden', async 
   await openDetails(page, false, false, undefined, 'retired')
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
-  await expect(conversation.getByText('Turn cancelled', { exact: true })).toBeVisible()
+  await expect(
+    conversation.getByText('Turn retired before it started', { exact: true }),
+  ).toBeVisible()
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
   await expect
     .poll(() =>
