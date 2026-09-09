@@ -5,5 +5,6 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | effects | 2 | 1 | 0 | [effects](effects.md) |
+| native | 3 | 2 | 0 | [native](native.md) |
 | session_effects | 1 | 0 | 0 | [session_effects](session_effects.md) |
 | root | 7 | 1 | 0 | [root](root.md) |
