@@ -308,7 +308,7 @@ generated_artifact = "fixture"
             crate::BlobStorageConfiguration::parse(document.get("blob_storage"), 1)?
                 .expect("fixture blob configuration");
         let stores = Arc::new(
-            BlobStoreRegistry::initialize_for_conformance(Some(&configuration), pool.clone())
+            BlobStoreRegistry::initialize(Some(&configuration), pool.clone())
                 .await?
                 .expect("configured fixture stores"),
         );
