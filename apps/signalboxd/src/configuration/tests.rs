@@ -5883,3 +5883,132 @@ fn disabling_reconciliation_requires_lossless_nudge_handoff() {
     );
     assert!(HubModelConfiguration::parse(&lossless).is_ok());
 }
+
+#[test]
+fn repository_git_push_requires_an_absolute_file_reference_without_exposing_it() {
+    let push_path = "/unused/push-only-token";
+    let configured = configuration_with_repository_watch().replace(
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+        &format!(
+            "credential_file = \"{WATCH_CREDENTIAL_FILE}\"\npush_credential_file = \"{push_path}\""
+        ),
+    );
+    let parsed = HubModelConfiguration::parse(&configured).expect("optional push credential");
+    let repositories = parsed.repository_watch().expect("watch").repositories();
+    assert_eq!(
+        repositories[0].push_credential_file(),
+        Some(std::path::Path::new(push_path))
+    );
+    assert_eq!(repositories[1].push_credential_file(), None);
+    assert!(!format!("{:?}", repositories[0]).contains(push_path));
+    assert!(
+        HubModelConfiguration::parse(&configured.replace(push_path, "relative-token")).is_err()
+    );
+    assert!(
+        HubModelConfiguration::parse(&configured.replace(push_path, "/unused/../token")).is_err()
+    );
+}
+
+#[test]
+fn repository_git_push_rejects_credentials_shared_across_roles_or_repositories() {
+    // Distinct from both polling credentials and the webhook secret in the fixture.
+    const PUSH_CREDENTIAL: &str = "/unused/push-only-token";
+    const OTHER_PUSH_CREDENTIAL: &str = "/unused/other-push-only-token";
+    struct Collision {
+        name: &'static str,
+        first_push: &'static str,
+        second_push: &'static str,
+    }
+    for case in [
+        Collision {
+            name: "shared push secret",
+            first_push: PUSH_CREDENTIAL,
+            second_push: PUSH_CREDENTIAL,
+        },
+        Collision {
+            name: "same repository polling secret",
+            first_push: WATCH_CREDENTIAL_FILE,
+            second_push: OTHER_PUSH_CREDENTIAL,
+        },
+        Collision {
+            name: "later repository polling secret",
+            first_push: SECOND_WATCH_CREDENTIAL_FILE,
+            second_push: OTHER_PUSH_CREDENTIAL,
+        },
+        Collision {
+            name: "earlier repository polling secret",
+            first_push: PUSH_CREDENTIAL,
+            second_push: WATCH_CREDENTIAL_FILE,
+        },
+        Collision {
+            name: "same repository webhook secret",
+            first_push: WATCH_WEBHOOK_SECRET_FILE,
+            second_push: OTHER_PUSH_CREDENTIAL,
+        },
+        Collision {
+            name: "earlier repository webhook secret",
+            first_push: PUSH_CREDENTIAL,
+            second_push: WATCH_WEBHOOK_SECRET_FILE,
+        },
+    ] {
+        let mut configured = configuration_with_repository_watch_webhook()
+            .parse::<toml_edit::DocumentMut>()
+            .expect("watch fixture");
+        let repositories = configured["repository_watch"]["repositories"]
+            .as_array_of_tables_mut()
+            .expect("watched repositories");
+        for (repository, push) in repositories
+            .iter_mut()
+            .zip([case.first_push, case.second_push])
+        {
+            repository["push_credential_file"] = toml_edit::value(push);
+        }
+        assert_eq!(
+            HubModelConfiguration::parse(&configured.to_string()).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile),
+            "{}",
+            case.name,
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_git_push_rejects_a_dangling_symlink_to_a_polling_credential() {
+    let directory = tempfile::tempdir().expect("credential directory");
+    let credential = directory.path().join("pending-poll-token");
+    let push_alias = directory.path().join("push-alias");
+    std::os::unix::fs::symlink(&credential, &push_alias).expect("dangling push alias");
+    let configured = configuration_with_repository_watch().replace(
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+        &format!(
+            "credential_file = \"{}\"\npush_credential_file = \"{}\"",
+            credential.display(),
+            push_alias.display()
+        ),
+    );
+    assert_eq!(
+        HubModelConfiguration::parse(&configured).err(),
+        Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_git_push_rejects_a_hard_link_to_a_webhook_secret() {
+    let directory = tempfile::tempdir().expect("credential directory");
+    let secret = directory.path().join("webhook-secret");
+    std::fs::write(&secret, []).expect("webhook secret");
+    let push_alias = directory.path().join("push-alias");
+    std::fs::hard_link(&secret, &push_alias).expect("push hard link");
+    let configured = configuration_with_repository_watch_webhook()
+        .replace(WATCH_WEBHOOK_SECRET_FILE, &secret.display().to_string())
+        .replace(
+            &format!("credential_file = \"{SECOND_WATCH_CREDENTIAL_FILE}\""),
+            &format!("credential_file = \"{SECOND_WATCH_CREDENTIAL_FILE}\"\npush_credential_file = \"{}\"", push_alias.display()),
+        );
+    assert_eq!(
+        HubModelConfiguration::parse(&configured).err(),
+        Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile),
+    );
+}

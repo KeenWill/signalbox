@@ -9,6 +9,7 @@ mod catalog;
 mod composed_identity;
 mod executor;
 mod families;
+mod git_push;
 mod pinned_file_system;
 mod retained_workspaces;
 mod session_status;
