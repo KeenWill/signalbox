@@ -365,6 +365,8 @@ pub enum ExecutionErrorKind {
     ExecutionFailed,
     /// Successful content exceeded its bound.
     ResultTooLarge,
+    /// Successful content contained U+0000.
+    ResultContainsNull,
     /// Restart lost effect-free work.
     CrashLost,
 }
