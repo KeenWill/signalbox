@@ -63,7 +63,8 @@ negotiation; earlier commits and unchanged fence blobs are omitted. Selected
 packed objects and their delta dependencies retain the content bounds.
 Pack-index lookups do not count unrelated entries against the push-range
 inspection bound. The transport disables delta compression against omitted
-historical blobs.
+historical blobs. Object-ID collections compare the object format and its active
+identifier bytes.
 
 Push layout validation, reference resolution, and object capture run off the
 async worker with a 300-second preparation deadline; expiry returns
