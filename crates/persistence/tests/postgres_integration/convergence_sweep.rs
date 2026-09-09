@@ -1086,6 +1086,213 @@ async fn target_reenrollment_restores_its_commissioned_session_park() -> Result<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn lifting_one_module_park_preserves_convergence_authority() -> Result<(), Box<dyn Error>> {
+    // Arbitrary identity for this isolated commission.
+    const COMMISSION: u128 = 0x89_280;
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    let (dispatch, session) = dispatched(
+        commissioned
+            .commission(
+                prepared_commission(COMMISSION)?,
+                &mut UuidV7SubmitInputIdGenerator,
+                |_| None,
+            )
+            .await?,
+    );
+    store
+        .record_dispatch_decision(
+            Uuid::now_v7(),
+            &repository,
+            pull_request(),
+            &observation,
+            (dispatch, session),
+            ConvergenceSweepDecision::LiveSession,
+        )
+        .await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    lifecycle
+        .park(
+            session,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            None,
+            LifecycleActor::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+        )
+        .await?;
+    assert_eq!(
+        store
+            .record_no_model_activity_failure(
+                Uuid::now_v7(),
+                &repository,
+                pull_request(),
+                &observation,
+                session,
+            )
+            .await?,
+        ConvergenceSweepFailureDisposition::Parked
+    );
+    assert!(
+        store
+            .load_target(&repository, pull_request())
+            .await?
+            .expect("target exists")
+            .is_parked()
+    );
+
+    assert!(
+        !signalbox_persistence::test_support::restore_module_park(
+            &pool,
+            session,
+            DispatchingModule::RepositoryWatch,
+        )
+        .await?,
+        "lifting the first authority must not report the session restored",
+    );
+    assert_eq!(
+        lifecycle
+            .load(session)
+            .await?
+            .expect("session exists")
+            .state(),
+        SessionLifecycleState::Parked {
+            cause: SessionParkCause::ModulePark,
+            responder: SessionParkResponder::Module {
+                module: DispatchingModule::CommissionedDispatch
+            },
+            standing: None,
+        },
+        "lifting repository-watch authority must retain the convergence park",
+    );
+    assert!(
+        lifecycle.resume(session).await?.is_parked(),
+        "session resume cannot bypass the remaining convergence authority"
+    );
+    assert_eq!(
+        store.reenroll_target(&repository, pull_request()).await?,
+        Some(session)
+    );
+    assert!(
+        !lifecycle
+            .load(session)
+            .await?
+            .expect("session exists")
+            .state()
+            .is_parked()
+    );
+    assert!(
+        !store
+            .load_target(&repository, pull_request())
+            .await?
+            .expect("target exists")
+            .is_parked(),
+        "restoration lifts authority before the retained nudge is acknowledged"
+    );
+    assert_eq!(
+        store.reenroll_target(&repository, pull_request()).await?,
+        Some(session),
+        "the restored session remains available for nudge replay"
+    );
+    store
+        .acknowledge_reenrollment_nudge(&repository, pull_request(), session)
+        .await?;
+    assert_eq!(
+        store.reenroll_target(&repository, pull_request()).await?,
+        None
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_stale_reenrollment_acknowledgement_preserves_a_later_park() -> Result<(), Box<dyn Error>>
+{
+    // Arbitrary identity for this isolated commission.
+    const COMMISSION: u128 = 0x89_280;
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    let (dispatch, session) = dispatched(
+        commissioned
+            .commission(
+                prepared_commission(COMMISSION)?,
+                &mut UuidV7SubmitInputIdGenerator,
+                |_| None,
+            )
+            .await?,
+    );
+    store
+        .record_dispatch_decision(
+            Uuid::now_v7(),
+            &repository,
+            pull_request(),
+            &observation,
+            (dispatch, session),
+            ConvergenceSweepDecision::LiveSession,
+        )
+        .await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    assert_eq!(
+        store
+            .record_no_model_activity_failure(
+                Uuid::now_v7(),
+                &repository,
+                pull_request(),
+                &observation,
+                session,
+            )
+            .await?,
+        ConvergenceSweepFailureDisposition::Parked,
+    );
+    assert_eq!(
+        store.reenroll_target(&repository, pull_request()).await?,
+        Some(session)
+    );
+    assert_eq!(
+        store
+            .record_no_model_activity_failure(
+                Uuid::now_v7(),
+                &repository,
+                pull_request(),
+                &observation,
+                session,
+            )
+            .await?,
+        ConvergenceSweepFailureDisposition::Parked,
+    );
+    store
+        .acknowledge_reenrollment_nudge(&repository, pull_request(), session)
+        .await?;
+    assert!(
+        store
+            .load_target(&repository, pull_request())
+            .await?
+            .expect("target exists")
+            .is_parked(),
+        "a repeated acknowledgement must not clear a later park of the same session"
+    );
+    assert!(
+        lifecycle
+            .load(session)
+            .await?
+            .expect("session exists")
+            .state()
+            .is_parked()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn live_session_without_model_activity_is_parked() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
