@@ -577,6 +577,30 @@ async fn a_past_retry_after_date_records_zero_delay() {
 }
 
 #[tokio::test]
+async fn a_lost_error_body_retains_its_availability_status() {
+    let mut reply = http_response(
+        "429 Too Many Requests",
+        &[("content-type", "application/json")],
+        b"incomplete",
+    );
+    reply.pop();
+    let server = CannedServer::serving(vec![reply]).await;
+    let runtime = runtime_for(&server.base_url);
+    let (report, _) = execute(
+        &runtime,
+        operation("lost-error-body"),
+        CancellationSignal::never(),
+    )
+    .await;
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("the received error status remains authoritative when its body is lost");
+    };
+    assert_eq!(error.kind, ProviderErrorKind::RateLimited);
+    assert_eq!(error.exchange.http_status, Some(429));
+    assert!(!error.non_acceptance_proven);
+}
+
+#[tokio::test]
 async fn a_malformed_error_body_falls_back_to_http_status() {
     assert_anthropic_error_body_falls_back_to_status(b"{not json").await;
 }

@@ -1500,15 +1500,14 @@ where
         })?;
         report_classified_outcome(telemetry, &classified);
         let correlation = authorized.observation_correlation();
-        Ok((match classified.cause {
-            ModelCallCauseCode::ProviderError(kind) => correlation
-                .bind_provider_failure_observation_with_retry_after(
-                    provider_failure_cause(kind),
-                    usage,
-                    retry_after,
-                    non_acceptance_proven,
-                ),
-            _ => correlation.bind_terminal_observation_with_usage(classified.observation, usage),
+        Ok((match classified.durable_failure_cause() {
+            Some(cause) => correlation.bind_provider_failure_observation_with_retry_after(
+                cause,
+                usage,
+                retry_after,
+                non_acceptance_proven,
+            ),
+            None => correlation.bind_terminal_observation_with_usage(classified.observation, usage),
         })
         .with_rate_limits(rate_limits))
     }
@@ -2138,6 +2137,20 @@ struct TerminalClassification {
     concrete_target: Option<String>,
 }
 
+impl TerminalClassification {
+    fn durable_failure_cause(&self) -> Option<signalbox_domain::ProviderModelCallFailureCause> {
+        match self.cause {
+            ModelCallCauseCode::ProviderError(kind) => Some(provider_failure_cause(kind)),
+            ModelCallCauseCode::BoundaryLoss(_)
+                if self.observation == ModelCallTerminalObservation::KnownFailed =>
+            {
+                Some(signalbox_domain::ProviderModelCallFailureCause::ProviderInternal)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// One fail-closed classification outcome plus the sanitized diagnostics that
 /// explain it.
 ///
@@ -2466,10 +2479,37 @@ fn classify_terminal(
             ModelCallTerminalObservation::Cancelled,
             ModelCallCauseCode::CancellationConfirmed,
         ),
-        TerminalEvidence::BoundaryLoss(loss) => classify(
-            ModelCallTerminalObservation::Ambiguous,
-            ModelCallCauseCode::BoundaryLoss(BoundaryLossCode::of(&loss.cause)),
-        ),
+        TerminalEvidence::BoundaryLoss(loss) => {
+            let content_observed = loss.response_content_observed
+                || loss.tool_calls == signalbox_model_runtime::ToolCallsAtLoss::Opened
+                || loss.usage.output_tokens.is_some_and(|tokens| tokens > 0)
+                || observations
+                    .iter()
+                    .any(|observation| match &observation.fact {
+                        ObservationFact::TextDelta { text, .. }
+                        | ObservationFact::ThinkingDelta { text, .. } => !text.is_empty(),
+                        ObservationFact::ToolArgumentsDelta { fragment, .. } => {
+                            !fragment.is_empty()
+                        }
+                        ObservationFact::ToolCallProposed(_) => true,
+                        _ => false,
+                    });
+            let transient = matches!(
+                loss.cause,
+                LossCause::TimedOut(_)
+                    | LossCause::TransportFailed(_)
+                    | LossCause::ResponseBodyLost(_)
+                    | LossCause::StreamEndedWithoutTerminalMarker { .. }
+            );
+            classify(
+                if transient && !content_observed {
+                    ModelCallTerminalObservation::KnownFailed
+                } else {
+                    ModelCallTerminalObservation::Ambiguous
+                },
+                ModelCallCauseCode::BoundaryLoss(BoundaryLossCode::of(&loss.cause)),
+            )
+        }
         TerminalEvidence::CompletedWithProviderCompaction { .. } => {
             Err(ClassificationFailure::bare(
                 RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
@@ -3364,6 +3404,7 @@ mod tests {
         assert_eq!(
             classify_terminal(
                 TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    response_content_observed: true,
                     cause: LossCause::TransportFailed(TransportFacts {
                         detail: String::from("safe typed fixture"),
                     }),
@@ -3379,6 +3420,130 @@ mod tests {
             .expect("typed boundary-loss evidence is supported")
             .observation,
             ModelCallTerminalObservation::Ambiguous
+        );
+    }
+
+    #[test]
+    fn availability_retries_transport_loss_before_content_as_a_transient_failure() {
+        for cause in [
+            LossCause::TimedOut(TransportFacts::new("recorded timeout")),
+            LossCause::TransportFailed(TransportFacts::new("recorded connection loss")),
+            LossCause::StreamEndedWithoutTerminalMarker {
+                interruption: signalbox_model_runtime::StreamInterruption::EndOfStream,
+            },
+        ] {
+            let loss = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: false,
+                cause,
+                exchange: ExchangeFacts::default(),
+                reported_model: None,
+                finish_reported: None,
+                tool_calls: ToolCallsAtLoss::NoneOpened,
+                usage: TokenUsage::unreported(),
+            });
+            let classified = classify_terminal(loss, &[], &configured("model-exact"))
+                .expect("loss before content follows the transient retry policy");
+            assert_eq!(
+                classified.observation,
+                ModelCallTerminalObservation::KnownFailed
+            );
+            assert_eq!(
+                classified.durable_failure_cause(),
+                Some(signalbox_domain::ProviderModelCallFailureCause::ProviderInternal)
+            );
+        }
+    }
+
+    #[test]
+    fn availability_error_after_content_remains_a_classified_known_failure() {
+        let error = TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            kind: ProviderErrorKind::Overloaded,
+            non_acceptance_proven: false,
+            native: NativeErrorFacts::default(),
+            usage: TokenUsage::unreported(),
+        });
+        let observations = [Observation {
+            correlation: call(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "partial response".into(),
+            },
+        }];
+        let classified = classify_terminal(error, &observations, &configured("model-exact"))
+            .expect("a definitive overload is classified even after content");
+        assert_eq!(
+            classified.observation,
+            ModelCallTerminalObservation::KnownFailed
+        );
+        assert_eq!(
+            classified.cause,
+            ModelCallCauseCode::ProviderError(ProviderErrorKind::Overloaded)
+        );
+    }
+
+    #[test]
+    fn availability_does_not_retry_a_stream_break_after_content() {
+        let loss = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: true,
+            cause: LossCause::StreamEndedWithoutTerminalMarker {
+                interruption: signalbox_model_runtime::StreamInterruption::EndOfStream,
+            },
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            finish_reported: None,
+            tool_calls: ToolCallsAtLoss::NoneOpened,
+            usage: TokenUsage::unreported(),
+        });
+        let observations = [Observation {
+            correlation: call(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "partial response".into(),
+            },
+        }];
+        let classified = classify_terminal(loss, &observations, &configured("model-exact"))
+            .expect("incomplete content retains ambiguous-loss handling");
+        assert_eq!(
+            classified.observation,
+            ModelCallTerminalObservation::Ambiguous
+        );
+        assert_eq!(
+            classified.cause,
+            ModelCallCauseCode::BoundaryLoss(
+                super::BoundaryLossCode::StreamEndedWithoutTerminalMarker
+            )
+        );
+    }
+
+    #[test]
+    fn availability_does_not_retry_a_timeout_after_content() {
+        let loss = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: true,
+            cause: LossCause::TimedOut(TransportFacts::new("recorded timeout")),
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            finish_reported: None,
+            tool_calls: ToolCallsAtLoss::NoneOpened,
+            usage: TokenUsage::unreported(),
+        });
+        let observations = [Observation {
+            correlation: call(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "partial response".into(),
+            },
+        }];
+        let classified = classify_terminal(loss, &observations, &configured("model-exact"))
+            .expect("incomplete content retains ambiguous-loss handling");
+        assert_eq!(
+            classified.observation,
+            ModelCallTerminalObservation::Ambiguous
+        );
+        assert_eq!(
+            classified.cause,
+            ModelCallCauseCode::BoundaryLoss(super::BoundaryLossCode::TimedOut)
         );
     }
 
@@ -4202,6 +4367,7 @@ mod tests {
             (
                 "boundary_loss(transport_failed)",
                 TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    response_content_observed: true,
                     cause: LossCause::TransportFailed(TransportFacts {
                         detail: String::from("safe typed fixture"),
                     }),
@@ -4424,6 +4590,7 @@ mod tests {
         let telemetry = telemetry();
         let classified = classify_terminal(
             TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: true,
                 cause: LossCause::ResponseEnvelopeRejected {
                     stage:
                         signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers,

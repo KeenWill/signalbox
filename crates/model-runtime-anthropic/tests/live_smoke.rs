@@ -522,6 +522,7 @@ mod require_decoded_response_tests {
     fn boundary_loss_panics() {
         let _ = require_decoded_response(
             TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: true,
                 cause: LossCause::UnexpectedHttpStatus,
                 exchange: exchange(200),
                 reported_model: None,

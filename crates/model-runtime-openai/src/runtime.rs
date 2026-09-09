@@ -434,6 +434,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             // evidence rather than a silent second send; see `new` for the
             // rationale.
             TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: false,
                 cause: LossCause::UnexpectedHttpStatus,
                 exchange,
                 reported_model: None,
@@ -687,7 +688,9 @@ async fn finish_error(
 ) -> TerminalEvidence {
     let body = match collect_response_body(response, cancellation).await {
         None => return exchange_loss(LossCause::CancellationRequested, exchange),
-        Some(Err(cause)) => return exchange_loss(cause, exchange),
+        Some(Err(cause)) => {
+            return fallback_provider_error(exchange, status, format!("{cause:?}").as_bytes());
+        }
         Some(Ok(bytes)) => bytes,
     };
     if validate_provider_json_nesting(&body).is_ok()

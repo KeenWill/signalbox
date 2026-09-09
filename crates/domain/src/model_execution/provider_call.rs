@@ -88,7 +88,7 @@ impl IssuedModelCallCorrelation {
         self.bind_provider_failure_observation_with_retry_after(cause, usage, None, false)
     }
 
-    /// Binds a classified provider error and its optional provider-directed
+    /// Binds a classified call failure and its optional provider-directed
     /// retry delay without retaining provider-authored error material.
     pub fn bind_provider_failure_observation_with_retry_after(
         self,
@@ -183,12 +183,11 @@ impl ProviderReportedTokenUsage {
     }
 }
 
-/// Closed, provider-neutral classification of one definitive provider error.
+/// Closed, provider-neutral classification of one known call failure.
 ///
 /// These values contain no provider-authored text, credential material, model
-/// content, or request/response body. Absence on a known failure means the
-/// failure arose outside a definitive provider error or predates persistence of
-/// this classification.
+/// content, or request/response body. Absence on a known failure means no
+/// provider-availability classification was retained.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ProviderModelCallFailureCause {
     /// The provider rejected the request credential.
@@ -207,7 +206,8 @@ pub enum ProviderModelCallFailureCause {
     QuotaExhausted,
     /// The provider reported overload.
     Overloaded,
-    /// The provider reported an internal error.
+    /// A provider-internal error or transport loss before observed response content.
+    /// Both use the transient same-credential retry policy.
     ProviderInternal,
     /// The adapter did not recognize a definitive provider error class.
     Unrecognized,

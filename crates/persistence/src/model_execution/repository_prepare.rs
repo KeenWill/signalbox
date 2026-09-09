@@ -45,9 +45,8 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, CorrelatedModelCallTerminalObservation, FailedModelCallTurnIdentities,
     ModelCallId, ModelCallPreparationFailure, ModelCallTerminalIdentities,
-    ModelCallTerminalOutcome, PendingSteeringReclassificationIdentity,
-    ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
-    ResolvedProviderTarget, SessionId, TurnId, TurnTerminalCause,
+    ModelCallTerminalOutcome, PendingSteeringReclassificationIdentity, ProviderModelIdentity,
+    ProviderReportedTokenUsage, ResolvedProviderTarget, SessionId, TurnId, TurnTerminalCause,
 };
 use sqlx::{Row, types::Uuid};
 use std::collections::BTreeSet;
@@ -750,14 +749,6 @@ impl PostgresModelCallRepository {
                     .bind(observation.call().into_uuid())
                     .fetch_one(&mut *transaction)
                     .await?;
-                    // A successor reissues the request, so availability failures
-                    // need the adapter's proof that the failed request was never
-                    // accepted. Credential rejection is the one exception: the
-                    // authentication refusal itself authorizes rotation, but never
-                    // a retry on the rejected credential.
-                    // A stop already requested on this attempt forbids the reissue
-                    // outright: the successor would reload an attempt the domain
-                    // admits only while running.
                     let stop_requested = matches!(
                         execution.current_attempt().state(),
                         signalbox_domain::CurrentTurnAttemptState::StopRequested { .. }
@@ -770,13 +761,12 @@ impl PostgresModelCallRepository {
                     )
                     .await?;
                     let retry_candidate = is_same_credential_retry_cause(cause)
-                        && same_credential_attempts < self.same_credential_attempt_bound.get()
-                        && observation.non_acceptance_proven()
+                        && self
+                            .same_credential_attempt_bound
+                            .is_none_or(|bound| same_credential_attempts < bound.get())
                         && !stop_requested;
-                    let rotation_candidate = action == CredentialPoolRuntimeAction::SwitchNow
-                        && (observation.non_acceptance_proven()
-                            || cause == ProviderModelCallFailureCause::CredentialRejected)
-                        && !stop_requested;
+                    let rotation_candidate =
+                        action == CredentialPoolRuntimeAction::SwitchNow && !stop_requested;
                     let mut durable_exclusions = if retry_candidate || rotation_candidate {
                         Some(
                             load_durable_pool_exclusions(

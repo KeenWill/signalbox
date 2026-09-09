@@ -1056,15 +1056,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         access_sink.flush();
         let evidence =
             signalbox_model_runtime::redact_evidence(evidence, &home.material.identity_token, None);
-        let mut evidence =
-            signalbox_model_runtime::redact_evidence(evidence, &home.material.access_token, None);
-        if let TerminalEvidence::ProviderError(error) = &mut evidence
-            && error.kind == signalbox_model_runtime::ProviderErrorKind::CredentialRejected
-        {
-            error.kind = signalbox_model_runtime::ProviderErrorKind::Unrecognized;
-            error.non_acceptance_proven = false;
-        }
-        evidence
+        signalbox_model_runtime::redact_evidence(evidence, &home.material.access_token, None)
     } else {
         execute_cli_process(request, sink, cancellation).await
     }

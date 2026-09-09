@@ -1465,6 +1465,7 @@ mod tests {
     fn boundary_loss_redaction_covers_exchange_finish_model_and_detail() {
         let key = credential("key_loop");
         let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: true,
             cause: LossCause::ResponseUnintelligible {
                 detail: "decode-key_loop".to_string(),
             },
@@ -1514,6 +1515,7 @@ mod tests {
         let key = credential("key_loop");
         let stage = crate::ResponseEnvelopeRejectionStage::ToolCallId;
         let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: true,
             cause: LossCause::ResponseEnvelopeRejected {
                 stage,
                 detail: "decode-key_loop".into(),
@@ -1587,6 +1589,7 @@ mod tests {
     fn interrupted_stream_transport_detail_is_redacted() {
         let key = credential("key_loop");
         let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: true,
             cause: LossCause::StreamEndedWithoutTerminalMarker {
                 interruption: StreamInterruption::TransportFailure(TransportFacts::new(
                     "stream-key_loop",

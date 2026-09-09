@@ -254,6 +254,7 @@ pub enum UnsentCause {
 
 ```rust
 pub struct BoundaryLossEvidence {
+    pub response_content_observed: bool,
     pub cause: LossCause,
     pub exchange: ExchangeFacts,
     pub reported_model: option::Option<ProviderReportedModel>,

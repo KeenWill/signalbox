@@ -442,6 +442,30 @@ async fn buffered_error_type_classifies_when_code_is_absent() {
 }
 
 #[tokio::test]
+async fn a_lost_error_body_retains_its_availability_status() {
+    let mut reply = http_response(
+        "401 Unauthorized",
+        &[("content-type", "application/json")],
+        b"incomplete",
+    );
+    reply.pop();
+    let server = CannedServer::serving(vec![reply]).await;
+    let runtime = runtime_for(&server.base_url);
+    let (report, _) = execute(
+        &runtime,
+        operation("lost-error-body"),
+        CancellationSignal::never(),
+    )
+    .await;
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("the received error status remains authoritative when its body is lost");
+    };
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
+    assert_eq!(error.exchange.http_status, Some(401));
+    assert!(!error.non_acceptance_proven);
+}
+
+#[tokio::test]
 async fn a_malformed_error_body_falls_back_to_http_status() {
     assert_openai_error_body_falls_back_to_status(b"{not json").await;
 }

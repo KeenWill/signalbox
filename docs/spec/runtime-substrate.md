@@ -86,11 +86,11 @@ was impossible: cancelled before send, a connection that failed before any
 request byte, or a provably unacceptable incomplete write. Boundary loss says
 the request crossed or may have crossed the acceptance boundary and no
 definitive response exists; it carries a typed loss cause, the partial facts
-observed before the loss, and whether a tool call had opened in the material the
-adapter decoded. A provider error may also carry an adapter-owned proof that the
-provider never accepted the request; this page owns that evidence, and
-[credential-availability](credential-availability.md) decides what the proof
-leads to.
+observed before the loss, whether response content was observed, and whether a
+tool call had opened in the material the adapter decoded. A provider error may
+also carry an adapter-owned proof that the provider never accepted the request.
+[Credential availability](credential-availability.md) owns successor policy for
+classified failures.
 
 `SseFraming` is the provider-agnostic incremental parser both HTTP adapters
 build on, from transport byte chunks to event-stream records.
@@ -152,8 +152,9 @@ carries a validated provider-compaction block with non-null replacement content
 and retained input and output counts; otherwise execute returns an unrecognized
 provider error.
 
-The Claude Code CLI never supplies the non-acceptance proof: it classifies
-failures from rendered prose by substring and exposes no structured native code.
+The Claude Code CLI never supplies the non-acceptance proof. A reported 401
+status takes precedence over rendered failure text; other failures use its
+rendered-prose classification and status fallback.
 
 SSE id and retry fields are parsed and dropped, because they exist for stream
 resumption and resuming would be a second request.
@@ -334,33 +335,19 @@ reset among fully consumed primary and secondary windows; null windows in sparse
 updates preserve prior observations. Past HTTP dates and Codex reset instants
 saturate to zero delay.
 
-The non-acceptance proof on a provider error is an adapter-owned typed fact,
-never inferred from the error kind, status retryability or provider prose. A
-`CredentialRejected` failure instead admits the `switch_now` successor without
-non-acceptance proof; its `non_acceptance_proven` bit remains false. An adapter
-admits the proof only when it decoded its own documented error envelope, the
-native token belongs to the closed set that adapter names for the proof, the
-HTTP status agrees with that token, and the envelope arrived as an error
-response decoded before any stream began. A status-derived fallback, an absent
-or undecodable body, or an unmapped token carries no proof and keeps its
-status-classified kind; a newly mapped availability token carries none until
-that set names it, and an SSE error record never carries it, so an availability
-failure that arrives mid-stream carries none. The Codex CLI adapter admits the
-proof only on a failed `turn/completed` whose `codexErrorInfo` is
-`contextWindowExceeded`, `usageLimitExceeded`, `rateLimitExceeded`,
-`serverOverloaded`, `httpConnectionFailed`, `responseStreamConnectionFailed`,
-`internalServerError`, or `badRequest`. Any positive usage axis, agent-message
-or reasoning delta, item other than `userMessage` or `hookPrompt` in lifecycle
-events or turn summaries, or earlier `willRetry: true` error excludes that
-proof. Other closures carry none. A nonretrying Codex error whose process exits
-without a closing turn notification retains its classification without
-non-acceptance proof.
-
-Provider-internal non-acceptance proof is admitted for Anthropic `api_error` at
-HTTP 500, OpenAI `server_error`/`internal_server_error` at HTTP 500, and a Codex
-CLI turn that closes failed under that rule with `internalServerError`.
-Anthropic also admits `rate_limit_error` and `overloaded_error`; OpenAI also
-admits `rate_limit_exceeded`, `rate_limit_error`, and `insufficient_quota`.
+Classified availability failures admit retry and configured rotation without
+non-acceptance proof, including status-derived fallback classifications and
+mid-stream error records. A received HTTP error status remains classified when
+its body is lost. A definitive classified error after response content is still
+a known failure. A timeout or transport break before observed response content
+follows transient retry policy; after content it retains ambiguous-loss
+handling. Content progress is retained in buffered and streamed delivery. The
+provider error's `non_acceptance_proven` field retains the adapter's protocol
+evidence and does not gate availability. Codex `willRetry` events do not prevent
+a subsequent classified failure from admitting a successor. HTTP statuses
+carried by Codex connection and stream errors classify 401 as credential
+rejection, 429 as rate limit, 500 as provider internal failure, and 503 or 529
+as overload.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion, and an unrecognized finish token is boundary

@@ -789,6 +789,14 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn loss_at_decode_failure(self, cause: LossCause) -> TerminalEvidence {
         let tool_calls = self.tool_calls_at_decode_failure();
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: self.opened_tool_calls
+                || self.content.iter().any(|part| match part {
+                    AssistantPart::Text(text) | AssistantPart::Thinking { text, .. } => {
+                        !text.is_empty()
+                    }
+                    AssistantPart::RedactedThinking { data } => !data.is_empty(),
+                    _ => true,
+                }),
             cause,
             exchange: self.exchange,
             reported_model: self.reported_model,
@@ -801,6 +809,14 @@ impl<C: Clone> EventDecoder<C> {
     fn loss(self, cause: LossCause) -> TerminalEvidence {
         let tool_calls = self.tool_calls_at_loss();
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: self.opened_tool_calls
+                || self.content.iter().any(|part| match part {
+                    AssistantPart::Text(text) | AssistantPart::Thinking { text, .. } => {
+                        !text.is_empty()
+                    }
+                    AssistantPart::RedactedThinking { data } => !data.is_empty(),
+                    _ => true,
+                }),
             cause,
             exchange: self.exchange,
             reported_model: self.reported_model,
