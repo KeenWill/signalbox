@@ -3549,7 +3549,7 @@ async fn composed_introspection_returns_real_own_transcript() -> Result<(), Box<
     })
     .to_string();
     let expected_tool_use_content = format!(
-        "{}\n{arguments}",
+        "{}\n{{\"after_position\":null,\"max_bytes\":131072,\"max_entries\":100}}",
         signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME
     );
     let (execution, runtime) = fixture.execution(
