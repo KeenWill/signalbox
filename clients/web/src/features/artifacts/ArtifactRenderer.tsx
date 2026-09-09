@@ -319,7 +319,7 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
         renderer={rendered ? enumLabel(rendered.kind) : 'Details only'}
         mediaType={descriptor.declared_media_type}
         byteLength={descriptor.byte_length}
-        provenance={derivation?.transformation_name ?? 'Original file'}
+        provenance={derivation?.transformation_name ?? 'Original content'}
       >
         {original && (
           <button
@@ -386,7 +386,7 @@ function GenericBlobBody({ artifact }: RendererProps<GenericBlobArtifact>) {
         renderer="Details only"
         mediaType={artifact.descriptor.declared_media_type}
         byteLength={artifact.descriptor.byte_length}
-        provenance="Original file"
+        provenance="Original content"
       >
         {download && (
           <a href={download.content_url} download={artifact.displayName}>
@@ -427,7 +427,7 @@ function DocumentBody({ artifact }: RendererProps<DocumentArtifact>) {
       <ArtifactMetadata
         renderer="Document"
         mediaType={descriptor.declared_media_type}
-        provenance="Original file"
+        provenance="Original content"
       >
         {browserNative && (
           <a href={browserNative.content_url} target="_blank" rel="noreferrer">
@@ -500,7 +500,7 @@ function MediaPlaceholderBody({ artifact }: RendererProps<MediaPlaceholderArtifa
       <ArtifactMetadata
         renderer={enumLabel(artifact.mediaKind)}
         mediaType={descriptor.declared_media_type}
-        provenance="Original file"
+        provenance="Original content"
       >
         {download && (
           <a href={download.content_url} download={artifact.displayName}>
@@ -533,7 +533,7 @@ function ArtifactMetadata({
           <dd>{renderer}</dd>
         </div>
         <div>
-          <dt>Type</dt>
+          <dt>Type (as declared)</dt>
           <dd>{mediaType}</dd>
         </div>
         {byteLength !== undefined && (
