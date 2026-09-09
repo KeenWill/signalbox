@@ -407,12 +407,11 @@ impl RunningRuntime {
         let model_configuration = support::parse_model_configuration(&configuration)?;
         let blob_store_registry = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
-            BlobStorageFixtureMode::Enabled => BlobStoreRegistry::initialize_for_conformance(
-                model_configuration.blob_storage(),
-                pool.clone(),
-            )
-            .await?
-            .map(Arc::new),
+            BlobStorageFixtureMode::Enabled => {
+                BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone())
+                    .await?
+                    .map(Arc::new)
+            }
         };
         let runtime_models = model_configuration.runtime_model_catalog();
         let template_configuration = session_template_configuration(&model_configuration)?;
