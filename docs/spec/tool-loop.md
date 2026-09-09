@@ -489,6 +489,10 @@ round; neither enters the crash-loss path nor fails the turn.
 derives a durable command identity from the physical tool attempt and attributes
 the command and last-writer stamp to the exact `ToolRequestId`.
 
+Composed `file_inspect` and `file_read` declare external effect. Their resolver
+uses the same rendered-frontier attachment proof before source or worker I/O; a
+visibility refusal returns a typed known failure from the executor.
+
 Every code-host declaration, reads included, is `ExternalEffect`; read-only
 declarations default to automatic approval and mutations to confirmation, so the
 approval transaction authorizes each mutation before credentials resolve.

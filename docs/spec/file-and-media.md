@@ -40,13 +40,25 @@ daemon for byte ranges, which the daemon checks against the declared envelope
 before serving them from a `VerifiedBlobSource`. A worker's response is
 untrusted until the registry has reparsed and cross-checked it.
 
-Two effect-free tool declarations are compiled, and no daemon catalog registers
-either one. `file_inspect` takes a canonical digest and an optional selector for
-a repeated visible use. `file_read` adds an exact provider-owned view and
-exactly one input: object options for a first read, or the cursor a truncated
-result returned. `signalbox-file-media-provider-runtime` supplies the
-registry-backed service behind both and authorizes each request through an
-injected `FileUseResolver`.
+With `file_media = true` and blob storage configured, the daemon registers
+`file_inspect` and `file_read` as external-effect tools. Startup verifies the
+compiled text-family worker beside the daemon executable through
+`/usr/bin/bwrap` and the delegated `SIGNALBOX_FILE_MEDIA_CGROUP_ROOT`. The
+resolver reuses `blob_read`'s projected-frontier attachment proof and completes
+catalog work before source or worker I/O. A digest outside that frontier is
+unauthorized; a repeated digest requires its rendered selector, the semantic
+entry identity and zero-based part ordinal. The registry recognizes no format in
+the daemon.
+
+`file_read` takes an exact provider-owned view and either object options or an
+authenticated restart-ephemeral continuation. Continuations bind the original
+digest, selector, reader, view, options, and provider section state; each page
+reauthorizes the selected use against its issuing frontier and repeats
+inspection. Text inspection validates a bounded prefix, and text reads return
+bounded UTF-8 sections without splitting scalars. JSON and CSV views retain
+bounded structured results and reject sources outside their whole-decode
+envelopes. Sources are range capabilities; their total length never sizes a
+materialization.
 
 PDF preflight charges recursive length-carrier decoding against the aggregate
 object-stream budget. Text reads charge page content and font CMaps against one
@@ -78,7 +90,7 @@ answer for any adapter set and any probe completion order.
 The service repeats inspection for every read, and `file_read` accepts no
 model-supplied media type or reader identity. Why: no classification from an
 earlier call is trusted. A registered streaming-text reader is selected through
-streaming validation even for declared `text/plain`. JSON container-entry
+bounded prefix validation even for declared `text/plain`. JSON container-entry
 ceilings are enforced while parsing, before constructing an excessive tree.
 Image metadata views use the canonical metadata from that inspection; absent
 image fields fail without a second decode.
@@ -152,10 +164,6 @@ recovery is registered as part of the reader's validation.
 
 ## Planned
 
-- Daemon composition of `file_inspect` and `file_read` behind a
-  `FileUseResolver` that reuses the rendered-frontier visibility proof; the
-  daemon registry recognizes no format. See the
-  [design](../design/file-and-media.md).
 - Image, audio, and general-file views, whose derived bytes publish and register
   before the read's result commits and leave no dangling result on failure. See
   the [design](../design/file-and-media.md).

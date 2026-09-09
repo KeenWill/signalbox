@@ -1,0 +1,352 @@
+//! Typed file tools composed with rendered-frontier authority and isolated parsers.
+
+use std::{num::NonZeroU64, sync::Arc};
+
+use signalbox_application::{
+    CompiledToolCatalog, CorrelatedToolExecutorEvidence, RenderedAttachmentSelector,
+    ToolExecutionInvocation, ToolExecutor,
+};
+use signalbox_domain::{BlobDigest, ToolRequest, UserContentPart};
+use signalbox_file_media_processor_runtime::{SandboxedFileMediaProcessor, WorkerBinding};
+use signalbox_file_media_provider_runtime::{
+    ContinuationAuthority, FileUseResolutionError, FileUseResolver, FileUseResolverFuture,
+    RegistryFileMediaAgentService, ResolvedFileUse,
+};
+use signalbox_file_media_runtime::{
+    AttachmentKind, DeclaredMediaType, DisplayFilename, FileDigest, FileMediaCeilings,
+    FileMediaProcessCeilings, FileMediaRegistry, FileUse, NeverCancelled, ProcessorIsolation,
+    SourceReadError, SourceReadFuture, VerifiedBlobSource, VisiblePartSelector,
+};
+use signalbox_persistence::{
+    blob::{BlobCatalogEntry, BlobCatalogRepository},
+    tool_loop::PostgresToolLoopRepository,
+};
+use signalbox_tools_file_media::{FileInspectServiceRequest, FileMediaTools};
+use sqlx::PgPool;
+
+use super::DaemonToolExecutorError;
+use crate::{
+    BlobStoreRegistry,
+    blob_read_runtime::{BlobReadError, read_blob_chunk, read_blob_entry},
+};
+
+/// Store-backed file tool composition; every parser operation goes through the worker port.
+#[derive(Clone, Debug)]
+pub struct DaemonFileMediaExecutor {
+    pool: PgPool,
+    stores: Arc<BlobStoreRegistry>,
+    registry: FileMediaRegistry,
+    processor: SandboxedFileMediaProcessor,
+    continuations: ContinuationAuthority,
+}
+
+impl DaemonFileMediaExecutor {
+    /// Composes the compiled text family after proving its exact worker isolation profile.
+    pub async fn compose(
+        pool: PgPool,
+        stores: Arc<BlobStoreRegistry>,
+    ) -> Result<(CompiledToolCatalog, Self), DaemonToolExecutorError> {
+        let executable =
+            std::env::current_exe().map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        let worker = executable
+            .parent()
+            .ok_or_else(DaemonToolExecutorError::pre_dispatch)?
+            .join("signalbox-file-media-text-worker");
+        Self::compose_with_text_worker(pool, stores, worker).await
+    }
+
+    async fn compose_with_text_worker(
+        pool: PgPool,
+        stores: Arc<BlobStoreRegistry>,
+        worker: std::path::PathBuf,
+    ) -> Result<(CompiledToolCatalog, Self), DaemonToolExecutorError> {
+        let declaration = signalbox_file_media_adapters_text::text_family_declaration()
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        let binding = WorkerBinding::try_new(worker, declaration.clone())
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        let processor = SandboxedFileMediaProcessor::try_new(
+            "/usr/bin/bwrap",
+            vec![binding],
+            FileMediaProcessCeilings::version_one(),
+        )
+        .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        let isolation = processor.verify_isolation().await;
+        if isolation != ProcessorIsolation::Available {
+            return Err(DaemonToolExecutorError::pre_dispatch());
+        }
+        let registry = FileMediaRegistry::try_new(
+            vec![declaration],
+            FileMediaCeilings::version_one(),
+            isolation,
+        )
+        .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        let executor = Self {
+            pool,
+            stores,
+            registry,
+            processor,
+            continuations: ContinuationAuthority::generate()
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
+        };
+        let (catalog, _) = FileMediaTools::try_new(executor.service(None))
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?
+            .into_parts();
+        Ok((catalog, executor))
+    }
+
+    fn service(
+        &self,
+        request: Option<ToolRequest>,
+    ) -> RegistryFileMediaAgentService<
+        DaemonFileUseResolver,
+        SandboxedFileMediaProcessor,
+        NeverCancelled,
+    > {
+        RegistryFileMediaAgentService::new(
+            self.registry.clone(),
+            DaemonFileUseResolver {
+                request,
+                visibility: PostgresToolLoopRepository::new(self.pool.clone()),
+                catalog: BlobCatalogRepository::new(self.pool.clone()),
+                stores: Arc::clone(&self.stores),
+            },
+            self.processor.clone(),
+            NeverCancelled,
+            self.continuations.clone(),
+        )
+    }
+}
+
+impl ToolExecutor for DaemonFileMediaExecutor {
+    type Error = DaemonToolExecutorError;
+
+    async fn execute(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        let service = self.service(Some(invocation.request().clone()));
+        let (_, mut executor) = FileMediaTools::try_new(service)
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?
+            .into_parts();
+        let Ok(permit) = self.stores.read_budget().try_acquire_owned() else {
+            let detail = signalbox_domain::ToolExecutionErrorDetail::try_new(String::from(
+                r#"{"status":"blob_unavailable"}"#,
+            ))
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+            return Ok(
+                invocation.bind(signalbox_application::ToolExecutorEvidence::KnownFailed {
+                    detail: Some(detail),
+                }),
+            );
+        };
+        let outcome =
+            signalbox_application::with_released_scheduler_admission(executor.execute(invocation))
+                .await;
+        drop(permit);
+        outcome.map_err(|error| DaemonToolExecutorError::from_error(&error))
+    }
+}
+
+struct DaemonFileUseResolver {
+    request: Option<ToolRequest>,
+    visibility: PostgresToolLoopRepository,
+    catalog: BlobCatalogRepository,
+    stores: Arc<BlobStoreRegistry>,
+}
+
+impl FileUseResolver for DaemonFileUseResolver {
+    type Source = CatalogFileSource;
+
+    fn resolve(
+        &mut self,
+        request: FileInspectServiceRequest,
+    ) -> FileUseResolverFuture<'_, Self::Source> {
+        Box::pin(async move {
+            let invalid = || FileUseResolutionError::Internal;
+            let selector = request
+                .visible_part()
+                .map(|value| {
+                    RenderedAttachmentSelector::parse(value.as_str())
+                        .ok_or(FileUseResolutionError::BlobNotVisible)
+                })
+                .transpose()?;
+            let digest = BlobDigest::from_bytes(*request.digest().as_bytes());
+            let visible = self
+                .visibility
+                .resolve_visible_attachment(
+                    self.request.as_ref().ok_or_else(invalid)?,
+                    digest,
+                    selector,
+                )
+                .await
+                .map_err(|_| FileUseResolutionError::BlobUnavailable)?
+                .ok_or(FileUseResolutionError::BlobNotVisible)?;
+            let entry = read_blob_entry(&self.catalog, digest)
+                .await
+                .map_err(resolution_error)?;
+            let length = NonZeroU64::new(entry.expected().byte_length()).ok_or_else(invalid)?;
+            let UserContentPart::Attachment {
+                kind,
+                media_type,
+                display_filename,
+                ..
+            } = visible.part
+            else {
+                return Err(invalid());
+            };
+            let file_use = FileUse::new(
+                request.digest(),
+                length,
+                match kind {
+                    signalbox_domain::AttachmentKind::Image => AttachmentKind::Image,
+                    signalbox_domain::AttachmentKind::Document => AttachmentKind::Document,
+                    signalbox_domain::AttachmentKind::File => AttachmentKind::File,
+                },
+                DeclaredMediaType::try_new(media_type.as_str()).map_err(|_| invalid())?,
+                display_filename
+                    .map(|name| DisplayFilename::try_new(name.as_str()))
+                    .transpose()
+                    .map_err(|_| invalid())?,
+            );
+            let selector = VisiblePartSelector::try_new(visible.selector.to_string())
+                .map_err(|_| invalid())?;
+            Ok(ResolvedFileUse::new(
+                file_use,
+                CatalogFileSource {
+                    entry,
+                    length,
+                    stores: Arc::clone(&self.stores),
+                },
+                selector,
+            ))
+        })
+    }
+}
+
+struct CatalogFileSource {
+    entry: BlobCatalogEntry,
+    length: NonZeroU64,
+    stores: Arc<BlobStoreRegistry>,
+}
+
+impl VerifiedBlobSource for CatalogFileSource {
+    fn digest(&self) -> FileDigest {
+        FileDigest::from_bytes(*self.entry.expected().digest().as_bytes())
+    }
+    fn byte_length(&self) -> NonZeroU64 {
+        self.length
+    }
+    fn read_range(&self, offset: u64, length: NonZeroU64) -> SourceReadFuture<'_> {
+        Box::pin(async move {
+            if length.get() > signalbox_blob_store::MAX_BLOB_RANGE_BYTES {
+                return Err(SourceReadError::RangeOutOfBounds);
+            }
+            read_blob_chunk(&self.stores, &self.entry, offset, length)
+                .await
+                .map_err(|error| match error {
+                    BlobReadError::NotFound | BlobReadError::Missing => SourceReadError::Missing,
+                    BlobReadError::Corrupt => SourceReadError::Corrupt,
+                    BlobReadError::Unavailable => SourceReadError::Unavailable,
+                    BlobReadError::RangeOutOfBounds { .. } => SourceReadError::RangeOutOfBounds,
+                    BlobReadError::Integrity => SourceReadError::Integrity,
+                })
+        })
+    }
+}
+
+fn resolution_error(error: BlobReadError) -> FileUseResolutionError {
+    match error {
+        BlobReadError::NotFound | BlobReadError::Missing => FileUseResolutionError::BlobMissing,
+        BlobReadError::Corrupt => FileUseResolutionError::BlobCorrupt,
+        BlobReadError::Unavailable => FileUseResolutionError::BlobUnavailable,
+        BlobReadError::RangeOutOfBounds { .. } | BlobReadError::Integrity => {
+            FileUseResolutionError::Internal
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use signalbox_application::ToolCatalog;
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL and the delegated real file-media sandbox profile"]
+    async fn file_tools_enter_the_daemon_catalog_with_a_composed_frontier_resolver()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let root = tempfile::tempdir()?;
+        let staging = root.path().join("staging");
+        let store = root.path().join("store");
+        std::fs::create_dir(&staging)?;
+        std::fs::create_dir(&store)?;
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700))?;
+        let configuration = format!(
+            r#"
+[blob_storage]
+version = 1
+staging_directory = {:?}
+max_blob_bytes = 21474836480
+[[blob_storage.stores]]
+name = "fixture"
+namespace_id = "00000000-0000-0000-0000-000000133001"
+kind = "filesystem"
+root_directory = {:?}
+[blob_storage.routes]
+user_attachment = "fixture"
+tool_artifact = "fixture"
+imported_source = "fixture"
+generated_artifact = "fixture"
+"#,
+            staging, store
+        );
+        let document: toml_edit::DocumentMut = configuration.parse()?;
+        let configuration =
+            crate::BlobStorageConfiguration::parse(document.get("blob_storage"), 1)?
+                .expect("fixture blob configuration");
+        let stores = Arc::new(
+            BlobStoreRegistry::initialize_for_conformance(Some(&configuration), pool.clone())
+                .await?
+                .expect("configured fixture stores"),
+        );
+        let worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_text_worker")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_exe()
+                    .expect("test executable")
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .expect("Cargo test binary under deps")
+                    .join("signalbox-file-media-text-worker")
+            });
+        let base = super::super::DaemonToolCatalog::try_new([]).expect("empty base catalog");
+        assert!(
+            !base
+                .definitions()
+                .iter()
+                .any(|tool| tool.name().as_str() == "file_inspect")
+        );
+        let (family, executor) =
+            DaemonFileMediaExecutor::compose_with_text_worker(pool.clone(), stores, worker).await?;
+        let composed = base.with_compiled_catalog(family)?;
+        let definitions = composed.definitions();
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|tool| tool.name().as_str())
+                .collect::<Vec<_>>(),
+            ["file_inspect", "file_read"]
+        );
+        assert!(
+            definitions.iter().all(
+                |tool| tool.effect_class() == signalbox_domain::ToolEffectClass::ExternalEffect
+            )
+        );
+        drop(executor);
+        pool.close().await;
+        Ok(())
+    }
+}

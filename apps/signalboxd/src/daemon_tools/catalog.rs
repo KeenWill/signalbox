@@ -165,6 +165,11 @@ fn configured_composition_contains(name: &ToolName, composition: DaemonToolCompo
         || PLAN_TOOL_NAMES.contains(&name)
         || SESSION_DELEGATION_TOOL_NAMES.contains(&name)
         || BLOB_TOOL_NAMES.contains(&name)
+        || matches!(
+            name,
+            signalbox_tools_file_media::FILE_INSPECT_NAME
+                | signalbox_tools_file_media::FILE_READ_NAME
+        )
         || mapped_family_contains
 }
 

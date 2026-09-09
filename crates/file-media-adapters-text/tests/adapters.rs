@@ -51,11 +51,11 @@ async fn complete_source_json_probe_does_not_drop_invalid_utf8_suffix() -> Resul
 }
 
 #[tokio::test]
-async fn oversized_streaming_text_remains_unknown() -> Result<(), Box<dyn Error>> {
+async fn oversized_streaming_text_inspects_a_bounded_prefix() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::oversized(b'a'));
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_unknown(inspection);
+    support::assert_validated_media(inspection, "text/plain");
     Ok(())
 }
 
@@ -230,29 +230,43 @@ async fn truncated_declared_json_exponent_preserves_the_size_reason() -> Result<
 }
 
 #[tokio::test]
-async fn impossible_declared_json_fraction_prefix_remains_unknown() -> Result<(), Box<dyn Error>> {
+async fn impossible_declared_json_fraction_prefix_uses_bounded_text_fallback()
+-> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(b"1.e2".to_vec());
     let mut ceilings = FileMediaCeilings::version_one();
     ceilings.validation_source_bytes = 3;
 
     let inspection = support::inspect_with_ceilings(&source, "application/json", ceilings).await?;
-    support::assert_unknown(inspection);
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "application/json",
+            detected: "text/plain",
+        },
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn oversized_declared_json_rejects_trailing_prefix_bytes() -> Result<(), Box<dyn Error>> {
+async fn oversized_declared_json_with_trailing_prose_uses_bounded_text_fallback()
+-> Result<(), Box<dyn Error>> {
     let mut bytes = b"true trailing".to_vec();
     bytes.resize(128 * 1_024 + 1, b' ');
     let source = MemorySource::new(bytes);
 
     let inspection = support::inspect(&source, "application/json").await?;
-    support::assert_unknown(inspection);
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "application/json",
+            detected: "text/plain",
+        },
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn oversized_declared_json_rejects_an_incomplete_trailing_scalar()
+async fn oversized_declared_json_with_a_split_scalar_uses_bounded_text_fallback()
 -> Result<(), Box<dyn Error>> {
     let mut bytes = b"true ".to_vec();
     bytes.resize(4_095, b' ');
@@ -261,7 +275,13 @@ async fn oversized_declared_json_rejects_an_incomplete_trailing_scalar()
     let source = MemorySource::new(bytes);
 
     let inspection = support::inspect(&source, "application/json").await?;
-    support::assert_unknown(inspection);
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "application/json",
+            detected: "text/plain",
+        },
+    );
     Ok(())
 }
 
@@ -973,5 +993,279 @@ async fn invalid_declared_text_is_unknown_after_streaming_validation() -> Result
     let source = MemorySource::new(fixtures::truncated_utf8());
     let inspection = support::inspect(&source, "text/plain").await?;
     support::assert_unknown(inspection);
+    Ok(())
+}
+
+/// A generated five-GiB source retains only the requested frame, never its declared length.
+struct StreamedTextSource {
+    maximum_requested: std::sync::atomic::AtomicU64,
+    requested: std::sync::atomic::AtomicU64,
+}
+
+impl signalbox_file_media_runtime::VerifiedBlobSource for StreamedTextSource {
+    fn digest(&self) -> signalbox_file_media_runtime::FileDigest {
+        signalbox_file_media_runtime::FileDigest::from_bytes([0x51; 32])
+    }
+    fn byte_length(&self) -> std::num::NonZeroU64 {
+        std::num::NonZeroU64::new(5 * 1024 * 1024 * 1024).expect("five GiB is positive")
+    }
+    fn read_range(
+        &self,
+        offset: u64,
+        length: std::num::NonZeroU64,
+    ) -> signalbox_file_media_runtime::SourceReadFuture<'_> {
+        Box::pin(async move {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.maximum_requested.fetch_max(length.get(), Relaxed);
+            self.requested.fetch_add(length.get(), Relaxed);
+            if length.get() > 131_072
+                || offset
+                    .checked_add(length.get())
+                    .is_none_or(|end| end > self.byte_length().get())
+            {
+                return Err(signalbox_file_media_runtime::SourceReadError::RangeOutOfBounds);
+            }
+            Ok(vec![b'x'; length.get() as usize])
+        })
+    }
+}
+
+#[tokio::test]
+async fn five_gibibyte_text_uses_bounded_prefixes_and_continued_sections()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_file_media_runtime::*;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    let source = StreamedTextSource {
+        maximum_requested: AtomicU64::new(0),
+        requested: AtomicU64::new(0),
+    };
+    let registry = FileMediaRegistry::try_new(
+        vec![
+            signalbox_file_media_adapters_text::text_family_declaration()
+                .map_err(|_| "declaration")?,
+        ],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )?;
+    let inspection = InspectionRequest {
+        source: FileUse::new(
+            source.digest(),
+            source.byte_length(),
+            AttachmentKind::File,
+            DeclaredMediaType::try_new("text/plain")?,
+            None,
+        ),
+        visible_part: None,
+    };
+    let processor = DirectProcessor::provider();
+    let inspected = registry
+        .inspect(&processor, inspection.clone(), &source, &NeverCancelled)
+        .await?;
+    support::assert_validated_media(inspected, "text/plain");
+    assert_eq!(source.maximum_requested.load(Relaxed), 4096);
+    assert_eq!(source.requested.load(Relaxed), 12_288);
+
+    let first = registry
+        .read(
+            &processor,
+            FileReadRequest {
+                inspection: inspection.clone(),
+                view: ReadViewName::try_new("text")?,
+                input: FileReadInput::Initial {
+                    options: serde_json::json!({}),
+                },
+            },
+            &source,
+            &NeverCancelled,
+        )
+        .await?;
+    let FileReadResult::Text {
+        body,
+        continuation: ReadContinuation::More { cursor },
+    } = first
+    else {
+        panic!("the first bounded section must have a continuation")
+    };
+    assert_eq!(body.len(), 131_069);
+    assert_eq!(cursor.as_str(), "section_1");
+    drop(body);
+    let second = registry
+        .read(
+            &processor,
+            FileReadRequest {
+                inspection,
+                view: ReadViewName::try_new("text")?,
+                input: FileReadInput::Continuation { cursor },
+            },
+            &source,
+            &NeverCancelled,
+        )
+        .await?;
+    let FileReadResult::Text {
+        body,
+        continuation: ReadContinuation::More { cursor },
+    } = second
+    else {
+        panic!("the next bounded section must have a continuation")
+    };
+    assert_eq!(body.len(), 131_069);
+    assert_eq!(cursor.as_str(), "section_2");
+    assert_eq!(source.maximum_requested.load(Relaxed), 131_072);
+    assert_eq!(source.requested.load(Relaxed), 299_008);
+    Ok(())
+}
+
+#[tokio::test]
+async fn text_sections_preserve_a_scalar_crossing_the_boundary() -> Result<(), Box<dyn Error>> {
+    use signalbox_file_media_runtime::*;
+    let mut text = "a".repeat(131_068);
+    text.push_str("🦀tail");
+    let source = MemorySource::new(text.clone().into_bytes());
+    let registry = FileMediaRegistry::try_new(
+        vec![
+            signalbox_file_media_adapters_text::text_family_declaration()
+                .map_err(|_| "declaration")?,
+        ],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )?;
+    let inspection = InspectionRequest {
+        source: source.file_use("text/plain")?,
+        visible_part: None,
+    };
+    let processor = DirectProcessor::provider();
+    let first = registry
+        .read(
+            &processor,
+            FileReadRequest {
+                inspection: inspection.clone(),
+                view: ReadViewName::try_new("text")?,
+                input: FileReadInput::Initial {
+                    options: serde_json::json!({}),
+                },
+            },
+            &source,
+            &NeverCancelled,
+        )
+        .await?;
+    let FileReadResult::Text {
+        body: first,
+        continuation: ReadContinuation::More { cursor },
+    } = first
+    else {
+        panic!("the boundary leaves a tail")
+    };
+    assert!(first.ends_with('🦀'));
+    let second = registry
+        .read(
+            &processor,
+            FileReadRequest {
+                inspection,
+                view: ReadViewName::try_new("text")?,
+                input: FileReadInput::Continuation { cursor },
+            },
+            &source,
+            &NeverCancelled,
+        )
+        .await?;
+    let FileReadResult::Text {
+        body: second,
+        continuation: ReadContinuation::Complete,
+    } = second
+    else {
+        panic!("the next section completes the source")
+    };
+    assert_eq!(second, "tail");
+    assert_eq!(first + &second, text);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires the delegated real file-media sandbox profile"]
+async fn file_read_five_gibibyte_source_stays_within_worker_memory_limit()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_file_media_processor_runtime::{SandboxedFileMediaProcessor, WorkerBinding};
+    use signalbox_file_media_runtime::*;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    let source = StreamedTextSource {
+        maximum_requested: AtomicU64::new(0),
+        requested: AtomicU64::new(0),
+    };
+    let declaration =
+        signalbox_file_media_adapters_text::text_family_declaration().map_err(|_| "declaration")?;
+    let worker = signalbox_test_bin::test_bin_path!("signalbox-file-media-text-worker");
+    let limits = FileMediaProcessCeilings::version_one();
+    assert!(limits.memory_bytes() < source.byte_length().get());
+    let processor = SandboxedFileMediaProcessor::try_new(
+        "/usr/bin/bwrap",
+        vec![WorkerBinding::try_new(worker, declaration.clone())?],
+        limits,
+    )?;
+    assert_eq!(
+        processor.verify_isolation().await,
+        ProcessorIsolation::Available
+    );
+    let registry = FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )?;
+    let inspection = InspectionRequest {
+        source: FileUse::new(
+            source.digest(),
+            source.byte_length(),
+            AttachmentKind::File,
+            DeclaredMediaType::try_new("text/plain")?,
+            None,
+        ),
+        visible_part: None,
+    };
+    let first = registry
+        .read(
+            &processor,
+            FileReadRequest {
+                inspection: inspection.clone(),
+                view: ReadViewName::try_new("text")?,
+                input: FileReadInput::Initial {
+                    options: serde_json::json!({}),
+                },
+            },
+            &source,
+            &NeverCancelled,
+        )
+        .await?;
+    let FileReadResult::Text {
+        body,
+        continuation: ReadContinuation::More { cursor },
+    } = first
+    else {
+        panic!("the sandboxed first section must continue")
+    };
+    assert_eq!(body.len(), 131_069);
+    drop(body);
+    let second = registry
+        .read(
+            &processor,
+            FileReadRequest {
+                inspection,
+                view: ReadViewName::try_new("text")?,
+                input: FileReadInput::Continuation { cursor },
+            },
+            &source,
+            &NeverCancelled,
+        )
+        .await?;
+    let FileReadResult::Text {
+        body,
+        continuation: ReadContinuation::More { cursor },
+    } = second
+    else {
+        panic!("the sandboxed second section must continue")
+    };
+    assert_eq!(body.len(), 131_069);
+    assert_eq!(cursor.as_str(), "section_2");
+    assert_eq!(source.maximum_requested.load(Relaxed), 131_072);
+    assert_eq!(source.requested.load(Relaxed), 286_720);
     Ok(())
 }
