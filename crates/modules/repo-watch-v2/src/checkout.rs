@@ -14,6 +14,7 @@ pub use crate::kickoff::KickoffPushAuthority;
 pub enum CheckoutRetirementReason {
     ProvisioningFailed,
     RepositoryUnconfigured,
+    KickoffRejected,
 }
 
 impl CheckoutRetirementReason {
@@ -21,6 +22,7 @@ impl CheckoutRetirementReason {
         match self {
             Self::ProvisioningFailed => "checkout_provisioning_failed",
             Self::RepositoryUnconfigured => "repository_unconfigured",
+            Self::KickoffRejected => "kickoff_rejected",
         }
     }
 }
@@ -220,6 +222,7 @@ impl RepoWatchStore {
                     Some("repository_unconfigured") => {
                         Some(CheckoutRetirementReason::RepositoryUnconfigured)
                     }
+                    Some("kickoff_rejected") => Some(CheckoutRetirementReason::KickoffRejected),
                     Some(_) => return Err(StoreError::InvalidRetainedCommand),
                 },
             })
