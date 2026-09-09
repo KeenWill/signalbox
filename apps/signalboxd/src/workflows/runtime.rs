@@ -492,10 +492,18 @@ impl EffectExecutor for UnavailableEffects {
         &'a mut self,
         invocation: EffectInvocation<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
-        self.rejected = Some(invocation.request.capability());
         if let Some(eval) = &mut self.eval {
-            return eval.execute(invocation);
+            let rejected = &mut self.rejected;
+            return Box::pin(async move {
+                let result = eval.execute(invocation).await;
+                *rejected = result
+                    .as_ref()
+                    .err()
+                    .map(|_| invocation.request.capability());
+                result
+            });
         }
+        self.rejected = Some(invocation.request.capability());
         Box::pin(async {
             Err(LiveDeliveryFailure::new(
                 "daemon workflow effect is unavailable",
