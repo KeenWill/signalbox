@@ -5,6 +5,9 @@
 //! vocabulary and leave the table and column names here, so a schema change is
 //! contained in — and exercised by — the crate that owns the schema.
 
+#[cfg(feature = "postgres-integration")]
+pub mod postgres;
+
 use signalbox_domain::{
     CommitSha, DispatchingModule, DurableCommandId, ModelCallId, SessionId, TurnId,
 };

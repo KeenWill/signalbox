@@ -41,22 +41,7 @@ use std::{
     error::Error,
 };
 
-use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels, local_test_connection_options, migrate,
-};
-use sqlx::{PgPool, postgres::PgPoolOptions};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ImageExt, runners::AsyncRunner},
-};
-
-#[path = "../../../tooling/postgres_test_image.rs"]
-mod postgres_test_image;
-use postgres_test_image::POSTGRES_IMAGE_TAG;
-const DATABASE_NAME: &str = "signalbox_search_path";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
+use sqlx::PgPool;
 
 const RESTORE_ROOT_FUNCTIONS: &str = "
     WITH restore_dependency AS (
@@ -780,25 +765,8 @@ fn unpinned_names(covered: &[(String, bool)]) -> Vec<&str> {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn every_restore_reachable_function_pins_its_search_path() -> Result<(), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
+    let (_container, pool, _database_url) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(2).await?;
 
     let covered = restore_reachable_functions(&pool).await?;
     assert!(
@@ -820,25 +788,8 @@ async fn every_restore_reachable_function_pins_its_search_path() -> Result<(), B
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn transitive_body_references_close_to_a_fixed_point() -> Result<(), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
+    let (_container, pool, _database_url) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(2).await?;
     let keywords = postgres_keywords(&pool).await?;
     let classifier_failures = collect_classifier_failures(&keywords);
     let chain = synthetic_transitive_chain();

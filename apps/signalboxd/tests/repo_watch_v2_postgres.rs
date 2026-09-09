@@ -4,6 +4,7 @@
     reason = "the standalone integration test uses assertion panics and explicit fixture expectations"
 )]
 
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use rust_decimal::Decimal;
@@ -232,7 +233,13 @@ impl SessionCommandCodec for DecodeOnlyCommandCodec {
     }
 }
 
-async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+async fn postgres() -> Result<(TestDatabase, PgPool, String), Box<dyn Error>> {
+    signalbox_persistence::test_support::postgres::migrated_postgres(4).await
+}
+
+/// Uses a dedicated server for cluster-wide state and historical migrations.
+async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>>
+{
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
@@ -2871,7 +2878,8 @@ async fn wait_for_blocked_webhook_admission(pool: &PgPool) -> Result<(), Box<dyn
         loop {
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT FROM pg_locks
-                 WHERE relation = 'webhook_delivery'::regclass AND NOT granted)",
+                 WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                   AND relation = 'webhook_delivery'::regclass AND NOT granted)",
             )
             .fetch_one(pool)
             .await?;
@@ -2891,7 +2899,8 @@ async fn wait_for_blocked_reload_activation(pool: &PgPool) -> Result<(), Box<dyn
         loop {
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT FROM pg_locks
-                 WHERE relation = 'reload_activation'::regclass AND NOT granted)",
+                 WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                   AND relation = 'reload_activation'::regclass AND NOT granted)",
             )
             .fetch_one(pool)
             .await?;
@@ -2911,7 +2920,8 @@ async fn wait_for_blocked_target_reconciliation(pool: &PgPool) -> Result<(), Box
         loop {
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT FROM pg_locks
-                 WHERE relation = 'convergence_sweep_target'::regclass AND NOT granted)",
+                 WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                   AND relation = 'convergence_sweep_target'::regclass AND NOT granted)",
             )
             .fetch_one(pool)
             .await?;
@@ -2967,7 +2977,7 @@ async fn composed_repository_watch_dispatches_and_reloads_its_running_listener()
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let (container, core_pool, _) = postgres().await?;
+    let (container, core_pool, _) = unmigrated_postgres().await?;
     migrate(&core_pool).await?;
     let module_pool = connect_repository_watch_pool(&core_pool)
         .await
@@ -3473,7 +3483,7 @@ async fn repository_watch_rejects_invalid_reloads_and_keeps_dispatching_running_
     };
     use std::sync::Arc;
 
-    let (container, core_pool, _) = postgres().await?;
+    let (container, core_pool, _) = unmigrated_postgres().await?;
     migrate(&core_pool).await?;
     let module_pool = connect_repository_watch_pool(&core_pool)
         .await
@@ -3683,7 +3693,7 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     };
     use std::sync::Arc;
 
-    let (_container, core_pool, _) = postgres().await?;
+    let (_container, core_pool, _) = unmigrated_postgres().await?;
     migrate(&core_pool).await?;
     let module_pool = connect_repository_watch_pool(&core_pool)
         .await
@@ -4203,7 +4213,7 @@ async fn undated_compact_entries_do_not_reopen_ordinary_pull_requests() -> Resul
 async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the_cache()
 -> Result<(), Box<dyn Error>> {
     use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
-    let (container, core_pool, url) = postgres().await?;
+    let (container, core_pool, url) = unmigrated_postgres().await?;
     migrate(&core_pool).await?;
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
         .execute(&core_pool)
@@ -4478,7 +4488,7 @@ async fn completed_polls_prune_terminal_and_expired_subject_pages() -> Result<()
 async fn incomplete_poll_does_not_retain_validators_from_partial_pages()
 -> Result<(), Box<dyn Error>> {
     use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
-    let (container, core_pool, url) = postgres().await?;
+    let (container, core_pool, url) = unmigrated_postgres().await?;
     migrate(&core_pool).await?;
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
         .execute(&core_pool)

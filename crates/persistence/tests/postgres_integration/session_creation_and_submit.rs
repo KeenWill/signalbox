@@ -3033,7 +3033,7 @@ async fn accepted_input_schema_rejects_content_above_maximum() -> Result<(), Box
 }
 
 struct MultipartReplayFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     repository: SubmitInputRepository,
     command: SubmitInput,
@@ -3463,7 +3463,7 @@ pub(super) async fn catalog_verified_blob(
 }
 
 struct UnknownAttachmentFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     repository: SubmitInputRepository,
     command: SubmitInput,
@@ -3670,7 +3670,7 @@ async fn changed_unknown_attachment_is_conflicting_reuse() -> Result<(), Box<dyn
 }
 
 struct AttachmentBudgetFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     repository: SubmitInputRepository,
     first_part: UserContentPart,
@@ -3980,7 +3980,7 @@ async fn attachment_byte_bound_rejection_replays_exactly() -> Result<(), Box<dyn
 }
 
 struct QueuedFrontierFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     repository: SubmitInputRepository,
     session: SessionId,
@@ -4349,7 +4349,7 @@ async fn queued_frontier_rejection_rolls_back_provisional_effects() -> Result<()
 }
 
 struct SteeringFrontierFixture {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     repository: SubmitInputRepository,
     session: SessionId,

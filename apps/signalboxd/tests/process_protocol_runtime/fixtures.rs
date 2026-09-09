@@ -1,14 +1,10 @@
 //! Shared test fixtures.
 
 use super::*;
+use signalbox_persistence::test_support::postgres::TestDatabase;
 
 pub(crate) const RESPONSE_ALLOWANCE: Duration = Duration::from_secs(30);
 pub(crate) const RUNTIME_SETTLE_ALLOWANCE: Duration = Duration::from_secs(60);
-
-pub(crate) const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-pub(crate) const DATABASE_NAME: &str = "signalbox_process_runtime";
-pub(crate) const DATABASE_USER: &str = "signalbox";
-pub(crate) const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
 pub(crate) const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 pub(crate) const MODEL_CONFIGURATION: &str = r#"
@@ -94,27 +90,10 @@ pub(crate) fn session_template_configuration(
     Ok(SessionTemplateConfiguration::read(&path, || None, models)?)
 }
 
-pub(crate) async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool))
+pub(crate) async fn postgres() -> Result<(TestDatabase, PgPool), Box<dyn Error>> {
+    let (database, pool, _) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(8).await?;
+    Ok((database, pool))
 }
 
 pub(crate) struct SocketDirectory {
@@ -287,7 +266,7 @@ where
 pub(crate) type RuntimeEligibilitySweep = WitnessedEligibilitySweep<PostgresEligibilitySweep>;
 
 pub(crate) struct RunningRuntime {
-    pub(crate) container: ContainerAsync<Postgres>,
+    pub(crate) container: TestDatabase,
     pub(crate) pool: PgPool,
     pub(crate) socket_directory: SocketDirectory,
     pub(crate) shutdown: watch::Sender<bool>,
