@@ -755,9 +755,11 @@ impl RuntimeState {
                     repository: repository.repository().clone(),
                     signal_reviewers: configuration.signal_reviewers().to_vec(),
                     subject_retention: configuration.webhook_retention(),
+                    poll_request_budget: configuration.poll_request_budget(),
                     clients: RepositoryWatchClientLoader::new(repository),
                     store: self.store.clone(),
                 };
+                wake.notify_one();
                 self.repositories.spawn(run_repository_task(
                     task,
                     repository.poll_interval(),

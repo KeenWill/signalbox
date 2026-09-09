@@ -164,13 +164,20 @@ missing their merge time are dropped without discarding the ordinary
 predecessor, dated compact entries, or event frontier. Workflow reads query
 completed runs by distinct current head SHA for the default branch and open
 pull-request same-repository head branches; prior completions for those branches
-remain comparison input. Each observation admits at most 1,000 REST and GraphQL
-requests combined; exhausting that budget rejects the incomplete observation.
+remain comparison input. Each periodic attempt spends at most
+`numeric_bounds.repository_watch_poll_request_budget` REST and GraphQL requests,
+including its REST-quota preflight; the preflight requires that same number of
+remaining REST requests. Completed discovery, pull-request, and workflow stages
+commit independently. Budget exhaustion logs `partial` and retains a durable
+`poll_cursor` with pending subjects and normalized unfinished pages; the next
+poll resumes those reads, and completion clears the cursor. A webhook refresh
+removes its subject from the pending poll and discards unfinished reads for that
+subject. Webhook observations retain a 1,000-request ceiling per pull request.
 Check inventories exceeding GitHub's 1,000-suite commit limit and workflow
-searches exceeding GitHub's 1,000-result cap also reject the observation. Failed
-observations leave the prior committed state intact. The daemon starts these
-tasks, the configured webhook listener, and one serialized command worker beside
-the convergence sweep, and drains them before closing its database.
+searches exceeding GitHub's 1,000-result cap reject their stage. Failed stages
+preserve completed stage commits. The daemon starts these tasks, the configured
+webhook listener, and one serialized command worker beside the convergence
+sweep, and drains them before closing its database.
 
 The webhook listener authenticates the configured hook identity, secret, and
 repository before accepting a delivery. An empty resolved webhook secret is
@@ -339,10 +346,11 @@ rules and contains no raw provider JSON, credential values, or reactions from
 actors outside the configured signal-reviewer set. Before every poller
 composition, including startup and re-enablement, the runtime compares the
 persisted reviewer set with configured signal reviewers and invalidates both
-validators and snapshots when they differ. After restart with an unchanged set,
-the first complete poll sends conditional requests for every traversed resource
-with a persisted validator. After a complete accepted observation, cache
-retention removes untraversed resources and terminal pull-request pages;
+validators, snapshots, and unfinished poll cursors when they differ. After
+restart with an unchanged set, the first complete poll sends conditional
+requests for every traversed resource with a persisted validator. Completed
+stages and budget-limited attempts retain accepted transport pages. A completed
+reconciliation removes untraversed resources and terminal pull-request pages;
 unchanged responses retain their traversed pages.
 
 Dispatched sessions retain the repository-watch creation cause, module actor,

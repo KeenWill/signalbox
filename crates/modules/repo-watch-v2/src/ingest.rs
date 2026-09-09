@@ -42,6 +42,8 @@ pub struct MergedPullRequestBaseline {
 /// Durable comparison input loaded before one repository fetch.
 #[derive(Clone, Debug)]
 pub struct IngestBaseline {
+    pub(crate) default_branch: Option<BranchName>,
+    pub(crate) default_head: Option<CommitSha>,
     pub generation: u64,
     pub observation: Option<RepoWatchObservation>,
     pub merged_baselines: Vec<MergedPullRequestBaseline>,
@@ -50,6 +52,8 @@ pub struct IngestBaseline {
 
 #[derive(sqlx::FromRow)]
 struct IngestRepositoryRow {
+    default_branch: String,
+    default_head_sha: String,
     frontier_generation: Decimal,
     comparison_baseline: String,
 }
@@ -72,7 +76,7 @@ impl RepoWatchStore {
             .execute(&mut *transaction)
             .await?;
         let row: Option<IngestRepositoryRow> = sqlx::query_as(
-            "SELECT frontier_generation, comparison_baseline::text AS comparison_baseline
+            "SELECT default_branch, default_head_sha, frontier_generation, comparison_baseline::text AS comparison_baseline
                FROM repository_state WHERE repository = $1",
         )
         .bind(repository.as_str())
@@ -86,6 +90,20 @@ impl RepoWatchStore {
         .fetch_all(&mut *transaction)
         .await?;
         transaction.commit().await?;
+        let default_branch = row
+            .as_ref()
+            .map(|row| {
+                BranchName::try_new(row.default_branch.clone())
+                    .map_err(|_| StoreError::InvalidComparisonBaseline)
+            })
+            .transpose()?;
+        let default_head = row
+            .as_ref()
+            .map(|row| {
+                CommitSha::try_new(row.default_head_sha.clone())
+                    .map_err(|_| StoreError::InvalidComparisonBaseline)
+            })
+            .transpose()?;
         let (generation, observation, merged_baselines) = match row {
             Some(row) => {
                 let mut value: Value = serde_json::from_str(&row.comparison_baseline)
@@ -135,6 +153,8 @@ impl RepoWatchStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
         Ok(IngestBaseline {
+            default_branch,
+            default_head,
             generation,
             observation,
             merged_baselines,

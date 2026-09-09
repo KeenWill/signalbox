@@ -4114,6 +4114,7 @@ struct ConditionalPollFixture {
     pages: std::collections::BTreeMap<String, (serde_json::Value, bool)>,
     requests: std::sync::Mutex<Vec<ConditionalRequest>>,
     changed: bool,
+    thread_requests: std::sync::atomic::AtomicUsize,
 }
 
 impl ConditionalPollFixture {
@@ -4123,6 +4124,7 @@ impl ConditionalPollFixture {
         let root = "/repos/example/project";
         let head = "1111111111111111111111111111111111111111";
         let pages = [
+            (String::from("/rate_limit"),json!({"resources":{"core":{"remaining":5000}}}),false),
             (root.to_owned(), json!({"default_branch":"main","private_provider_field":"discard-me"}),false),
             (format!("{root}/branches?per_page=100&page=1"),json!([{"name":"main","commit":{"sha":head}}]),false),
             (format!("{root}/pulls?state=open&per_page=100&page=1"),json!([]),true),
@@ -4142,6 +4144,7 @@ impl ConditionalPollFixture {
             pages,
             requests: std::sync::Mutex::new(Vec::new()),
             changed: false,
+            thread_requests: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -4189,6 +4192,8 @@ impl signalbox_module_repo_watch_v2::poll_cache::ConditionalObservationRead
         &self,
         _: serde_json::Value,
     ) -> Result<serde_json::Value, signalbox_module_repo_watch_v2::provider::ObservationError> {
+        self.thread_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(
             serde_json::json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}),
         )
@@ -4215,8 +4220,8 @@ async fn undated_compact_entries_do_not_reopen_ordinary_pull_requests() -> Resul
         &store,
         &repository,
         &[],
-        EventProducer::Poll,
         MERGED_RETENTION,
+        std::num::NonZeroUsize::new(1000).expect("poll budget"),
     )
     .await?;
     let initial = store.ingest_baseline(&repository).await?;
@@ -4256,10 +4261,17 @@ async fn undated_compact_entries_do_not_reopen_ordinary_pull_requests() -> Resul
     );
     let opened_before: i64 = sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE repository = $1 AND event_kind = 'pull_request_opened'")
         .bind(repository.as_str()).fetch_one(&pool).await?;
-    assert!(matches!(
-        poll_with_cache(&io, &reopened, &repository, &[], EventProducer::Poll, MERGED_RETENTION).await?,
-        FrontierEventAdmission::Committed { events, .. } if events.is_empty()
-    ));
+    assert!(
+        poll_with_cache(
+            &io,
+            &reopened,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(1000).expect("poll budget")
+        )
+        .await?
+    );
     let opened_after: i64 = sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE repository = $1 AND event_kind = 'pull_request_opened'")
         .bind(repository.as_str()).fetch_one(&pool).await?;
     assert_eq!(
@@ -4297,24 +4309,23 @@ async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the
     let reviewers = [RepoWatchAuthorLogin::try_new(String::from("reviewer"))?];
     store.prepare_poll_cache(&repository, &reviewers).await?;
     let first = ConditionalPollFixture::new();
-    assert!(matches!(
+    assert!(
         poll_with_cache(
             &first,
             &store,
             &repository,
             &reviewers,
-            EventProducer::Poll,
-            MERGED_RETENTION
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(1000).expect("poll budget")
         )
-        .await?,
-        FrontierEventAdmission::Committed { .. }
-    ));
+        .await?
+    );
     let original = store.ingest_baseline(&repository).await?.observation;
     let snapshots: Vec<String> =
         sqlx::query_scalar("SELECT snapshot::text FROM poll_cache_page ORDER BY resource_key")
             .fetch_all(&pool)
             .await?;
-    assert_eq!(snapshots.len(), first.pages.len());
+    assert_eq!(snapshots.len(), first.pages.len() - 1);
     assert!(!snapshots.join(" ").contains("discard-me"));
     assert!(!snapshots.join(" ").contains("outsider"));
     drop(store);
@@ -4326,16 +4337,17 @@ async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the
         .prepare_poll_cache(&repository, &same_set_different_case)
         .await?;
     let second = ConditionalPollFixture::new();
-    assert!(matches!(
+    assert!(
         poll_with_cache(
             &second,
             &restarted,
             &repository,
             &reviewers,
-            EventProducer::Poll, MERGED_RETENTION)
-        .await?,
-        FrontierEventAdmission::Committed { events, .. } if events.is_empty()
-    ));
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(1000).expect("poll budget")
+        )
+        .await?
+    );
     assert_eq!(
         restarted.ingest_baseline(&repository).await?.observation,
         original
@@ -4348,14 +4360,19 @@ async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the
             .collect::<std::collections::BTreeSet<_>>(),
         second.pages.keys().map(String::as_str).collect()
     );
-    assert!(requests.iter().all(
-        |ConditionalRequest {
-             etag,
-             last_modified: modified,
-             ..
-         }| etag.as_deref() == Some("\"fixture-etag\"")
-            && modified.as_deref() == Some("Mon, 07 Sep 2026 12:00:00 GMT")
-    ));
+    assert!(
+        requests
+            .iter()
+            .filter(|request| request.path != "/rate_limit")
+            .all(
+                |ConditionalRequest {
+                     etag,
+                     last_modified: modified,
+                     ..
+                 }| etag.as_deref() == Some("\"fixture-etag\"")
+                    && modified.as_deref() == Some("Mon, 07 Sep 2026 12:00:00 GMT")
+            )
+    );
     let replacement_reviewers = [RepoWatchAuthorLogin::try_new(String::from("outsider"))?];
     restarted
         .prepare_poll_cache(&repository, &replacement_reviewers)
@@ -4367,18 +4384,17 @@ async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the
         0
     );
     let third = ConditionalPollFixture::new();
-    assert!(matches!(
+    assert!(
         poll_with_cache(
             &third,
             &restarted,
             &repository,
             &replacement_reviewers,
-            EventProducer::Poll,
-            MERGED_RETENTION
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(1000).expect("poll budget")
         )
-        .await?,
-        FrontierEventAdmission::Committed { .. }
-    ));
+        .await?
+    );
     assert!(third.requests.lock().expect("request log").iter().all(
         |ConditionalRequest {
              etag,
@@ -4426,15 +4442,15 @@ async fn completed_polls_prune_terminal_and_expired_subject_pages() -> Result<()
             &store,
             &repository,
             &reviewers,
-            EventProducer::Poll,
             MERGED_RETENTION,
+            std::num::NonZeroUsize::new(1000).expect("poll budget"),
         )
         .await?;
         let initial_keys: Vec<String> =
             sqlx::query_scalar("SELECT resource_key FROM poll_cache_page ORDER BY resource_key")
                 .fetch_all(&pool)
                 .await?;
-        assert_eq!(initial_keys.len(), open.pages.len());
+        assert_eq!(initial_keys.len(), open.pages.len() - 1);
         let stale_pull: String = sqlx::query_scalar(
             "SELECT snapshot::text FROM poll_cache_page WHERE resource_key = $1",
         )
@@ -4449,8 +4465,8 @@ async fn completed_polls_prune_terminal_and_expired_subject_pages() -> Result<()
                 &store,
                 &repository,
                 &reviewers,
-                EventProducer::Poll,
-                MERGED_RETENTION
+                MERGED_RETENTION,
+                std::num::NonZeroUsize::new(1000).expect("poll budget")
             )
             .await
             .is_err()
@@ -4464,6 +4480,17 @@ async fn completed_polls_prune_terminal_and_expired_subject_pages() -> Result<()
             "a failed poll cannot prune accepted pages"
         );
 
+        assert!(
+            poll_with_cache(
+                &open,
+                &store,
+                &repository,
+                &reviewers,
+                MERGED_RETENTION,
+                std::num::NonZeroUsize::new(1000).expect("poll budget")
+            )
+            .await?
+        );
         let mut terminal = ConditionalPollFixture::new();
         terminal.changed = true;
         terminal
@@ -4490,8 +4517,8 @@ async fn completed_polls_prune_terminal_and_expired_subject_pages() -> Result<()
             &store,
             &repository,
             &reviewers,
-            EventProducer::Poll,
             MERGED_RETENTION,
+            std::num::NonZeroUsize::new(1000).expect("poll budget"),
         )
         .await?;
         let expected = std::collections::BTreeSet::from([
@@ -4529,8 +4556,8 @@ async fn completed_polls_prune_terminal_and_expired_subject_pages() -> Result<()
                 &store,
                 &repository,
                 &reviewers,
-                EventProducer::Poll,
                 MERGED_RETENTION,
+                std::num::NonZeroUsize::new(1000).expect("poll budget"),
             )
             .await?;
             assert!(
@@ -4558,8 +4585,7 @@ async fn completed_polls_prune_terminal_and_expired_subject_pages() -> Result<()
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn incomplete_poll_does_not_retain_validators_from_partial_pages()
--> Result<(), Box<dyn Error>> {
+async fn failed_subject_keeps_completed_poll_stages() -> Result<(), Box<dyn Error>> {
     use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
     let (container, core_pool, url) = unmigrated_postgres().await?;
     migrate(&core_pool).await?;
@@ -4579,8 +4605,8 @@ async fn incomplete_poll_does_not_retain_validators_from_partial_pages()
             &store,
             &repository,
             &reviewers,
-            EventProducer::Poll,
-            MERGED_RETENTION
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(1000).expect("poll budget")
         )
         .await
         .is_err()
@@ -4589,34 +4615,33 @@ async fn incomplete_poll_does_not_retain_validators_from_partial_pages()
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cache_page")
             .fetch_one(&pool)
             .await?,
-        0
+        5
     );
     assert!(
         store
             .ingest_baseline(&repository)
             .await?
             .observation
-            .is_none()
+            .is_some()
     );
     let complete = ConditionalPollFixture::new();
-    assert!(matches!(
+    assert!(
         poll_with_cache(
             &complete,
             &store,
             &repository,
             &reviewers,
-            EventProducer::Poll,
-            MERGED_RETENTION
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(1000).expect("poll budget")
         )
-        .await?,
-        FrontierEventAdmission::Committed { .. }
-    ));
-    assert!(complete.requests.lock().expect("request log").iter().all(
+        .await?
+    );
+    assert!(complete.requests.lock().expect("request log").iter().any(
         |ConditionalRequest {
              etag,
              last_modified: modified,
              ..
-         }| etag.is_none() && modified.is_none()
+         }| etag.is_some() && modified.is_some()
     ));
     pool.close().await;
     core_pool.close().await;
@@ -4740,6 +4765,300 @@ async fn labeled_webhook_dispatches_without_a_poll() -> Result<(), Box<dyn Error
         sqlx::query_scalar::<_, bool>("SELECT bool_and(producer='webhook') FROM gh_event")
             .fetch_one(&pool)
             .await?
+    );
+    drop(container);
+    Ok(())
+}
+
+fn bounded_poll_fixture() -> ConditionalPollFixture {
+    let mut io = ConditionalPollFixture::new();
+    io.changed = true;
+    io.pages.insert(
+        String::from("/rate_limit"),
+        (
+            serde_json::json!({"resources":{"core":{"remaining":5000}}}),
+            false,
+        ),
+    );
+    let pull = io.pages["/repos/example/project/pulls/1"].0.clone();
+    let reviews = io.pages["/repos/example/project/pulls/1/reviews?per_page=100&page=1"].clone();
+    for number in [2, 3] {
+        let mut detail = pull.clone();
+        detail["number"] = serde_json::json!(number);
+        io.pages.insert(
+            format!("/repos/example/project/pulls/{number}"),
+            (detail, false),
+        );
+        io.pages.insert(
+            format!("/repos/example/project/pulls/{number}/reviews?per_page=100&page=1"),
+            reviews.clone(),
+        );
+    }
+    io.pages
+        .get_mut("/repos/example/project/pulls?state=open&per_page=100&page=2")
+        .expect("inventory")
+        .0 = serde_json::json!([{"number":1},{"number":2},{"number":3}]);
+    io
+}
+
+async fn drain_bounded_polls(
+    io: &ConditionalPollFixture,
+    store: &RepoWatchStore,
+    repository: &RepositorySlug,
+    budget: std::num::NonZeroUsize,
+) -> Result<usize, Box<dyn Error>> {
+    let mut attempts = 0;
+    loop {
+        let before = io.requests.lock().expect("requests").len()
+            + io.thread_requests
+                .load(std::sync::atomic::Ordering::Relaxed);
+        let complete = signalbox_module_repo_watch_v2::poll_cache::poll_with_cache(
+            io,
+            store,
+            repository,
+            &[],
+            MERGED_RETENTION,
+            budget,
+        )
+        .await?;
+        let after = io.requests.lock().expect("requests").len()
+            + io.thread_requests
+                .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            after - before <= budget.get(),
+            "attempt spent {} requests with budget {budget}",
+            after - before
+        );
+        attempts += 1;
+        if complete {
+            return Ok(attempts);
+        }
+        assert!(attempts < 50, "finite fixture backlog must drain");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn backlog_larger_than_the_request_budget_drains_across_restarted_polls()
+-> Result<(), Box<dyn Error>> {
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    let io = bounded_poll_fixture();
+    let budget = std::num::NonZeroUsize::new(4).expect("positive request budget");
+    assert!(
+        !signalbox_module_repo_watch_v2::poll_cache::poll_with_cache(
+            &io,
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            budget
+        )
+        .await?
+    );
+    assert_eq!(io.requests.lock().expect("requests").len(), 4);
+    drop(store);
+    pool.close().await;
+    let resumed_pool = module_pool(&url).await?;
+    let resumed = RepoWatchStore::new(resumed_pool.clone());
+    let attempts = drain_bounded_polls(&io, &resumed, &repository, budget).await?;
+    assert!(attempts > 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pr_state")
+            .fetch_one(&resumed_pool)
+            .await?,
+        3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM gh_event WHERE event_kind='pull_request_opened'"
+        )
+        .fetch_one(&resumed_pool)
+        .await?,
+        3
+    );
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn completing_a_partial_poll_clears_its_durable_cursor() -> Result<(), Box<dyn Error>> {
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    let io = bounded_poll_fixture();
+    assert!(
+        !signalbox_module_repo_watch_v2::poll_cache::poll_with_cache(
+            &io,
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(4).expect("budget")
+        )
+        .await?
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cursor")
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+    assert!(
+        signalbox_module_repo_watch_v2::poll_cache::poll_with_cache(
+            &io,
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(100).expect("budget")
+        )
+        .await?
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cursor")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn webhook_refresh_replaces_a_partial_polls_older_pull_without_duplicate_events()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::poll_cache::{observe_webhook_pulls, poll_with_cache};
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    let mut io = bounded_poll_fixture();
+    assert!(
+        poll_with_cache(
+            &io,
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(100).expect("budget")
+        )
+        .await?
+    );
+    assert!(
+        !poll_with_cache(
+            &io,
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(7).expect("budget")
+        )
+        .await?
+    );
+    let staged: bool = sqlx::query_scalar(
+        "SELECT cursor->'pages' ? '/repos/example/project/pulls/1' FROM poll_cursor",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(staged, "partial poll retains the unlabeled PR detail");
+    io.pages
+        .get_mut("/repos/example/project/pulls/1")
+        .expect("detail")
+        .0["labels"] = serde_json::json!([{"name":"repo-watch"}]);
+    let delivery = Uuid::now_v7();
+    let now = OffsetDateTime::now_utc();
+    store
+        .admit_webhook(WebhookDelivery {
+            repository: &repository,
+            hook_id: 1,
+            delivery_id: delivery,
+            event: "pull_request",
+            action: Some("labeled"),
+            body: br#"{"pull_request":{"number":1}}"#,
+            received_at: now,
+            expires_at: now + MERGED_RETENTION,
+        })
+        .await?;
+    store
+        .settle_webhook(1, delivery, WebhookDisposition::Applied, now)
+        .await?;
+    observe_webhook_pulls(&io, &store, &repository, &[], MERGED_RETENTION).await?;
+    let budget = std::num::NonZeroUsize::new(4).expect("budget");
+    drain_bounded_polls(&io, &store, &repository, budget).await?;
+    assert!(
+        poll_with_cache(
+            &io,
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(100).expect("budget")
+        )
+        .await?
+    );
+    let changes:Vec<(String,String)>=sqlx::query_as("SELECT event_kind,producer FROM gh_event WHERE event_kind IN ('labeled','unlabeled') ORDER BY repository_event_ordinal").fetch_all(&pool).await?;
+    assert_eq!(
+        changes,
+        vec![(String::from("labeled"), String::from("webhook"))]
+    );
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn poll_preflight_requires_the_configured_attempt_budget() -> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::{poll_cache::poll_with_cache, provider::ObservationError};
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    let mut io = bounded_poll_fixture();
+    let budget = std::num::NonZeroUsize::new(7).expect("request budget");
+    io.pages.get_mut("/rate_limit").expect("quota").0["resources"]["core"]["remaining"] =
+        serde_json::json!(6);
+    assert!(matches!(
+        poll_with_cache(&io, &store, &repository, &[], MERGED_RETENTION, budget).await,
+        Err(ObservationError::RestBudgetUnavailable {
+            required: 7,
+            remaining: 6
+        })
+    ));
+    assert_eq!(io.requests.lock().expect("requests").len(), 1);
+    io.pages.get_mut("/rate_limit").expect("quota").0["resources"]["core"]["remaining"] =
+        serde_json::json!(7);
+    assert!(!poll_with_cache(&io, &store, &repository, &[], MERGED_RETENTION, budget).await?);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cursor")
+            .fetch_one(&pool)
+            .await?,
+        1
     );
     drop(container);
     Ok(())

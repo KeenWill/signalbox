@@ -22,7 +22,7 @@ use signalbox_session_ownership::{
 };
 
 use crate::{
-    EventProducer, FrontierEventAdmission, RepoWatchStore, StoreError,
+    EventProducer, RepoWatchStore, StoreError,
     github::{GitHubClient, GitHubClientError},
     ingest::{RepositoryObservation, RepositoryTask},
     observation_decode::{array, conclusion, object_id, positive, text},
@@ -64,6 +64,10 @@ pub enum ObservationError {
     },
     RequestBudgetExceeded {
         limit: usize,
+    },
+    RestBudgetUnavailable {
+        required: usize,
+        remaining: u64,
     },
     CheckSuiteLimitExceeded {
         limit: usize,
@@ -108,6 +112,13 @@ impl fmt::Display for ObservationError {
                 f,
                 "commit check-run inventory exceeds GitHub's {limit}-suite limit"
             ),
+            Self::RestBudgetUnavailable {
+                required,
+                remaining,
+            } => write!(
+                f,
+                "repository-watch REST budget requires {required} requests; {remaining} remain"
+            ),
             Self::RequestBudgetExceeded { limit } => write!(
                 f,
                 "repository-watch observation request budget exhausted after {limit} requests"
@@ -127,6 +138,7 @@ impl Error for ObservationError {
             Self::InvalidState { source, .. } => Some(source),
             Self::Request { source, .. } => Some(source),
             Self::InvalidResponse
+            | Self::RestBudgetUnavailable { .. }
             | Self::RequestBudgetExceeded { .. }
             | Self::CheckSuiteLimitExceeded { .. }
             | Self::WorkflowRunLimitExceeded { .. } => None,
@@ -251,6 +263,7 @@ pub struct GitHubRepositoryTask<Loader> {
     pub repository: RepositorySlug,
     pub signal_reviewers: Vec<RepoWatchAuthorLogin>,
     pub subject_retention: std::time::Duration,
+    pub poll_request_budget: std::num::NonZeroUsize,
     pub clients: Loader,
     pub store: RepoWatchStore,
 }
@@ -278,13 +291,13 @@ where
         let result = self.observe(producer).await;
         use crate::measurements::PollOutcome;
         attempt.finish(match &result {
-            Ok(()) => PollOutcome::Succeeded,
+            Ok(_) => PollOutcome::Succeeded,
             Err(RepositoryAttemptError::Client(_)) => PollOutcome::ClientFailed,
             Err(RepositoryAttemptError::Observation(_)) => PollOutcome::ObservationFailed,
             Err(RepositoryAttemptError::Store(_)) => PollOutcome::StoreFailed,
             Err(RepositoryAttemptError::FrontierConflict) => PollOutcome::FrontierConflict,
         });
-        result
+        result.map(|_| ())
     }
 }
 
@@ -292,43 +305,37 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
     async fn observe(
         &mut self,
         producer: EventProducer,
-    ) -> Result<(), RepositoryAttemptError<Loader::Error>> {
+    ) -> Result<bool, RepositoryAttemptError<Loader::Error>> {
         let client = self
             .clients
             .load_client()
             .await
             .map_err(RepositoryAttemptError::Client)?;
-        crate::poll_cache::observe_webhook_pulls(
-            &client,
-            &self.store,
-            &self.repository,
-            &self.signal_reviewers,
-            self.subject_retention,
-        )
-        .await
-        .map_err(RepositoryAttemptError::Observation)?;
         if producer == EventProducer::Webhook {
-            return Ok(());
+            crate::poll_cache::observe_webhook_pulls(
+                &client,
+                &self.store,
+                &self.repository,
+                &self.signal_reviewers,
+                self.subject_retention,
+            )
+            .await
+            .map_err(RepositoryAttemptError::Observation)?;
+            return Ok(true);
         }
-        let admission = crate::poll_cache::poll_with_cache(
+        crate::poll_cache::poll_with_cache(
             &client,
             &self.store,
             &self.repository,
             &self.signal_reviewers,
-            producer,
             self.subject_retention,
+            self.poll_request_budget,
         )
         .await
         .map_err(|error| match error {
             ObservationError::Cache(error) => RepositoryAttemptError::Store(error),
             error => RepositoryAttemptError::Observation(error),
-        })?;
-        match admission {
-            FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged => Ok(()),
-            FrontierEventAdmission::Stale | FrontierEventAdmission::ConflictingReuse => {
-                Err(RepositoryAttemptError::FrontierConflict)
-            }
-        }
+        })
     }
 }
 
@@ -457,11 +464,23 @@ pub async fn fetch_pull_observation(
         io,
         requests: std::sync::atomic::AtomicUsize::new(0),
     };
-    let io = &budget;
+    fetch_poll_pull(&budget, repository, reviewers, baseline, number).await
+}
+
+pub(crate) async fn fetch_poll_pull(
+    io: &impl GitHubObservationRead,
+    repository: &RepositorySlug,
+    reviewers: &[RepoWatchAuthorLogin],
+    baseline: &crate::ingest::IngestBaseline,
+    number: PullRequestNumber,
+) -> Result<RepositoryObservation, ObservationError> {
     let root = format!("/repos/{}", repository.as_str());
-    let (metadata, _) = read_page(io, &root).await?;
-    let default_branch =
-        metadata.admit(BranchName::try_new(metadata.text(&metadata["default_branch"])?).ok())?;
+    let default_branch = if let Some(branch) = &baseline.default_branch {
+        branch.clone()
+    } else {
+        let (metadata, _) = read_page(io, &root).await?;
+        metadata.admit(BranchName::try_new(metadata.text(&metadata["default_branch"])?).ok())?
+    };
     let previous = baseline.observation.as_ref();
     let mut branch_heads = previous
         .map(|prior| prior.state().branch_heads().to_vec())
@@ -481,12 +500,10 @@ pub async fn fetch_pull_observation(
             })
             .collect::<Result<Vec<_>, ObservationError>>()?;
     }
-    let default_head = metadata
-        .admit(
-            branch_heads
-                .iter()
-                .find(|branch| branch.branch() == &default_branch),
-        )?
+    let default_head = branch_heads
+        .iter()
+        .find(|branch| branch.branch() == &default_branch)
+        .ok_or(ObservationError::InvalidResponse)?
         .head()
         .clone();
     let mut pulls = previous
@@ -520,6 +537,138 @@ pub async fn fetch_pull_observation(
         default_head,
         observation: RepoWatchObservation::new(reviewers.to_vec(), state),
         merged_at: merge_time.map(|time| (number, time)).into_iter().collect(),
+        observed_at: OffsetDateTime::now_utc(),
+    })
+}
+
+pub(crate) async fn fetch_poll_repository(
+    io: &impl GitHubObservationRead,
+    repository: &RepositorySlug,
+    reviewers: &[RepoWatchAuthorLogin],
+    baseline: &crate::ingest::IngestBaseline,
+) -> Result<(RepositoryObservation, Vec<PullRequestNumber>), ObservationError> {
+    let root = format!("/repos/{}", repository.as_str());
+    let (metadata, _) = read_page(io, &root).await?;
+    let default_branch =
+        metadata.admit(BranchName::try_new(metadata.text(&metadata["default_branch"])?).ok())?;
+    let branch_heads = pages(io, &format!("{root}/branches"), None)
+        .await?
+        .iter()
+        .map(|v| {
+            Ok(RepoWatchBranchHead::new(
+                v.admit(BranchName::try_new(v.text(&v["name"])?).ok())?,
+                v.admit(CommitSha::try_new(v.text(&v["commit"]["sha"])?).ok())?,
+            ))
+        })
+        .collect::<Result<Vec<_>, ObservationError>>()?;
+    let default_head = metadata
+        .admit(
+            branch_heads
+                .iter()
+                .find(|branch| branch.branch() == &default_branch),
+        )?
+        .head()
+        .clone();
+    let previous = baseline.observation.as_ref();
+    let pulls = previous
+        .map(|prior| prior.state().pull_requests().to_vec())
+        .unwrap_or_default();
+    let mut numbers = pages(io, &format!("{root}/pulls?state=open"), None)
+        .await?
+        .iter()
+        .map(|v| v.admit(positive(&v["number"]).map(PullRequestNumber::new)))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    numbers.extend(pulls.iter().map(|pull| pull.context().number()));
+    let workflow_runs = match previous {
+        Some(prior) => prior.state().workflow_runs().to_vec(),
+        None => {
+            fetch_workflows(
+                io,
+                &root,
+                repository,
+                &branch_heads
+                    .iter()
+                    .filter(|head| head.branch() == &default_branch)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                None,
+            )
+            .await?
+        }
+    };
+    let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+        pull_requests: pulls,
+        branch_heads,
+        workflow_runs,
+    })
+    .map_err(|source| ObservationError::InvalidState {
+        repository: repository.clone(),
+        pull_request: None,
+        source,
+    })?;
+    Ok((
+        RepositoryObservation {
+            repository: repository.clone(),
+            default_branch,
+            default_head,
+            observation: RepoWatchObservation::new(reviewers.to_vec(), state),
+            merged_at: BTreeMap::new(),
+            observed_at: OffsetDateTime::now_utc(),
+        },
+        numbers.into_iter().collect(),
+    ))
+}
+
+pub(crate) async fn fetch_poll_workflows(
+    io: &impl GitHubObservationRead,
+    repository: &RepositorySlug,
+    reviewers: &[RepoWatchAuthorLogin],
+    baseline: &crate::ingest::IngestBaseline,
+) -> Result<RepositoryObservation, ObservationError> {
+    let root = format!("/repos/{}", repository.as_str());
+    let previous = baseline
+        .observation
+        .as_ref()
+        .ok_or(ObservationError::InvalidResponse)?;
+    let default_branch = baseline
+        .default_branch
+        .clone()
+        .ok_or(ObservationError::InvalidResponse)?;
+    let default_head = baseline
+        .default_head
+        .clone()
+        .ok_or(ObservationError::InvalidResponse)?;
+    let state = previous.state();
+    let retained_branches = state
+        .branch_heads()
+        .iter()
+        .filter(|branch| {
+            branch.branch() == &default_branch
+                || state.pull_requests().iter().any(|pull| {
+                    pull.context().head_repository() == repository
+                        && branch.branch() == pull.context().head_branch()
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let workflow_runs =
+        fetch_workflows(io, &root, repository, &retained_branches, Some(previous)).await?;
+    let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+        pull_requests: state.pull_requests().to_vec(),
+        branch_heads: state.branch_heads().to_vec(),
+        workflow_runs,
+    })
+    .map_err(|source| ObservationError::InvalidState {
+        repository: repository.clone(),
+        pull_request: None,
+        source,
+    })?;
+    Ok(RepositoryObservation {
+        repository: repository.clone(),
+        default_branch,
+        default_head,
+        observation: RepoWatchObservation::new(reviewers.to_vec(), state),
+        merged_at: BTreeMap::new(),
         observed_at: OffsetDateTime::now_utc(),
     })
 }
@@ -604,12 +753,12 @@ async fn fetch_pull(
     };
     let ((completed_check_suites, completed_check_runs), reviews, threads, reactions) =
         if lifecycle == RepoWatchPullRequestLifecycle::Open {
-            tokio::try_join!(
-                fetch_checks(io, root, context.head_sha()),
-                fetch_reviews(io, &path, previous),
-                fetch_threads(io, repository, number),
-                fetch_reactions(io, root, number, reviewers),
-            )?
+            (
+                fetch_checks(io, root, context.head_sha()).await?,
+                fetch_reviews(io, &path, previous).await?,
+                fetch_threads(io, repository, number).await?,
+                fetch_reactions(io, root, number, reviewers).await?,
+            )
         } else if let Some(previous) = previous {
             (
                 (
@@ -1008,6 +1157,7 @@ mod tests {
                 repository: repository.clone(),
                 signal_reviewers: Vec::new(),
                 subject_retention: std::time::Duration::ZERO,
+                poll_request_budget: std::num::NonZeroUsize::new(100).expect("fixture budget"),
                 clients: UnavailableClient,
                 store: store.clone(),
             };
