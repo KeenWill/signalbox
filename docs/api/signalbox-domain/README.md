@@ -4,6 +4,7 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| program_primitives | 6 | 0 | 0 | [program_primitives](program_primitives.md) |
 | program_registration | 7 | 0 | 0 | [program_registration](program_registration.md) |
 | program_session | 6 | 1 | 0 | [program_session](program_session.md) |
 | accepted_input | 5 | 0 | 0 | [accepted_input](accepted_input.md) |

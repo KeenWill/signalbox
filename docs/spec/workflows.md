@@ -105,6 +105,24 @@ completion prevents success; after accepted success it records
 Cancelled and faulted receipts carry a null result. Equal cancellation retries
 replay their recorded outcome without appending frames.
 
+## Durable primitives
+
+`DurablePrimitives` answers empty `Now` and `Random` requests with Unix
+milliseconds and a uniformly sampled operating-system u64 respectively. Values
+use decimal strings in checked JSON payloads; recorded answers replay without
+reading the clock or drawing randomness. `Sleep` carries an absolute
+`deadline_unix_ms` at request admission and receives `Wake` with that deadline
+once wall time reaches it, including after restart. Sleep-only waits use timers
+without opening journal listeners.
+
+`AwaitEvent` carries a typed `program_answers` source run and an exclusive
+journal position (`after`, zero for the beginning). It receives the next
+retained `Answer` delivery's exact payload bytes and position. The outstanding
+request's run and ordinal identify each wait. Source reads occur before
+listening, after subscription and after every wake; PostgreSQL answer
+notifications are hints filtered to the requested source runs. The SDK's typed
+`primitives` wrappers preserve full-width values as decimal strings.
+
 ## Daemon runner
 
 The fenced daemon owns one local workflow runner. Internal registration and
@@ -121,9 +139,10 @@ preserved.
 The Linux compiled catalog includes `clock` revision `1`: its input is a
 big-endian u64, and its result concatenates that input and a journaled
 big-endian u64 Unix time in seconds. The runner resolves admitted JavaScript
-artifacts from their registrations without requiring a native catalog.
-Registration effects and the clock are composed; other effects and durable waits
-are not composed. There is no public launch command.
+artifacts from their registrations without requiring a native catalog. Empty
+`Now` requests receive the SDK's typed Unix-millisecond answer. Registration
+effects and the clock are composed; other effects and durable waits are not
+composed. There is no public launch command.
 
 ## Native programs
 

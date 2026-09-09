@@ -152,6 +152,9 @@ pub enum ToolExecutionErrorKind {
 pub struct ToolExecutionErrorDetail(String);
 
 impl ToolExecutionErrorDetail {
+    /// Maximum admitted UTF-8 byte length.
+    pub const MAX_UTF8_BYTES: usize = MAX_TOOL_ERROR_DETAIL_BYTES;
+
     /// Checks a nonempty, POSIX-trimmed, control-free detail.
     pub fn try_new(value: String) -> Result<Self, ToolExecutionErrorDetailError> {
         let failure = if value.is_empty() {

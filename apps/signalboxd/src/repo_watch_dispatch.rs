@@ -191,9 +191,10 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
         let session = applied.session();
         let stop = if let Some(stop) = checkout.stop_command {
             let sticky = match checkout.retired_reason {
-                Some(CheckoutRetirementReason::RepositoryUnconfigured) => {
-                    StopStickiness::Redispatchable
-                }
+                Some(
+                    CheckoutRetirementReason::RepositoryUnconfigured
+                    | CheckoutRetirementReason::KickoffRejected,
+                ) => StopStickiness::Redispatchable,
                 _ => StopStickiness::Sticky,
             };
             Some((stop, sticky))
@@ -317,6 +318,72 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 return Err(RepositoryWatchCommandError::CoreCommandFailed);
             }
         } else if !checkout.removed {
+            use signalbox_module_repo_watch_v2::checkout::KickoffPushAuthority;
+            let push_authority = match crate::repo_watch_runtime::git_push_repository(
+                self.configuration,
+                &checkout.event,
+            ) {
+                Some(_) => KickoffPushAuthority::Available,
+                None => KickoffPushAuthority::Unavailable,
+            };
+            if let Some((kickoff, text)) = self
+                .store
+                .retain_dispatch_kickoff(
+                    id,
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    push_authority,
+                )
+                .await
+                .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+            {
+                let kickoff_result = match self.core.submit_kickoff(kickoff, session, text).await {
+                    Err(RepositoryWatchCommandError::KickoffDefaultsChanged) => {
+                        let (retry, text) = self
+                            .store
+                            .retry_dispatch_kickoff(
+                                id,
+                                kickoff,
+                                DurableCommandId::from_uuid(Uuid::now_v7()),
+                            )
+                            .await
+                            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+                            .ok_or(RepositoryWatchCommandError::CoreCommandFailed)?;
+                        self.core.submit_kickoff(retry, session, text).await
+                    }
+                    result => result,
+                };
+                match kickoff_result {
+                    Err(RepositoryWatchCommandError::KickoffRejected) => {
+                        let stop = self
+                            .store
+                            .retire_dispatch_checkout(
+                                id,
+                                CheckoutRetirementReason::KickoffRejected,
+                                "submit_input",
+                                "rejected",
+                                DurableCommandId::from_uuid(Uuid::now_v7()),
+                            )
+                            .await
+                            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+                        let stop = SessionLifecycleCommand::new(
+                            stop,
+                            session,
+                            SessionLifecycleOperation::Stop {
+                                sticky: StopStickiness::Redispatchable,
+                                descendant_scope: DescendantTerminationScope::ParentAlone,
+                            },
+                        );
+                        if !matches!(
+                            self.core.submit_lifecycle(stop).await?,
+                            CommandSubmission::Accepted
+                        ) {
+                            return Err(RepositoryWatchCommandError::CoreCommandFailed);
+                        }
+                        return Ok(result);
+                    }
+                    result => result?,
+                }
+            }
             signalbox_persistence::start_eligible_turn::StartEligibleTurnRepository::new(
                 self.core.pool.clone(),
             )
@@ -431,6 +498,8 @@ pub enum RepositoryWatchCommandError {
     TemplateUnavailable,
     UnsupportedCommand,
     CoreCommandFailed,
+    KickoffDefaultsChanged,
+    KickoffRejected,
     InterruptFailed,
     CheckoutRemovalFailed,
 }
@@ -443,6 +512,86 @@ impl SessionCommandSink for RepositoryWatchCommandSink {
 }
 
 impl RepositoryWatchCommandSink {
+    async fn submit_kickoff(
+        &mut self,
+        command: DurableCommandId,
+        session: SessionId,
+        text: String,
+    ) -> Result<(), RepositoryWatchCommandError> {
+        use signalbox_application::{
+            SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+            UuidV7SubmitInputIdGenerator,
+        };
+        use signalbox_domain::{
+            DeliveryRequest, ModelSelectionOverride, ParentTerminationKind,
+            PerInputConfigurationChoices, SubmitInputRejectedResult, SubmitInputResult,
+            UserContent,
+        };
+        let repository =
+            signalbox_persistence::submit_input::SubmitInputRepository::with_model_capabilities(
+                self.pool.clone(),
+                self.models.model_capability_catalog(),
+            );
+        let delivery = match repository
+            .load(command)
+            .await
+            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+        {
+            Some(recorded) => recorded.command().delivery(),
+            None => {
+                let current =
+                    signalbox_persistence::session::SessionRepository::new(self.pool.clone())
+                        .load_session(session)
+                        .await
+                        .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+                        .ok_or(RepositoryWatchCommandError::CoreCommandFailed)?;
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: PerInputConfigurationChoices::new(
+                        current.current_configuration_defaults().version(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                }
+            }
+        };
+        let request = SubmitInputRequest::try_new(
+            command,
+            session,
+            UserContent::try_text(text)
+                .map_err(|_| RepositoryWatchCommandError::UnsupportedCommand)?,
+            delivery,
+        )
+        .map_err(|_| RepositoryWatchCommandError::UnsupportedCommand)?;
+        let mut service = SubmitInputService::new(
+            UuidV7SubmitInputIdGenerator,
+            crate::process_runtime::ConfiguredSubmitInputTransaction {
+                repository,
+                model_configuration: &self.models,
+                principal: CommandPrincipal::Module {
+                    module: DispatchingModule::RepositoryWatch,
+                },
+                cascade_root_kind: ParentTerminationKind::Cancelled,
+            },
+            self.eligibility_nudge.clone(),
+            self.tool_dispatch_gate.clone(),
+        );
+        match service.execute(request).await {
+            Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(_))) => Ok(()),
+            Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::SessionDefaultsVersionMismatch { .. },
+            ))) => Err(RepositoryWatchCommandError::KickoffDefaultsChanged),
+            Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(_))) => {
+                Err(RepositoryWatchCommandError::KickoffRejected)
+            }
+            Ok(SubmitInputOutcome::ConflictingReuse { .. }) => {
+                Err(RepositoryWatchCommandError::CoreCommandFailed)
+            }
+            Err(error) => {
+                tracing::warn!(?session, %error, "repository-watch kickoff submission failed");
+                Err(RepositoryWatchCommandError::CoreCommandFailed)
+            }
+        }
+    }
+
     async fn submit_with_checkout_provisioning(
         &mut self,
         command: SessionCommand,

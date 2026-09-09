@@ -25,6 +25,7 @@ mod model_call;
 mod model_execution;
 mod model_settings;
 mod program_journal;
+pub mod program_primitives;
 pub mod program_registration;
 /// Host-verified program session attribution.
 pub mod program_session;
