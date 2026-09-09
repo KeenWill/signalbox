@@ -61,14 +61,11 @@ impl WorkflowService {
                 ProgramCancellationOutcome::Applied
             ))
         ) {
-            self.cancelled(command.run_id);
+            let _ = self
+                .wake
+                .send(runtime::WorkflowWake::Cancel(command.run_id));
         }
         result
-    }
-
-    /// Wakes a blocked attempt after its durable cancellation has committed.
-    pub fn cancelled(&self, run: ProgramRunId) {
-        let _ = self.wake.send(runtime::WorkflowWake::Cancel(run));
     }
 
     pub fn clock_executable(&self) -> Option<&ProgramExecutable> {
