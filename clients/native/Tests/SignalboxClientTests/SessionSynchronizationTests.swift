@@ -3412,6 +3412,7 @@ private enum SynchronizationFixture {
       """
       {
         "type":"transcript_snapshot_start",
+        "repository_watch":null,
         "session_id":"\(session)",
         "cursor":"\(cursor)",
         "runner":null
@@ -3425,6 +3426,7 @@ private enum SynchronizationFixture {
       """
       {
         "type":"transcript_snapshot_start",
+        "repository_watch":null,
         "session_id":"\(session)",
         "cursor":"\(cursor)",
         "runner":{
@@ -3466,6 +3468,7 @@ private enum SynchronizationFixture {
       """
       {
         "type":"transcript_snapshot_start",
+        "repository_watch":null,
         "session_id":17,
         "cursor":"10",
         "runner":null

@@ -1314,6 +1314,9 @@ async fn goal_successor_uses_the_reloaded_alias_definition() -> Result<(), Box<d
     let alias = signalbox_domain::ModelAlias::from_uuid(Uuid::from_u128(0x2003));
     let next_selection = Uuid::from_u128(0x2002);
     let mut source = GOAL_MODEL_CONFIGURATION.parse::<toml_edit::DocumentMut>()?;
+    let credential = tempfile::NamedTempFile::new()?;
+    source["credential_profiles"][0]["file"] =
+        toml_edit::value(credential.path().to_str().expect("fixture credential path"));
     let example = include_str!("../../../config/signalboxd.example.toml")
         .parse::<toml_edit::DocumentMut>()?;
     source.insert("numeric_bounds", example["numeric_bounds"].clone());

@@ -51,7 +51,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && !contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) }}
     name: Tool live smokes (report only)
     continue-on-error: true
-    runs-on: signalbox-coverage
+    runs-on: signalbox-smokes
     env:
       CARGO_BUILD_JOBS: "2"
     timeout-minutes: 25

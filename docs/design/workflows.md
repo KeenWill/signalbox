@@ -117,6 +117,10 @@ however the row was stored. Offload preserves frame kinds and existing inline
 rows; each larger payload is stored once and loaded as exact bytes. Journals are
 not truncated.
 
+## Repository watch
+
+[Repository watch design](repo-watch.md).
+
 ## Evaluations
 
 [Evaluation workflows](eval-system.md).

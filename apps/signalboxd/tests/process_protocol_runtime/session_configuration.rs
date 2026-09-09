@@ -818,6 +818,9 @@ async fn reload_configuration_swaps_request_catalogs_and_replays_without_reading
     let model_path = files.path().join("models.toml");
     let template_path = files.path().join("templates.toml");
     let mut model_source = MODEL_CONFIGURATION.parse::<toml_edit::DocumentMut>()?;
+    let credential = tempfile::NamedTempFile::new_in(files.path())?;
+    model_source["credential_profiles"][0]["file"] =
+        toml_edit::value(credential.path().to_str().expect("fixture credential path"));
     let example = include_str!("../../../../config/signalboxd.example.toml")
         .parse::<toml_edit::DocumentMut>()?;
     model_source.insert("numeric_bounds", example["numeric_bounds"].clone());
@@ -1038,6 +1041,9 @@ async fn reload_receipt_failure_requires_recovery_after_catalog_installation()
     let model_path = files.path().join("models.toml");
     let template_path = files.path().join("templates.toml");
     let mut source = MODEL_CONFIGURATION.parse::<toml_edit::DocumentMut>()?;
+    let credential = tempfile::NamedTempFile::new_in(files.path())?;
+    source["credential_profiles"][0]["file"] =
+        toml_edit::value(credential.path().to_str().expect("fixture credential path"));
     let example = include_str!("../../../../config/signalboxd.example.toml")
         .parse::<toml_edit::DocumentMut>()?;
     source.insert("numeric_bounds", example["numeric_bounds"].clone());

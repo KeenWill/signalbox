@@ -62,29 +62,32 @@ disable provider access and require identical evidence and scorecards.
 
 ## Recording and sealing
 
-`evaluation_run` and `evaluation_trial` form one immutable sealed snapshot. The
-run row is keyed by the workflow run identity and retains measurement metadata,
-scorecard kind and full scorecard; registration and manifest resolve through the
-workflow run. Trial rows are keyed by that run and trial ordinal and retain the
-case/repeat binding, expected label/provenance, outcome and journal evidence
-reference, including available rationale, provider identity and token usage with
-its cache accounting semantics. Failed and ambiguous outcomes are explicit trial
-evidence.
+`evaluation_run` and `evaluation_trial` form one sealed snapshot that evaluation
+code cannot modify. The run row is keyed by the workflow run identity and
+retains measurement metadata, scorecard kind and full scorecard; registration
+and manifest resolve through the workflow run. Trial rows are keyed by that run
+and trial ordinal and retain the case/repeat binding, expected label/provenance,
+outcome and journal evidence reference, including available rationale, provider
+identity and token usage with its cache accounting semantics. Failed and
+ambiguous outcomes are explicit trial evidence.
 
 Seal verifies the calling run, exact manifest membership and one resolved
 outcome for every planned trial. It re-decodes the digest-pinned corpus to
 derive expectations and label provenance at the selected case positions, then
 derives the scorecard from that accepted evidence using the pinned scoring
 implementation. Any supplied summary must agree. One transaction inserts the
-run, all trials and the scorecard or inserts nothing; updates, deletes,
-truncation and later trial insertion are prohibited. Equal snapshot retries
-adopt the committed receipt, including commit-before-delivery recovery; changed
-identity bindings, evidence or summary under the same run conflict.
+run, all trials and the scorecard or inserts nothing; evaluation code cannot
+update, delete or truncate sealed rows or insert later trials. Corpus-derived
+fields in sealed evidence remain subject to the retention and deletion rules
+decided under [Corpus governance](../open-questions.md#graded-approval-judging);
+sealing does not prohibit governance actions. Equal snapshot retries adopt the
+committed receipt, including commit-before-delivery recovery; changed identity
+bindings, evidence or summary under the same run conflict.
 
 The program seals before returning the same scorecard through the workflow's
 Terminal/Answer result. A committed seal is a complete measurement snapshot, not
 workflow terminal authority: a crash or cancellation after sealing leaves the
-snapshot immutable, while the journal determines execution status. The journal
+snapshot unchanged, while the journal determines execution status. The journal
 owns progress and recovery; no mutable evaluation lifecycle tables or second
 success record are added.
 

@@ -11,7 +11,7 @@ rust_library(
     name = "signalbox_module_repo_watch_v2",
     crate_features = CRATE_FEATURES,
     crate_root = "src/lib.rs",
-    deps = ["//crates/ownership-seam:signalbox_ownership_seam"],
+    deps = ["//crates/session-ownership:signalbox_session_ownership"],
 )
 
 rust_unit_test(
@@ -32,7 +32,7 @@ rust_binary(
     crate_root = "examples/observation_probe.rs",
     deps = [
         ":signalbox_module_repo_watch_v2",
-        "//crates/ownership-seam:signalbox_ownership_seam",
+        "//crates/session-ownership:signalbox_session_ownership",
     ] + all_crate_deps(normal_dev = True),
 )
 

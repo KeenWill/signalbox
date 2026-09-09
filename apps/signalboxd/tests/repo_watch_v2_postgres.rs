@@ -21,7 +21,11 @@ use signalbox_module_repo_watch_v2::{
     WebhookDelivery, WebhookDisposition, matching_rules, plan_lifecycle_reaction_for_test,
     plan_repository_event, plan_retained_lifecycle_reaction_for_test,
 };
-use signalbox_ownership_seam::{
+use signalbox_persistence::{
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
+    disposable_test_container_labels, local_test_connection_options, migrate,
+};
+use signalbox_session_ownership::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, CreateSession,
     CreateSessionOutcome, DescendantTerminationScope, DurableCommandId, FinishCondition,
     GitHubObjectId, LabelName, LifecycleEvent, MergeableState, OffsetDateTime, PullRequestBody,
@@ -41,10 +45,6 @@ use signalbox_ownership_seam::{
     SessionCommandPayload, SessionCreated, SessionId, SessionLifecycleCommand,
     SessionLifecycleOperation, SessionOwnership, SessionTemplateName, StartGate, StopStickiness,
     WorkflowName,
-};
-use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels, local_test_connection_options, migrate,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -580,7 +580,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("ci"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     assert_eq!(matching_rules(std::slice::from_ref(&rule), &event), [&rule]);
     let identity = RepoWatchEventContentIdentityV1::from_bytes([15; 32]);
@@ -590,7 +590,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("build"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let earlier_identity = RepoWatchEventContentIdentityV1::from_bytes([14; 32]);
     let earlier_occurrence = event_candidate(&earlier_event, earlier_identity);
@@ -767,7 +767,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("ci"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let replayed_occurrence = event_candidate(&replayed_event, identity);
     let replayed_earlier_event = RepoWatchEvent::branch_workflow(
@@ -775,7 +775,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("build"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let replayed_earlier_occurrence = event_candidate(&replayed_earlier_event, earlier_identity);
     assert_eq!(
@@ -892,7 +892,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("lint"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let eventful_projection_occurrence = event_candidate(
         &eventful_projection_event,
@@ -1005,7 +1005,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         complete_repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("complete-frontier"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let incomplete_occurrence = event_candidate(
         &incomplete_event,
@@ -1112,7 +1112,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(grouped[0].len(), 2);
     assert_eq!(grouped[1].len(), 1);
     assert_ne!(grouped[0][0].dispatch(), grouped[1][0].dispatch());
-    let signalbox_ownership_seam::SessionCommandPayload::CreateSession(created) =
+    let signalbox_session_ownership::SessionCommandPayload::CreateSession(created) =
         plans[0].command().clone().into_payload()
     else {
         panic!("matching dispatch action must produce create_session");
@@ -1579,7 +1579,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("build"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let preceding_occurrence = event_candidate(
         &preceding_event,
@@ -1803,7 +1803,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("recurring"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let recurring_occurrence = event_candidate(
         &recurring_event,
@@ -1868,7 +1868,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("recurring"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let restored_occurrence = event_candidate(
         &restored_event,
@@ -2162,7 +2162,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         reactions: source.reactions().to_vec(),
     })?;
     let compacted =
-        signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineV1::from_merged_state(
+        signalbox_session_ownership::RepoWatchMergedPullRequestBaselineV1::from_merged_state(
             &merged,
             comparison_baseline.signal_reviewers(),
         )?
@@ -2422,13 +2422,13 @@ fn dispatch_observation(
 #[ignore = "requires disposable PostgreSQL"]
 async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_cooldown()
 -> Result<(), Box<dyn Error>> {
-    use signalbox_ownership_seam::{
+    use signalbox_session_ownership::{
         GoalChange, GoalEventKind, LifecycleActor, LifecycleEventKind, SessionStateKind,
         SessionTerminal, SessionTerminalOutcome,
     };
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    let source = signalbox_ownership_seam::LifecycleEventSource::new(core_pool.clone());
+    let source = signalbox_session_ownership::LifecycleEventSource::new(core_pool.clone());
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
         .execute(&core_pool)
         .await?;
@@ -2665,7 +2665,7 @@ impl signalbox_module_repo_watch_v2::dispatch::SessionCommandSink for SettlingTh
         &mut self,
         command: SessionCommand,
     ) -> Result<signalbox_module_repo_watch_v2::dispatch::CommandSubmission, ()> {
-        use signalbox_ownership_seam::{CommandSettlement, LifecycleEventKind};
+        use signalbox_session_ownership::{CommandSettlement, LifecycleEventKind};
         let SessionCommandPayload::Lifecycle(command) = command.into_payload() else {
             panic!("fixture submits only its start release");
         };
@@ -2787,7 +2787,9 @@ fn runtime_configuration(
 }
 
 fn runtime_configuration_source(hook: &RuntimeHookFixture<'_>) -> Result<String, Box<dyn Error>> {
-    let catalog = include_str!("../../../config/signalboxd.example.toml")
+    let poll_credential = hook.secret.with_extension("poll-token");
+    write_private_credential(&poll_credential, b"")?;
+    let mut catalog = include_str!("../../../config/signalboxd.example.toml")
         .replace(
             "/usr/local/bin/signalbox-exec-supervisor",
             std::env::current_exe()?.to_string_lossy().as_ref(),
@@ -2796,6 +2798,18 @@ fn runtime_configuration_source(hook: &RuntimeHookFixture<'_>) -> Result<String,
             "repository_watch_webhook_retention = \"604800s\"",
             &format!("repository_watch_webhook_retention = {:?}", hook.retention),
         );
+    for profile in ["anthropic-primary", "anthropic-overflow"] {
+        let model_credential = hook
+            .secret
+            .parent()
+            .expect("fixture directory")
+            .join(profile);
+        write_private_credential(&model_credential, b"")?;
+        catalog = catalog.replace(
+            &format!("/run/secrets/{profile}"),
+            model_credential.to_str().expect("fixture credential path"),
+        );
+    }
     Ok(format!(
         r#"{catalog}
 [repository_watch]
@@ -2831,8 +2845,17 @@ template = "{template}"
         path = hook.path,
         id = hook.id,
         secret = hook.secret.display(),
-        poll_credential = hook.secret.with_extension("missing-token").display(),
+        poll_credential = poll_credential.display(),
     ))
+}
+
+/// Synthetic secrets use the same private permissions as admitted credentials.
+fn write_private_credential(
+    path: &std::path::Path,
+    bytes: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    std::fs::write(path, bytes)?;
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
 }
 
 async fn unused_webhook_address() -> Result<std::net::SocketAddr, std::io::Error> {
@@ -2985,7 +3008,7 @@ async fn composed_repository_watch_dispatches_and_reloads_its_running_listener()
     );
     let files = tempfile::tempdir()?;
     let secret = files.path().join("hook-secret");
-    std::fs::write(&secret, b"initial-hook-secret")?;
+    write_private_credential(&secret, b"initial-hook-secret")?;
     let mut hook = RuntimeHookFixture {
         address: unused_webhook_address().await?,
         path: "/initial",
@@ -3221,7 +3244,7 @@ system_prompt = "Inspect repository activity."
     // Expect/continue proves the old server admitted the request before replacement.
     let mut inflight = tokio::net::TcpStream::connect(hook.address).await?;
     let replacement_secret = files.path().join("replacement-secret");
-    std::fs::write(&replacement_secret, b"replacement-hook-secret")?;
+    write_private_credential(&replacement_secret, b"replacement-hook-secret")?;
     let signature = ring::hmac::sign(
         &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"replacement-hook-secret"),
         RUNTIME_WEBHOOK_BODY.as_bytes(),
@@ -3380,7 +3403,7 @@ system_prompt = "Inspect repository activity."
     );
     let rotated_secret = files.path().join("admission-reload-secret");
     const ROTATED_SECRET: &[u8] = b"admission-reload-secret";
-    std::fs::write(&rotated_secret, ROTATED_SECRET)?;
+    write_private_credential(&rotated_secret, ROTATED_SECRET)?;
     let shadow_rotated_hook = RuntimeHookFixture {
         mode: "shadow",
         secret: &rotated_secret,
@@ -3480,7 +3503,7 @@ async fn repository_watch_rejects_invalid_reloads_and_keeps_dispatching_running_
         .expect("module login");
     let files = tempfile::tempdir()?;
     let secret = files.path().join("hook-secret");
-    std::fs::write(&secret, b"hook-secret")?;
+    write_private_credential(&secret, b"hook-secret")?;
     let mut hook = RuntimeHookFixture {
         address: unused_webhook_address().await?,
         path: "/running",
@@ -3690,7 +3713,7 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
         .expect("module pool");
     let files = tempfile::tempdir()?;
     let secret = files.path().join("secret");
-    std::fs::write(&secret, "hook-secret")?;
+    write_private_credential(&secret, "hook-secret")?;
     let mut hook = RuntimeHookFixture {
         address: unused_webhook_address().await?,
         path: "/reload",
@@ -3734,6 +3757,7 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     .with_repository_watch(runtime.clone());
     hook.enabled = true;
     let push_credential = files.path().join("push-token");
+    write_private_credential(&push_credential, b"")?;
     let replacement_source = runtime_configuration_source(&hook)?.replace(
         "credential_file =",
         &format!(

@@ -141,6 +141,8 @@ pub enum ToolExecutionErrorKind {
     ExecutionFailed,
     /// Successful content exceeded its admission bound.
     ResultTooLarge,
+    /// Successful content contained U+0000.
+    ResultContainsNull,
     /// Restart lost a prepared or effect-free attempt.
     CrashLost,
 }
@@ -621,6 +623,7 @@ impl CurrentToolAttempt {
                     error.kind(),
                     ToolExecutionErrorKind::ExecutionFailed
                         | ToolExecutionErrorKind::ResultTooLarge
+                        | ToolExecutionErrorKind::ResultContainsNull
                 ) =>
             {
                 ToolAttemptEnd::KnownFailed { error }
@@ -1412,6 +1415,7 @@ mod tests {
     fn preflight_cannot_claim_dispatched_or_crash_errors() {
         assert_preflight_rejects_error_kind(ToolExecutionErrorKind::ExecutionFailed);
         assert_preflight_rejects_error_kind(ToolExecutionErrorKind::ResultTooLarge);
+        assert_preflight_rejects_error_kind(ToolExecutionErrorKind::ResultContainsNull);
         assert_preflight_rejects_error_kind(ToolExecutionErrorKind::CrashLost);
     }
 

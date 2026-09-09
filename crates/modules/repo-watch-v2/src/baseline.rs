@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     CheckConclusion, ChecksOutcome, MergeableState, ReactionSubject,
     RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
     RepoWatchPullRequestState, RepoWatchThreadState, ReviewState,
@@ -252,7 +252,7 @@ fn reaction_subject_payload(value: ReactionSubject) -> Value {
 mod tests {
     use std::num::NonZeroU64;
 
-    use signalbox_ownership_seam::{
+    use signalbox_session_ownership::{
         CommitSha, MergeableState, PullRequestNumber, RepoWatchMergedPullRequestBaselineInputV1,
         RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchRepositoryState,
     };
@@ -261,7 +261,7 @@ mod tests {
 
     fn merged_baseline(number: u64) -> RepoWatchMergedPullRequestBaselineV1 {
         RepoWatchMergedPullRequestBaselineV1::try_new(RepoWatchMergedPullRequestBaselineInputV1 {
-            head_repository: signalbox_ownership_seam::RepositorySlug::try_new(String::from(
+            head_repository: signalbox_session_ownership::RepositorySlug::try_new(String::from(
                 "example/fork",
             ))
             .expect("fixture head repository"),
@@ -288,11 +288,11 @@ mod tests {
             RepoWatchObservation::new(Vec::new(), RepoWatchRepositoryState::default());
         let first = crate::ingest::MergedPullRequestBaseline {
             state: merged_baseline(1),
-            merged_at: signalbox_ownership_seam::OffsetDateTime::UNIX_EPOCH,
+            merged_at: signalbox_session_ownership::OffsetDateTime::UNIX_EPOCH,
         };
         let second = crate::ingest::MergedPullRequestBaseline {
             state: merged_baseline(2),
-            merged_at: signalbox_ownership_seam::OffsetDateTime::UNIX_EPOCH,
+            merged_at: signalbox_session_ownership::OffsetDateTime::UNIX_EPOCH,
         };
 
         assert_eq!(

@@ -108,7 +108,7 @@ The sweep's container-label check scans the declared workspace Rust source
 manifest inside test runfiles. Direct Python invocation continues to select
 tracked sources with Git.
 
-`bazel test //:rust_integration_tests` runs native macro, ownership-seam,
+`bazel test //:rust_integration_tests` runs native macro, session-ownership,
 provider-loopback, and filesystem conformance tests. It is included in
 `//:bazel_tests`. Filesystem conformance checks the host storage classification
 outside the sandbox and always executes; the other results are cacheable.

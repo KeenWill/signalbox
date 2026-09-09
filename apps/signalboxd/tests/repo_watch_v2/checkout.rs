@@ -227,6 +227,10 @@ impl CheckoutFixture {
         git2::Repository::init(&root)?;
         let credential = files.path().join("poll-token");
         std::fs::write(&credential, TOKEN)?;
+        std::fs::set_permissions(
+            &credential,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
         let catalog = include_str!("../../../../config/signalboxd.example.toml")
             .replace(
                 "/usr/local/bin/signalbox-exec-supervisor",
@@ -410,7 +414,7 @@ system_prompt = "Inspect repository activity."
     }
 
     async fn settle(&self) {
-        let lifecycle = signalbox_ownership_seam::LifecycleEventSource::new(self.core.clone());
+        let lifecycle = signalbox_session_ownership::LifecycleEventSource::new(self.core.clone());
         while let Some(event) = lifecycle.next().await.expect("next lifecycle event") {
             self.store
                 .apply_lifecycle_event(&event)
@@ -745,6 +749,10 @@ async fn dispatched_push_advances_only_its_retained_head_and_survives_recomposit
     );
     let credential = fixture._files.path().join("push-token");
     std::fs::write(&credential, "push-fixture-token")?;
+    std::fs::set_permissions(
+        &credential,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )?;
     let catalog_text = fixture.catalog.replace(
         "credential_file =",
         &format!(
