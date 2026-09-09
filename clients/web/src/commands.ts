@@ -31,6 +31,7 @@ export interface CommandContext {
   canAbandonImport?: boolean
   abandonImport?: () => void
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
+  navigationLocked?: boolean
   navigate?: (path: string) => void
   configuresTranscriptDetail?: boolean
   openArtifactInspector?: () => void
@@ -63,7 +64,8 @@ const hasSelectedArtifactPreview = (context: CommandContext) => {
   const id = selectedArtifact(context)
   return id !== null && context.artifactPreviewIds.includes(id)
 }
-const productNavigation = (context: CommandContext) => context.navigate !== undefined
+const productNavigation = (context: CommandContext) =>
+  context.navigate !== undefined && !context.navigationLocked
 const transcriptDetail = (context: CommandContext) =>
   context.timelineIds.length > 0 ||
   context.timelineWindowAvailable === true ||

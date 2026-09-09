@@ -79,12 +79,18 @@ const variants: Array<
 > = [
   [
     'session_created',
-    { type: 'session_created', cause: { type: 'interactive' }, imported_evidence: null },
+    {
+      type: 'session_created',
+      workspace_root_kind: null,
+      cause: { type: 'interactive' },
+      imported_evidence: null,
+    },
   ],
   [
     'session_created',
     {
       type: 'session_created',
+      workspace_root_kind: null,
       cause: { type: 'repository_watch', dispatch_id: detailSessionId },
       imported_evidence: null,
     },
@@ -93,6 +99,7 @@ const variants: Array<
     'session_created',
     {
       type: 'session_created',
+      workspace_root_kind: null,
       cause: { type: 'commissioned', dispatch_id: detailSessionId },
       imported_evidence: null,
     },
@@ -101,6 +108,7 @@ const variants: Array<
     'session_created',
     {
       type: 'session_created',
+      workspace_root_kind: null,
       cause: { type: 'delegated', spawning_request_id: detailSessionId },
       imported_evidence: null,
     },

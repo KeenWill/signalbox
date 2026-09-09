@@ -901,7 +901,7 @@ where
                     writer,
                     version,
                     request_id,
-                    &services.pool,
+                    services,
                     snapshot_permit,
                 ))
                 .await

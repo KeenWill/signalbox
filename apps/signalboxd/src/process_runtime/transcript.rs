@@ -257,6 +257,17 @@ pub(super) async fn spool_transcript(
         version,
         request_id,
         ServerMessage::TranscriptSnapshotStart {
+            workspace_root_kind: reader.workspace_root_kind().map(|kind| match kind {
+                signalbox_domain::SessionWorkspaceRootKind::Derived => {
+                    signalbox_process_protocol::SessionWorkspaceRootKind::Derived
+                }
+                signalbox_domain::SessionWorkspaceRootKind::Configured => {
+                    signalbox_process_protocol::SessionWorkspaceRootKind::Configured
+                }
+                signalbox_domain::SessionWorkspaceRootKind::Provisioned => {
+                    signalbox_process_protocol::SessionWorkspaceRootKind::Provisioned
+                }
+            }),
             repository_watch: match reload {
                 Some(reload) => reload
                     .repository_watch_origin(session)

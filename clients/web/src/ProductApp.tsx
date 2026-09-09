@@ -27,10 +27,10 @@ import {
   emptyArtifactInspectorState,
 } from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
-import type { CommandContext, CommandId } from './commands'
-import { invokeCommand } from './commands'
+import type { CommandContext } from './commands'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
+import { loadRetainedCommand } from './imports/retainedCommand'
 import {
   ProductContractError,
   type ProductRouteId,
@@ -46,6 +46,7 @@ import {
 import {
   invokeProductCommand,
   type ProductCommandContext,
+  type ProductCommandId,
   productCommandAvailable,
   productCommandRegistry,
   productHotkeyBindings,
@@ -74,7 +75,7 @@ const isEditableTarget = (target: EventTarget | null) => {
   )
 }
 
-const productNavigationCommandIds: Record<ProductRouteId, CommandId> = {
+const productNavigationCommandIds: Record<ProductRouteId, ProductCommandId> = {
   attention: 'navigate.attention',
   sessions: 'navigate.sessions',
   search: 'navigate.search',
@@ -89,13 +90,12 @@ export function ProductNavigation({
   active,
   context,
   onActivate,
-  disabled = false,
 }: {
   active: ProductRouteId
-  context: CommandContext
+  context: ProductCommandContext
   onActivate?: () => void
-  disabled?: boolean
 }) {
+  const scenarioDisabled = !productCommandAvailable('navigate.scenario', context)
   return (
     <div className="product-navigation">
       <div className="brand">
@@ -103,46 +103,49 @@ export function ProductNavigation({
         <strong>Signalbox</strong>
       </div>
       <nav aria-label="Product">
-        {productRoutes.map((route) => (
-          <Link
-            key={route.id}
-            to="/$surface"
-            params={{ surface: route.id }}
-            className={active === route.id ? 'product-link active' : 'product-link'}
-            aria-current={active === route.id ? 'page' : undefined}
-            aria-disabled={disabled || undefined}
-            tabIndex={disabled ? -1 : undefined}
-            onClick={(event) => {
-              if (disabled) {
+        {productRoutes.map((route) => {
+          const disabled = !productCommandAvailable(productNavigationCommandIds[route.id], context)
+          return (
+            <Link
+              key={route.id}
+              to="/$surface"
+              params={{ surface: route.id }}
+              className={active === route.id ? 'product-link active' : 'product-link'}
+              aria-current={active === route.id ? 'page' : undefined}
+              aria-disabled={disabled || undefined}
+              tabIndex={disabled ? -1 : undefined}
+              onClick={(event) => {
+                if (disabled) {
+                  event.preventDefault()
+                  return
+                }
+                if (
+                  event.button !== 0 ||
+                  event.metaKey ||
+                  event.ctrlKey ||
+                  event.shiftKey ||
+                  event.altKey
+                ) {
+                  return
+                }
                 event.preventDefault()
-                return
-              }
-              if (
-                event.button !== 0 ||
-                event.metaKey ||
-                event.ctrlKey ||
-                event.shiftKey ||
-                event.altKey
-              ) {
-                return
-              }
-              event.preventDefault()
-              onActivate?.()
-              invokeCommand(productNavigationCommandIds[route.id], context)
-            }}
-          >
-            <span>{route.label}</span>
-          </Link>
-        ))}
+                onActivate?.()
+                invokeProductCommand(productNavigationCommandIds[route.id], context)
+              }}
+            >
+              <span>{route.label}</span>
+            </Link>
+          )
+        })}
       </nav>
       <Link
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
-        aria-disabled={disabled || undefined}
-        tabIndex={disabled ? -1 : undefined}
+        aria-disabled={scenarioDisabled || undefined}
+        tabIndex={scenarioDisabled ? -1 : undefined}
         onClick={(event) => {
-          if (disabled) {
+          if (scenarioDisabled) {
             event.preventDefault()
             return
           }
@@ -473,7 +476,10 @@ export function ProductApp({
     attempt: number
   } | null>(null)
   const [importsCommandContext, setImportsCommandContext] = useState<CommandContext | null>(null)
-  const [navigationDisabled, setNavigationDisabled] = useState(false)
+  const [retainedNavigationLock, setNavigationDisabled] = useState(
+    () => loadRetainedCommand('production') !== null,
+  )
+  const navigationDisabled = surface === 'imports' && retainedNavigationLock
   const updateImportsCommandContext = useCallback(
     (next: CommandContext | null) => setImportsCommandContext(next),
     [],
@@ -590,9 +596,8 @@ export function ProductApp({
           ? (anchor) =>
               setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
           : undefined,
+      navigationLocked: navigationDisabled,
       navigate: (path) => {
-        // A retained exact continuation command owns the surface until it is retried or abandoned.
-        if (navigationDisabled) return
         if (path === '/scenario/streaming') {
           void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } })
           return
@@ -685,6 +690,7 @@ export function ProductApp({
   )
   useHotkeySequences(
     productHotkeySequenceBindings
+      .filter((binding) => productCommandAvailable(binding.commandId, context))
       .filter(
         (binding) =>
           !binding.commandId.startsWith('imports.') ||
@@ -882,7 +888,7 @@ export function ProductApp({
       style={shellStyle}
     >
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} context={context} disabled={navigationDisabled} />
+        <ProductNavigation active={surface} context={context} />
       </aside>
       <main className={`product-main product-main-${surface}`} ref={mainRef} tabIndex={-1}>
         <header className="product-header">
@@ -1003,7 +1009,6 @@ export function ProductApp({
             <ProductNavigation
               active={surface}
               context={context}
-              disabled={navigationDisabled}
               onActivate={() => dispatch(actions.overlaySet(null))}
             />
           </Dialog.Content>

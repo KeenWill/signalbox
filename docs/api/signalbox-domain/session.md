@@ -463,3 +463,14 @@ impl ReconstitutedSessionCreation {
     pub const fn applied_result(&self) -> CreateSessionAppliedResult;
 }
 ```
+
+## SessionWorkspaceRootKind
+
+```rust
+pub enum SessionWorkspaceRootKind {
+    Derived,
+    Configured,
+    Provisioned,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```

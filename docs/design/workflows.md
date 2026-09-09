@@ -63,7 +63,8 @@ The emitted artifact is one module importing only `@signalbox/program-sdk/v1`.
 
 Effect method input/output records have checked Rust and TypeScript codecs;
 full-width integer identities use decimal strings and exact payloads use byte
-arrays. Domain values, wire payloads and storage rows remain distinct.
+arrays. Domain values, wire payloads and storage rows remain distinct. Effects
+that only native programs may call may use Rust-only method records.
 
 ## Completion
 
@@ -115,3 +116,11 @@ bytes before it reconstitutes the frame, so replay compares identical bytes
 however the row was stored. Offload preserves frame kinds and existing inline
 rows; each larger payload is stored once and loaded as exact bytes. Journals are
 not truncated.
+
+## Repository watch
+
+[Repository watch design](repo-watch.md).
+
+## Evaluations
+
+[Evaluation workflows](eval-system.md).

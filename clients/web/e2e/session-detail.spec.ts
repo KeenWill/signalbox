@@ -26,7 +26,12 @@ async function openDetails(
           ...item,
           kind: 'session_created' as const,
           projected_body_bytes: 128,
-          body: { type: 'session_created' as const, cause: creation, imported_evidence: null },
+          body: {
+            type: 'session_created' as const,
+            workspace_root_kind: null,
+            cause: creation,
+            imported_evidence: null,
+          },
         }
       : outcome === 'reconciliation' && index === 4
         ? {
@@ -224,6 +229,7 @@ async function openDetails(
         latest_address: { event_sequence: '5' },
         observed_through: '5',
         repository_watch: null,
+        workspace_root_kind: null,
         sizes: {
           item_count: '5',
           projected_text_bytes: '256',

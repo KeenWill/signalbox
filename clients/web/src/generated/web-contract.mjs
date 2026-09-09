@@ -3900,9 +3900,26 @@ const schemas = {
       },
       "work": {
         "$ref": "#/$defs/WebSessionWorkFacts"
+      },
+      "workspace_root_kind": {
+        "anyOf": [
+          {
+            "description": "Path-free daemon-local workspace binding evidence.",
+            "enum": [
+              "derived",
+              "configured",
+              "provisioned"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
       }
     },
     "required": [
+      "workspace_root_kind",
       "repository_watch",
       "session_id",
       "sizes",
@@ -4129,6 +4146,16 @@ const schemas = {
               "type": {
                 "const": "session_created",
                 "type": "string"
+              },
+              "workspace_root_kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebSessionWorkspaceRootKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -4536,6 +4563,15 @@ const schemas = {
             "type": "string"
           }
         ]
+      },
+      "WebSessionWorkspaceRootKind": {
+        "description": "Path-free daemon-local workspace binding evidence.",
+        "enum": [
+          "derived",
+          "configured",
+          "provisioned"
+        ],
+        "type": "string"
       },
       "WebTimelineAddress": {
         "additionalProperties": false,

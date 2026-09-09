@@ -31,6 +31,13 @@ imported ancestry also records whether the client resumed or forked from that
 point. Resume declares a continuation and fork declares a branch, and the
 relationship records creation-time intent only.
 
+Daemon-local workspace binding records a path-free `workspace_root_kind`:
+`derived`, `configured`, or `provisioned` when the checkout marker matches the
+session's retained dispatch. Transcript snapshots, browser session descriptors,
+and browser creation evidence project the recorded kind; it is absent until
+binding. The workspace guard logs the kind when it binds, and a process restart
+records the root it binds in that process.
+
 Two durable command families create sessions from outside a turn, and a
 delegation spawn creates a child session from inside one. `CreateSession`
 creates a session with no ancestry, from explicit defaults or from a named

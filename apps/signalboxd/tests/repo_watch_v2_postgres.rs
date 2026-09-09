@@ -302,6 +302,25 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store.admit_webhook(delivery()).await?,
         WebhookAdmission::Inserted
     );
+    assert_eq!(
+        store
+            .ingestion_measurements(&repository)
+            .last_accepted_webhook,
+        Some(observed_at)
+    );
+    let mut replay = delivery();
+    replay.received_at += Duration::from_secs(1);
+    assert_eq!(
+        store.admit_webhook(replay).await?,
+        WebhookAdmission::PendingReplay
+    );
+    assert_eq!(
+        store
+            .ingestion_measurements(&repository)
+            .last_accepted_webhook,
+        Some(observed_at),
+        "delivery replays preserve the accepted high-water mark"
+    );
     let stored_digest: Vec<u8> = sqlx::query_scalar(
         "SELECT body_digest
            FROM webhook_delivery
@@ -2045,6 +2064,17 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .await?;
     assert!(lineage.0 > 0);
     assert!(lineage.1);
+    let measurements = store.clone().ingestion_measurements(&runtime_repository);
+    assert_eq!(measurements.last_successful_observation, Some(observed_at));
+    assert_eq!(measurements.events_recorded, u64::try_from(lineage.0)?);
+    assert_eq!(measurements.last_poll, None);
+    assert_eq!(
+        restarted
+            .ingestion_measurements(&runtime_repository)
+            .events_recorded,
+        0,
+        "replays and unchanged observations record no new events"
+    );
 
     for (repository_name, lifecycle, expected_kind, expected_compact_count) in [
         (
@@ -2787,7 +2817,9 @@ fn runtime_configuration(
 }
 
 fn runtime_configuration_source(hook: &RuntimeHookFixture<'_>) -> Result<String, Box<dyn Error>> {
-    let catalog = include_str!("../../../config/signalboxd.example.toml")
+    let poll_credential = hook.secret.with_extension("poll-token");
+    write_private_credential(&poll_credential, b"")?;
+    let mut catalog = include_str!("../../../config/signalboxd.example.toml")
         .replace(
             "/usr/local/bin/signalbox-exec-supervisor",
             std::env::current_exe()?.to_string_lossy().as_ref(),
@@ -2796,6 +2828,18 @@ fn runtime_configuration_source(hook: &RuntimeHookFixture<'_>) -> Result<String,
             "repository_watch_webhook_retention = \"604800s\"",
             &format!("repository_watch_webhook_retention = {:?}", hook.retention),
         );
+    for profile in ["anthropic-primary", "anthropic-overflow"] {
+        let model_credential = hook
+            .secret
+            .parent()
+            .expect("fixture directory")
+            .join(profile);
+        write_private_credential(&model_credential, b"")?;
+        catalog = catalog.replace(
+            &format!("/run/secrets/{profile}"),
+            model_credential.to_str().expect("fixture credential path"),
+        );
+    }
     Ok(format!(
         r#"{catalog}
 [repository_watch]
@@ -2831,8 +2875,17 @@ template = "{template}"
         path = hook.path,
         id = hook.id,
         secret = hook.secret.display(),
-        poll_credential = hook.secret.with_extension("missing-token").display(),
+        poll_credential = poll_credential.display(),
     ))
+}
+
+/// Synthetic secrets use the same private permissions as admitted credentials.
+fn write_private_credential(
+    path: &std::path::Path,
+    bytes: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    std::fs::write(path, bytes)?;
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
 }
 
 async fn unused_webhook_address() -> Result<std::net::SocketAddr, std::io::Error> {
@@ -2985,7 +3038,7 @@ async fn composed_repository_watch_dispatches_and_reloads_its_running_listener()
     );
     let files = tempfile::tempdir()?;
     let secret = files.path().join("hook-secret");
-    std::fs::write(&secret, b"initial-hook-secret")?;
+    write_private_credential(&secret, b"initial-hook-secret")?;
     let mut hook = RuntimeHookFixture {
         address: unused_webhook_address().await?,
         path: "/initial",
@@ -3221,7 +3274,7 @@ system_prompt = "Inspect repository activity."
     // Expect/continue proves the old server admitted the request before replacement.
     let mut inflight = tokio::net::TcpStream::connect(hook.address).await?;
     let replacement_secret = files.path().join("replacement-secret");
-    std::fs::write(&replacement_secret, b"replacement-hook-secret")?;
+    write_private_credential(&replacement_secret, b"replacement-hook-secret")?;
     let signature = ring::hmac::sign(
         &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"replacement-hook-secret"),
         RUNTIME_WEBHOOK_BODY.as_bytes(),
@@ -3380,7 +3433,7 @@ system_prompt = "Inspect repository activity."
     );
     let rotated_secret = files.path().join("admission-reload-secret");
     const ROTATED_SECRET: &[u8] = b"admission-reload-secret";
-    std::fs::write(&rotated_secret, ROTATED_SECRET)?;
+    write_private_credential(&rotated_secret, ROTATED_SECRET)?;
     let shadow_rotated_hook = RuntimeHookFixture {
         mode: "shadow",
         secret: &rotated_secret,
@@ -3480,7 +3533,7 @@ async fn repository_watch_rejects_invalid_reloads_and_keeps_dispatching_running_
         .expect("module login");
     let files = tempfile::tempdir()?;
     let secret = files.path().join("hook-secret");
-    std::fs::write(&secret, b"hook-secret")?;
+    write_private_credential(&secret, b"hook-secret")?;
     let mut hook = RuntimeHookFixture {
         address: unused_webhook_address().await?,
         path: "/running",
@@ -3690,7 +3743,7 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
         .expect("module pool");
     let files = tempfile::tempdir()?;
     let secret = files.path().join("secret");
-    std::fs::write(&secret, "hook-secret")?;
+    write_private_credential(&secret, "hook-secret")?;
     let mut hook = RuntimeHookFixture {
         address: unused_webhook_address().await?,
         path: "/reload",
@@ -3734,6 +3787,7 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     .with_repository_watch(runtime.clone());
     hook.enabled = true;
     let push_credential = files.path().join("push-token");
+    write_private_credential(&push_credential, b"")?;
     let replacement_source = runtime_configuration_source(&hook)?.replace(
         "credential_file =",
         &format!(
