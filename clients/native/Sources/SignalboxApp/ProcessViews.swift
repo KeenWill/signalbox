@@ -2490,6 +2490,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   private func applyLiveEvent(_ followed: SignalboxFollowedSessionEvent) {
     switch followed.event {
+    case .automaticReconciliationExhausted(let turnID, let operationKind, let operationID):
+      let kind = operationKind == .modelCall ? "model call" : "tool attempt"
+      presentDiagnostic(
+        "Automatic reconciliation exhausted for turn \(turnID.rawValue) "
+          + "(\(kind) \(operationID.rawValue)). Waiting for an operator decision.")
     case .goalTurnRetired(let turnID):
       pendingInputs.removeAll { $0.turnID == turnID }
       acceptedInputsAwaitingTranscript.removeAll { $0.turnID == turnID }

@@ -1580,6 +1580,7 @@ impl ProcessUpdate {
 
 #[derive(Clone, Debug)]
 pub(super) enum ProcessUpdateEvent {
+    AutomaticReconciliationExhausted(signalbox_application::ExhaustedAutomaticReconciliation),
     CredentialPoolExhausted(
         Box<signalbox_persistence::credential_pool_exhaustion::CredentialPoolExhaustion>,
     ),
@@ -1685,6 +1686,9 @@ impl ProcessUpdateEvent {
                 acceptance_position: acceptance_position.as_u64(),
                 content: content.clone(),
             },
+            DispatchedOutboxEventKind::AutomaticReconciliationExhausted(evidence) => {
+                Self::AutomaticReconciliationExhausted(*evidence)
+            }
             DispatchedOutboxEventKind::CredentialPoolExhausted(evidence) => {
                 Self::CredentialPoolExhausted(evidence.clone())
             }
@@ -1992,6 +1996,24 @@ impl ProcessUpdateEvent {
                 completion_entry_id: wire_uuid(completion_entry.into_uuid()),
                 terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
             },
+            Self::AutomaticReconciliationExhausted(evidence) => {
+                use signalbox_application::AutomaticReconciliationOperation;
+                use signalbox_process_protocol::ReconciliationOperationKind;
+                let (operation_kind, operation_id) = match evidence.operation() {
+                    AutomaticReconciliationOperation::ModelCall(call) => {
+                        (ReconciliationOperationKind::ModelCall, call.into_uuid())
+                    }
+                    AutomaticReconciliationOperation::ToolAttempt(attempt) => (
+                        ReconciliationOperationKind::ToolAttempt,
+                        attempt.into_uuid(),
+                    ),
+                };
+                SessionEvent::AutomaticReconciliationExhausted {
+                    turn_id: wire_uuid(evidence.turn().into_uuid()),
+                    operation_kind,
+                    operation_id: wire_uuid(operation_id),
+                }
+            }
             Self::CredentialPoolExhausted(evidence) => SessionEvent::TurnCredentialPoolExhausted {
                 turn_id: wire_uuid(evidence.turn_id),
                 terminal_frontier_id: wire_uuid(evidence.terminal_frontier_id),

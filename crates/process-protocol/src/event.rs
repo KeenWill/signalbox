@@ -24,10 +24,24 @@ use crate::transcript::{ModelCallState, ToolBatchState};
 use crate::user_input::UserInputContent;
 use serde::{Deserialize, Serialize};
 
+/// Physical operation whose automatic reconciliation budget was spent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationOperationKind {
+    ModelCall,
+    ToolAttempt,
+}
+
 /// Closed durable update event family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionEvent {
+    /// Automatic recovery requires an operator decision for this turn.
+    AutomaticReconciliationExhausted {
+        turn_id: CanonicalUuid,
+        operation_kind: ReconciliationOperationKind,
+        operation_id: CanonicalUuid,
+    },
     /// Session creation committed.
     SessionCreated {},
     /// One defaults replacement changed model selection or settings.
@@ -444,7 +458,8 @@ pub(crate) fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameV
                 return Err(FrameValidationError::TurnStateShape);
             }
         }
-        SessionEvent::SessionCreated {}
+        SessionEvent::AutomaticReconciliationExhausted { .. }
+        | SessionEvent::SessionCreated {}
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ModelCallTransition { .. }

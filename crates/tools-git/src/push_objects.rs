@@ -1,7 +1,9 @@
 //! Descriptor-bound object capture for a push range; see git-authority-threat-model.md.
 
 use crate::{
-    descriptor::{FileSnapshotIdentity, descriptor_path, file_identity, file_snapshot_identity},
+    descriptor::{
+        FileIdentity, FileSnapshotIdentity, descriptor_path, file_identity, file_snapshot_identity,
+    },
     failure::LocalGitFailure,
     layout::parse_full_object_id,
     limits::{
@@ -141,9 +143,16 @@ impl PushObjectSnapshot {
 }
 
 struct SourceFile {
-    path: PathBuf,
+    directory: usize,
+    name: PathBuf,
     file: File,
     identity: FileSnapshotIdentity,
+}
+
+struct SourceDirectory {
+    path: PathBuf,
+    directory: File,
+    identity: FileIdentity,
 }
 
 struct Pack {
@@ -157,8 +166,9 @@ struct Pack {
     end: usize,
 }
 
-struct ObjectSource {
+pub(super) struct ObjectSource {
     objects: File,
+    directories: Vec<SourceDirectory>,
     files: Vec<SourceFile>,
     packs: Vec<Pack>,
     format: ObjectFormat,
@@ -195,7 +205,10 @@ fn open_child(root: &File, path: &Path) -> Result<File, LocalGitFailure> {
 }
 
 impl ObjectSource {
-    fn open(authority: &PinnedRepository, deadline: Instant) -> Result<Self, LocalGitFailure> {
+    pub(super) fn open(
+        authority: &PinnedRepository,
+        deadline: Instant,
+    ) -> Result<Self, LocalGitFailure> {
         authority.validate_object_layout()?;
         let objects = File::from(
             openat(
@@ -215,8 +228,14 @@ impl ObjectSource {
             )
             .map_err(rejected)?,
         );
+        let pack_path = descriptor_path(&pack_directory);
         let mut source = Self {
             objects,
+            directories: vec![SourceDirectory {
+                path: PathBuf::from("pack"),
+                identity: file_identity(&pack_directory.metadata().map_err(rejected)?),
+                directory: pack_directory,
+            }],
             files: Vec::new(),
             packs: Vec::new(),
             format: authority.object_format,
@@ -224,7 +243,7 @@ impl ObjectSource {
             deadline,
         };
         let mut scanned = 0usize;
-        for entry in fs::read_dir(descriptor_path(&pack_directory)).map_err(rejected)? {
+        for entry in fs::read_dir(pack_path).map_err(rejected)? {
             source.check_deadline()?;
             scanned += 1;
             if scanned > MAX_REPOSITORY_INSPECTIONS {
@@ -300,11 +319,52 @@ impl ObjectSource {
     }
 
     fn open_file(&mut self, path: &Path) -> Result<usize, LocalGitFailure> {
-        let file = open_child(&self.objects, path)?;
+        let parent = path.parent().ok_or(LocalGitFailure::Repository)?;
+        let directory = if let Some(index) = self
+            .directories
+            .iter()
+            .position(|directory| directory.path == parent)
+        {
+            index
+        } else {
+            let directory = File::from(
+                openat(
+                    &self.objects,
+                    parent,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(rejected)?,
+            );
+            let identity = file_identity(&directory.metadata().map_err(rejected)?);
+            let index = self.directories.len();
+            self.directories.push(SourceDirectory {
+                path: parent.to_owned(),
+                directory,
+                identity,
+            });
+            if self.directories.len() > MAX_REPOSITORY_INSPECTIONS {
+                return Err(LocalGitFailure::Repository);
+            }
+            index
+        };
+        let file = File::from(
+            openat(
+                self.directories[directory].directory.as_fd(),
+                path.file_name().ok_or(LocalGitFailure::Repository)?,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(rejected)?,
+        );
+        if !file.metadata().map_err(rejected)?.is_file() {
+            return Err(LocalGitFailure::Repository);
+        }
         let identity = file_snapshot_identity(&file.metadata().map_err(rejected)?);
         let index = self.files.len();
         self.files.push(SourceFile {
-            path: path.to_owned(),
+            directory,
+            name: PathBuf::from(path.file_name().ok_or(LocalGitFailure::Repository)?),
             file,
             identity,
         });
@@ -345,7 +405,7 @@ impl ObjectSource {
         Ok(())
     }
 
-    fn capture(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
+    pub(super) fn capture(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
         self.check_deadline()?;
         if database.exists(oid) {
             return Ok(());
@@ -587,7 +647,7 @@ impl ObjectSource {
         Ok(())
     }
 
-    fn validate(&self, authority: &PinnedRepository) -> Result<(), LocalGitFailure> {
+    pub(super) fn validate(&self, authority: &PinnedRepository) -> Result<(), LocalGitFailure> {
         authority.validate_object_layout()?;
         let current = File::from(
             openat(
@@ -603,9 +663,34 @@ impl ObjectSource {
         {
             return Err(LocalGitFailure::Repository);
         }
+        for entry in &self.directories {
+            self.check_deadline()?;
+            let current = File::from(
+                openat(
+                    &self.objects,
+                    &entry.path,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(rejected)?,
+            );
+            if file_identity(&current.metadata().map_err(rejected)?) != entry.identity
+                || file_identity(&entry.directory.metadata().map_err(rejected)?) != entry.identity
+            {
+                return Err(LocalGitFailure::Repository);
+            }
+        }
         for entry in &self.files {
             self.check_deadline()?;
-            let current = open_child(&self.objects, &entry.path)?;
+            let current = File::from(
+                openat(
+                    self.directories[entry.directory].directory.as_fd(),
+                    &entry.name,
+                    OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(rejected)?,
+            );
             if file_snapshot_identity(&current.metadata().map_err(rejected)?) != entry.identity
                 || file_snapshot_identity(&entry.file.metadata().map_err(rejected)?)
                     != entry.identity

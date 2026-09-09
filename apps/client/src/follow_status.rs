@@ -174,7 +174,8 @@ pub(crate) fn terminal_snapshot_selection(
             terminal_frontier_id: *terminal_frontier_id,
         }),
         SessionEvent::TurnReconciliationRequired { .. } => None,
-        SessionEvent::SessionCreated {}
+        SessionEvent::AutomaticReconciliationExhausted { .. }
+        | SessionEvent::SessionCreated {}
         | SessionEvent::SessionModelSettingsChanged { .. }
         | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::InputAccepted { .. }

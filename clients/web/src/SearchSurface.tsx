@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react'
 import type { WebContractBootstrap, WebSearchPage } from './generated/web-contract.mjs'
+import { enumLabel } from './labels'
 import {
   boundedSearchText,
   ProductRequestError,
@@ -12,7 +13,6 @@ import {
 
 type SearchResult = WebSearchPage['results'][number]
 
-const displayClass = (value: string) => value.replaceAll('_', ' ')
 const MAX_U64 = 18_446_744_073_709_551_615n
 const MAX_I64 = 9_223_372_036_854_775_807n
 const MAX_SESSION_DRAFT_LENGTH = 45
@@ -281,12 +281,12 @@ export function SearchSurface({
       </form>
       {(draftIsInvalid || queryOverflow || sessionOverflow) && !routeValidationIsVisible && (
         <p className="search-notice" role="alert">
-          Invalid search parameters.
+          Check your search.
         </p>
       )}
       {routeValidationIsVisible && (
         <p className="search-notice" ref={routeValidationRef} role="alert" tabIndex={-1}>
-          Invalid search parameters. Query: {queryBytes}/{queryLimit} bytes.
+          Check your search. Size: {queryBytes}/{queryLimit} bytes.
         </p>
       )}
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
@@ -306,14 +306,14 @@ export function SearchSurface({
           <AlertTriangle aria-hidden="true" />
           <div>
             <h2 ref={errorHeadingRef} tabIndex={-1}>
-              Search could not be read
+              Search failed
             </h2>
             <p>
               {results.error instanceof ProductRequestError
                 ? `${results.error.response.error.code}: ${results.error.message}`
                 : results.error instanceof ProductTransportError
                   ? results.error.message
-                  : 'The response did not match the generated web contract.'}
+                  : 'The server sent an unexpected response.'}
             </p>
             <button
               type="button"
@@ -369,7 +369,7 @@ export function SearchSurface({
                     key={`${result.session_id}:${result.address.event_sequence}:${result.projection_id}`}
                   >
                     <div className="search-result-meta">
-                      <span>{displayClass(result.content_class)}</span>
+                      <span>{enumLabel(result.content_class)}</span>
                       <code>{result.address.event_sequence}</code>
                     </div>
                     <p>{highlightedSnippet(result)}</p>

@@ -205,7 +205,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         SignalboxProcessPresentation.retainedLabel(kind),
         diagnostic?.message ?? "The daemon reported an unrecognized session event."
       )
-    case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
+    case .automaticReconciliationExhausted, .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
       .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition, .toolBatchTransition,
       .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnCredentialPoolExhausted, .turnFailed, .turnRefused,
@@ -1248,7 +1248,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
       case .contextCompacted(_, let modelCallID, _, _, _):
         return modelCallID == evidence.modelCallID
-      case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
+      case .automaticReconciliationExhausted, .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
       .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
         .inputAccepted, .turnActivated, .turnCredentialPoolExhausted, .turnFailed, .turnRefused, .turnCancelled,
         .toolApprovalDecided, .turnReconciliationRequired,
@@ -1380,7 +1380,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return entryTurnID == turnID && requestID.rawValue == awaitingToolDecisionRequestID
-    case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
+    case .automaticReconciliationExhausted, .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
       .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition,
       .contextCompacted, .turnRefused, .turnReconciliationRequired,
@@ -1444,7 +1444,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         requiredAttemptID: toolAttemptID,
         terminalFrontierID: terminalFrontierID
       )
-    case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
+    case .automaticReconciliationExhausted, .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
       .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition, .toolBatchTransition,
       .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnRefused,
@@ -1698,7 +1698,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return message.entryID == cancellationEntryID && entryTurnID == turnID
-    case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
+    case .automaticReconciliationExhausted, .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
       .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition, .toolBatchTransition,
       .toolApprovalDecided, .contextCompacted, .turnRefused, .turnReconciliationRequired,
@@ -1860,7 +1860,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       }
     case .turnToolReconciliationRequired:
       return !terminalResultEntryIDs.isEmpty
-    case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
+    case .automaticReconciliationExhausted, .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
       .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition, .toolApprovalDecided,
       .runnerStateTransition, .unknown:

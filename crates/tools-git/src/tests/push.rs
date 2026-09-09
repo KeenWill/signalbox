@@ -412,7 +412,7 @@ fn every_minted_remote_name_builds_a_configured_remote() {
 }
 
 /// Stores selected fixture objects without compression so pack size is load-bearing.
-fn plant_uncompressed_push_pack(
+pub(super) fn plant_uncompressed_push_pack(
     repository: &Repository,
     objects: &[git2::Oid],
 ) -> std::path::PathBuf {

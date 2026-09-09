@@ -198,3 +198,31 @@ fn append_compressed(bytes: &mut Vec<u8>, content: &[u8]) {
         .expect("fixture content compresses");
     bytes.extend(encoder.finish().expect("fixture zlib stream finishes"));
 }
+
+#[test]
+fn selected_object_reads_keep_the_packed_delta_dependency_bound() {
+    for encoding in [DeltaEncoding::Offset, DeltaEncoding::Reference] {
+        let fixture = Fixture::new();
+        let oversized = plant_delta_chain(fixture.root(), encoding, &[MAX_OBJECT_BYTES + 1, 1]);
+        let bounded = plant_delta_chain(fixture.root(), encoding, &[8, 2]);
+        let executor = fixture.executor();
+        let authority = &executor.repository_authority;
+        let repository = authority
+            .open_repository_shell()
+            .expect("private repository opens");
+        repository
+            .capture_objects_on_read(authority)
+            .expect("selected source pins");
+
+        let failure = diff_object_buffer(&repository, oversized, 0o100644)
+            .expect_err("selected delta rejects its oversized base");
+        let content = diff_object_buffer(&repository, bounded, 0o100644)
+            .expect("selected bounded delta reads");
+        repository
+            .validate_selected_objects(authority)
+            .expect("selected sources remain bound");
+
+        assert_eq!(failure, LocalGitFailure::Operation, "{encoding:?}");
+        assert_eq!(content, b"xx", "{encoding:?}");
+    }
+}

@@ -41,6 +41,7 @@ use crate::limits::{
 };
 use crate::pack_install::OBJECT_PUBLICATION_LOCK;
 use crate::pack_read_bounds::collect_unreadable_objects;
+use crate::push_objects::ObjectSource;
 
 pub(super) struct PinnedRepository {
     root_path: PathBuf,
@@ -72,6 +73,7 @@ pub(super) struct RepositoryShell {
     repository: Repository,
     _directory: tempfile::TempDir,
     unreadable_objects: RefCell<Option<Arc<BTreeSet<git2::Oid>>>>,
+    selected_objects: RefCell<Option<ObjectSource>>,
 }
 
 pub(super) struct PinnedObjectDatabase {
@@ -85,6 +87,28 @@ pub(super) struct PinnedObjectDatabase {
 }
 
 impl RepositoryShell {
+    pub(super) fn capture_objects_on_read(
+        &self,
+        authority: &PinnedRepository,
+    ) -> Result<(), LocalGitFailure> {
+        *self.selected_objects.borrow_mut() = Some(ObjectSource::open(
+            authority,
+            std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT,
+        )?);
+        Ok(())
+    }
+
+    pub(super) fn validate_selected_objects(
+        &self,
+        authority: &PinnedRepository,
+    ) -> Result<(), LocalGitFailure> {
+        self.selected_objects
+            .borrow()
+            .as_ref()
+            .ok_or(LocalGitFailure::Operation)?
+            .validate(authority)
+    }
+
     pub(super) fn set_odb(
         &self,
         database: &Odb<'_>,
@@ -99,6 +123,13 @@ impl RepositoryShell {
         &self,
         oid: git2::Oid,
     ) -> Result<(usize, git2::ObjectType), git2::Error> {
+        if let Some(source) = self.selected_objects.borrow_mut().as_mut() {
+            let database = self.repository.odb()?;
+            source.capture(&database, oid).map_err(|_| {
+                git2::Error::from_str("object read exceeds captured content bounds")
+            })?;
+            return database.read_header(oid);
+        }
         if self
             .unreadable_objects
             .borrow()
@@ -1344,6 +1375,7 @@ pub(super) fn open_pinned_repository(
         repository,
         _directory: directory,
         unreadable_objects: RefCell::new(None),
+        selected_objects: RefCell::new(None),
     })
 }
 

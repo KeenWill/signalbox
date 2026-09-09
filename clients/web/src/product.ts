@@ -29,11 +29,11 @@ import { validateDetailContinuation } from './session-timeline/model'
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
 
 export const productRoutes = [
-  { id: 'attention', label: 'Attention', description: 'Actionable work and fleet state' },
+  { id: 'attention', label: 'Attention', description: 'Work needing attention and fleet status' },
   { id: 'sessions', label: 'Sessions', description: 'Conversation activity and history' },
   { id: 'search', label: 'Search', description: 'Global and session search' },
-  { id: 'runners', label: 'Runners', description: 'Execution fleet' },
-  { id: 'reviews', label: 'Reviews', description: 'Pull request convergence' },
+  { id: 'runners', label: 'Runners', description: 'Runner fleet' },
+  { id: 'reviews', label: 'Reviews', description: 'Pull request reviews' },
   { id: 'imports', label: 'Imports', description: 'Imported conversations' },
   { id: 'usage', label: 'Usage', description: 'Tokens and cost' },
   { id: 'settings', label: 'Settings', description: 'Local workspace preferences' },
@@ -160,7 +160,7 @@ export class ProductRequestError extends Error {
 
 export class ProductTransportError extends Error {
   constructor(cause: unknown) {
-    super('The Signalbox daemon could not be reached.', { cause })
+    super("Can't reach the Signalbox server.", { cause })
     this.name = 'ProductTransportError'
   }
 }
@@ -568,13 +568,13 @@ const utf8Length = (value: string): number => new TextEncoder().encode(value).by
 
 const validateBlobDescriptorInput = (input: BlobDescriptorInput): void => {
   if (utf8Length(input.mediaType) > MAX_DECLARED_MEDIA_TYPE_BYTES) {
-    throw new ProductInputError('Descriptor media type exceeded the 255-byte limit.')
+    throw new ProductInputError('Media type is too long (max 255 bytes).')
   }
   if (
     input.displayFilename !== undefined &&
     utf8Length(input.displayFilename) > MAX_DISPLAY_FILENAME_BYTES
   ) {
-    throw new ProductInputError('Descriptor display filename exceeded the 1024-byte limit.')
+    throw new ProductInputError('Filename is too long (max 1024 bytes).')
   }
 }
 
@@ -1021,10 +1021,10 @@ const SESSION_INPUT_DEADLINE_MS = 30_000
 
 export async function submitSessionInput(sessionId: string, input: WebSubmitInputRequest) {
   if (input.message.length > MAX_SESSION_MESSAGE_LENGTH)
-    throw new ProductInputError('Message exceeds the browser draft length limit.')
+    throw new ProductInputError('Message is too long.')
   const body = JSON.stringify(decodeWebSubmitInputRequest(input))
   if (new TextEncoder().encode(body).byteLength > MAX_PRODUCT_JSON_BYTES) {
-    throw new ProductInputError('Message exceeds the browser request byte limit.')
+    throw new ProductInputError('Message is too long.')
   }
   const controller = new AbortController()
   const deadline = setTimeout(() => controller.abort(), SESSION_INPUT_DEADLINE_MS)
