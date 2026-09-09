@@ -19,7 +19,7 @@ export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactI
       ...identity,
       kind: 'blocked',
       attemptedKind: `Imported ${contentKindLabel(entry.content_kind).toLowerCase()}`,
-      reason: 'Content unavailable.',
+      reason: 'No preview for this content.',
     }
   }
   if (!entry.text) {
@@ -30,7 +30,7 @@ export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactI
       ...identity,
       kind: 'blocked',
       attemptedKind: 'Imported text',
-      reason: 'No text recorded.',
+      reason: 'Text unknown.',
     }
   }
   if (entry.text.kind === 'attested_absent') {

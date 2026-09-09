@@ -27,7 +27,7 @@ const entryText = (entry: WebImportedEntry): string => {
   if (!entry.text) return enumLabel(entry.content_kind)
   switch (entry.text.kind) {
     case 'not_attested':
-      return 'No text recorded'
+      return 'Text unknown'
     case 'attested_absent':
       return 'No text'
     case 'attested':

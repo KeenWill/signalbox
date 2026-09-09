@@ -190,7 +190,7 @@ export const commandRegistry = [
   {
     id: 'navigate.reviews',
     title: 'Go to Reviews',
-    description: 'Open approval work and history.',
+    description: 'Open Reviews.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -199,7 +199,7 @@ export const commandRegistry = [
   {
     id: 'navigate.runners',
     title: 'Go to Runners',
-    description: 'Open runner capacity and health.',
+    description: 'Open Runners.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -217,7 +217,7 @@ export const commandRegistry = [
   {
     id: 'navigate.usage',
     title: 'Go to Usage',
-    description: 'Open token and cost analysis.',
+    description: 'Open Usage.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -244,7 +244,7 @@ export const commandRegistry = [
   {
     id: 'artifact.open',
     title: 'Open artifact inspector',
-    description: 'Look up a stored file by digest.',
+    description: 'Look up stored content by digest.',
     category: 'Surface',
     bindings: [],
     available: artifactInspector,

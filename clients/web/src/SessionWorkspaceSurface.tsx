@@ -482,7 +482,7 @@ export function SessionWorkspaceSurface({
           {timelineCapability === 'checking'
             ? 'Connecting…'
             : timelineCapability === 'unavailable'
-              ? 'Sessions unavailable'
+              ? 'Session timeline unavailable'
               : 'Session ID required'}
         </p>
       ) : session.isError ? (
@@ -643,7 +643,7 @@ export function SessionWorkspaceSurface({
                 limits={transcriptLimits}
               />
             ) : (
-              <p>Conversation unavailable</p>
+              <p>Transcript text unavailable</p>
             )}
           </section>
           {synchronization.sessionId === sessionId && synchronization.drafts.length > 0 && (

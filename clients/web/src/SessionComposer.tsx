@@ -62,7 +62,7 @@ export function SessionComposer({
           actions.sessionInputSettled({ sessionId, commandId: input.command_id, confirmed: true }),
         )
         setText(input.message)
-        setNotice(`Not sent: ${error.message}`)
+        setNotice(`Not accepted: ${error.message}`)
       } else {
         dispatch(
           actions.sessionInputSettled({ sessionId, commandId: input.command_id, confirmed: false }),
@@ -148,7 +148,7 @@ export function SessionComposer({
                       ? 'Connecting…'
                       : activeState === null
                         ? ''
-                        : `Session: ${enumLabel(activeState)}`)}
+                        : `Turn: ${enumLabel(activeState)}`)}
         </span>
       </div>
     </form>

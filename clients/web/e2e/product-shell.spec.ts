@@ -310,7 +310,7 @@ test('gates Sessions on the validated bootstrap capability', async ({ page }) =>
   )
   await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText('Sessions unavailable')).toBeVisible()
+  await expect(page.getByText('Session timeline unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -327,7 +327,7 @@ test('gates Sessions on valid timeline limits', async ({ page }) => {
   )
   await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText('Sessions unavailable')).toBeVisible()
+  await expect(page.getByText('Session timeline unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -554,7 +554,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   const accepted = page.getByRole('row', { name: /41 Message accepted/ })
   await accepted.getByText('Message accepted', { exact: true }).click()
   await expect(page.locator('#session-timeline-detail-41')).toBeVisible()
-  await expect(page.getByRole('region', { name: 'User input', exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Accepted input', exact: true })).toBeVisible()
   await accepted.getByText('Message accepted', { exact: true }).click()
   await expect(page.locator('#session-timeline-detail-41')).toBeHidden()
 

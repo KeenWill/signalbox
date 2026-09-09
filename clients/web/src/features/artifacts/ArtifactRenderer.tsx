@@ -580,7 +580,7 @@ function RendererBoundary({
       <div className="artifact-state blocked" role="status">
         <ShieldAlert aria-hidden="true" />
         <div>
-          <strong>Artifact blocked</strong>
+          <strong>Preview unavailable</strong>
           <p>{artifact.reason}</p>
         </div>
       </div>

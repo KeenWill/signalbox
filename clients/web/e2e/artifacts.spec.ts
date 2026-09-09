@@ -361,7 +361,7 @@ test('renders unauthorized kinds as typed safe states', async ({ page }) => {
   await page.goto('/scenario/blobs')
 
   const blocked = page.getByRole('article', { name: 'Artifact restricted.capture' })
-  await expect(blocked.getByText('Artifact blocked')).toBeVisible()
+  await expect(blocked.getByText('Preview unavailable')).toBeVisible()
   await expect(blocked.getByRole('link')).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

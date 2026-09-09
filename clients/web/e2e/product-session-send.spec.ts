@@ -319,7 +319,7 @@ test('reports the daemon rejection reason and keeps the draft editable', async (
   await page.getByRole('textbox', { name: 'Message' }).fill('Keep the rejected draft.')
   await page.getByRole('button', { name: 'Send message', exact: true }).click()
   await expect(
-    page.getByText('Not sent: input cannot start a turn while another turn is active'),
+    page.getByText('Not accepted: input cannot start a turn while another turn is active'),
   ).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Message' })).toBeEditable()
   api.grow()
@@ -328,7 +328,7 @@ test('reports the daemon rejection reason and keeps the draft editable', async (
 test('shows when an active turn prevents starting another turn', async ({ page }) => {
   const api = await sessionApi(page, true)
   await openSession(page)
-  await expect(page.getByText('Session: Running')).toBeVisible()
+  await expect(page.getByText('Turn: Running')).toBeVisible()
   await page.getByRole('textbox', { name: 'Message' }).fill('A draft for later.')
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
   expect(api.state.submissions).toHaveLength(0)
@@ -788,6 +788,6 @@ test('replaces the sent notice when followed work starts', async ({ page }) => {
   await expect(composer.getByRole('status')).toHaveText('Message sent')
   api.state.active = true
   api.grow()
-  await expect(composer.getByRole('status')).toHaveText('Session: Running')
+  await expect(composer.getByRole('status')).toHaveText('Turn: Running')
   await expect(composer.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
 })

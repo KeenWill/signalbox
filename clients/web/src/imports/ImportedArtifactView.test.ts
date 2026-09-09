@@ -90,7 +90,7 @@ describe('imported artifact projection', () => {
       displayName: 'Imported entry 8',
       kind: 'blocked',
       attemptedKind: 'Imported document',
-      reason: 'Content unavailable.',
+      reason: 'No preview for this content.',
     })
   })
 
@@ -107,7 +107,7 @@ describe('imported artifact projection', () => {
       displayName: 'Imported entry 8',
       kind: 'blocked',
       attemptedKind: 'Imported text',
-      reason: 'No text recorded.',
+      reason: 'Text unknown.',
     })
   })
 

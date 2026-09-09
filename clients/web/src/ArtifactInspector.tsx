@@ -163,7 +163,7 @@ export function ArtifactInspector({
       </header>
       {!available ? (
         <div className="artifact-capability" role="status">
-          File downloads unavailable
+          Stored content lookup unavailable
         </div>
       ) : (
         <form onSubmit={resolveDescriptor}>

@@ -56,7 +56,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.reviews',
     title: 'Go to Reviews',
-    description: 'Open approval work and history.',
+    description: 'Open Reviews.',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
@@ -65,7 +65,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.runners',
     title: 'Go to Runners',
-    description: 'Open runner capacity and health.',
+    description: 'Open Runners.',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
@@ -83,7 +83,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.usage',
     title: 'Go to Usage',
-    description: 'Open token and cost analysis.',
+    description: 'Open Usage.',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,

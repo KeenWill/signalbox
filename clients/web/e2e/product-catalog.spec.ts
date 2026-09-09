@@ -339,7 +339,9 @@ test('shows unavailable timelines after opening a catalog row', async ({ page },
     firstSessionId,
   )
   await page.screenshot({ path: testInfo.outputPath('timeline-unavailable.png') })
-  await expect(page.getByRole('status').filter({ hasText: 'Sessions unavailable' })).toBeVisible()
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Session timeline unavailable' }),
+  ).toBeVisible()
   await expect(page.getByText('Loading session…', { exact: true })).toBeHidden()
   await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
   expect(timelineReads).toBe(0)

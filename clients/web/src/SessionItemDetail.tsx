@@ -156,12 +156,12 @@ const ToolAttemptDetail = ({ tool }: { tool: ToolAttempt }) => {
       <Facts
         facts={[
           ['Request', tool.request_id],
-          ['Attempt', physical?.attempt_id ?? 'Not issued'],
+          ['Attempt', physical?.attempt_id ?? 'Not recorded'],
           ['State', enumLabel(physical?.state ?? 'Requested')],
           ['Approval', enumLabel(tool.approval_posture)],
           ['Effect', enumLabel(physical?.effect_posture ?? 'Not recorded')],
           ['Sandbox', enumLabel(physical?.sandbox_posture ?? 'Not recorded')],
-          ['Escalated to judge', tool.approval_judge_escalated ? 'Yes' : 'No'],
+          ['Judge escalated to user', tool.approval_judge_escalated ? 'Yes' : 'No'],
           ['Cause', enumLabel(physical?.cause ?? 'Not recorded')],
         ]}
       />
@@ -196,7 +196,7 @@ const delegationProvenanceFacts = (
       ]
     case 'parent_lifecycle_command':
       return [
-        ['Source', 'Parent status command'],
+        ['Source', 'Parent lifecycle command'],
         ['Session', provenance.session_id],
         ['Command', provenance.command_id],
       ]
@@ -371,7 +371,7 @@ const detailContent = (body: DetailBody): ReactNode => {
       return (
         <>
           <Facts facts={[['Turn', body.turn_id]]} />
-          <TextDetail label="User input" excerpt={body.text} />
+          <TextDetail label="Accepted input" excerpt={body.text} />
           <AttachmentReferences attachments={body.attachments} />
         </>
       )
@@ -420,12 +420,12 @@ const detailContent = (body: DetailBody): ReactNode => {
                   : body.state.frontier_id,
               ],
               ['Item number', body.projected_member_index ?? 'None'],
-              ['Tool attempts', String(body.tools.length)],
+              ['Tool requests', String(body.tools.length)],
               ['Goal events', String(body.goal_events.length)],
             ]}
           />
           {tools.length > 0 && (
-            <section className="session-detail-members" aria-label="Tool attempts">
+            <section className="session-detail-members" aria-label="Tool requests">
               {tools.map((tool) => (
                 <ToolAttemptDetail key={tool.request_id} tool={tool} />
               ))}
@@ -463,7 +463,7 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Turn', body.turn_id],
               ['Decision', enumLabel(body.decision)],
               ['Source', enumLabel(body.actor.type)],
-              ['Escalated to judge', body.approval_judge_escalated ? 'Yes' : 'No'],
+              ['Judge escalated to user', body.approval_judge_escalated ? 'Yes' : 'No'],
               ...actorFacts,
             ]}
           />

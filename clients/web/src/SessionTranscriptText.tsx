@@ -64,12 +64,12 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
   if (!excerpt)
     return body.type === 'model_call' && body.provider_failure_cause ? (
       <p className="session-turn-outcome">
-        Assistant error: {enumLabel(body.provider_failure_cause)}
+        Provider error: {enumLabel(body.provider_failure_cause)}
       </p>
     ) : null
   return (
     <>
-      <span className="eyebrow">{body.type === 'user_input' ? 'You' : 'Assistant'}</span>
+      <span className="eyebrow">{body.type === 'user_input' ? 'Accepted input' : 'Assistant'}</span>
       <p className="session-message-text">{excerpt.text}</p>
       {body.type === 'user_input' && <AttachmentReferences attachments={body.attachments} />}
       {(excerpt.offset_bytes !== '0' || excerpt.continuation !== null) && (
