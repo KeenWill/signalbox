@@ -4,7 +4,7 @@ use signalbox_module_repo_watch_v2::{
     github::GitHubClient,
     provider::{GitHubObservationRead, ObservationError, fetch_observation},
 };
-use signalbox_ownership_seam::{RepoWatchAuthorLogin, RepositorySlug};
+use signalbox_session_ownership::{RepoWatchAuthorLogin, RepositorySlug};
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},

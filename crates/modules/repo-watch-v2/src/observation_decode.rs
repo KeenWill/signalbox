@@ -1,7 +1,7 @@
 use std::num::NonZeroU64;
 
 use serde_json::Value;
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
     MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
     PullRequestNumber, PullRequestTitle, ReactionContent, ReactionSubject, RepoWatchAuthorLogin,
@@ -193,7 +193,7 @@ fn optional<T>(v: &Value, decode: impl FnOnce(&Value) -> Option<T>) -> Option<Op
 pub(crate) fn merged_baselines(
     value: &Value,
 ) -> Option<Vec<crate::ingest::MergedPullRequestBaseline>> {
-    use signalbox_ownership_seam::{
+    use signalbox_session_ownership::{
         RepoWatchMergedCheckRunBaselineV1, RepoWatchMergedCheckSuiteBaselineV1,
         RepoWatchMergedPullRequestBaselineInputV1, RepoWatchMergedPullRequestBaselineV1,
     };
@@ -244,7 +244,7 @@ pub(crate) fn merged_baselines(
         .ok()?;
         Some(crate::ingest::MergedPullRequestBaseline {
             state,
-            merged_at: signalbox_ownership_seam::OffsetDateTime::from_unix_timestamp(
+            merged_at: signalbox_session_ownership::OffsetDateTime::from_unix_timestamp(
                 v["merged_at"].as_i64()?,
             )
             .ok()?,

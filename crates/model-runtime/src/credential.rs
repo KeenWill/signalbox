@@ -59,6 +59,14 @@ pub enum CredentialAccessFailure {
     Unavailable,
     /// The delivery artifact was present but could not be read as a value.
     Unreadable,
+    /// The credential file target is not a regular file.
+    NotRegularFile,
+    /// The credential file is not owned by the process's effective user.
+    WrongOwner,
+    /// The credential file grants group or other permissions.
+    InsecurePermissions,
+    /// The credential file exceeds its admitted byte limit.
+    TooLarge,
     /// OAuth minting and current configuration tuples differ.
     OauthTupleMismatch,
     /// OAuth refresh may have rotated without a retained replacement.

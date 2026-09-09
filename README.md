@@ -107,20 +107,24 @@ or inherited Cargo configuration) that executable needs Cargo's runtime library
 search path, which the direct `exec` does not set, and the command exits `127`
 naming the missing shared object. This is a known limitation.
 
-The daemon's default Anthropic key path is
-`$HOME/.config/signalbox/anthropic-api-key`, written into the seeded model
-catalog's Anthropic credential profile rather than passed in the environment,
-and overridable with `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` at the moment that
-copy is seeded; edit the seeded catalog to change it afterwards. The default
-code-host token path is `$HOME/.config/signalbox/github-token`, overridable with
-`SIGNALBOX_DEV_GITHUB_TOKEN_FILE`. The devenv Brave key path defaults to
-`$DEVENV_STATE/dev-instance/brave-api-key` and is overridable with
-`SIGNALBOX_DEV_BRAVE_API_KEY_FILE`. No credential material is committed or
-generated. The
+The dev launcher uses `$HOME/.config/signalbox/anthropic-api-key` and
+`$HOME/.config/signalbox/github-token` when those files exist, otherwise it
+creates empty mode-0600 files named `anthropic-api-key` and `github-token` under
+`$DEVENV_STATE/dev-instance`. `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` overrides
+the primary profile's path when the catalog is seeded; edit that catalog to
+change it afterwards. Other file profiles receive distinct private placeholders
+in the same state directory. `SIGNALBOX_DEV_GITHUB_TOKEN_FILE` overrides the
+code-host path. The Brave path defaults to
+`$DEVENV_STATE/dev-instance/brave-api-key`, created empty and private when
+absent, and is overridable with `SIGNALBOX_DEV_BRAVE_API_KEY_FILE`. Overrides
+must name admitted files; the launcher preserves their contents and permissions.
+Empty placeholders allow startup but supply no usable credential. No credential
+material is committed or generated. The
 [credential lifecycle](docs/spec/configuration-and-credentials.md) states when
 those files are read, what their bytes mean, and how absence is handled. These
 commands write the code-host token from the GitHub CLI and open the Anthropic
-and Brave key files for editing:
+and Brave key files for editing. Create the home Anthropic file before seeding,
+or update the seeded profile to point to it:
 
 ```console
 install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/github-token"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; gh auth token >"$temporary" && mv "$temporary" "$destination" && trap - EXIT)

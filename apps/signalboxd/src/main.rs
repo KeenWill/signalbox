@@ -403,6 +403,7 @@ fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
 enum SanitizedStartupCause<'a> {
     Configuration(&'a HubConfigurationError),
     ModelConfiguration(&'a HubModelConfigurationError),
+    Credential(&'a signalbox_model_runtime::CredentialAccessError),
     TemplateConfiguration(&'a SessionTemplateConfigurationError),
     TelemetryConfiguration(&'a TelemetryConfigurationError),
     Database(&'a FencedHubDatabaseError),
@@ -417,6 +418,7 @@ impl fmt::Display for SanitizedStartupCause<'_> {
         match self {
             Self::Configuration(error) => error.fmt(formatter),
             Self::ModelConfiguration(error) => error.fmt(formatter),
+            Self::Credential(error) => error.fmt(formatter),
             Self::TemplateConfiguration(error) => error.fmt(formatter),
             Self::TelemetryConfiguration(error) => error.fmt(formatter),
             Self::Database(error) => error.fmt(formatter),
@@ -1468,6 +1470,30 @@ async fn run_hub(
             )
         })?,
     };
+    model_configuration
+        .validate_credential_files()
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Credential(&error),
+            )
+        })?;
+    let integration_credentials = FileCredentialAccess::from_files([
+        (
+            CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
+            configuration.github_token_file(),
+        ),
+        (
+            CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
+            configuration.brave_api_key_file(),
+        ),
+    ]);
+    integration_credentials.validate().map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Credential(&error),
+        )
+    })?;
     if let Some(codex_cli) = model_configuration.codex_cli() {
         verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
             .await
@@ -1995,7 +2021,8 @@ async fn run_hub(
     })?;
     let configuration_reload = configuration_reload
         .with_runtime_factory(runtime_factory.clone())
-        .with_github_tool_credential(configuration.github_token_file());
+        .with_github_tool_credential(configuration.github_token_file())
+        .with_integration_credentials(integration_credentials);
     let configuration_reload = match &repository_watch_runtime {
         Some(watch) => {
             watch

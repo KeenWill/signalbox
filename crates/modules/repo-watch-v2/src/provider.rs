@@ -8,7 +8,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, MergeableState,
     OffsetDateTime, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
     PullRequestNumber, PullRequestTitle, ReactionContent, ReactionSubject, RepoWatchAuthorLogin,
@@ -271,6 +271,28 @@ where
     type Error = RepositoryAttemptError<Loader::Error>;
 
     async fn poll(&mut self, producer: EventProducer) -> Result<(), Self::Error> {
+        let attempt = crate::measurements::AttemptGuard::start(
+            self.store.measurements.clone(),
+            self.repository.clone(),
+        );
+        let result = self.observe(producer).await;
+        use crate::measurements::PollOutcome;
+        attempt.finish(match &result {
+            Ok(()) => PollOutcome::Succeeded,
+            Err(RepositoryAttemptError::Client(_)) => PollOutcome::ClientFailed,
+            Err(RepositoryAttemptError::Observation(_)) => PollOutcome::ObservationFailed,
+            Err(RepositoryAttemptError::Store(_)) => PollOutcome::StoreFailed,
+            Err(RepositoryAttemptError::FrontierConflict) => PollOutcome::FrontierConflict,
+        });
+        result
+    }
+}
+
+impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
+    async fn observe(
+        &mut self,
+        producer: EventProducer,
+    ) -> Result<(), RepositoryAttemptError<Loader::Error>> {
         let client = self
             .clients
             .load_client()
@@ -680,7 +702,7 @@ fn pull_context(
         })
         .ok()?,
         labels: array(&v["labels"], |v| {
-            signalbox_ownership_seam::LabelName::try_new(text(&v["name"])?).ok()
+            signalbox_session_ownership::LabelName::try_new(text(&v["name"])?).ok()
         })?,
         draft: v["draft"].as_bool()?,
         author,
@@ -873,6 +895,45 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    struct UnavailableClient;
+    impl RepositoryClientLoader for UnavailableClient {
+        type Error = &'static str;
+        async fn load_client(&self) -> Result<GitHubClient, Self::Error> {
+            Err("unavailable")
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_client_load_is_visible_for_periodic_polls_and_webhook_wakes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::measurements::PollOutcome;
+        for producer in [EventProducer::Poll, EventProducer::Webhook] {
+            let repository = RepositorySlug::try_new("poll-evidence/project".to_owned())?;
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@localhost/unused")?;
+            let store = RepoWatchStore::new(pool);
+            let mut task = GitHubRepositoryTask {
+                repository: repository.clone(),
+                signal_reviewers: Vec::new(),
+                subject_retention: std::time::Duration::ZERO,
+                clients: UnavailableClient,
+                store: store.clone(),
+            };
+            assert!(matches!(
+                task.poll(producer).await,
+                Err(RepositoryAttemptError::Client(_))
+            ));
+            let evidence = store.ingestion_measurements(&repository);
+            assert_eq!(
+                evidence.last_poll.expect("attempt recorded").outcome,
+                PollOutcome::ClientFailed
+            );
+            assert_eq!(evidence.last_successful_observation, None);
+            assert_eq!(evidence.events_recorded, 0);
+        }
+        Ok(())
+    }
 
     // Distinct provider identities and revisions are arbitrary fixture data.
     const HEAD: &str = "1111111111111111111111111111111111111111";
@@ -1325,7 +1386,7 @@ mod tests {
 
     #[tokio::test]
     async fn compacted_merged_numbers_do_not_cause_provider_reads() {
-        use signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineInputV1;
+        use signalbox_session_ownership::RepoWatchMergedPullRequestBaselineInputV1;
         let mut io = fixture();
         *io.pages
             .get_mut("/repos/example/project/pulls?state=open&per_page=100&page=1")
@@ -1417,7 +1478,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_anonymous_reaction_does_not_hide_another_reviewers_removal() {
-        use signalbox_ownership_seam::{
+        use signalbox_session_ownership::{
             ReactionChange, RepoWatchEventIdentityFrontierV1, RepoWatchEventKindV1,
             UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
         };

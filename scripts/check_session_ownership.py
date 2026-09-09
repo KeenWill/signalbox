@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject module dependency edges and SQL reach-arounds across the ownership seam."""
+"""Reject module dependency edges and SQL reach-arounds across session ownership."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path.cwd().resolve()
 MODULE_ROOT = ROOT / "crates" / "modules"
-SEAM_ROOT = (ROOT / "crates" / "ownership-seam").resolve()
+SEAM_ROOT = (ROOT / "crates" / "session-ownership").resolve()
 FORBIDDEN_IMPORTS = (
     "signalbox_application",
     "signalbox_domain",
@@ -59,7 +59,7 @@ def check_manifest(path: Path, inherited: dict[str, object]) -> list[str]:
             dependency_names = (normalized, normalized_package)
             if any(
                 candidate.startswith("signalbox-")
-                and candidate != "signalbox-ownership-seam"
+                and candidate != "signalbox-session-ownership"
                 for candidate in dependency_names
             ):
                 failures.append(f"{path}: forbidden Signalbox dependency {name}")
@@ -120,11 +120,11 @@ def main() -> int:
         failures.extend(check_tool_source(source))
 
     if failures:
-        print("ownership-seam check failed:", file=sys.stderr)
+        print("session-ownership check failed:", file=sys.stderr)
         for failure in failures:
             print(f"  {failure}", file=sys.stderr)
         return 1
-    print("ownership-seam check passed")
+    print("session-ownership check passed")
     return 0
 
 

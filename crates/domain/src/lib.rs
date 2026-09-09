@@ -276,7 +276,7 @@ pub use session::{
     InitialSession, PreparedCreateSession, ReconstitutedSessionCreation, Session,
     SessionCreationCause, SessionCreationProvenance, SessionPlacementReconstitutionFacts,
     SessionReconstitutionError, SessionReconstitutionFailure, SessionReconstitutionInput,
-    TranscriptAncestry, TranscriptFrontier,
+    SessionWorkspaceRootKind, TranscriptAncestry, TranscriptFrontier,
 };
 pub use session_delegation::{
     BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRequest,

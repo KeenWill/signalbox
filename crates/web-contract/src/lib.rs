@@ -913,6 +913,9 @@ pub struct WebSessionWorkFacts {
 pub struct WebSessionTimelineDescriptor {
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
+    pub workspace_root_kind: Option<WebSessionWorkspaceRootKind>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub repository_watch: Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
     pub sizes: WebSessionTimelineSizeFacts,
@@ -1193,6 +1196,8 @@ pub enum WebTimelineToolFailureCause {
     InvalidArguments,
     ExecutionFailed,
     ResultTooLarge,
+    /// Successful content contained U+0000.
+    ResultContainsNull,
     CrashLost,
 }
 
@@ -1686,6 +1691,7 @@ pub enum WebSessionTimelineDetailBody {
         kind: WebSessionTimelineEventKind,
     },
     SessionCreated {
+        workspace_root_kind: Option<WebSessionWorkspaceRootKind>,
         cause: WebTimelineCreationCause,
         imported_evidence: Option<WebTimelineImportedEvidence>,
     },
@@ -2773,6 +2779,7 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
         "/properties/repository_watch/properties/pull_request",
     )?;
     make_property_nullable(&mut descriptor_schema, "repository_watch")?;
+    make_property_nullable(&mut descriptor_schema, "workspace_root_kind")?;
     let mut timeline_window_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
     make_property_nullable(&mut timeline_window_schema, "continuation_before")?;
@@ -5299,6 +5306,15 @@ pub enum WebRepositoryWatchEventKind {
     BaseAdvanced,
     /// The `reaction_changed` event.
     ReactionChanged,
+}
+
+/// Path-free daemon-local workspace binding evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionWorkspaceRootKind {
+    Derived,
+    Configured,
+    Provisioned,
 }
 
 #[cfg(test)]
