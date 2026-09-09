@@ -15,7 +15,7 @@ any_of = ["conflicting"]
 [[repository_watch.rules.actions]]
 kind = "dispatch_session"
 template = "merge-forward"
-# Rule B: PRs the owner or coordinator labels `repo-watch` get one review-response session per PR when checks finish or the head moves, at most every 30 min.
+# Rule B: PRs the owner or coordinator labels `repo-watch` get one review-response session per PR when checks finish, the head moves or mergeability changes, at most every 30 min.
 [[repository_watch.rules]]
 id = "labeled-review-response"
 version = 6
