@@ -75,6 +75,7 @@ impl IssuedModelCallCorrelation {
             retry_after: None,
             non_acceptance_proven: false,
             rate_limits: None,
+            credential_recovery: None,
         }
     }
 
@@ -105,6 +106,7 @@ impl IssuedModelCallCorrelation {
             retry_after,
             non_acceptance_proven,
             rate_limits: None,
+            credential_recovery: None,
         }
     }
 }
@@ -216,6 +218,7 @@ pub enum ProviderModelCallFailureCause {
 /// One provider-neutral terminal observation bound to exact issued authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CorrelatedModelCallTerminalObservation {
+    pub(super) credential_recovery: Option<CredentialRejectionRecovery>,
     pub(super) rate_limits: Option<Box<crate::ProviderRateLimitSnapshot>>,
     pub(super) correlation: IssuedModelCallCorrelation,
     pub(super) observation: ModelCallTerminalObservation,
@@ -225,7 +228,30 @@ pub struct CorrelatedModelCallTerminalObservation {
     pub(super) non_acceptance_proven: bool,
 }
 
+/// Delivery recovery observed after a credential rejection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialRejectionRecovery {
+    /// Retry this profile with its refreshed access token.
+    Refreshed,
+    /// Rotate because refresh failed or the refreshed token was rejected.
+    Unavailable,
+}
+
 impl CorrelatedModelCallTerminalObservation {
+    /// Attaches delivery recovery to this exact rejected provider call.
+    pub fn with_credential_recovery(
+        mut self,
+        recovery: Option<CredentialRejectionRecovery>,
+    ) -> Self {
+        self.credential_recovery = recovery;
+        self
+    }
+
+    /// Returns the delivery recovery observed for this credential rejection.
+    pub const fn credential_recovery(&self) -> Option<CredentialRejectionRecovery> {
+        self.credential_recovery
+    }
+
     /// Attaches capacity evidence observed during this exact provider call.
     pub fn with_rate_limits(mut self, snapshot: Option<crate::ProviderRateLimitSnapshot>) -> Self {
         self.rate_limits = snapshot.map(Box::new);

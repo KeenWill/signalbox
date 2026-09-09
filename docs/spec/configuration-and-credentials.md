@@ -826,13 +826,17 @@ before scavenging and fails without removal on ownership, type, or containment
 mismatch. The Codex child uses the home's file backend and token-only
 authentication with ambient credentials, keyrings, helpers, and external stores
 disabled; inability to deliver the home is a typed pre-send failure. An
-access-token rejection during an invocation neither quarantines the profile nor
-permits automatic call retry. Delivery failure evidence and quarantine commit
-atomically and bypass pool trigger policy. OAuth quarantine reads lock only
-currently registered OAuth pool members. Successful re-provisioning clears OAuth
-delivery-origin quarantine and cached access; failure preserves both. Deletion
-holds the dispatch profile lock while removing authorization and cached access,
-advances the retained generation, and preserves registration and history.
+access-token rejection during an invocation refreshes the token and retries the
+same profile in a new durable call. A rejection after that successful refresh,
+or a failed refresh, rotates to the next profile. A successful invocation clears
+the token's rejection-recovery state. An expired access token does not
+quarantine the profile or apply its pool rejection action. Delivery failure
+evidence and quarantine commit atomically and bypass pool trigger policy. OAuth
+quarantine reads lock only currently registered OAuth pool members. Successful
+re-provisioning clears OAuth delivery-origin quarantine and cached access;
+failure preserves both. Deletion holds the dispatch profile lock while removing
+authorization and cached access, advances the retained generation, and preserves
+registration and history.
 
 A `codex_home` profile accepts `max_concurrent_invocations` from 1 through
 1,024. The startup registration bounds per-member invocation reservations; an

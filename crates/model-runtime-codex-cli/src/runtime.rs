@@ -441,6 +441,7 @@ pub struct CodexCliPreparedRequest<C> {
     controls: CodexControls,
     model_context_window_override: Option<u32>,
     oauth_home: Option<crate::oauth::OauthCredentialHome>,
+    credential_reference: signalbox_model_runtime::CredentialReference,
 }
 
 struct CodexControls {
@@ -763,6 +764,7 @@ impl CodexCliRuntime {
             controls,
             model_context_window_override,
             oauth_home: None,
+            credential_reference: operation.credential_reference,
         })
     }
 }
@@ -913,7 +915,34 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for CodexCliRuntime {
                 }),
             };
         }
-        let evidence = execute_process(prepared, sink, &mut cancellation).await;
+        let oauth_token = prepared
+            .oauth_home
+            .as_ref()
+            .map(|home| home.material.access_token.clone());
+        let reference = prepared.credential_reference.clone();
+        let mut evidence = execute_process(prepared, sink, &mut cancellation).await;
+        if let Some(token) = oauth_token
+            && let Some((provider, _)) = &self.oauth_delivery
+        {
+            match &mut evidence {
+                TerminalEvidence::ProviderError(error)
+                    if error.kind
+                        == signalbox_model_runtime::ProviderErrorKind::CredentialRejected =>
+                {
+                    error.credential_recovery = Some(
+                        provider
+                            .recover_rejection(&reference, &token, cancellation)
+                            .await,
+                    );
+                }
+                TerminalEvidence::Completed(_)
+                | TerminalEvidence::CompletedWithProviderCompaction { .. }
+                | TerminalEvidence::Refused(_) => {
+                    provider.invocation_succeeded(&reference, &token).await;
+                }
+                _ => {}
+            }
+        }
         TerminalReport {
             correlation,
             evidence,

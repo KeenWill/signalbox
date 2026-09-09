@@ -286,9 +286,20 @@ pub struct RefusalEvidence {
     pub retained_output_tokens: Option<u64>,
 }
 
+/// Result of recovering an invocation-time credential rejection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialRejectionRecovery {
+    /// A refreshed access token is available for a new call on the same profile.
+    Refreshed,
+    /// Refresh failed or an invocation rejected the refreshed token.
+    Unavailable,
+}
+
 /// Evidence for a complete, correlated definitive provider error response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderErrorEvidence {
+    /// Delivery-layer recovery after an invocation rejected an access token.
+    pub credential_recovery: Option<CredentialRejectionRecovery>,
     pub exchange: ExchangeFacts,
     /// The model identity the provider reported before or with the error,
     /// when observed — retained here so the mismatch precedence in

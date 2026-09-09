@@ -113,12 +113,14 @@ Successor: a stop was not requested, and either a classified transient cause has
 same-credential attempts remaining, or the pinned action is `switch_now` and a
 member remains. Classified quota, rate-limit, overload and credential rejection
 failures admit successors whether received before or during a stream;
-non-acceptance proof is not required. Credential rejection never admits
-same-credential retry. The turn stays active and keeps its slot; the predecessor
-attempt ends KnownFailure without terminalizing, and the same commit prepares a
-successor attempt. That commit appends no `TurnFailed`: one commit never both
-terminalizes the turn and authorizes a successor. The rotation and transient
-retry tests pin this ending.
+non-acceptance proof is not required. OAuth access-token recovery admits a
+same-profile retry after refresh, independent of the transient attempt bound; a
+failed refresh or rejection of the refreshed token rotates. Other credential
+rejections never admit same-credential retry. The turn stays active and keeps
+its slot; the predecessor attempt ends KnownFailure without terminalizing, and
+the same commit prepares a successor attempt. That commit appends no
+`TurnFailed`: one commit never both terminalizes the turn and authorizes a
+successor. The rotation and transient retry tests pin this ending.
 
 A timeout, connection loss, lost body or incomplete stream before observed
 response content follows the provider-internal transient retry path. The durable

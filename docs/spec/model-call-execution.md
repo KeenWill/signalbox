@@ -173,10 +173,13 @@ marker, and a reconciliation outbox record, and releases the slot.
 
 A classified availability `KnownFailed` call may be followed by a successor call
 when the same-credential retry below admits it or when its pinned pool action is
-`switch_now`. Neither requires non-acceptance proof. A `CredentialRejected`
-failure admits only the configured rotation. `switch_now` uses the next admitted
-member of the same pool. `AvailabilitySuccessorModelCallTurn` is the aggregate
-transition that authorizes either distinct call on a successor turn attempt.
+`switch_now`. Neither requires non-acceptance proof. OAuth access-token recovery
+retries the same profile after refresh and rotates after failed refresh or
+rejection of the refreshed token, retaining each `CredentialRejected` call.
+Other credential rejections admit only the configured rotation. `switch_now`
+uses the next admitted member of the same pool.
+`AvailabilitySuccessorModelCallTurn` is the aggregate transition that authorizes
+either distinct call on a successor turn attempt.
 
 Usage evidence is a projection of terminal physical model calls that never
 materializes the transcript; `UsageReader` in `crates/application/src/usage.rs`
@@ -275,9 +278,10 @@ exactly-once claim could duplicate both an effect and its spend. Refusal never
 admits a successor: it is provider judgment about the request, so another
 account would refuse the same content and substituting one would only seek a
 different answer. Credential resolution failure never admits a successor: it is
-deployment misconfiguration. Credential rejection admits only the configured
-`switch_now` rotation; the rejection remains recorded durably on the failed
-attempt.
+deployment misconfiguration. Credential rejection remains recorded durably on
+the failed attempt. OAuth access-token recovery follows
+[configuration and credentials](configuration-and-credentials.md); other
+credential rejections admit only the configured `switch_now` rotation.
 
 A successful call ends its availability chain, and a later tool round starts a
 fresh one, so a round that exhausts the pool before calling carries no earlier

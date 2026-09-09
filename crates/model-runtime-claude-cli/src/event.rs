@@ -547,6 +547,7 @@ impl<C: Clone> EventDecoder<C> {
 
                 self.report_usage(sink);
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    credential_recovery: None,
                     exchange: self.exchange,
                     reported_model: self.reported_model,
                     kind,
@@ -647,6 +648,7 @@ impl<C: Clone> EventDecoder<C> {
             };
 
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: self.exchange,
                 reported_model: self.reported_model,
                 kind,
@@ -660,6 +662,7 @@ impl<C: Clone> EventDecoder<C> {
             })
         } else {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: self.exchange,
                 reported_model: self.reported_model,
                 kind: fallback_kind,

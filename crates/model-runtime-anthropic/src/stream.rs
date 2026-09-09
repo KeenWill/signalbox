@@ -398,6 +398,7 @@ impl StreamDecoder {
         }
         StreamStep::Terminal(Box::new(TerminalEvidence::ProviderError(
             ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: self.exchange.clone(),
                 reported_model: self.reported_model.clone(),
                 kind,

@@ -914,6 +914,7 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
         }
         TerminalEvidence::Refused(refusal) => {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: refusal.exchange,
                 reported_model: refusal.reported_model,
                 kind: ProviderErrorKind::Unrecognized,
@@ -953,6 +954,7 @@ async fn finish_error(
         None => Vec::new(),
         Some(Err(cause)) => {
             return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange,
                 reported_model: None,
                 kind: classify_error_status(status),
@@ -976,6 +978,7 @@ async fn finish_error(
         let (kind, non_acceptance_proven) =
             classify_error_with_proof(status, error.error_type.as_deref());
         return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            credential_recovery: None,
             exchange,
             // The Messages error envelope reports no model identity.
             reported_model: None,
@@ -989,6 +992,7 @@ async fn finish_error(
     // envelope is still definitive (per the runtime-substrate spec);
     // classify by status and retain the raw body as native material.
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        credential_recovery: None,
         exchange,
         reported_model: None,
         kind: classify_error_status(status),

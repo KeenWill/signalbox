@@ -137,6 +137,23 @@ fn version_probe_with_descendant(directory: &Path, output: &str) -> std::path::P
 struct OauthFixture;
 
 impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for OauthFixture {
+    fn invocation_succeeded<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        _: &'a signalbox_model_runtime::CredentialValue,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
+
+    fn recover_rejection<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        _: &'a signalbox_model_runtime::CredentialValue,
+        _: CancellationSignal,
+    ) -> signalbox_model_runtime_codex_cli::OauthRecoveryFuture<'a> {
+        Box::pin(async { signalbox_model_runtime::CredentialRejectionRecovery::Refreshed })
+    }
+
     fn deliver<'a>(
         &'a self,
         _: &'a CredentialReference,
@@ -163,6 +180,23 @@ impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for OauthFixture
 struct WaitingOauthFixture;
 
 impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for WaitingOauthFixture {
+    fn invocation_succeeded<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        _: &'a signalbox_model_runtime::CredentialValue,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
+
+    fn recover_rejection<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        _: &'a signalbox_model_runtime::CredentialValue,
+        _: CancellationSignal,
+    ) -> signalbox_model_runtime_codex_cli::OauthRecoveryFuture<'a> {
+        Box::pin(async { signalbox_model_runtime::CredentialRejectionRecovery::Unavailable })
+    }
+
     fn deliver<'a>(
         &'a self,
         _: &'a CredentialReference,
@@ -283,6 +317,10 @@ exit 1
     assert_eq!(
         provider_error(&report.evidence).kind,
         ProviderErrorKind::CredentialRejected
+    );
+    assert_eq!(
+        provider_error(&report.evidence).credential_recovery,
+        Some(signalbox_model_runtime::CredentialRejectionRecovery::Refreshed)
     );
     let evidence = format!("{:?}", report.evidence);
     assert!(!evidence.contains("opaque-access"), "{evidence}");

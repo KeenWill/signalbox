@@ -739,7 +739,12 @@ impl PostgresModelCallRepository {
                     acquire_model_call_outbox_order_guard(&mut transaction).await?;
                     lock_credential_pool_action_heads(&mut transaction, &policy).await?;
                     outbox::lock_sequence_allocator(&mut transaction).await?;
-                    let action = policy.action(cause);
+                    let recovery = observation.credential_recovery();
+                    let action = if recovery.is_some() {
+                        CredentialPoolRuntimeAction::SwitchNow
+                    } else {
+                        policy.action(cause)
+                    };
                     let mut pool_exhausted_name = None;
                     let current_reference = sqlx::query_scalar::<_, String>(
                         "SELECT credential_reference
@@ -760,10 +765,12 @@ impl PostgresModelCallRepository {
                         &current_reference,
                     )
                     .await?;
-                    let retry_candidate = is_same_credential_retry_cause(cause)
-                        && self
-                            .same_credential_attempt_bound
-                            .is_none_or(|bound| same_credential_attempts < bound.get())
+                    let retry_candidate = (recovery
+                        == Some(signalbox_domain::CredentialRejectionRecovery::Refreshed)
+                        || (is_same_credential_retry_cause(cause)
+                            && self
+                                .same_credential_attempt_bound
+                                .is_none_or(|bound| same_credential_attempts < bound.get())))
                         && !stop_requested;
                     let rotation_candidate =
                         action == CredentialPoolRuntimeAction::SwitchNow && !stop_requested;

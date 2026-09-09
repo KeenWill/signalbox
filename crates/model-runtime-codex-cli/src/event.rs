@@ -158,6 +158,7 @@ impl<C: Clone> EventDecoder<C> {
         if let Some((method, error)) = self.rejection.take() {
             if input_too_large(method, &error) {
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    credential_recovery: None,
                     exchange: self.exchange,
                     reported_model: None,
                     kind: ProviderErrorKind::RequestTooLarge,
@@ -223,6 +224,7 @@ impl<C: Clone> EventDecoder<C> {
                 }
                 exchange.http_status = info.and_then(|info| info.http_status());
                 TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    credential_recovery: None,
                     exchange,
                     reported_model: None,
                     kind,

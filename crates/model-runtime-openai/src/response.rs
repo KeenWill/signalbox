@@ -171,6 +171,7 @@ pub(crate) fn provider_error(
     usage: TokenUsage,
 ) -> TerminalEvidence {
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        credential_recovery: None,
         kind: classify_error(0, error.code.as_deref()),
         non_acceptance_proven: false,
         native: NativeErrorFacts {

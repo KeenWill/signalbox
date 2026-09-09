@@ -662,6 +662,7 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
         }
         TerminalEvidence::Refused(refusal) => {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: refusal.exchange,
                 reported_model: refusal.reported_model,
                 kind: ProviderErrorKind::Unrecognized,
@@ -703,6 +704,7 @@ async fn finish_error(
             error.error_type.as_deref(),
         );
         return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            credential_recovery: None,
             exchange,
             // The Responses error envelope reports no model identity.
             reported_model: None,
@@ -721,6 +723,7 @@ fn fallback_provider_error(exchange: ExchangeFacts, status: u16, body: &[u8]) ->
     // first can make valid JSON unparseable and hide a reversible credential
     // representation from JSON-aware redaction.
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        credential_recovery: None,
         exchange,
         reported_model: None,
         kind: classify_error(status, None),

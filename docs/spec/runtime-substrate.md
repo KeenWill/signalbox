@@ -344,10 +344,13 @@ follows transient retry policy; after content it retains ambiguous-loss
 handling. Content progress is retained in buffered and streamed delivery. The
 provider error's `non_acceptance_proven` field retains the adapter's protocol
 evidence and does not gate availability. Codex `willRetry` events do not prevent
-a subsequent classified failure from admitting a successor. HTTP statuses
-carried by Codex connection and stream errors classify 401 as credential
-rejection, 429 as rate limit, 500 as provider internal failure, and 503 or 529
-as overload.
+a subsequent classified failure from admitting a successor. OAuth delivery
+refreshes a rejected access token before returning recovery evidence; the daemon
+records the rejection and admits a new call on the same profile after refresh,
+or rotates after failed refresh or rejection of the refreshed token. HTTP
+statuses carried by Codex connection and stream errors classify 401 as
+credential rejection, 429 as rate limit, 500 as provider internal failure, and
+503 or 529 as overload.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion, and an unrecognized finish token is boundary

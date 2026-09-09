@@ -1485,6 +1485,21 @@ where
             TerminalEvidence::ProviderError(error) => error.exchange.retry_after,
             _ => None,
         };
+        let credential_recovery = match &report.evidence {
+            TerminalEvidence::ProviderError(error)
+                if error.kind == ProviderErrorKind::CredentialRejected =>
+            {
+                error.credential_recovery.map(|recovery| match recovery {
+                    signalbox_model_runtime::CredentialRejectionRecovery::Refreshed => {
+                        signalbox_domain::CredentialRejectionRecovery::Refreshed
+                    }
+                    signalbox_model_runtime::CredentialRejectionRecovery::Unavailable => {
+                        signalbox_domain::CredentialRejectionRecovery::Unavailable
+                    }
+                })
+            }
+            _ => None,
+        };
         let non_acceptance_proven = match &report.evidence {
             TerminalEvidence::ProviderError(error) => error.non_acceptance_proven,
             _ => false,
@@ -1509,6 +1524,7 @@ where
             ),
             None => correlation.bind_terminal_observation_with_usage(classified.observation, usage),
         })
+        .with_credential_recovery(credential_recovery)
         .with_rate_limits(rate_limits))
     }
 }
@@ -3347,6 +3363,7 @@ mod tests {
         assert_eq!(
             classify_terminal(
                 TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    credential_recovery: None,
                     exchange: exchange.clone(),
                     reported_model: None,
                     kind: ProviderErrorKind::RateLimited,
@@ -3457,6 +3474,7 @@ mod tests {
     #[test]
     fn availability_error_after_content_remains_a_classified_known_failure() {
         let error = TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            credential_recovery: None,
             exchange: ExchangeFacts::default(),
             reported_model: None,
             kind: ProviderErrorKind::Overloaded,
@@ -4342,6 +4360,7 @@ mod tests {
             (
                 "provider_error(credential_rejected)",
                 TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    credential_recovery: None,
                     exchange: ExchangeFacts::default(),
                     reported_model: None,
                     kind: ProviderErrorKind::CredentialRejected,

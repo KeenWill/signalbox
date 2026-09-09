@@ -135,7 +135,7 @@ impl PostgresModelCallRepository {
         self
     }
 
-    /// Bounds recorded attempts on one credential within a turn; `None` is unbounded.
+    /// Bounds recorded calls for transient-failure retry on one credential; `None` is unbounded.
     pub fn with_same_credential_attempt_bound(mut self, bound: Option<NonZeroUsize>) -> Self {
         self.same_credential_attempt_bound = bound;
         self

@@ -73,9 +73,9 @@ pub use credential::{
 };
 pub use evidence::{
     BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
-    ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, ProvenUnsentEvidence,
-    ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderRequestId,
-    RateLimitSnapshot, RateLimitWindow, RefusalEvidence, RefusalReason,
+    CredentialRejectionRecovery, ExchangeFacts, FinishReason, LossCause, NativeErrorFacts,
+    ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
+    ProviderRequestId, RateLimitSnapshot, RateLimitWindow, RefusalEvidence, RefusalReason,
     ResponseEnvelopeRejectionStage, StreamInterruption, TerminalEvidence, TerminalReport,
     ToolCallsAtLoss, TransportFacts, UnsentCause, parse_retry_after,
 };
