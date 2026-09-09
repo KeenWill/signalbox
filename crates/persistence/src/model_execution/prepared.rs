@@ -456,8 +456,8 @@ pub(super) async fn load_tool_conversation_entries(
     let attempts = crate::tool_loop::load_attempts_by_id(connection, &attempt_ids)
         .await
         .map_err(map_tool_evidence_error)?;
-    let context_texts = sqlx::query_as::<_, (Uuid, Option<String>)>(
-        "SELECT attempt_id, context_result_text FROM tool_attempt WHERE attempt_id = ANY($1)",
+    let context_texts = sqlx::query_as::<_, (Uuid, Option<String>, Option<String>)>(
+        "SELECT attempt_id, context_result_text, context_error_detail FROM tool_attempt WHERE attempt_id = ANY($1)",
     )
     .bind(
         attempt_ids
@@ -468,6 +468,7 @@ pub(super) async fn load_tool_conversation_entries(
     .fetch_all(&mut *connection)
     .await?
     .into_iter()
+    .map(|(id, text, detail)| (id, (text, detail)))
     .collect::<BTreeMap<_, _>>();
     let mut request_ids = request_ids.into_iter().collect::<BTreeSet<_>>();
     for attempt in attempts.values() {
@@ -518,7 +519,7 @@ pub(super) async fn load_tool_conversation_entries(
                     .get(&attempt.request())
                     .cloned()
                     .ok_or(ModelCallCorruption::Missing("tool result request evidence"))?;
-                let context_text = context_texts
+                let (context_text, context_error_detail) = context_texts
                     .get(&attempt.attempt().into_uuid())
                     .ok_or(ModelCallCorruption::Missing("tool context text"))?
                     .clone();
@@ -531,6 +532,10 @@ pub(super) async fn load_tool_conversation_entries(
                     request,
                     attempt,
                     context_text,
+                    context_error_detail: context_error_detail
+                        .map(signalbox_domain::ToolExecutionErrorDetail::try_new)
+                        .transpose()
+                        .map_err(|_| ModelCallCorruption::Inconsistent("tool context error"))?,
                 });
             }
             SemanticTranscriptEntryPayload::ToolDenied {
@@ -610,6 +615,7 @@ async fn tool_evidence_fits_before_loading(
             UNION ALL
             SELECT COALESCE(octet_length(result_text), 0)::bigint
                    + COALESCE(octet_length(context_result_text), 0)
+                   + COALESCE(octet_length(context_error_detail), 0)
                    + COALESCE(octet_length(error_detail), 0)
               FROM tool_attempt
               JOIN unnest($2::uuid[]) AS projected(attempt_id) USING (attempt_id)
@@ -892,7 +898,7 @@ mod preflight_tests {
         let mut connection = pool.acquire().await?;
         sqlx::raw_sql(
             "CREATE TEMP TABLE tool_request (request_id uuid, tool_name text, arguments_text text, inadmissible_reason text);
-             CREATE TEMP TABLE tool_attempt (attempt_id uuid, request_id uuid, result_text text, error_detail text, context_result_text text);
+             CREATE TEMP TABLE tool_attempt (attempt_id uuid, request_id uuid, result_text text, error_detail text, context_result_text text, context_error_detail text);
              CREATE TEMP TABLE tool_approval_decision (request_id uuid, denial_reason text, rationale text);",
         ).execute(&mut *connection).await?;
         let request = Uuid::from_u128(1);

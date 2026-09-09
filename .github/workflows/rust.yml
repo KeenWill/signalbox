@@ -38,10 +38,10 @@ jobs:
   # work only when this job proves no changed path can reach the Rust build:
   # every path is either non-binding Markdown/`docs/` prose or browser-client
   # source under `clients/web/` (the generated contract under
-  # `clients/web/src/generated/` is Rust output and keeps the full bar, as
+  # `clients/web/src/generated/` is Rust output and keeps Rust checks, as
   # does `clients/web`'s own workflow file). Pushes to main always run the
-  # complete workflow. `clients/web/**` changes are gated by `web.yml`, which
-  # triggers on exactly that path set.
+  # Rust bar; PostgreSQL shards use their own path scope. Browser changes use
+  # `web.yml`, which triggers on exactly that path set.
   rust-change-scope:
     name: Rust change scope
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-orchestration' }}
@@ -49,6 +49,7 @@ jobs:
       docs_only: ${{ steps.paths.outputs.docs_only }}
       web_only: ${{ steps.paths.outputs.web_only }}
       skip_rust: ${{ steps.paths.outputs.skip_rust }}
+      postgres: ${{ steps.paths.outputs.postgres }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,55 +60,71 @@ jobs:
         id: paths
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           docs_only=false
           web_only=false
           skip_rust=false
+          postgres=false
+          changed_paths="$RUNNER_TEMP/rust-changed-files"
           if [ "$EVENT_NAME" = pull_request ]; then
-            docs=0
-            web=0
-            rust=0
-            changed_paths="$RUNNER_TEMP/rust-changed-files"
             git diff --no-renames --name-only -z \
               "$BASE_SHA...$HEAD_SHA" > "$changed_paths"
-            while IFS= read -r -d '' path; do
-              case "$path" in
-                # Binding process/specification prose and generated indexes
-                # run the complete bar even though they are Markdown.
-                AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
-                  | docs/api/* \
-                  | docs/style.md)
-                  rust=$((rust + 1))
-                  ;;
-                docs/* | *.md)
-                  docs=$((docs + 1))
-                  ;;
-                # Generated browser-contract output is produced from Rust and
-                # checked against it by the workspace tests.
-                clients/web/src/generated/*)
-                  rust=$((rust + 1))
-                  ;;
-                clients/web/*)
-                  web=$((web + 1))
-                  ;;
-                *)
-                  rust=$((rust + 1))
-                  ;;
-              esac
-            done < "$changed_paths"
-            if [ "$rust" -eq 0 ]; then
-              skip_rust=true
-              [ "$web" -eq 0 ] && docs_only=true
-              [ "$docs" -eq 0 ] && web_only=true
-            fi
-            echo "changed paths: docs=$docs web=$web rust-reaching=$rust" \
-              "-> skip_rust=$skip_rust"
+          else
+            git diff --no-renames --name-only -z \
+              "$BASE_SHA" "$HEAD_SHA" > "$changed_paths"
           fi
+          docs=0
+          web=0
+          rust=0
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              crates/persistence/* | crates/domain/* | crates/application/* \
+                | apps/signalboxd/* | apps/client/* | crates/modules/* \
+                | crates/workflow-runtime/* | crates/tools-*/* \
+                | crates/process-protocol/* | config/* \
+                | tooling/postgres_test_image.rs \
+                | scripts/postgres_integration_suites.py | .github/workflows/* \
+                | MODULE.bazel* | Cargo.lock | BUILD.bazel | */BUILD.bazel)
+                postgres=true
+                ;;
+            esac
+            case "$path" in
+              # Binding process/specification prose and generated indexes
+              # run Rust checks even though they are Markdown.
+              AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
+                | docs/api/* \
+                | docs/style.md)
+                rust=$((rust + 1))
+                ;;
+              docs/* | *.md)
+                docs=$((docs + 1))
+                ;;
+              # Generated browser-contract output is produced from Rust and
+              # checked against it by the workspace tests.
+              clients/web/src/generated/*)
+                rust=$((rust + 1))
+                ;;
+              clients/web/*)
+                web=$((web + 1))
+                ;;
+              *)
+                rust=$((rust + 1))
+                ;;
+            esac
+          done < "$changed_paths"
+          if [ "$EVENT_NAME" = pull_request ] && [ "$rust" -eq 0 ] && [ "$postgres" = false ]; then
+            skip_rust=true
+            [ "$web" -eq 0 ] && docs_only=true
+            [ "$docs" -eq 0 ] && web_only=true
+          fi
+          echo "changed paths: docs=$docs web=$web rust-reaching=$rust" \
+            "-> skip_rust=$skip_rust"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
           echo "web_only=$web_only" >> "$GITHUB_OUTPUT"
           echo "skip_rust=$skip_rust" >> "$GITHUB_OUTPUT"
+          echo "postgres=$postgres" >> "$GITHUB_OUTPUT"
 
   contract-checks:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-builds' }}
@@ -185,6 +202,15 @@ jobs:
       - name: Test checkers and check generated files and Markdown
         run: |
           bazel test --keep_going --jobs=4 --local_test_jobs=1 //:python_checker_tests //:markdown_format //:generated_artifact_tests //:rust_format_tests
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Check and compile typed programs
+        run: |
+          npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs install --frozen-lockfile
+          npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs exec tsc -p tsconfig.json --noEmit
+          npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs test
+          npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs run check:fixtures
       # The scan rejects row-lock clauses and advisory-lock calls outside the
       # inventory in production Rust. This performs no Rust or SQL parsing.
       - name: Check explicit-lock inventory
@@ -354,3 +380,5 @@ jobs:
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
     uses: ./.github/workflows/bazel.yml
+    with:
+      postgres: ${{ needs.rust-change-scope.outputs.postgres == 'true' }}

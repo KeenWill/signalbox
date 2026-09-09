@@ -518,6 +518,7 @@ enum RuntimeDrainOutcome {
 enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
     FencedPoolFloor,
+    Workflows(Result<(), signalboxd::workflows::WorkflowRuntimeError>),
     CredentialInvocations,
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
@@ -997,6 +998,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
+        | Ok(RuntimeTaskExit::Workflows(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness)
         | Ok(RuntimeTaskExit::LifecycleDeadline)
         | Ok(RuntimeTaskExit::LifecycleMetrics) => RuntimeTaskCompletion::Clean,
@@ -1010,6 +1012,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         }
         Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
             tracing::error!(?error, "repository-watch runtime failed");
+            RuntimeTaskCompletion::Failed
+        }
+        Ok(RuntimeTaskExit::Workflows(Err(error))) => {
+            tracing::error!(cause = error.cause_code(), "workflow runtime failed");
             RuntimeTaskCompletion::Failed
         }
         Ok(RuntimeTaskExit::WebHttp(Err(error))) => {
@@ -1953,6 +1959,31 @@ async fn run_hub(
     );
     let runner_service = runner_service.with_eligibility_nudge(eligibility_nudge.clone());
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let configuration_reload = signalboxd::configuration_reload::ConfigurationReload::new(
+        scheduler_pool.clone(),
+        model_configuration.clone(),
+        template_configuration.clone(),
+        configuration.model_configuration_file().to_path_buf(),
+        configuration.template_configuration_file().to_path_buf(),
+        env::var_os("HOME").map(PathBuf::from),
+    )
+    .map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("configuration_reload_composition_failed"),
+        )
+    })?;
+    let configuration_reload = configuration_reload
+        .with_runtime_factory(runtime_factory.clone())
+        .with_github_tool_credential(configuration.github_token_file())
+        .with_integration_credentials(integration_credentials);
+    let goal_disposition = PostgresGoalPassDisposition::new(
+        scheduler_pool.clone(),
+        model_configuration.clone(),
+        eligibility_nudge.clone(),
+        goal_mode_numeric_bounds,
+    )
+    .with_configuration_reload(configuration_reload.clone());
     let repository_watch_runtime = {
         let start = async {
             let module_pool = connect_repository_watch_pool(&pool).await?;
@@ -1965,6 +1996,7 @@ async fn run_hub(
             Ok::<_, RepositoryWatchRuntimeError>(RepositoryWatchRuntime::unstarted(
                 module_pool,
                 RepositoryWatchServices {
+                    goal_resumption: goal_disposition.clone(),
                     checkout_runner: checkout_runner.clone(),
                     core_pool: pool.clone(),
                     models: Arc::new(model_configuration.clone()),
@@ -2005,24 +2037,6 @@ async fn run_hub(
     tool_executor = tool_executor
         .with_blob_executor(blob_executor)
         .with_repository_watch(repository_watch_runtime.clone());
-    let configuration_reload = signalboxd::configuration_reload::ConfigurationReload::new(
-        scheduler_pool.clone(),
-        model_configuration.clone(),
-        template_configuration.clone(),
-        configuration.model_configuration_file().to_path_buf(),
-        configuration.template_configuration_file().to_path_buf(),
-        env::var_os("HOME").map(PathBuf::from),
-    )
-    .map_err(|_| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("configuration_reload_composition_failed"),
-        )
-    })?;
-    let configuration_reload = configuration_reload
-        .with_runtime_factory(runtime_factory.clone())
-        .with_github_tool_credential(configuration.github_token_file())
-        .with_integration_credentials(integration_credentials);
     let configuration_reload = match &repository_watch_runtime {
         Some(watch) => {
             watch
@@ -2258,13 +2272,6 @@ async fn run_hub(
         turn_liveness_scan_interval,
         SessionDeadlineBounds::new(session_admission_deadline, session_waiting_deadline),
     );
-    let goal_disposition = PostgresGoalPassDisposition::new(
-        scheduler_pool,
-        model_configuration.clone(),
-        eligibility_nudge,
-        goal_mode_numeric_bounds,
-    )
-    .with_configuration_reload(configuration_reload.clone());
     let process_runtime = process_runtime.with_goal_resumption(goal_disposition.clone());
     match goal_disposition
         .reconcile_automatic_resumptions_after_restart()
@@ -2311,6 +2318,12 @@ async fn run_hub(
             "scheduler pass admission uses the deployment override"
         );
     }
+    let (workflow_shutdown, workflow_shutdown_receiver) = oneshot::channel();
+    let workflows = signalboxd::workflows::WorkflowRuntime::new(pool.clone());
+    let process_runtime = match &workflows {
+        Ok((service, _)) => process_runtime.with_workflows(service.clone()),
+        Err(_) => process_runtime,
+    };
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
     let (fenced_pool_floor_shutdown, fenced_pool_floor_shutdown_receiver) = watch::channel(false);
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
@@ -2320,6 +2333,18 @@ async fn run_hub(
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
     let (lifecycle_metrics_shutdown, lifecycle_metrics_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
+    runtime_tasks.spawn(async move {
+        let result = async {
+            let (_service, workflows) = workflows?;
+            workflows
+                .run(async {
+                    let _ = workflow_shutdown_receiver.await;
+                })
+                .await
+        }
+        .await;
+        RuntimeTaskExit::Workflows(result)
+    });
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Scheduler(
             scheduler
@@ -2402,6 +2427,13 @@ async fn run_hub(
             () = &mut guard_loss => RuntimeStopCause::GuardLost,
             completed = runtime_tasks.join_next() => {
                 match completed {
+                    Some(Ok(RuntimeTaskExit::Workflows(result))) => {
+                        match result {
+                            Ok(()) => tracing::error!("workflow runtime completed before shutdown"),
+                            Err(error) => tracing::error!(cause = error.cause_code(), "workflow runtime failed"),
+                        }
+                        RuntimeStopCause::RuntimeFailed
+                    }
                     Some(Ok(RuntimeTaskExit::Process(Err(error)))) => {
                         report_process_runtime_failure(&error);
                         RuntimeStopCause::RuntimeFailed
@@ -2486,6 +2518,7 @@ async fn run_hub(
             }
         };
 
+        let _ = workflow_shutdown.send(());
         let _ = repository_watch_shutdown.send(true);
         if cause == RuntimeStopCause::GuardLost {
             runtime_tasks.abort_all();

@@ -2,6 +2,11 @@ name: Bazel
 
 on:
   workflow_call:
+    inputs:
+      postgres:
+        description: Run PostgreSQL integration shards for affected paths.
+        type: boolean
+        default: true
   workflow_dispatch:
 
 permissions:
@@ -71,6 +76,7 @@ jobs:
             ' sh "$runner_uid" "$runner_gid" "$runner_home" "$runner_path"
 
   postgres-matrix:
+    if: github.event_name == 'workflow_dispatch' || inputs.postgres
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-orchestration' }}
     timeout-minutes: 2
     outputs:
@@ -83,6 +89,7 @@ jobs:
         run: echo "matrix=$(python3 scripts/postgres_integration_suites.py --matrix)" >> "$GITHUB_OUTPUT"
 
   bazel-postgres:
+    if: github.event_name == 'workflow_dispatch' || inputs.postgres
     needs: postgres-matrix
     strategy:
       fail-fast: false

@@ -748,7 +748,7 @@ where
             if matches!(command.operation(), SessionLifecycleOperation::Adopt { .. })
                 && let Some(goal_resumption) = &services.goal_resumption
             {
-                goal_resumption.arm_blocked_goal_resumption(session);
+                goal_resumption.arm_adopted_goal_resumption(session);
             }
             if let SessionLifecycleApplication::ClosurePending {
                 live_turn,
@@ -1238,7 +1238,9 @@ pub(super) fn wire_goal_state(state: &GoalState) -> GoalLifecycleState {
         },
         GoalState::Achieved { report } => GoalLifecycleState::Achieved {
             turn_id: wire_uuid(report.turn().into_uuid()),
-            tool_request_id: wire_uuid(report.tool_request().into_uuid()),
+            tool_request_id: report
+                .tool_request()
+                .map(|request| wire_uuid(request.into_uuid())),
         },
         GoalState::UserStopped => GoalLifecycleState::UserStopped {},
         GoalState::Superseded { by_generation } => GoalLifecycleState::Superseded {
@@ -1305,8 +1307,11 @@ pub(super) fn wire_goal_event(
         }),
         GoalEventKind::Achieved { report, provenance } => Ok(GoalHistoryEvent::Achieved {
             report: report.as_str().to_owned(),
-            turn_id: wire_uuid(provenance.turn().into_uuid()),
-            tool_request_id: wire_uuid(provenance.tool_request().into_uuid()),
+            turn_id: wire_uuid(provenance.report_ref().turn().into_uuid()),
+            tool_request_id: provenance
+                .report_ref()
+                .tool_request()
+                .map(|request| wire_uuid(request.into_uuid())),
         }),
         GoalEventKind::UserStopped { provenance } => {
             let stop = stop.ok_or(ProcessConnectionError::EncodeInvariant)?;

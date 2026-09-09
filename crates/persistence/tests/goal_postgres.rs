@@ -2706,7 +2706,7 @@ async fn model_goal_declaration_is_the_final_response_part() -> Result<(), Box<d
             session(SESSION),
             GoalReport::try_new(report_text).expect("fixture report is admitted"),
             provenance,
-            signalbox_domain::FinishCheckVerdict::Unverified,
+            |_, _| std::future::ready(FinishCheckVerdict::Unverified),
         )
         .await
         .expect_err("a nonfinal declaration cannot source a goal event");
@@ -2769,7 +2769,7 @@ async fn a_committed_closure_refuses_late_model_achievement() -> Result<(), Box<
             session(SESSION),
             GoalReport::try_new(report).expect("fixture report is admitted"),
             GoalModelProvenance::new(attached_turn.turn(), declaration_request),
-            signalbox_domain::FinishCheckVerdict::Unverified,
+            |_, _| async { panic!("a committed closure must skip the finish check") },
         )
         .await?;
 
@@ -2841,7 +2841,7 @@ async fn model_goal_declaration_carries_full_report_bound() -> Result<(), Box<dy
                 session(SESSION),
                 report,
                 GoalModelProvenance::new(attached_turn.turn(), request),
-                signalbox_domain::FinishCheckVerdict::Unverified,
+                |_, _| std::future::ready(FinishCheckVerdict::Unverified),
             )
             .await?,
     );
@@ -5045,6 +5045,263 @@ async fn attach_and_declare(
     Ok((turn, GoalModelProvenance::new(turn, declaration_request)))
 }
 
+/// Queues an active turn's declaration behind the supplied goal command, with
+/// a checker that fails the test if the stale declaration reaches evaluation.
+async fn declaration_queued_behind_goal_command(
+    action: GoalUserAction,
+    successor: Option<GoalTurnCandidates>,
+) -> Result<GoalTransitionOutcome, Box<dyn Error>> {
+    use tokio::time::{Duration, timeout};
+
+    // Arbitrary identities for the original active goal declaration.
+    const ATTACH: u128 = 0x9c6;
+    const FIRST_TURN: u128 = 0xbc6;
+    const REQUEST: u128 = 0xfc6;
+    const DECLARATION_TIMEOUT: Duration = Duration::from_secs(10);
+    let (_container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let candidates = turn_candidates(FIRST_TURN);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(ATTACH),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("finish the fixture work")),
+                ),
+                Some(candidates),
+                |_| None,
+            )
+            .await?,
+    );
+    let turn = activate_goal_turn(&pool, FIRST_TURN + 0x10).await?;
+    let provenance = GoalModelProvenance::new(turn, tool_request(REQUEST));
+    let mut blocker = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(session(SESSION).into_uuid())
+        .execute(&mut *blocker)
+        .await?;
+    let invalidation = tokio::spawn({
+        let repository = repository.clone();
+        async move {
+            repository
+                .handle_user_command(
+                    GoalUserCommand::new(
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                        session(SESSION),
+                        action,
+                    ),
+                    successor,
+                    |_| None,
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the invalidating command waits on the session lock"
+    );
+    let declaration = tokio::spawn(async move {
+        repository
+            .declare_achieved(
+                session(SESSION),
+                GoalReport::try_new(String::from("the fixture work is finished"))
+                    .expect("fixture report"),
+                provenance,
+                |_, _| async { panic!("an inadmissible declaration must skip the finish check") },
+            )
+            .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 2).await?,
+        "the declaration queues behind invalidation"
+    );
+    blocker.rollback().await?;
+    assert_applied_command(timeout(DECLARATION_TIMEOUT, invalidation).await???);
+    let outcome = timeout(DECLARATION_TIMEOUT, declaration).await???;
+    pool.close().await;
+    Ok(outcome)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_declaration_behind_goal_stop_skips_the_finish_check() -> Result<(), Box<dyn Error>> {
+    let outcome = declaration_queued_behind_goal_command(
+        GoalUserAction::Stop {
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+        },
+        None,
+    )
+    .await?;
+    assert!(
+        matches!(outcome, GoalTransitionOutcome::Rejected(error) if error.failure() == signalbox_domain::GoalTransitionFailure::RequiresPursuing)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_declaration_behind_supersession_skips_the_finish_check() -> Result<(), Box<dyn Error>> {
+    // Arbitrary identity for the replacement goal turn.
+    const SUCCESSOR: u128 = 0xbc7;
+    let outcome = declaration_queued_behind_goal_command(
+        GoalUserAction::Supersede(statement("replacement work")),
+        Some(turn_candidates(SUCCESSOR)),
+    )
+    .await?;
+    assert_eq!(outcome, GoalTransitionOutcome::NotCurrentGoalTurn);
+    Ok(())
+}
+
+/// Adoption's condition is evaluated while the committing transition holds the
+/// session lock, including when the declaration started behind adoption.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_adoption_gates_achievement_on_the_locked_finish_check()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::FinishCondition;
+    use tokio::{
+        sync::oneshot,
+        time::{Duration, timeout},
+    };
+
+    const FIXTURE_COMMAND: u128 = 0x9c5;
+    const FIXTURE_CANDIDATES: u128 = 0xbc5;
+    const FIXTURE_REQUEST: u128 = 0xfc5;
+    const CHECK_FAILURE: &str = "The adopted external gate is still open";
+    const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+    let (_container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let (_, provenance) = attach_and_declare(
+        &pool,
+        FIXTURE_COMMAND,
+        FIXTURE_CANDIDATES,
+        FIXTURE_REQUEST,
+        true,
+    )
+    .await?;
+    let commands = SessionLifecycleCommandRepository::new(pool.clone());
+    let release = || {
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            session(SESSION),
+            SessionLifecycleOperation::Release,
+        )
+    };
+    assert!(matches!(
+        commands
+            .handle(release(), CommandPrincipal::Operator)
+            .await?,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(_))
+    ));
+    let mut blocker = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(session(SESSION).into_uuid())
+        .execute(&mut *blocker)
+        .await?;
+    let adoption = tokio::spawn({
+        let commands = commands.clone();
+        async move {
+            commands
+                .handle(
+                    SessionLifecycleCommand::new(
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                        session(SESSION),
+                        SessionLifecycleOperation::Adopt {
+                            finish_condition: Some(FinishCondition::ExternalGate),
+                        },
+                    ),
+                    CommandPrincipal::Operator,
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "adoption waits on the session lock"
+    );
+    let (observed, condition) = oneshot::channel();
+    let (finish, evaluation) = oneshot::channel();
+    let declaration = tokio::spawn({
+        let repository = repository.clone();
+        async move {
+            repository
+                .declare_achieved(
+                    session(SESSION),
+                    GoalReport::try_new(String::from("the fixture work is finished"))
+                        .expect("fixture report"),
+                    provenance,
+                    |condition, _| async move {
+                        observed
+                            .send(condition)
+                            .expect("test receives the evaluated condition");
+                        evaluation.await.expect("test releases evaluation");
+                        FinishCheckVerdict::Failed {
+                            detail: String::from(CHECK_FAILURE),
+                        }
+                    },
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 2).await?,
+        "declaration also waits before evaluation"
+    );
+    blocker.rollback().await?;
+    assert!(matches!(
+        timeout(TEST_TIMEOUT, adoption).await???,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(_))
+    ));
+    assert_eq!(
+        timeout(TEST_TIMEOUT, condition).await??,
+        Some(FinishCondition::ExternalGate)
+    );
+    assert_eq!(
+        repository
+            .load_goal(session(SESSION))
+            .await?
+            .expect("attached goal")
+            .current()
+            .state(),
+        &GoalState::Pursuing
+    );
+    let releasing = tokio::spawn({
+        let command = release();
+        async move { commands.handle(command, CommandPrincipal::Operator).await }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the session lock is held throughout evaluation"
+    );
+    finish.send(()).expect("check is in flight");
+    assert_applied_transition(timeout(TEST_TIMEOUT, declaration).await???);
+    assert!(matches!(
+        timeout(TEST_TIMEOUT, releasing).await???,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(_))
+    ));
+    assert_eq!(
+        repository
+            .load_goal(session(SESSION))
+            .await?
+            .expect("attached goal")
+            .current()
+            .state(),
+        &GoalState::Blocked {
+            reason: signalbox_domain::GoalBlockedReasonKind::FinishCheckFailed,
+            need: GoalNeed::try_new(String::from(CHECK_FAILURE))?,
+        },
+    );
+    pool.close().await;
+    Ok(())
+}
+
 /// A failing finish check appends no achievement, keeps
 /// the goal pursuing, and leaves its detail for the failure that follows.
 #[tokio::test(flavor = "multi_thread")]
@@ -5062,8 +5319,10 @@ async fn a_failing_finish_check_blocks_the_goal_with_its_result() -> Result<(), 
             session(SESSION),
             GoalReport::try_new(String::from("the fixture work is finished"))?,
             provenance,
-            FinishCheckVerdict::Failed {
-                detail: String::from("two review threads are unresolved"),
+            |_, _| {
+                std::future::ready(FinishCheckVerdict::Failed {
+                    detail: String::from("two review threads are unresolved"),
+                })
             },
         )
         .await?;
@@ -5111,7 +5370,7 @@ async fn a_passing_finish_check_settles_achieved_verified() -> Result<(), Box<dy
                 session(SESSION),
                 GoalReport::try_new(String::from("the fixture work is finished"))?,
                 provenance,
-                FinishCheckVerdict::Passed,
+                |_, _| std::future::ready(FinishCheckVerdict::Passed),
             )
             .await?,
     );
@@ -5151,7 +5410,7 @@ async fn a_declared_achievement_settles_achieved_declared() -> Result<(), Box<dy
                 session(SESSION),
                 GoalReport::try_new(String::from("the fixture work is finished"))?,
                 provenance,
-                FinishCheckVerdict::Unverified,
+                |_, _| std::future::ready(FinishCheckVerdict::Unverified),
             )
             .await?,
     );
@@ -5806,5 +6065,224 @@ async fn goal_stop_rolls_back_when_interrupt_admission_fails() -> Result<(), Box
     request_goal_stop(&pool).await?;
     pool.close().await;
     drop(container);
+    Ok(())
+}
+
+/// Creates one owned goal whose first turn completed, before continuation is reconciled.
+async fn goal_awaiting_verification(
+    pool: &PgPool,
+) -> Result<(GoalRepository, TurnId), Box<dyn Error>> {
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let first = turn_candidates(0xb127);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(ATTACH_COMMAND),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("Fix the review findings")),
+                ),
+                Some(first),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(activate_goal_turn(pool, 0xd127).await?, first.turn());
+    mark_goal_turn_completed(pool, first.turn()).await?;
+    Ok((repository, first.turn()))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn verified_goal_records_github_evidence_and_schedules_no_successor()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::goal::{GoalCompletionCheck, GoalCompletionResult};
+    let (_database, pool) = migrated_postgres().await?;
+    let (repository, turn) = goal_awaiting_verification(&pool).await?;
+    let goal = repository.load_goal(session(SESSION)).await?.unwrap();
+    let head = signalbox_domain::CommitSha::try_new(
+        "1111111111111111111111111111111111111111".to_owned(),
+    )?;
+    let threads = vec![
+        signalbox_domain::ReviewThreadId::try_new("thread-A".to_owned())?,
+        signalbox_domain::ReviewThreadId::try_new("thread-B".to_owned())?,
+    ]
+    .into_boxed_slice();
+    let check = GoalCompletionCheck {
+        generation: goal.current().generation(),
+        turn,
+        result: GoalCompletionResult::Verified {
+            head_sha: head.clone(),
+            resolved_thread_ids: threads.clone(),
+        },
+    };
+    assert_eq!(
+        repository
+            .reconcile_current_with_completion(
+                session(SESSION),
+                turn_candidates(0xb128),
+                GoalNeed::try_new("repair execution".to_owned())?,
+                Some(check),
+                |_| None
+            )
+            .await?,
+        GoalTurnContinuationOutcome::NotPursuing
+    );
+    let achieved = repository.load_goal(session(SESSION)).await?.unwrap();
+    let event = achieved.events().last().unwrap();
+    assert!(
+        matches!(event.kind(), signalbox_domain::GoalEventKind::Achieved { provenance: signalbox_domain::GoalAchievementProvenance::Verified { turn: source, head_sha, resolved_thread_ids }, .. } if *source == turn && *head_sha == head && *resolved_thread_ids == threads)
+    );
+    assert_eq!(
+        SessionLifecycleRepository::new(pool.clone())
+            .load(session(SESSION))
+            .await?
+            .unwrap()
+            .state(),
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::AchievedVerified
+        }
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM goal_turn WHERE session_id = $1")
+            .bind(session(SESSION).into_uuid())
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+    assert_eq!(
+        repository
+            .reconcile_current_after_execution(
+                session(SESSION),
+                turn_candidates(0xb129),
+                GoalNeed::try_new("repair execution".to_owned())?,
+                |_| None
+            )
+            .await?,
+        GoalTurnContinuationOutcome::NotPursuing
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unverified_goal_queues_the_missing_thread_instead_of_the_original_task()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::goal::{GoalCompletionCheck, GoalCompletionResult};
+    let (_database, pool) = migrated_postgres().await?;
+    let (repository, turn) = goal_awaiting_verification(&pool).await?;
+    let goal = repository.load_goal(session(SESSION)).await?.unwrap();
+    let missing = "Push landed. Resolve thread-A before concluding.";
+    let next = turn_candidates(0xb128);
+    let check = GoalCompletionCheck {
+        generation: goal.current().generation(),
+        turn,
+        result: GoalCompletionResult::Missing(GoalGuidance::try_new(missing.to_owned())?),
+    };
+    assert_eq!(
+        repository
+            .reconcile_current_with_completion(
+                session(SESSION),
+                next,
+                GoalNeed::try_new("repair execution".to_owned())?,
+                Some(check),
+                |_| None
+            )
+            .await?,
+        GoalTurnContinuationOutcome::Scheduled { turn: next.turn() }
+    );
+    assert_eq!(
+        repository
+            .load_goal(session(SESSION))
+            .await?
+            .unwrap()
+            .current()
+            .state(),
+        &GoalState::Pursuing
+    );
+    let content: String = sqlx::query_scalar(
+        "SELECT text_value FROM accepted_input_content_part WHERE accepted_input_id = $1",
+    )
+    .bind(next.accepted_input().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(content, missing);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn goal_verification_reads_only_successful_push_and_reply_outputs()
+-> Result<(), Box<dyn Error>> {
+    let (_database, pool) = migrated_postgres().await?;
+    let (repository, turn) = goal_awaiting_verification(&pool).await?;
+    let goal = repository.load_goal(session(SESSION)).await?.unwrap();
+    // These arbitrary identities bind the tool requests to their own result rows.
+    const PUSH: u128 = 0xf127;
+    const REPLY: u128 = 0xf128;
+    const FAILED_PUSH: u128 = 0xf129;
+    insert_goal_tool_request(
+        &pool,
+        turn,
+        tool_request(PUSH),
+        "git_push_configured",
+        r#"{"branch":"fix"}"#,
+        "push",
+    )
+    .await?;
+    insert_goal_tool_request(
+        &pool,
+        turn,
+        tool_request(REPLY),
+        "change_request_thread_reply",
+        r#"{"body":"fixed","number":7,"repository":"example/project","thread_id":"thread-A"}"#,
+        "reply",
+    )
+    .await?;
+    insert_goal_tool_request(
+        &pool,
+        turn,
+        tool_request(FAILED_PUSH),
+        "git_push_configured",
+        r#"{"branch":"fix"}"#,
+        "push failed",
+    )
+    .await?;
+    let push_result =
+        r#"{"branch":"fix","commit":"1111111111111111111111111111111111111111","remote":"origin"}"#;
+    let reply_result =
+        r#"{"id":"reply-A","url":"https://github.com/example/project/pull/7#discussion_r1"}"#;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    for (request, disposition, result) in [
+        (PUSH, "completed", Some(push_result)),
+        (REPLY, "completed", Some(reply_result)),
+        (FAILED_PUSH, "known_failed", None),
+    ] {
+        sqlx::query("INSERT INTO tool_attempt (attempt_id, request_id, session_id, turn_id, issuing_turn_attempt_id, effect_class, dispatch_generation, state_kind, terminal_disposition_kind, result_content_kind, result_text, context_result_text, error_kind) VALUES ($1,$2,$3,$4,$5,'external_effect',1,'terminal',$6,CASE WHEN $7::text IS NULL THEN NULL ELSE 'text' END,$7,$7,CASE WHEN $7::text IS NULL THEN 'execution_failed' ELSE NULL END)")
+            .bind(Uuid::from_u128(request + 0x10000)).bind(Uuid::from_u128(request)).bind(session(SESSION).into_uuid()).bind(turn.into_uuid()).bind(Uuid::now_v7()).bind(disposition).bind(result).execute(&pool).await?;
+    }
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let outputs = repository
+        .completed_goal_tools(session(SESSION), goal.current().generation())
+        .await?;
+    assert_eq!(outputs.len(), 2);
+    assert!(
+        outputs
+            .iter()
+            .any(|tool| tool.tool_name == "git_push_configured" && tool.result_text == push_result)
+    );
+    assert!(
+        outputs
+            .iter()
+            .any(|tool| tool.tool_name == "change_request_thread_reply"
+                && tool.result_text == reply_result)
+    );
     Ok(())
 }

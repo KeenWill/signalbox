@@ -1,4 +1,4 @@
-use std::{collections::HashSet, ffi::OsStr, fs, io::Read};
+use std::{collections::BTreeSet, ffi::OsStr, fs, io::Read};
 
 use git2::{ObjectFormat, Odb, Signature};
 use rustix::fs::{AtFlags, Mode, OFlags, openat};
@@ -241,7 +241,7 @@ where
     let mut parent_ids = parent.into_iter().collect::<Vec<_>>();
     let is_ordinary_commit = merge_parent_ids.is_empty();
     parent_ids.extend(merge_parent_ids);
-    let mut unique_parent_ids = HashSet::new();
+    let mut unique_parent_ids = BTreeSet::new();
     parent_ids.retain(|oid| unique_parent_ids.insert(*oid));
     let parents = parent_ids
         .iter()

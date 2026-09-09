@@ -219,11 +219,30 @@ impl goal::GoalRepository {
         unmonitored_need: &signalbox_domain::GoalNeed,
         scheduled_need: &signalbox_domain::GoalNeed,
     ) -> result::Result<option::Option<signalbox_domain::GoalEventOrdinal>, goal::GoalRepositoryError>;
+    pub async fn completed_goal_tools(
+        &self,
+        session: signalbox_domain::SessionId,
+        generation: signalbox_domain::GoalGeneration,
+    ) -> result::Result<vec::Vec<goal::GoalCompletedTool>, goal::GoalRepositoryError>;
     pub async fn reconcile_current_after_execution<SelectDefinition>(
         &self,
         session: signalbox_domain::SessionId,
         candidates: goal_turn::GoalTurnCandidates,
         failure_need: signalbox_domain::GoalNeed,
+        select_definition: SelectDefinition,
+    ) -> result::Result<goal_turn::GoalTurnContinuationOutcome, goal::GoalRepositoryError>
+    where
+        SelectDefinition: function::FnOnce(
+            signalbox_domain::ModelAlias,
+        ) -> option::Option<
+            signalbox_domain::FrozenAliasDefinition,
+        >;
+    pub async fn reconcile_current_with_completion<SelectDefinition>(
+        &self,
+        session: signalbox_domain::SessionId,
+        candidates: goal_turn::GoalTurnCandidates,
+        failure_need: signalbox_domain::GoalNeed,
+        completion: option::Option<goal::GoalCompletionCheck>,
         select_definition: SelectDefinition,
     ) -> result::Result<goal_turn::GoalTurnContinuationOutcome, goal::GoalRepositoryError>
     where
@@ -239,17 +258,19 @@ impl goal::GoalRepository {
         need: signalbox_domain::GoalNeed,
         provenance: signalbox_domain::GoalModelProvenance,
     ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>;
-    pub async fn declare_achieved(
+    pub async fn declare_achieved<Check, Checked>(
         &self,
         session: signalbox_domain::SessionId,
         report: signalbox_domain::GoalReport,
         provenance: signalbox_domain::GoalModelProvenance,
-        verdict: signalbox_domain::FinishCheckVerdict,
-    ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>;
-    pub async fn load_finish_condition(
-        &self,
-        session: signalbox_domain::SessionId,
-    ) -> result::Result<option::Option<signalbox_domain::FinishCondition>, goal::GoalRepositoryError>;
+        check: Check,
+    ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>
+    where
+        Check: function::FnOnce(
+            option::Option<signalbox_domain::FinishCondition>,
+            signalbox_domain::GoalReport,
+        ) -> Checked,
+        Checked: future::Future<Output = signalbox_domain::FinishCheckVerdict>;
     pub async fn block_execution_failure(
         &self,
         session: signalbox_domain::SessionId,
@@ -286,6 +307,41 @@ impl goal::GoalRepository {
         session: signalbox_domain::SessionId,
     ) -> result::Result<vec::Vec<goal::GoalStopSettlement>, goal::GoalRepositoryError>;
 }
+```
+
+## GoalCompletedTool
+
+```rust
+pub struct GoalCompletedTool {
+    pub tool_name: string::String,
+    pub arguments_text: string::String,
+    pub result_text: string::String,
+}
+// derives: clone::Clone, fmt::Debug, from_row::FromRow<'a, R>
+```
+
+## GoalCompletionCheck
+
+```rust
+pub struct GoalCompletionCheck {
+    pub generation: signalbox_domain::GoalGeneration,
+    pub turn: signalbox_domain::TurnId,
+    pub result: goal::GoalCompletionResult,
+}
+// derives: clone::Clone, fmt::Debug
+```
+
+## GoalCompletionResult
+
+```rust
+pub enum GoalCompletionResult {
+    Verified {
+        head_sha: signalbox_domain::CommitSha,
+        resolved_thread_ids: boxed::Box<[signalbox_domain::ReviewThreadId]>,
+    },
+    Missing(signalbox_domain::GoalGuidance),
+}
+// derives: clone::Clone, fmt::Debug
 ```
 
 ## GoalStopSettlement

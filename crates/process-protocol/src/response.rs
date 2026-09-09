@@ -195,6 +195,18 @@ pub enum ServerMessage {
         command_id: crate::CommandId,
         withdrawal_id: CanonicalUuid,
     },
+    /// Immutable registration admission, also returned for an equal retry.
+    ProgramRegistered { registration_id: CanonicalUuid },
+    /// Immutable run admission, also returned for an equal retry.
+    ProgramRunStarted {
+        run_id: CanonicalUuid,
+        registration_id: CanonicalUuid,
+    },
+    /// Retained run input and observed terminal result.
+    ProgramRunRead {
+        run_id: CanonicalUuid,
+        run: crate::ProgramRun,
+    },
     /// The stored result of one program cancellation command.
     ProgramRunCancellationReceipt {
         command_id: crate::CommandId,

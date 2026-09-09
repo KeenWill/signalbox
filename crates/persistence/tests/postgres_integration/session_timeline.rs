@@ -1610,7 +1610,8 @@ async fn completed_tool_detail_selects_the_recorded_attempt_after_a_retry()
                FROM tool_attempt WHERE session_id = NEW.session_id;
              UPDATE tool_attempt SET state_kind = 'terminal',
                     terminal_disposition_kind = 'known_failed', error_kind = 'crash_lost',
-                    error_detail = 'earlier attempt failure'
+                    error_detail = 'earlier attempt failure',
+                    context_error_detail = 'earlier attempt failure'
               WHERE attempt_id = '00000000-0000-0000-0000-000000995820';
              RETURN NEW;
          END $$;

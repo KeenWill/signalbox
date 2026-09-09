@@ -86,6 +86,7 @@ pub mod usage_limits;
 mod web_blob_runtime;
 pub mod web_http;
 mod web_imports;
+pub mod workflows;
 mod workspace_instruction_runtime;
 
 pub use attachment_preparation_runtime::AttachmentPreparingModelCallProvider;
@@ -401,6 +402,13 @@ where
         let execution = self.execution.clone();
         let workspace_instructions = self.workspace_instructions.clone();
         async move {
+            if workspace_instructions
+                .session_is_parked(activated.session())
+                .await
+                .map_err(WorkspaceInstructionPreparedExecutionError::WorkspaceInstructions)?
+            {
+                return Ok(());
+            }
             if !workspace_instructions
                 .prepare(activated.session(), activated.turn())
                 .await
@@ -2404,12 +2412,23 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
                 repository.clone(),
                 repository.clone(),
                 repository.clone(),
-                repository,
+                repository.clone(),
                 provider,
                 gate,
                 automatic_tool_round_limit,
             );
             loop {
+                if repository
+                    .session_is_parked(session)
+                    .await
+                    .map_err(|error| {
+                        RetainedModelExecutionError::Primary(ModelCallExecutionError::Prepare(
+                            error,
+                        ))
+                    })?
+                {
+                    return Ok(());
+                }
                 let outcome = match service.execute(session).await {
                     Ok(outcome) => outcome,
                     Err(error) if service.retained_state().is_some() => {
@@ -3022,6 +3041,21 @@ where
         let workspace_instructions = self.workspace_instructions.clone();
         let mut shutdown_checkpoint = self.shutdown_checkpoint.clone();
         Box::pin(async move {
+            let session_is_parked = || async {
+                model_repository
+                    .session_is_parked(session)
+                    .await
+                    .map_err(|error| {
+                        PostgresProviderToolLoopExecutionError::Model(Box::new(
+                            RetainedModelExecutionError::Primary(ModelCallExecutionError::Prepare(
+                                error,
+                            )),
+                        ))
+                    })
+            };
+            if session_is_parked().await? {
+                return Ok(());
+            }
             if let Some(workspace_instructions) = workspace_instructions
                 && !workspace_instructions
                     .prepare(session, turn)
@@ -3035,7 +3069,7 @@ where
                 model_repository.clone(),
                 model_repository.clone(),
                 model_repository.clone(),
-                model_repository,
+                model_repository.clone(),
                 provider,
                 model_gate,
                 automatic_tool_round_limit,
@@ -3060,7 +3094,9 @@ where
             // returning issues neither another tool operation nor another paid
             // provider round.
             loop {
-                if shutdown_checkpoint_requested(&shutdown_checkpoint) {
+                if shutdown_checkpoint_requested(&shutdown_checkpoint)
+                    || session_is_parked().await?
+                {
                     return Ok(());
                 }
                 if run_tools {
@@ -3099,7 +3135,9 @@ where
                             run_tools = false;
                         }
                         ToolExecutionServiceOutcome::AwaitingApproval(waiting) => {
-                            if shutdown_checkpoint_requested(&shutdown_checkpoint) {
+                            if shutdown_checkpoint_requested(&shutdown_checkpoint)
+                                || session_is_parked().await?
+                            {
                                 return Ok(());
                             }
                             let (Some(approval_judge), Some(configuration)) =
@@ -3158,7 +3196,9 @@ where
                     }
                 }
 
-                if shutdown_checkpoint_requested(&shutdown_checkpoint) {
+                if shutdown_checkpoint_requested(&shutdown_checkpoint)
+                    || session_is_parked().await?
+                {
                     return Ok(());
                 }
                 let model_outcome = match model.execute(session).await {
@@ -3366,7 +3406,7 @@ impl PostgresScriptedModelExecution {
                 repository.clone(),
                 repository.clone(),
                 repository.clone(),
-                repository,
+                repository.clone(),
                 ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
                     signalbox_domain::ModelCallTerminalObservation::Completed {
                         assistant_text: vec![assistant_reply],
@@ -3376,6 +3416,17 @@ impl PostgresScriptedModelExecution {
                 None,
             );
             loop {
+                if repository
+                    .session_is_parked(session)
+                    .await
+                    .map_err(|error| {
+                        RetainedModelExecutionError::Primary(ModelCallExecutionError::Prepare(
+                            error,
+                        ))
+                    })?
+                {
+                    return Ok(());
+                }
                 let outcome = match service.execute(session).await {
                     Ok(outcome) => outcome,
                     Err(error) if service.retained_state().is_some() => {

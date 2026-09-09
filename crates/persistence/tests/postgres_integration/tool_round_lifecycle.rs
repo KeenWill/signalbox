@@ -4,6 +4,82 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn failure_context_migration_preserves_populated_attempts() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    // Supplies distinct identities for the pre-migration tool attempt.
+    const FIXTURE_SEED: u128 = 0x410_0000;
+    const DETAIL: &str = "retained failure detail";
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, FIXTURE_SEED, "current_time", "{}").await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    repository
+        .commit_preflight_error(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolExecutionError::new(
+                ToolExecutionErrorKind::InvalidArguments,
+                Some(ToolExecutionErrorDetail::try_new(DETAIL.to_owned()).unwrap()),
+            ),
+        )
+        .await?;
+    // Restore the installed column shape while retaining real deferred triggers.
+    sqlx::raw_sql("ALTER TABLE tool_attempt DROP COLUMN context_error_detail")
+        .execute(&pool)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/202609090410_tool_error_context_bound.sql"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    let retained: (String, String, String) = sqlx::query_as(
+        "SELECT error_detail, context_error_detail, error_kind
+           FROM tool_attempt WHERE attempt_id = $1",
+    )
+    .bind(attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        retained,
+        (
+            DETAIL.to_owned(),
+            DETAIL.to_owned(),
+            "invalid_arguments".to_owned()
+        )
+    );
+    let guarded: bool = sqlx::query_scalar(
+        "SELECT tgenabled = 'O' FROM pg_trigger
+          WHERE tgrelid = 'tool_attempt'::regclass AND tgname = 'tool_attempt_changes_are_guarded'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(guarded, "the terminal-attempt guard is restored");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn null_result_failure_survives_commit_and_batch_reload() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     // Supplies distinct identities for the tool-round fixture.
@@ -4200,7 +4276,8 @@ async fn tool_failures_close_durably() -> Result<(), Box<dyn Error>> {
             SET state_kind = 'terminal',
                 terminal_disposition_kind = 'known_failed',
                 error_kind = 'invalid_arguments',
-                error_detail = E'unsafe\\ndetail'
+                error_detail = E'unsafe\\ndetail',
+                context_error_detail = 'admitted fixture detail'
           WHERE attempt_id = $1",
     )
     .bind(schema_attempt.into_uuid())
@@ -5564,6 +5641,268 @@ async fn automatic_tool_reconciliation_exhaustion_publishes_the_operation()
 async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
 -> Result<(), Box<dyn Error>> {
     assert_bounded_269_kib_batch("{}").await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
+-> Result<(), Box<dyn Error>> {
+    // Only supplies distinct identities for the two model responses.
+    const FIXTURE_SEED: u128 = 0x269_1000;
+    const INPUT_TOKENS: u64 = 141_000;
+    const FIRST_OUTPUT_TOKENS: u64 = 117;
+    const OUTPUT_CEILING: u64 = 8_192;
+    let next_tool_count = signalbox_domain::ToolUsingAssistantResponse::MAX_TOOL_COUNT;
+    let (container, pool, _) = migrated_postgres().await?;
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+        FIXTURE_SEED + 6,
+    )));
+    let limits =
+        ToolContinuationUsageLimit::new(target, FastMode::Disabled, OUTPUT_CEILING, 200_000);
+    let fixture =
+        checkpoint_restart_model_call_with_limits(&pool, FIXTURE_SEED, false, None, &[limits])
+            .await?;
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_SEED + 5)),
+        target,
+    )])
+    .expect("fixture target is unique");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([limits]);
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(fixture.session, fixture.call)
+        .await?
+    else {
+        panic!("fixture call authorizes");
+    };
+    let (fixture, repository, _, requests) = commit_authorized_tool_batch(
+        FIXTURE_SEED,
+        (fixture, repository, *authorized),
+        &[("current_time", "{}")],
+        InitialToolApproval::PolicyAuto,
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(INPUT_TOKENS))
+            .with_output_tokens(Some(FIRST_OUTPUT_TOKENS)),
+        None,
+    )
+    .await?;
+    let tools = repository.tool_loop_repository();
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    tools
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tools
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    let result = "X".repeat(65_536);
+    tools
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(result.clone()).expect("fixture result is valid"),
+                    ),
+                }),
+        )
+        .await?;
+    let projected: String =
+        sqlx::query_scalar("SELECT context_result_text FROM tool_attempt WHERE attempt_id = $1")
+            .bind(attempt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    let (retained, marker) = projected
+        .split_once('\n')
+        .expect("fixture result has a truncation marker");
+    assert_eq!(retained, &result[..retained.len()]);
+    assert_eq!(
+        marker,
+        format!(
+            "[tool result truncated: retained {} bytes; dropped {} bytes]",
+            retained.len(),
+            result.len() - retained.len(),
+        )
+    );
+    let result_entry = SemanticTranscriptEntryId::from_uuid(Uuid::now_v7());
+    let continuation = ModelCallId::from_uuid(Uuid::now_v7());
+    let checkpointed = tools
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![result_entry],
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                continuation,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("fixture has no steering"),
+        )
+        .await?;
+    assert_eq!(
+        checkpointed,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation)
+    );
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(fixture.session, continuation)
+        .await?
+    else {
+        panic!("bounded-result continuation authorizes");
+    };
+    // The fixture provider counts the complete admitted result envelope as bytes
+    // and spends its full output ceiling before requesting the next tool.
+    let result_envelope = serde_json::json!({
+        "position": 0,
+        "source_session_id": fixture.session.into_uuid().to_string(),
+        "entry_id": result_entry.into_uuid().to_string(),
+        "type": "tool_execution_result",
+        "tool_request_id": requests[0].into_uuid().to_string(),
+        "tool_attempt_id": attempt.into_uuid().to_string(),
+        "content": projected,
+    });
+    let followup_input =
+        INPUT_TOKENS + FIRST_OUTPUT_TOKENS + serde_json::to_vec(&result_envelope)?.len() as u64;
+    let (fixture, repository, _, _) = commit_authorized_tool_batch(
+        FIXTURE_SEED + 0x100,
+        (
+            RestartModelCallFixture {
+                call: continuation,
+                ..fixture
+            },
+            repository,
+            *authorized,
+        ),
+        &vec![("current_time", "{}"); next_tool_count],
+        InitialToolApproval::PolicyAuto,
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(followup_input))
+            .with_output_tokens(Some(OUTPUT_CEILING)),
+        None,
+    )
+    .await?;
+    let tools = repository.tool_loop_repository();
+    let preflight_attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    tools
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            preflight_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    tools
+        .commit_preflight_error(
+            fixture.session,
+            fixture.turn,
+            preflight_attempt,
+            ToolExecutionError::new(
+                ToolExecutionErrorKind::PreauthorizationRejected,
+                Some(
+                    ToolExecutionErrorDetail::try_new(
+                        "\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES),
+                    )
+                    .expect("maximally escaped bounded fixture detail"),
+                ),
+            ),
+        )
+        .await?;
+    for _ in 1..next_tool_count {
+        let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+        tools
+            .prepare_next_attempt(
+                fixture.session,
+                fixture.turn,
+                attempt,
+                ToolEffectClass::EffectFree,
+            )
+            .await?;
+        let authorized = tools
+            .authorize_attempt(fixture.session, fixture.turn, attempt)
+            .await?;
+        tools
+            .commit_observation(
+                authorized
+                    .executor_fence()
+                    .bind(ToolAttemptObservation::KnownFailed {
+                        error: ToolExecutionError::new(
+                            ToolExecutionErrorKind::ExecutionFailed,
+                            Some(
+                                ToolExecutionErrorDetail::try_new(
+                                    "\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES),
+                                )
+                                .expect("maximally escaped bounded fixture detail"),
+                            ),
+                        ),
+                    }),
+            )
+            .await?;
+    }
+    let details: Vec<(String, String)> = sqlx::query_as(
+        "SELECT error_detail, context_error_detail FROM tool_attempt attempt
+           JOIN tool_request request USING (request_id)
+          WHERE request.producing_model_call_id = $1 ORDER BY attempt.attempt_id",
+    )
+    .bind(continuation.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(details.len(), next_tool_count);
+    for (exact, admitted) in details {
+        let detail = "\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES);
+        assert_eq!(exact, detail);
+        let marker_start = admitted
+            .find("[tool result truncated:")
+            .expect("failure marker");
+        let prefix = &admitted[..marker_start];
+        let retained = prefix.strip_suffix(' ').unwrap_or(prefix);
+        assert_eq!(retained, &detail[..retained.len()]);
+        assert_eq!(
+            &admitted[marker_start..],
+            format!(
+                "[tool result truncated: retained {} bytes; dropped {} bytes]",
+                retained.len(),
+                detail.len() - retained.len(),
+            )
+        );
+    }
+    let following_call = ModelCallId::from_uuid(Uuid::now_v7());
+    let checkpointed = tools
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            continuation,
+            signalbox_application::ToolContinuationIdentities::new(
+                (0..next_tool_count)
+                    .map(|_| SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()))
+                    .collect(),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                following_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("fixture has no steering"),
+        )
+        .await?;
+    assert_eq!(
+        checkpointed,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(following_call),
+        "a bounded result must leave room to report the following tool's typed failure"
+    );
+    pool.close().await;
+    drop(container);
     Ok(())
 }
 

@@ -25,6 +25,7 @@ mod model_call;
 mod model_execution;
 mod model_settings;
 mod program_journal;
+pub mod program_primitives;
 pub mod program_registration;
 /// Host-verified program session attribution.
 pub mod program_session;
@@ -93,12 +94,12 @@ pub use git_remote::{
     max_git_remote_name_bytes, max_git_remote_url_bytes,
 };
 pub use goal::{
-    FinishConditionStatement, Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalEvent,
-    GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGenerationSnapshot, GoalGuidance,
-    GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed, GoalReconstitutionError,
-    GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport, GoalReportRef,
-    GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
-    GoalTransitionFailure, GoalTurnSource, GoalUserProvenance,
+    FinishConditionStatement, Goal, GoalAchievementProvenance, GoalBlockProvenance,
+    GoalBlockedReasonKind, GoalEvent, GoalEventKind, GoalEventOrdinal, GoalGeneration,
+    GoalGenerationSnapshot, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance,
+    GoalNeed, GoalReconstitutionError, GoalReconstitutionFailure, GoalReconstitutionInput,
+    GoalReport, GoalReportRef, GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError,
+    GoalTransitionError, GoalTransitionFailure, GoalTurnSource, GoalUserProvenance,
 };
 pub use goal_command::{
     GoalCommandRejection, GoalCommandResult, GoalUserAction, GoalUserCommand,

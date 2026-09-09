@@ -27,6 +27,8 @@ rust_unit_test(
 
 rust_postgres_test(
     name = "workflow_host_postgres",
+    srcs = ["tests/workflow_host_postgres.rs"] + glob(["tests/workflow_host_postgres/**/*.rs"]),
+    compile_data = glob(["tests/fixtures/*.js"]),
     crate_features = SUITES["workflow-runtime"]["crate_features"],
     crate_root = "tests/workflow_host_postgres.rs",
     deps = [

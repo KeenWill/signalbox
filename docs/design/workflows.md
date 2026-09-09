@@ -4,14 +4,6 @@ This committed unbuilt design extends [workflows](../spec/workflows.md).
 
 ## Input and result
 
-User-authorized register, start and read commands use the
-[process protocol](../spec/process-protocol.md) and its durable command
-identity. Read returns retained run state and terminal result bytes.
-
-TypeScript's `defineProgram` takes a runtime input decoder and result encoder;
-strict `tsc` checking and type stripping happen before registration. The emitted
-artifact is one module importing only `@signalbox/program-sdk/v1`.
-
 Effect method input/output records have checked Rust and TypeScript codecs;
 full-width integer identities use decimal strings and exact payloads use byte
 arrays. Domain values, wire payloads and storage rows remain distinct. Effects
@@ -22,14 +14,6 @@ that only native programs may call may use Rust-only method records.
 JavaScript runtime exceptions journal `ProgramError`.
 
 ## Waits
-
-A sleep or daemon event wait is identified by its outstanding request's run
-identity and ordinal. Sleep admission persists its deadline; replay and restart
-reuse it. `AwaitEvent` names a typed source and durable position; delivery reads
-retained source events before listening and rechecks after wake. In-memory
-notifications are hints. Primitive deliveries use `LiveDeliverySource` in
-[`crates/workflow-runtime/src/lib.rs`](../../crates/workflow-runtime/src/lib.rs)
-and the shared journal.
 
 The daemon retains incomplete run admission, serializes attempts for each run
 and resumes from the pinned registration, immutable input and journal after

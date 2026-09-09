@@ -151,6 +151,19 @@ impl WorkspaceInstructionRepository {
         Self { pool }
     }
 
+    /// Observes the session park before instruction discovery starts.
+    pub async fn session_is_parked(
+        &self,
+        session: SessionId,
+    ) -> Result<bool, WorkspaceInstructionRepositoryError> {
+        Ok(sqlx::query_scalar(
+            "SELECT state_kind = 'parked' FROM session_lifecycle WHERE session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     /// Authenticates existing evidence for one active turn before discovery.
     pub async fn preflight_turn_start(
         &self,

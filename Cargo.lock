@@ -4950,6 +4950,7 @@ version = "0.0.0"
 dependencies = [
  "deno_core",
  "deno_error",
+ "getrandom 0.4.3",
  "serde",
  "signalbox-domain",
  "signalbox-persistence",
@@ -5025,6 +5026,7 @@ dependencies = [
  "signalbox-tools-web",
  "signalbox-tools-workspace",
  "signalbox-web-contract",
+ "signalbox-workflow-runtime",
  "sqlx",
  "tempfile",
  "testcontainers-modules",

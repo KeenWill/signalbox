@@ -22,7 +22,7 @@
 | credential_capacity | 0 | 0 | 1 | [credential_capacity](credential_capacity.md) |
 | credential_exclusions | 6 | 0 | 2 | [credential_exclusions](credential_exclusions.md) |
 | credential_invocations | 0 | 0 | 6 | [credential_invocations](credential_invocations.md) |
-| goal | 9 | 0 | 0 | [goal](goal.md) |
+| goal | 12 | 0 | 0 | [goal](goal.md) |
 | goal_turn | 2 | 0 | 0 | [goal_turn](goal_turn.md) |
 | hub_fence | 4 | 0 | 3 | [hub_fence](hub_fence.md) |
 | lifecycle_metrics | 8 | 0 | 0 | [lifecycle_metrics](lifecycle_metrics.md) |
@@ -34,7 +34,7 @@
 | plan | 3 | 0 | 0 | [plan](plan.md) |
 | process_read | 36 | 0 | 0 | [types](process_read/types.md), [types-2](process_read/types-2.md) |
 | program_cancellation | 5 | 0 | 1 | [program_cancellation](program_cancellation.md) |
-| program_journal | 4 | 0 | 0 | [program_journal](program_journal.md) |
+| program_journal | 5 | 0 | 0 | [program_journal](program_journal.md) |
 | program_registration | 2 | 0 | 0 | [program_registration](program_registration.md) |
 | program_session | 2 | 0 | 0 | [program_session](program_session.md) |
 | replace_session_defaults | 5 | 0 | 0 | [replace_session_defaults](replace_session_defaults.md) |
