@@ -309,10 +309,8 @@ mod tests {
         let root = tempfile::TempDir::new().expect("the fixture creates a staging root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
             .expect("the fixture staging root is private");
-        let staging = FilesystemBlobStaging::try_new_without_locality_check_for_test(
-            root.path().to_path_buf(),
-        )
-        .expect("the fixture staging namespace opens");
+        let staging = FilesystemBlobStaging::try_new(root.path().to_path_buf())
+            .expect("the fixture staging namespace opens");
         let spool = staging
             .create_upload()
             .await

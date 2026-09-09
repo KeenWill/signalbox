@@ -77,11 +77,6 @@ There is no replica-retirement state, so a configured binding cannot be removed
 while any `blob_replica` row names it, even after another replica exists
 elsewhere.
 
-A `filesystem` store is admitted only on storage the host positively classifies
-as local, non-network, and non-userspace; network, userspace, and unclassified
-mounts fail startup. Why: a remote filesystem operation cannot be interrupted or
-bounded from inside the daemon.
-
 Several stores are enabled at once and routed by storage class; routing by media
 type or filename is inexpressible. Why: the daemon assigns the class, and a
 caller-supplied string must not select which infrastructure gains authority over
