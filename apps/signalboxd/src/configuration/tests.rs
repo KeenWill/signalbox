@@ -270,6 +270,7 @@ adapter = "application"
 
 [daemon_tools]
 exec_supervisor_executable = "/bin/sh"
+sandboxed_exec_timeout_bound = "none"
 
 [git_identity]
 author_name = "Signalbox Daemon"
@@ -2734,7 +2735,7 @@ fn git_identity_rejects_an_unknown_field() {
 fn tool_mapping_registry_requires_daemon_tool_process_settings() {
     let missing = CONFIGURATION.replace(
         &format!(
-            "[daemon_tools]\nexec_supervisor_executable = \"{EXEC_SUPERVISOR_EXECUTABLE}\"\n\n"
+            "[daemon_tools]\nexec_supervisor_executable = \"{EXEC_SUPERVISOR_EXECUTABLE}\"\nsandboxed_exec_timeout_bound = \"none\"\n\n"
         ),
         "",
     );
@@ -2773,6 +2774,49 @@ fn daemon_tool_process_settings_reject_a_missing_supervisor() {
         HubModelConfiguration::parse(&missing).err(),
         Some(HubModelConfigurationError::InvalidDaemonToolSettings)
     );
+}
+
+#[test]
+fn daemon_sandboxed_exec_timeout_bound_accepts_none_and_a_friendly_duration() {
+    let unbounded = HubModelConfiguration::parse(CONFIGURATION).expect("fixture parses");
+    assert_eq!(
+        unbounded
+            .daemon_tools()
+            .expect("mapped fixture has daemon tool settings")
+            .sandboxed_exec_timeout_bound(),
+        None
+    );
+
+    let finite = CONFIGURATION.replace(
+        "sandboxed_exec_timeout_bound = \"none\"",
+        "sandboxed_exec_timeout_bound = \"20 minutes\"",
+    );
+    assert_eq!(
+        HubModelConfiguration::parse(&finite)
+            .expect("friendly timeout bound parses")
+            .daemon_tools()
+            .expect("mapped fixture has daemon tool settings")
+            .sandboxed_exec_timeout_bound(),
+        Some(std::time::Duration::from_secs(20 * 60))
+    );
+}
+
+#[test]
+fn daemon_sandboxed_exec_timeout_bound_is_required_and_at_least_one_second_when_finite() {
+    for replacement in [
+        "",
+        "sandboxed_exec_timeout_bound = \"0s\"",
+        "sandboxed_exec_timeout_bound = \"500ms\"",
+        "sandboxed_exec_timeout_bound = 120",
+    ] {
+        let configured =
+            CONFIGURATION.replace("sandboxed_exec_timeout_bound = \"none\"", replacement);
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidDaemonToolSettings),
+            "{replacement}"
+        );
+    }
 }
 
 #[cfg(unix)]

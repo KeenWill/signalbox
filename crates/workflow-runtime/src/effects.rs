@@ -174,6 +174,13 @@ struct GrantedDeliveries<'a, P, E> {
 }
 
 impl<P: LiveDeliverySource, E: EffectExecutor> LiveDeliverySource for GrantedDeliveries<'_, P, E> {
+    fn suspend_on_wait(&self, outstanding: &[RequestFrame]) -> bool {
+        outstanding.iter().all(|frame| {
+            request_capability(frame.kind())
+                .is_none_or(|capability| self.grants.contains(capability))
+        }) && self.primitives.suspend_on_wait(outstanding)
+    }
+
     fn next_delivery<'a>(
         &'a mut self,
         outstanding: &'a [RequestFrame],

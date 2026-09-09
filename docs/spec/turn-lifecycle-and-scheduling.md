@@ -475,6 +475,9 @@ cancellation.
 
 ## Planned
 
+- Session failure isolation, corrupt-session startup isolation, and bounded
+  guard reacquisition; see
+  [daemon survival design](../design/daemon-survival.md).
 - Pre-continuation runner takeover and retry supersession; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - Recovery-only startup: a runner reconciliation phase between migrations and
