@@ -164,10 +164,6 @@ The seven local Git tools perform no remote operation.
 
 The daemon-local registry supplies no runner execution path.
 
-The snapshot freeze exists because a catalog or runner change while a call is in
-flight could otherwise upgrade permission, introduce an unavailable runner tool,
-widen its selector, or move the locus.
-
 Because the attempt schema requires a closed effect class, preparation records
 `EffectFree` as a non-dispatching sentinel for an undeclared name. The preflight
 transaction closes that attempt before authorization, and the sentinel is not a
@@ -216,8 +212,7 @@ no transcript, request, attempt, approval, turn, placement, grant, or lease
 state directly; a delegation executor persists through its port. One terminal
 attempt row holds a tool's output. An execution result entry references that
 row; no result entry copies the output. The tool registry is an input to policy
-and execution; it never determines request content. Approval and dispatch use
-the snapshot frozen when the proposal was made, never a later lookup.
+and execution; it never determines request content.
 
 Contracts owned elsewhere bind here: one recorded attempt per model call in
 [model-call-execution](model-call-execution.md); no transaction across external
@@ -383,9 +378,9 @@ and oversized bytes are never persisted. The result-text and error-detail bounds
 constrain every executor's capture policy; no executor widens the durable bound
 or converts an otherwise bounded success into a failure because it omitted
 additional result members. A crash-lost attempt has durable `KnownFailed`
-evidence and therefore projects an execution result, not `ToolClosed`. Attempt
-evidence commits as soon as execution ends, independently of semantic
-projection.
+evidence and projects an execution result in the terminal failure suffix;
+reconciliation projects `ToolClosed`. Attempt evidence commits as soon as
+execution ends, independently of semantic projection.
 
 Once every request in a running batch is resolved, one continuation transaction
 appends exactly one result entry per request in proposal order, installs any
