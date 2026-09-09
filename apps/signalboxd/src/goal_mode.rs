@@ -544,6 +544,8 @@ pub struct PostgresGoalPassDisposition {
     numeric_bounds: GoalModeNumericBounds,
     #[cfg(feature = "test-support")]
     startup_resume_barrier: Option<Arc<Barrier>>,
+    #[cfg(test)]
+    automatic_resume_deferred: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl PostgresGoalPassDisposition {
@@ -562,6 +564,8 @@ impl PostgresGoalPassDisposition {
             numeric_bounds,
             #[cfg(feature = "test-support")]
             startup_resume_barrier: None,
+            #[cfg(test)]
+            automatic_resume_deferred: None,
         }
     }
 
@@ -865,7 +869,12 @@ impl PostgresGoalPassDisposition {
         loop {
             match self.attempt_automatic_resume(session, blocked).await {
                 ResumeAttempt::Settled => return,
-                ResumeAttempt::OwnershipDeferred => {}
+                ResumeAttempt::OwnershipDeferred => {
+                    #[cfg(test)]
+                    if let Some(deferred) = &self.automatic_resume_deferred {
+                        deferred.notify_one();
+                    }
+                }
                 ResumeAttempt::InfrastructureUnsettled => {
                     if remaining == 0 {
                         tracing::error!(
@@ -2768,12 +2777,14 @@ context_window_tokens = 200000
         let (nudge, mut source) = signalbox_application::InProcessEligibilityWorkSource::new(
             signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
         );
-        let runtime = PostgresGoalPassDisposition::new(
+        let deferred = Arc::new(tokio::sync::Notify::new());
+        let mut runtime = PostgresGoalPassDisposition::new(
             pool.clone(),
             models,
             nudge,
             GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
         );
+        runtime.automatic_resume_deferred = Some(deferred.clone());
         let blocked = repository
             .load_goal(session)
             .await?
@@ -2802,14 +2813,9 @@ context_window_tokens = 200000
             "startup must retain the parked block in its resumption inventory"
         );
         const RESUME_TEST_TIMEOUT: Duration = Duration::from_secs(10);
-        assert_eq!(
-            runtime.attempt_automatic_resume(session, blocked).await,
-            ResumeAttempt::OwnershipDeferred
-        );
-        assert_eq!(
-            runtime.attempt_automatic_resume(session, blocked).await,
-            ResumeAttempt::OwnershipDeferred
-        );
+        tokio::time::timeout(RESUME_TEST_TIMEOUT, deferred.notified())
+            .await
+            .expect("the startup worker must defer its attempt before the park is lifted");
         assert!(
             lifecycle
                 .load(session)
