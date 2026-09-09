@@ -2078,8 +2078,8 @@ async fn commission_fixture_session_goal(
     Ok(statement)
 }
 
-/// Stops a fixture session's goal as a user stop scoped to that session alone.
-async fn stop_fixture_session_goal(
+/// Supersedes a fixture goal while leaving its turn's approval request pending.
+async fn supersede_fixture_session_goal(
     pool: &PgPool,
     session: SessionId,
     seed: u128,
@@ -2089,11 +2089,14 @@ async fn stop_fixture_session_goal(
             GoalUserCommand::new(
                 DurableCommandId::from_uuid(Uuid::from_u128(seed)),
                 session,
-                GoalUserAction::Stop {
-                    descendant_scope: DescendantTerminationScope::ParentAlone,
-                },
+                GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                    "pursue the replacement approval fixture goal",
+                ))?),
             ),
-            None,
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 1)),
+                TurnId::from_uuid(Uuid::from_u128(seed + 2)),
+            )),
             |_| None,
         )
         .await?;
