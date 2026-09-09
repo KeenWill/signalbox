@@ -159,7 +159,13 @@ pub(super) fn verify_merge(
             ))
         })
         .collect::<Result<_, GitPushFailure>>()?;
+    let base_deletions: HashSet<_> = base_changes
+        .deltas()
+        .filter(|delta| delta.status() == Delta::Deleted)
+        .map(|delta| delta.old_file().path().ok_or(GitPushFailure::Repository))
+        .collect::<Result<_, _>>()?;
     let mut own_by_path = BTreeMap::new();
+    let mut retained_rename_results = BTreeMap::new();
     for (index, delta) in own.deltas().enumerate() {
         let path = delta
             .new_file()
@@ -171,6 +177,9 @@ pub(super) fn verify_merge(
         } else {
             path
         };
+        if delta.status() == Delta::Renamed && base_deletions.contains(source_path) {
+            retained_rename_results.insert(path, (delta.new_file().id(), delta.new_file().mode()));
+        }
         own_by_path.entry(source_path).or_insert(index);
     }
     for (index, delta) in carried.deltas().enumerate() {
@@ -179,6 +188,12 @@ pub(super) fn verify_merge(
             .path()
             .or_else(|| delta.old_file().path())
             .ok_or(GitPushFailure::Repository)?;
+        if delta.status() == Delta::Added
+            && retained_rename_results.get(path)
+                == Some(&(delta.new_file().id(), delta.new_file().mode()))
+        {
+            continue;
+        }
         let source_path = if delta.status() == Delta::Renamed {
             delta.old_file().path().ok_or(GitPushFailure::Repository)?
         } else {

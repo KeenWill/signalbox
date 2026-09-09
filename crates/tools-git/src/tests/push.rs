@@ -2177,3 +2177,91 @@ async fn push_accepts_nested_paths_within_the_merge_path_byte_budget() {
 
     assert_eq!(transport.request().commit(), merge.to_string());
 }
+
+#[tokio::test]
+async fn push_accepts_a_renamed_branch_result_after_the_base_deletes_its_source() {
+    for (case, branch_content) in [
+        ("unchanged rename", "one\ntwo\nthree\nfour\nfive\nsix\n"),
+        (
+            "edited rename",
+            "one\ntwo\nthree\nfour\nfive\nsix\nbranch\n",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository");
+        let ancestor = merge_test_commit_files(
+            &repository,
+            &[(b"old.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")],
+            &[],
+        );
+        let branch =
+            merge_test_commit_files(&repository, &[(b"new.txt", branch_content)], &[ancestor]);
+        let base = merge_test_commit_files(&repository, &[], &[ancestor]);
+        let merge = merge_test_commit_files(
+            &repository,
+            &[(b"new.txt", branch_content)],
+            &[branch, base],
+        );
+        let transport = RecordingPushTransport::default();
+        let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+        let result = executor
+            .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+            .await;
+
+        assert!(result.is_ok(), "{case}: {result:?}");
+        assert_eq!(transport.request().commit(), merge.to_string(), "{case}");
+    }
+}
+
+#[tokio::test]
+async fn push_refuses_new_content_in_a_rename_delete_resolution() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit_files(&repository, &[(b"old.txt", "shared\n")], &[]);
+    let branch = merge_test_commit_files(&repository, &[(b"new.txt", "shared\n")], &[ancestor]);
+    let base = merge_test_commit_files(&repository, &[], &[ancestor]);
+    let merge = merge_test_commit_files(
+        &repository,
+        &[(b"new.txt", "shared\nunclaimed\n")],
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(GitPushFailure::MergeDroppedBaseChanges(_))
+    ));
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn push_refuses_restoring_the_deleted_source_of_a_branch_rename() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit_files(&repository, &[(b"old.txt", "shared\n")], &[]);
+    let branch = merge_test_commit_files(&repository, &[(b"new.txt", "shared\n")], &[ancestor]);
+    let base = merge_test_commit_files(&repository, &[], &[ancestor]);
+    let merge = merge_test_commit_files(
+        &repository,
+        &[(b"old.txt", "shared\n"), (b"new.txt", "shared\n")],
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(GitPushFailure::MergeDroppedBaseChanges(_))
+    ));
+    assert!(!transport.has_request());
+}
