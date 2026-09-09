@@ -2120,6 +2120,9 @@ fn assert_goal_command_applied(outcome: GoalCommandHandlingOutcome) {
         GoalCommandHandlingOutcome::LineageMoved => {
             panic!("the fixture goal command expected a lineage head that had moved")
         }
+        GoalCommandHandlingOutcome::StopAwaitingApproval { request, .. } => {
+            panic!("the fixture goal stop is awaiting approval for request: {request:?}")
+        }
     }
 }
 

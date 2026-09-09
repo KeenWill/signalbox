@@ -2803,7 +2803,7 @@ pub(crate) mod tests {
         let statement = GoalStatement::try_new(String::from("finish the fixture task"))?;
         let goal = Goal::commission(session, statement.clone(), GoalUserProvenance::new(command));
         let request_id = RequestId::try_new(42)?;
-        let mut spool = spool_goal_snapshot(&goal, ProtocolVersion::One, request_id, session_id)
+        let mut spool = spool_goal_snapshot(&goal, &[], ProtocolVersion::One, request_id, session_id)
             .await
             .map_err(|error| {
                 io::Error::other(format!(
@@ -2833,7 +2833,7 @@ pub(crate) mod tests {
             ServerMessage::GoalHistoryItem {
                 event_ordinal: CanonicalU64::new(goal.events()[0].ordinal().get()),
                 generation: CanonicalU64::new(goal.events()[0].generation().get()),
-                event: wire_goal_event(&goal.events()[0])?,
+                event: wire_goal_event(&goal.events()[0], None)?,
             },
         )?)?);
         expected.extend(encode_server_line(&ServerFrame::try_new(

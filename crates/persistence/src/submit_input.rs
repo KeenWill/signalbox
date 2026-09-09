@@ -11,7 +11,7 @@ mod write;
 
 pub(crate) use scheduling_projection::load_scheduling_projection;
 
-use handle::handle_in_transaction;
+pub(crate) use handle::handle_in_transaction;
 
 pub use prepare::FreshInitialInput;
 pub(crate) use prepare::insert_fresh_initial_input;
@@ -285,7 +285,7 @@ impl SubmitInputRepositoryError {
     }
 }
 
-enum TransactionDecision {
+pub(crate) enum TransactionDecision {
     Commit(SubmitInputHandlingOutcome),
     Rollback(SubmitInputHandlingOutcome),
 }
