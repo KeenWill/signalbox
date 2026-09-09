@@ -144,7 +144,7 @@
     const data = byteArray(result.payload);
     const payload = new ByteArray(data.length);
     for (let index = 0; index < data.length; index++) payload[index] = data[index];
-    return { kind: "answer", value: decode(record(decodeJson(payload))) };
+    return { kind: "answer", value: decode(record(snapshotJson(decodeJson(payload)))) };
   };
   const refusedOrAmbiguous = (value) =>
     objectKeys(value).length === 1 && contains(["refused", "ambiguous"], value.outcome);
@@ -153,7 +153,7 @@
       record(input);
       const payload = encodeJson({ command: uuid(input.command), model: uuid(input.model) });
       return answer(effect("session", "create", payload), (value) => {
-        if (refusedOrAmbiguous(value)) return value;
+        if (refusedOrAmbiguous(value)) return { outcome: value.outcome };
         return { session: uuid(value.session) };
       });
     },
@@ -173,7 +173,7 @@
       for (let index = 0; index < prefixLength; index++) payload[index] = fields[index];
       for (let index = 0; index < suffix.length; index++) payload[prefixLength + index] = charCodeAt(suffix, index);
       return answer(effect("session", "turn", payload), (value) => {
-        if (refusedOrAmbiguous(value)) return value;
+        if (refusedOrAmbiguous(value)) return { outcome: value.outcome };
         if (!contains(["completed", "refused", "failed", "cancelled", "retired", "ambiguous"], value.outcome)) {
           throw new CodecTypeError("invalid session disposition");
         }
@@ -204,7 +204,7 @@
         revision: string(input.revision), source: byteArray(input.source),
         artifact: string(input.artifact), grants });
       return answer(effect("register", "register", payload), (value) => {
-        if (value.outcome === "ambiguous" && objectKeys(value).length === 1) return value;
+        if (value.outcome === "ambiguous" && objectKeys(value).length === 1) return { outcome: value.outcome };
         return { registration: uuid(value.registration) };
       });
     },

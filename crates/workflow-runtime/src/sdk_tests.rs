@@ -552,6 +552,73 @@ async fn session_wrapper_refuses_invalid_input_before_requesting_effect() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn answer_wrappers_refuse_inherited_fields() {
+    for (fields, call) in [
+        (
+            "{ outcome: 'refused' }",
+            "sdk.session.create({ command: identity, model: identity })",
+        ),
+        ("{ outcome: 'ambiguous' }", "sdk.register(registration)"),
+        (
+            "{ session: identity }",
+            "sdk.session.create({ command: identity, model: identity })",
+        ),
+        ("{ registration: identity }", "sdk.register(registration)"),
+        (
+            "{ outcome: 'completed', session: identity, turn: identity, accepted_input: identity, digest: new Array(32).fill(0) }",
+            "sdk.session.turn({ command: identity, session: identity, text: 'hello', defaults_version: '1' })",
+        ),
+    ] {
+        let (result, requests) = sdk_script(
+            &format!(
+                r#"
+const identity = "12345678-1234-1234-1234-123456789abc";
+const registration = {{ id: identity, name: "example", revision: "revision",
+  source: [], artifact: "export {{}};", grants: [] }};
+Object.assign(Object.prototype, {fields});
+await {call};
+"#
+            ),
+            [IsolateDelivery::Answer {
+                payload: br#"{"unexpected":1}"#.to_vec(),
+            }],
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "{call} must not accept inherited fields {fields} as answer data"
+        );
+        assert_eq!(
+            requests.len(),
+            1,
+            "the malformed answer must fail after the {call} request"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn answer_validation_ignores_inherited_accessors() {
+    let (result, requests) = sdk_script(
+        r#"
+const identity = "12345678-1234-1234-1234-123456789abc";
+Object.defineProperty(Object.prototype, "outcome", {
+  get() { throw new Error("answer validation invoked an inherited accessor"); }
+});
+const answer = await sdk.session.create({ command: identity, model: identity });
+if (answer.kind !== "answer" || answer.value.session !== identity) {
+  throw new Error("own answer data must remain valid despite inherited accessors");
+}
+"#,
+        [IsolateDelivery::Answer {
+            payload: br#"{"session":"12345678-1234-1234-1234-123456789abc"}"#.to_vec(),
+        }],
+    )
+    .await;
+    result.expect("answer inspection must read only its own data properties");
+    assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn session_wrapper_refuses_malformed_host_answer() {
     let (result, requests) = sdk_script(
         r#"
