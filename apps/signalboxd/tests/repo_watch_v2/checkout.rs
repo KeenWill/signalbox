@@ -2368,7 +2368,10 @@ impl CheckoutFixture {
         .map_err(|error| format!("watch construction: {error:?}"))?;
         let (catalog, executor) = tools.into_parts();
         Ok((
-            catalog.with_repository_push(self.sink.models.repository_watch())?,
+            catalog.with_repository_push(
+                self.sink.models.repository_watch(),
+                signalboxd::DaemonToolComposition::WithMappedFamilies,
+            )?,
             executor.with_repository_watch(Some(watch)),
         ))
     }

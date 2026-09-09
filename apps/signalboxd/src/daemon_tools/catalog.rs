@@ -62,17 +62,20 @@ impl DaemonToolCatalog {
         Ok(Self { entries })
     }
 
-    /// Registers configured push when at least one watched repository enables it.
+    /// Registers configured push for mapped workspaces when a watched repository enables it.
     pub fn with_repository_push(
         self,
         configuration: Option<&crate::RepositoryWatchConfiguration>,
+        composition: DaemonToolComposition,
     ) -> Result<Self, DaemonToolsConstructionError> {
-        if configuration.is_some_and(|watch| {
-            watch
-                .repositories()
-                .iter()
-                .any(|repository| repository.push_credential_file().is_some())
-        }) {
+        if composition == DaemonToolComposition::WithMappedFamilies
+            && configuration.is_some_and(|watch| {
+                watch
+                    .repositories()
+                    .iter()
+                    .any(|repository| repository.push_credential_file().is_some())
+            })
+        {
             self.with_compiled_catalog(
                 signalbox_tools_git::git_push_catalog()
                     .map_err(|_| DaemonToolsConstructionError::LocalGit)?,

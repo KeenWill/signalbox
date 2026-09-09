@@ -1575,6 +1575,10 @@ async fn run_hub(
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
         .map(|configuration| configuration.exec_supervisor_executable().to_path_buf());
+    let tool_composition = match daemon_tool_configuration {
+        Some(_) => signalboxd::DaemonToolComposition::WithMappedFamilies,
+        None => signalboxd::DaemonToolComposition::Base,
+    };
     let tools = match daemon_tool_configuration {
         Some(tool_configuration) => DaemonTools::try_new_production(
             SystemCurrentTimeClock,
@@ -2016,7 +2020,7 @@ async fn run_hub(
     let model_configuration = (*recovered_catalogs.models).clone();
     let template_configuration = (*recovered_catalogs.templates).clone();
     let startup_tool_catalog = tool_catalog
-        .with_repository_push(model_configuration.repository_watch())
+        .with_repository_push(model_configuration.repository_watch(), tool_composition)
         .map_err(|error| {
             erase_startup_cause(
                 RuntimePhase::Configuration,
