@@ -28,11 +28,16 @@ pub const CLOCK_REVISION: &str = "1";
 #[derive(Clone, Debug)]
 pub struct WorkflowService {
     registrations: ProgramRegistrationRepository,
-    wake: mpsc::UnboundedSender<ProgramRunId>,
+    wake: mpsc::UnboundedSender<runtime::WorkflowWake>,
     clock_executable: Option<ProgramExecutable>,
 }
 
 impl WorkflowService {
+    /// Wakes a blocked attempt after its durable cancellation has committed.
+    pub fn cancelled(&self, run: ProgramRunId) {
+        let _ = self.wake.send(runtime::WorkflowWake::Cancel(run));
+    }
+
     pub fn clock_executable(&self) -> Option<&ProgramExecutable> {
         self.clock_executable.as_ref()
     }
@@ -69,7 +74,7 @@ impl WorkflowService {
             .start_run(run, registration, input)
             .await?;
         self.wake
-            .send(run)
+            .send(runtime::WorkflowWake::Start(run))
             .map_err(|_| WorkflowRuntimeError::Stopped)?;
         Ok(run)
     }
