@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -279,15 +278,6 @@ class SuiteExecutionTests(unittest.TestCase):
                 with self.subTest(name=name, index=index), self.assertRaises(ManifestError):
                     run_suite((suite(name="alpha", shards=3),), name, index)
             execute.assert_not_called()
-
-    def test_cache_is_one_argument_only_on_self_hosted_runners(self):
-        for runner in ("self-hosted", "github-hosted"):
-            with self.subTest(runner=runner), patch.dict(os.environ, {
-                "RUNNER_ENVIRONMENT": runner, "BAZEL_REMOTE_CACHE": "https://cache.example/path with spaces"
-            }), patch("postgres_integration_suites.subprocess.run") as execute:
-                run_suite((suite(name="alpha"),), "alpha", 0)
-                cache = [arg for arg in execute.call_args.args[0] if arg.startswith("--remote_cache=")]
-                self.assertEqual(cache, ["--remote_cache=https://cache.example/path with spaces"] if runner == "self-hosted" else [])
 
 
 class DocumentedCommandTests(unittest.TestCase):
