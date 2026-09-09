@@ -80,10 +80,10 @@ were outstanding.
 Successful completion atomically records result bytes in a `Terminal` request
 and an immediately following `Answer` acknowledgement. A terminal request
 emitted with outstanding work receives `RejectReason::OutstandingRequests`; it
-cannot be accepted after that work drains. No frame may follow accepted success.
-Existing JavaScript modules return the unit result, encoded as empty bytes,
-after their requests drain. `ProgramJournal::result` reads retained result bytes
-without execution.
+cannot be accepted after that work drains. Only those deliveries may resolve a
+terminal request. No frame may follow accepted success. Existing JavaScript
+modules return the unit result, encoded as empty bytes, after their requests
+drain. `ProgramJournal::result` reads retained result bytes without execution.
 
 Cancellation addresses retained journal streams. A cancel serialized before
 completion prevents success; after accepted success it records

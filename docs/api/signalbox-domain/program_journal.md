@@ -304,7 +304,7 @@ pub enum ProgramJournalError {
     UnknownResolvedRequest,
     RequestResolvedTwice,
     OrdinalExhausted,
-    InvalidTerminalAnswer,
+    InvalidTerminalResolution,
     FrameAfterSuccess,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq

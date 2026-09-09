@@ -1245,13 +1245,117 @@ async fn terminal_answer_rejects_work_appended_and_resolved_after_its_request()
     };
     assert_trigger_error(
         source,
-        "terminal answer must immediately follow its request on a running run with no other outstanding requests",
+        "terminal resolution requires an immediate answer without outstanding work or an outstanding-work rejection",
     );
     assert_eq!(
         repository.load(run).await?.expect("unchanged journal"),
         before
     );
     assert!(before.result().is_none());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_request_rejects_non_contract_resolutions() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::RejectReason;
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let terminal = repository
+        .append_request(run, None, RequestKind::Terminal(payload(b"result")))
+        .await?;
+    let ordinal = terminal.ordinal();
+    let before = repository.load(run).await?.expect("unresolved terminal");
+    for kind in [
+        DeliveryKind::Wake {
+            resolves: ordinal,
+            payload: InlineFramePayload::default(),
+        },
+        DeliveryKind::Cancel {
+            resolves: ordinal,
+            payload: InlineFramePayload::default(),
+        },
+        DeliveryKind::Reject {
+            resolves: ordinal,
+            reason: RejectReason::OutstandingRequests,
+        },
+        DeliveryKind::Reject {
+            resolves: ordinal,
+            reason: RejectReason::CapabilityDenied,
+        },
+        DeliveryKind::Reject {
+            resolves: ordinal,
+            reason: RejectReason::UnsupportedOperation,
+        },
+    ] {
+        let error = repository
+            .append_delivery(run, kind.clone())
+            .await
+            .expect_err("invalid terminal resolution");
+        let signalbox_persistence::program_journal::ProgramJournalRepositoryError::Database {
+            source,
+            ..
+        } = error
+        else {
+            panic!("expected database rejection for {kind:?}, got {error:?}");
+        };
+        assert_trigger_error(
+            source,
+            "terminal resolution requires an immediate answer without outstanding work or an outstanding-work rejection",
+        );
+        assert_eq!(
+            repository.load(run).await?.expect("unchanged journal"),
+            before,
+            "{kind:?}"
+        );
+    }
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_rejection_cannot_count_work_appended_after_emission() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let terminal = repository
+        .append_request(run, None, RequestKind::Terminal(payload(b"result")))
+        .await?;
+    repository
+        .append_request(run, None, RequestKind::Now(payload(b"late work")))
+        .await?;
+    let before = repository.load(run).await?.expect("unresolved terminal");
+    let error = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Reject {
+                resolves: terminal.ordinal(),
+                reason: signalbox_domain::RejectReason::OutstandingRequests,
+            },
+        )
+        .await
+        .expect_err("late work does not justify terminal rejection");
+    let signalbox_persistence::program_journal::ProgramJournalRepositoryError::Database {
+        source,
+        ..
+    } = error
+    else {
+        panic!("expected database rejection, got {error:?}");
+    };
+    assert_trigger_error(
+        source,
+        "terminal resolution requires an immediate answer without outstanding work or an outstanding-work rejection",
+    );
+    assert_eq!(
+        repository.load(run).await?.expect("unchanged journal"),
+        before
+    );
     pool.close().await;
     Ok(())
 }
@@ -1297,7 +1401,7 @@ async fn terminal_answer_rejects_an_intervening_scope_frame() -> Result<(), Box<
     };
     assert_trigger_error(
         source,
-        "terminal answer must immediately follow its request on a running run with no other outstanding requests",
+        "terminal resolution requires an immediate answer without outstanding work or an outstanding-work rejection",
     );
     assert_eq!(
         repository.load(run).await?.expect("unchanged journal"),

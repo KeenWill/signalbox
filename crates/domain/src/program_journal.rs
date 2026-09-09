@@ -487,17 +487,22 @@ impl ProgramJournal {
                         ended = true;
                     }
                     if let Some(request) = delivery.kind().resolves() {
-                        if let Some(terminal_position) = terminals.get(&request)
-                            && matches!(delivery.kind(), DeliveryKind::Answer { .. })
-                        {
-                            if ended
-                                || refused_terminals.contains(&request)
-                                || entry.position().as_u64() != terminal_position + 1
-                                || answerable.len() != resolved.len() + 1
-                            {
-                                return Err(ProgramJournalError::InvalidTerminalAnswer);
+                        if let Some(terminal_position) = terminals.get(&request) {
+                            match delivery.kind() {
+                                DeliveryKind::Answer { .. }
+                                    if !ended
+                                        && !refused_terminals.contains(&request)
+                                        && entry.position().as_u64() == terminal_position + 1
+                                        && answerable.len() == resolved.len() + 1 =>
+                                {
+                                    succeeded = true;
+                                }
+                                DeliveryKind::Reject {
+                                    reason: RejectReason::OutstandingRequests,
+                                    ..
+                                } if refused_terminals.contains(&request) => {}
+                                _ => return Err(ProgramJournalError::InvalidTerminalResolution),
                             }
-                            succeeded = true;
                         }
                         if !answerable.contains(&request) {
                             return Err(ProgramJournalError::UnknownResolvedRequest);
@@ -534,7 +539,7 @@ pub enum ProgramJournalError {
     UnknownResolvedRequest,
     RequestResolvedTwice,
     OrdinalExhausted,
-    InvalidTerminalAnswer,
+    InvalidTerminalResolution,
     FrameAfterSuccess,
 }
 
@@ -546,8 +551,8 @@ impl fmt::Display for ProgramJournalError {
             Self::NoncontiguousDeliveryOrdinal => "delivery ordinals are not contiguous",
             Self::UnknownResolvedRequest => "delivery resolves no earlier answerable request",
             Self::RequestResolvedTwice => "request has more than one resolving delivery",
-            Self::InvalidTerminalAnswer => {
-                "terminal answer must immediately follow its request on a running run with no other outstanding requests"
+            Self::InvalidTerminalResolution => {
+                "terminal resolution requires an immediate answer without outstanding work or an outstanding-work rejection"
             }
             Self::FrameAfterSuccess => "journal frame follows accepted success",
             Self::OrdinalExhausted => "journal ordinal is exhausted",
@@ -794,22 +799,23 @@ mod tests {
         ];
         assert_eq!(
             ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
-            Err(ProgramJournalError::InvalidTerminalAnswer)
+            Err(ProgramJournalError::InvalidTerminalResolution)
         );
     }
 
     #[test]
     fn rejected_terminal_request_has_no_successful_result() {
-        let ordinal = RequestOrdinal::try_from_u64(1).expect("ordinal");
+        let ordinal = RequestOrdinal::try_from_u64(2).expect("ordinal");
         let terminal = RequestFrame::new(
             ordinal,
             None,
             RequestKind::Terminal(InlineFramePayload::new(b"refused".as_slice())),
         );
         let rejected = journal(vec![
-            entry(1, JournalFrame::Request(terminal)),
+            entry(1, JournalFrame::Request(request(1, b"outstanding work"))),
+            entry(2, JournalFrame::Request(terminal)),
             entry(
-                2,
+                3,
                 JournalFrame::Delivery(DeliveryFrame::new(
                     DeliveryOrdinal::try_from_u64(1).expect("ordinal"),
                     DeliveryKind::Reject {
@@ -838,8 +844,111 @@ mod tests {
         ];
         assert_eq!(
             ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
-            Err(ProgramJournalError::InvalidTerminalAnswer)
+            Err(ProgramJournalError::InvalidTerminalResolution)
         );
+    }
+
+    #[test]
+    fn terminal_request_rejects_non_contract_resolutions() {
+        let ordinal = RequestOrdinal::try_from_u64(1).expect("ordinal");
+        let terminal = RequestFrame::new(
+            ordinal,
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"result".as_slice())),
+        );
+        for kind in [
+            DeliveryKind::Wake {
+                resolves: ordinal,
+                payload: InlineFramePayload::default(),
+            },
+            DeliveryKind::Cancel {
+                resolves: ordinal,
+                payload: InlineFramePayload::default(),
+            },
+            DeliveryKind::Reject {
+                resolves: ordinal,
+                reason: RejectReason::OutstandingRequests,
+            },
+            DeliveryKind::Reject {
+                resolves: ordinal,
+                reason: RejectReason::CapabilityDenied,
+            },
+            DeliveryKind::Reject {
+                resolves: ordinal,
+                reason: RejectReason::UnsupportedOperation,
+            },
+        ] {
+            let entries = vec![
+                entry(1, JournalFrame::Request(terminal.clone())),
+                entry(
+                    2,
+                    JournalFrame::Delivery(DeliveryFrame::new(
+                        DeliveryOrdinal::try_from_u64(1).expect("ordinal"),
+                        kind.clone(),
+                    )),
+                ),
+            ];
+            assert_eq!(
+                ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
+                Err(ProgramJournalError::InvalidTerminalResolution),
+                "{kind:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_rejection_cannot_count_work_appended_after_emission() {
+        let ordinal = RequestOrdinal::try_from_u64(1).expect("ordinal");
+        let terminal = RequestFrame::new(
+            ordinal,
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"result".as_slice())),
+        );
+        let entries = vec![
+            entry(1, JournalFrame::Request(terminal)),
+            entry(2, JournalFrame::Request(request(2, b"late work"))),
+            entry(
+                3,
+                JournalFrame::Delivery(DeliveryFrame::new(
+                    DeliveryOrdinal::try_from_u64(1).expect("ordinal"),
+                    DeliveryKind::Reject {
+                        resolves: ordinal,
+                        reason: RejectReason::OutstandingRequests,
+                    },
+                )),
+            ),
+        ];
+        assert_eq!(
+            ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
+            Err(ProgramJournalError::InvalidTerminalResolution),
+        );
+    }
+
+    #[test]
+    fn terminal_rejection_retains_its_reason_after_outstanding_work_drains() {
+        let ordinal = RequestOrdinal::try_from_u64(2).expect("ordinal");
+        let terminal = RequestFrame::new(
+            ordinal,
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"refused".as_slice())),
+        );
+        let rejected = journal(vec![
+            entry(1, JournalFrame::Request(request(1, b"work"))),
+            entry(2, JournalFrame::Request(terminal)),
+            entry(3, JournalFrame::Delivery(delivery(1, 1, b"drained"))),
+            entry(
+                4,
+                JournalFrame::Delivery(DeliveryFrame::new(
+                    DeliveryOrdinal::try_from_u64(2).expect("ordinal"),
+                    DeliveryKind::Reject {
+                        resolves: ordinal,
+                        reason: RejectReason::OutstandingRequests,
+                    },
+                )),
+            ),
+        ]);
+        assert!(rejected.result().is_none());
+        assert!(!rejected.has_outstanding_requests());
     }
 
     #[test]
@@ -865,7 +974,7 @@ mod tests {
         ];
         assert_eq!(
             ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
-            Err(ProgramJournalError::InvalidTerminalAnswer)
+            Err(ProgramJournalError::InvalidTerminalResolution)
         );
     }
 

@@ -4,7 +4,9 @@ ALTER TABLE cancel_program_run_command ADD CONSTRAINT cancel_program_run_command
     CHECK (terminal_state IN ('cancelled', 'faulted', 'succeeded'));
 
 CREATE FUNCTION require_program_success() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE terminal_position numeric;
+DECLARE
+    terminal_position numeric;
+    outstanding_at_terminal boolean;
 BEGIN
     IF EXISTS (
         SELECT 1 FROM program_run_journal_entry AS answer
@@ -15,33 +17,35 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'journal frame follows accepted success' USING ERRCODE = '23514';
     END IF;
-    IF NEW.frame_kind = 'answer' THEN
+    IF NEW.resolves_request_ordinal IS NOT NULL THEN
         SELECT journal_position INTO terminal_position FROM program_run_journal_entry
         WHERE run_id = NEW.run_id AND request_ordinal = NEW.resolves_request_ordinal
             AND frame_kind = 'terminal';
-        IF terminal_position IS NOT NULL AND (
-            NEW.journal_position <> terminal_position + 1
-            OR EXISTS (SELECT 1 FROM program_run_journal_entry
-                WHERE run_id = NEW.run_id AND frame_kind IN ('run_cancel', 'fault'))
-            OR EXISTS (
+        IF terminal_position IS NOT NULL THEN
+            SELECT EXISTS (
                 SELECT 1 FROM program_run_journal_entry AS request
                 WHERE request.run_id = NEW.run_id AND request.frame_direction = 'request'
                     AND request.frame_kind <> 'scope'
-                    AND request.request_ordinal <> NEW.resolves_request_ordinal
-                    AND (NOT EXISTS (
-                        SELECT 1 FROM program_run_journal_entry AS delivery
-                        WHERE delivery.run_id = request.run_id
-                            AND delivery.resolves_request_ordinal = request.request_ordinal
-                    ) OR (request.journal_position < terminal_position AND NOT EXISTS (
+                    AND request.journal_position < terminal_position
+                    AND NOT EXISTS (
                         SELECT 1 FROM program_run_journal_entry AS delivery
                         WHERE delivery.run_id = request.run_id
                             AND delivery.resolves_request_ordinal = request.request_ordinal
                             AND delivery.journal_position < terminal_position
-                    )))
-            )
-        ) THEN
-            RAISE EXCEPTION 'terminal answer must immediately follow its request on a running run with no other outstanding requests'
-                USING ERRCODE = '23514';
+                    )
+            ) INTO outstanding_at_terminal;
+            IF NOT (
+                (NEW.frame_kind = 'answer' AND NOT outstanding_at_terminal
+                    AND NEW.journal_position = terminal_position + 1
+                    AND NOT EXISTS (SELECT 1 FROM program_run_journal_entry
+                        WHERE run_id = NEW.run_id AND frame_kind IN ('run_cancel', 'fault')))
+                OR (NEW.frame_kind = 'reject'
+                    AND NEW.reject_reason IS NOT DISTINCT FROM 'outstanding_requests'
+                    AND outstanding_at_terminal)
+            ) THEN
+                RAISE EXCEPTION 'terminal resolution requires an immediate answer without outstanding work or an outstanding-work rejection'
+                    USING ERRCODE = '23514';
+            END IF;
         END IF;
     END IF;
     RETURN NEW;
