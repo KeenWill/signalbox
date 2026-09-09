@@ -189,6 +189,242 @@ struct CheckoutFixture {
     catalog: String,
 }
 
+/// Holds provisioning after clone, before fetch and checkout finish the repository.
+#[derive(Clone)]
+struct CheckoutBarrierRunner {
+    runner: LocalGitRunner,
+    cloned: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+}
+
+impl ProcessRunner for CheckoutBarrierRunner {
+    fn sandbox_launcher_program(&self) -> &Path {
+        self.runner.sandbox_launcher_program()
+    }
+
+    fn sandbox_launcher_descriptor(&self) -> Option<i32> {
+        self.runner.sandbox_launcher_descriptor()
+    }
+
+    async fn bwrap_availability(&mut self, request: ProcessRequest) -> BwrapAvailability {
+        self.runner.bwrap_availability(request).await
+    }
+
+    async fn run(&mut self, request: ProcessRequest) -> ProcessRunResult {
+        let cloning = request.arguments[0] == "clone";
+        let result = self.runner.run(request).await;
+        if cloning {
+            self.cloned.notify_one();
+            self.resume.notified().await;
+        }
+        result
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn input_during_checkout_waits_for_provisioned_first_turn_git_tools()
+-> Result<(), Box<dyn Error>> {
+    assert_input_during_checkout_waits(None).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn release_start_during_checkout_cannot_activate_queued_input() -> Result<(), Box<dyn Error>>
+{
+    assert_input_during_checkout_waits(Some(SessionLifecycleOperation::ReleaseStart)).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn release_ownership_during_checkout_cannot_activate_queued_input()
+-> Result<(), Box<dyn Error>> {
+    assert_input_during_checkout_waits(Some(SessionLifecycleOperation::Release)).await
+}
+
+async fn assert_input_during_checkout_waits(
+    early_release: Option<SessionLifecycleOperation>,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_application::{
+        EligibilityWorkSource, StartEligibleTurnOutcome, StartEligibleTurnService,
+        SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+        UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+    };
+    use signalbox_domain::{
+        AcceptedInputTurnActivationIdentities, ContextFrontierId, DeliveryRequest,
+        ModelSelectionOverride, PerInputConfigurationChoices, SemanticTranscriptEntryId,
+        SessionConfigurationDefaultsVersion, SubmitInputAppliedResult, SubmitInputResult,
+        TurnAttemptId, UserContent,
+    };
+    use signalbox_persistence::{
+        start_eligible_turn::{CommitActivationPreviewOutcome, StartEligibleTurnRepository},
+        submit_input::SubmitInputRepository,
+    };
+
+    // A reconciliation hint must not substitute for checkout completion's nudge.
+    struct NoReconciliation;
+    impl signalbox_application::EligibilitySweep for NoReconciliation {
+        type Error = std::convert::Infallible;
+
+        async fn find_sessions(
+            &mut self,
+        ) -> Result<signalbox_application::EligibilitySweepBatch, Self::Error> {
+            Ok(signalbox_application::EligibilitySweepBatch::new(
+                Vec::new(),
+                false,
+            ))
+        }
+    }
+
+    let mut fixture = CheckoutFixture::new().await?;
+    let (catalog, executor) = fixture.daemon_tools()?;
+    let (nudge, mut work) = InProcessEligibilityWorkSource::new(NoReconciliation);
+    fixture.sink.eligibility_nudge = nudge.clone();
+    let mut submit = SubmitInputService::new(
+        UuidV7SubmitInputIdGenerator,
+        SubmitInputRepository::new(fixture.core.clone()),
+        nudge,
+        InProcessToolDispatchGate::default(),
+    );
+    let repository = StartEligibleTurnRepository::new(fixture.core.clone());
+    let mut start =
+        StartEligibleTurnService::new(UuidV7StartEligibleTurnIdGenerator, repository.clone());
+    let identities = AcceptedInputTurnActivationIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+        ContextFrontierId::from_uuid(Uuid::now_v7()),
+        TurnAttemptId::from_uuid(Uuid::now_v7()),
+    );
+    let cloned = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let runner = CheckoutBarrierRunner {
+        runner: fixture.runner.clone(),
+        cloned: cloned.clone(),
+        resume: resume.clone(),
+    };
+    let configuration = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("configuration")
+        .clone();
+    let provisioning =
+        submit_pending_with_runner(&fixture.store, &configuration, &mut fixture.sink, runner);
+    let while_cloned = async {
+        cloned.notified().await;
+        let session = SessionId::from_uuid(
+            sqlx::query_scalar(
+                "SELECT checkout_session_id FROM dispatch_ledger WHERE command_id = $1",
+            )
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await
+            .expect("session created with provisioning hold"),
+        );
+        let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(origin),
+        )) = submit
+            .execute(
+                SubmitInputRequest::try_new(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    session,
+                    UserContent::try_text("Inspect the checkout".to_owned()).expect("input text"),
+                    DeliveryRequest::StartWhenNoActiveTurn {
+                        configuration: PerInputConfigurationChoices::new(
+                            SessionConfigurationDefaultsVersion::first(),
+                            ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(
+                                DirectModelSelection::from_uuid(Uuid::now_v7()),
+                            )),
+                        ),
+                    },
+                )
+                .expect("input request"),
+            )
+            .await
+            .expect("input submission")
+        else {
+            panic!("input must be accepted while checkout is pending");
+        };
+        if let Some(operation) = early_release {
+            use signalbox_domain::{CommandPrincipal, SessionLifecycleCommandResult};
+            use signalbox_persistence::session_lifecycle_command::{
+                SessionLifecycleCommandHandlingOutcome, SessionLifecycleCommandRepository,
+            };
+            let released = SessionLifecycleCommandRepository::new(fixture.core.clone())
+                .handle(
+                    SessionLifecycleCommand::new(
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                        session,
+                        operation,
+                    ),
+                    CommandPrincipal::Operator,
+                )
+                .await
+                .expect("operator release");
+            assert!(matches!(
+                released,
+                SessionLifecycleCommandHandlingOutcome::Recorded(
+                    SessionLifecycleCommandResult::Applied(_)
+                )
+            ));
+            let start_gate_held: bool = sqlx::query_scalar(
+                "SELECT start_gate_held FROM session_lifecycle WHERE session_id = $1",
+            )
+            .bind(session.into_uuid())
+            .fetch_one(&fixture.core)
+            .await
+            .expect("ordinary start gate");
+            assert!(
+                !start_gate_held,
+                "the public command released the ordinary start gate"
+            );
+        }
+        assert_eq!(work.next().await.expect("input wake"), session);
+        assert_eq!(
+            start.execute(session).await.expect("eligibility pass"),
+            StartEligibleTurnOutcome::NoEligibleTurn
+        );
+        assert!(
+            repository
+                .preview(session, identities)
+                .await
+                .expect("activation preview")
+                .is_none()
+        );
+        resume.notify_one();
+        (session, origin)
+    };
+    let (provisioned, (session, origin)) = tokio::join!(provisioning, while_cloned);
+    provisioned.expect("checkout completes");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), work.next()).await??,
+        session,
+        "checkout completion wakes queued input"
+    );
+    let preview = repository
+        .preview(session, identities)
+        .await?
+        .expect("provisioned input eligible");
+    let CommitActivationPreviewOutcome::Activated(activated) =
+        repository.commit_preview(preview).await?
+    else {
+        panic!("first turn activates after provisioning");
+    };
+    assert_eq!(activated.turn(), origin.turn());
+    let status = run_git_tool(
+        &catalog,
+        &executor,
+        session,
+        activated.turn(),
+        "git_status",
+        "{}",
+    )
+    .await;
+    assert_eq!(status["branch"], "review");
+    assert_eq!(status["head"], fixture.head.as_str());
+    Ok(())
+}
+
 impl CheckoutFixture {
     async fn new() -> Result<Self, Box<dyn Error>> {
         Self::with_head_repository("checkout/project").await
@@ -599,7 +835,7 @@ async fn replay_preserves_a_provisioned_session_after_repository_removal()
     let state: (bool, bool) = sqlx::query_as(
         "SELECT state_kind = 'terminal', start_gate_held FROM session_lifecycle WHERE session_id = $1",
     ).bind(session.into_uuid()).fetch_one(&fixture.core).await?;
-    assert_eq!(state, (false, true));
+    assert_eq!(state, (false, false));
     assert_eq!(
         *fixture.runner.steps.lock().expect("steps"),
         ["clone", "fetch", "checkout"]
@@ -1076,7 +1312,7 @@ async fn dispatch_provisions_the_retained_head_at_the_git_tools_root() -> Result
             .bind(session.into_uuid())
             .fetch_one(&fixture.core)
             .await?;
-    assert!(held);
+    assert!(!held);
     let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
         .fetch_one(&fixture.core)
         .await?;
