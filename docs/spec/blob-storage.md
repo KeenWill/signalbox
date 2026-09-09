@@ -118,9 +118,8 @@ The attachment stub shown to the model is compact JSON, because ordinary JSON
 string escaping makes caller-supplied metadata data rather than stub syntax.
 
 A prepared model call carries only text, attachment stubs, and text-only
-blob-read results; no provider call materializes attachment bytes, whatever
-their size, and a blob-read result never enters a provider message as image or
-document media. Why: a durable attachment may exceed any context window, and
+blob-read results; attachment bytes never become a non-text media part in a
+provider message. Why: a durable attachment may exceed any context window, and
 replaying media into every call converts one upload into an unbounded per-turn
 cost.
 
