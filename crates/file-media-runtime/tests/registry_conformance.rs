@@ -832,7 +832,7 @@ fn streaming_text_fallback_follows_probe_and_declaration_miss() {
 }
 
 #[test]
-fn oversized_streaming_text_fallback_becomes_unknown_before_validation() {
+fn streaming_text_fallback_validates_a_prefix_of_a_larger_source() {
     let source = MemorySource::synthetic();
     let mut ceilings = FileMediaCeilings::version_one();
     ceilings.validation_source_bytes = 1;
@@ -844,11 +844,12 @@ fn oversized_streaming_text_fallback_becomes_unknown_before_validation() {
     };
 
     let outcome = inspect(&registry, &processor, &source, "unknown")
-        .expect("oversized streaming fallback becomes unknown");
+        .expect("the bounded prefix validates as text");
 
-    let FileInspection::Unknown { .. } = outcome else {
-        panic!("oversized streaming fallback must produce unknown inspection");
-    };
+    assert_eq!(
+        validated_evidence(outcome),
+        ValidationEvidence::StreamingTextValidation
+    );
 }
 
 #[test]

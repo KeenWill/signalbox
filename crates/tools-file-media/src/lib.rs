@@ -87,6 +87,19 @@ pub enum FileReadServiceInput {
 }
 
 impl FileReadServiceRequest {
+    /// Composes checked identities and one input mode; the registry validates view options.
+    pub const fn from_parts(
+        target: FileInspectServiceRequest,
+        view: ReadViewName,
+        input: FileReadServiceInput,
+    ) -> Self {
+        Self {
+            target,
+            view,
+            input,
+        }
+    }
+
     /// Borrows the visibility target.
     pub const fn target(&self) -> &FileInspectServiceRequest {
         &self.target
@@ -148,7 +161,7 @@ pub trait FileMediaAgentService: Send {
 struct FileInspectArguments {
     /// Canonical sha256: digest of a visible attachment.
     digest: String,
-    /// Visible-part selector returned by attachment inspection.
+    /// Visible-part selector carried by the rendered attachment stub.
     visible_part: Option<String>,
 }
 
@@ -171,7 +184,7 @@ struct FileReadArguments {
     options: Option<BTreeMap<String, Value>>,
     /// Opaque cursor returned by the preceding file_read result.
     continuation: Option<String>,
-    /// Visible-part selector returned by attachment inspection.
+    /// Visible-part selector carried by the rendered attachment stub.
     visible_part: Option<String>,
 }
 
@@ -200,12 +213,12 @@ impl<Service> FileMediaTools<Service> {
             .map_err(|_| FileMediaToolConstructionError::ErrorDetail)?;
         let inspect = compile_contract_definition::<FileInspectContract>(
             ToolPermissionDefault::Auto,
-            ToolEffectClass::EffectFree,
+            ToolEffectClass::ExternalEffect,
         )
         .map_err(map_contract_error)?;
         let read = compile_contract_definition::<FileReadContract>(
             ToolPermissionDefault::Auto,
-            ToolEffectClass::EffectFree,
+            ToolEffectClass::ExternalEffect,
         )
         .map_err(map_contract_error)?;
         let catalog = CompiledToolCatalog::try_new([
@@ -724,6 +737,12 @@ mod tests {
 
         assert_eq!(catalog.definitions()[0].name().as_str(), FILE_INSPECT_NAME);
         assert_eq!(catalog.definitions()[1].name().as_str(), FILE_READ_NAME);
+        assert!(
+            catalog
+                .definitions()
+                .iter()
+                .all(|definition| definition.effect_class() == ToolEffectClass::ExternalEffect)
+        );
     }
 
     #[test]

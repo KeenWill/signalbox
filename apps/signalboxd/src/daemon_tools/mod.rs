@@ -9,6 +9,8 @@ mod catalog;
 mod composed_identity;
 mod executor;
 mod families;
+mod file_media;
+pub use file_media::DaemonFileMediaExecutor;
 mod git_push;
 mod pinned_file_system;
 mod retained_workspaces;
@@ -463,6 +465,7 @@ where
                 delegation,
                 goal: goal.map(|(_, executor)| executor),
                 blob: None,
+                file_media: None,
             },
         })
     }

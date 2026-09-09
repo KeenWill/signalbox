@@ -16,10 +16,20 @@ pub const fn neutral_file_digest(
 pub struct ResolvedFileUse<Source> {/* private */}
 // derives: fmt::Debug
 impl<Source> ResolvedFileUse<Source> {
-    pub const fn new(file_use: signalbox_file_media_runtime::FileUse, source: Source) -> Self;
+    pub const fn new(
+        file_use: signalbox_file_media_runtime::FileUse,
+        source: Source,
+        selector: signalbox_file_media_runtime::VisiblePartSelector,
+    ) -> Self;
     pub const fn file_use(&self) -> &signalbox_file_media_runtime::FileUse;
     pub const fn source(&self) -> &Source;
-    pub fn into_parts(self) -> (signalbox_file_media_runtime::FileUse, Source);
+    pub fn into_parts(
+        self,
+    ) -> (
+        signalbox_file_media_runtime::FileUse,
+        Source,
+        signalbox_file_media_runtime::VisiblePartSelector,
+    );
 }
 ```
 
@@ -76,6 +86,7 @@ impl<Resolver, Processor, Cancellation>
         resolver: Resolver,
         processor: Processor,
         cancellation: Cancellation,
+        continuations: ContinuationAuthority,
     ) -> Self;
     pub const fn registry(&self) -> &signalbox_file_media_runtime::FileMediaRegistry;
 }

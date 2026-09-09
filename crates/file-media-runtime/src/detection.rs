@@ -86,7 +86,7 @@ pub enum ValidationEvidence {
     StructuralValidation,
     /// A declared candidate was independently structurally validated.
     DeclaredCandidateStructurallyValidated,
-    /// Complete streaming UTF-8 and control policy validation succeeded.
+    /// The bounded text prefix passed UTF-8 and control policy validation.
     StreamingTextValidation,
 }
 

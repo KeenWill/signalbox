@@ -68,6 +68,7 @@ pub struct DaemonToolExecutor<
     pub(super) delegation: SessionDelegationExecutor<DaemonSessionDelegationPort>,
     pub(super) goal: Option<GoalDeclarationExecutor>,
     pub(super) blob: Option<BlobToolExecutor>,
+    pub(super) file_media: Option<super::DaemonFileMediaExecutor>,
 }
 
 impl<
@@ -108,6 +109,15 @@ where
         if let Some(workspaces) = self.workspace_bound.as_mut() {
             workspaces.repository_watch = watch;
         }
+        self
+    }
+
+    /// Installs the executor whose resolver and worker composed the file declarations.
+    pub fn with_file_media_executor(
+        mut self,
+        executor: Option<super::DaemonFileMediaExecutor>,
+    ) -> Self {
+        self.file_media = executor;
         self
     }
 
@@ -294,6 +304,14 @@ where
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            signalbox_tools_file_media::FILE_INSPECT_NAME
+            | signalbox_tools_file_media::FILE_READ_NAME => {
+                self.file_media
+                    .as_mut()
+                    .ok_or_else(Self::Error::unknown_tool)?
+                    .execute(invocation)
+                    .await
+            }
             BLOB_METADATA_NAME | BLOB_READ_NAME => self
                 .blob
                 .as_mut()

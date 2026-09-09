@@ -37,6 +37,11 @@ impl FileInspectServiceRequest {
 pub struct FileReadServiceRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl FileReadServiceRequest {
+    pub const fn from_parts(
+        target: FileInspectServiceRequest,
+        view: signalbox_file_media_runtime::ReadViewName,
+        input: FileReadServiceInput,
+    ) -> Self;
     pub const fn target(&self) -> &FileInspectServiceRequest;
     pub const fn view(&self) -> &signalbox_file_media_runtime::ReadViewName;
     pub const fn options(&self) -> option::Option<&map::BTreeMap<string::String, value::Value>>;

@@ -4,6 +4,10 @@
 //! verified-source construction. It returns no store locator, path, credential,
 //! or open database transaction to the registry or processor.
 
+mod continuation;
+pub use continuation::ContinuationAuthority;
+
+use continuation::ContinuationState;
 use std::{future::Future, pin::Pin};
 
 use signalbox_domain::BlobDigest;
@@ -26,12 +30,21 @@ pub const fn neutral_file_digest(digest: BlobDigest) -> FileDigest {
 pub struct ResolvedFileUse<Source> {
     file_use: FileUse,
     source: Source,
+    selector: signalbox_file_media_runtime::VisiblePartSelector,
 }
 
 impl<Source> ResolvedFileUse<Source> {
     /// Constructs evidence returned by a visibility-authorizing resolver.
-    pub const fn new(file_use: FileUse, source: Source) -> Self {
-        Self { file_use, source }
+    pub const fn new(
+        file_use: FileUse,
+        source: Source,
+        selector: signalbox_file_media_runtime::VisiblePartSelector,
+    ) -> Self {
+        Self {
+            file_use,
+            source,
+            selector,
+        }
     }
 
     /// Borrows exact semantic use metadata.
@@ -44,9 +57,15 @@ impl<Source> ResolvedFileUse<Source> {
         &self.source
     }
 
-    /// Returns both owned parts.
-    pub fn into_parts(self) -> (FileUse, Source) {
-        (self.file_use, self.source)
+    /// Returns the exact use, range source, and resolved occurrence selector.
+    pub fn into_parts(
+        self,
+    ) -> (
+        FileUse,
+        Source,
+        signalbox_file_media_runtime::VisiblePartSelector,
+    ) {
+        (self.file_use, self.source, self.selector)
     }
 }
 
@@ -101,6 +120,7 @@ pub struct RegistryFileMediaAgentService<Resolver, Processor, Cancellation> {
     resolver: Resolver,
     processor: Processor,
     cancellation: Cancellation,
+    continuations: ContinuationAuthority,
 }
 
 impl<Resolver, Processor, Cancellation>
@@ -112,12 +132,14 @@ impl<Resolver, Processor, Cancellation>
         resolver: Resolver,
         processor: Processor,
         cancellation: Cancellation,
+        continuations: ContinuationAuthority,
     ) -> Self {
         Self {
             registry,
             resolver,
             processor,
             cancellation,
+            continuations,
         }
     }
 
@@ -140,13 +162,12 @@ where
     ) -> FileMediaAgentServiceFuture<'_, signalbox_file_media_runtime::FileInspection> {
         Box::pin(async move {
             let requested_digest = request.digest();
-            let visible_part = request.visible_part().cloned();
             let resolved = self
                 .resolver
                 .resolve(request)
                 .await
                 .map_err(FileMediaFailure::from)?;
-            let (file_use, source) = resolved.into_parts();
+            let (file_use, source, selector) = resolved.into_parts();
             if file_use.digest() != requested_digest {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
@@ -155,7 +176,7 @@ where
                     &self.processor,
                     InspectionRequest {
                         source: file_use,
-                        visible_part,
+                        visible_part: Some(selector),
                     },
                     &source,
                     &self.cancellation,
@@ -170,35 +191,79 @@ where
     ) -> FileMediaAgentServiceFuture<'_, signalbox_file_media_runtime::FileReadResult> {
         Box::pin(async move {
             let requested_digest = request.target().digest();
-            let visible_part = request.target().visible_part().cloned();
             let view = request.view().clone();
-            let input = request.clone().into_runtime_input();
-            let target =
-                FileInspectServiceRequest::from_parts(requested_digest, visible_part.clone());
+            let preceding = request
+                .continuation()
+                .map(|cursor| self.continuations.open(cursor))
+                .transpose()?;
+            let visible_part = request.target().visible_part().cloned();
             let resolved = self
                 .resolver
-                .resolve(target)
+                .resolve(FileInspectServiceRequest::from_parts(
+                    requested_digest,
+                    visible_part,
+                ))
                 .await
                 .map_err(FileMediaFailure::from)?;
-            let (file_use, source) = resolved.into_parts();
+            let (file_use, source, selector) = resolved.into_parts();
             if file_use.digest() != requested_digest {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
-            self.registry
-                .read(
+            if preceding
+                .as_ref()
+                .is_some_and(|state| !state.matches(&file_use, &selector, &view))
+            {
+                return Err(FileMediaFailure::InvalidViewArguments);
+            }
+            let input = match &preceding {
+                Some(state) => state.runtime_input()?,
+                None => request.clone().into_runtime_input(),
+            };
+            let expected_reader = preceding
+                .as_ref()
+                .map(ContinuationState::reader)
+                .transpose()?;
+            let (reader, mut result) = self
+                .registry
+                .read_with_reader(
                     &self.processor,
                     FileReadRequest {
                         inspection: InspectionRequest {
-                            source: file_use,
-                            visible_part,
+                            source: file_use.clone(),
+                            visible_part: Some(selector.clone()),
                         },
-                        view,
+                        view: view.clone(),
                         input,
                     },
                     &source,
                     &self.cancellation,
+                    expected_reader.as_ref(),
                 )
-                .await
+                .await?;
+            let continuation = match &mut result {
+                signalbox_file_media_runtime::FileReadResult::Text { continuation, .. }
+                | signalbox_file_media_runtime::FileReadResult::Structured {
+                    continuation, ..
+                } => continuation,
+            };
+            if let signalbox_file_media_runtime::ReadContinuation::More { cursor } = continuation {
+                let state = ContinuationState::new(
+                    &file_use,
+                    &selector,
+                    &view,
+                    &reader,
+                    preceding.map_or_else(
+                        || request.options().cloned().unwrap_or_default(),
+                        |state| state.options,
+                    ),
+                    cursor,
+                );
+                *cursor = self.continuations.seal(&state)?;
+            }
+            Ok(result)
         })
     }
 }
+
+#[cfg(test)]
+mod tests;
