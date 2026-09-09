@@ -34,6 +34,7 @@ def _playwright_runtime_impl(ctx):
             sha256 = sha256,
         )
         archives.append(ctx.path(archive))
+    ctx.watch(ctx.path(ctx.attr.extractor))
     result = ctx.execute([ctx.which("python3"), ctx.path(ctx.attr.extractor), ctx.path(".")] + archives, timeout = 600)
     if result.return_code:
         fail(result.stderr)
