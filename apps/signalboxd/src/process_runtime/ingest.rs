@@ -720,7 +720,6 @@ pub(super) async fn wait_for_connection_loss(reader: &ClientReader) {
     loop {
         let Ok(readiness) = reader
             .get_ref()
-            .get_ref()
             .ready(Interest::READABLE | Interest::WRITABLE)
             .await
         else {

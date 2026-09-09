@@ -175,19 +175,22 @@ permit and before application handling.
 The daemon exports an active-client-connection gauge and warns once on entering
 each saturation episode; it pauses acceptance at the ceiling. The required
 `client_frame_deadline` bounds frame completion from the first received byte,
-including admission wait, and `client_write_progress_deadline` bounds a write
-that makes no progress. Expiry closes the connection. Neither bound limits idle
-connections or idle follow streams; `"none"` disables the corresponding bound.
+including admission wait and buffered input awaiting earlier request handling,
+and `client_write_progress_deadline` bounds a write that makes no progress.
+Read-ahead remains bounded and does not defer expiry when full. Expiry closes
+the connection. Neither bound limits idle connections or idle follow streams;
+`"none"` disables the corresponding bound.
 
 SIGINT or SIGTERM stops admission and drains runtime work under the configured
 shutdown grace window. A subsequent termination signal interrupts that drain,
 aborts remaining runtime tasks, and proceeds immediately to cleanup.
 
 Every accepted non-review mutation, import transport request, or blob transport
-request produces exactly one receipt message or an error, except an import or
-blob request that crosses its non-resetting deadline and is closed without one.
-A mutation whose commit outcome is unknown returns `commit_ambiguous`; an
-infrastructure failure known to precede the commit returns `unavailable`.
+request produces exactly one receipt message or an error, except when a
+connection deadline expires or an import or blob request crosses its
+non-resetting deadline and closes the connection. A mutation whose commit
+outcome is unknown returns `commit_ambiguous`; an infrastructure failure known
+to precede the commit returns `unavailable`.
 
 The client, never the server, supplies a durable-command mutation's command
 identity, so an equal retransmission reaches the replay boundary in

@@ -996,7 +996,7 @@ pub(crate) mod tests {
     {
         let (mut client, server) = UnixStream::pair()?;
         let (reader, _writer) = server.into_split();
-        let mut reader = BufReader::new(super::client_io::ArrivalReader::new(reader));
+        let mut reader = super::client_io::ArrivalReader::new(reader);
         client.write_all(b"pipelined request").await?;
         assert_eq!(reader.fill_buf().await?, b"pipelined request");
         drop(client);
@@ -1154,7 +1154,7 @@ pub(crate) mod tests {
         let budget = Arc::new(Semaphore::new(1));
         let (mut client, server) = tokio::net::UnixStream::pair()?;
         let (server, _writer) = server.into_split();
-        let mut reader = BufReader::new(super::client_io::ArrivalReader::new(server));
+        let mut reader = super::client_io::ArrivalReader::new(server);
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
         let acquire = read_admitted_frame(
             &mut reader,

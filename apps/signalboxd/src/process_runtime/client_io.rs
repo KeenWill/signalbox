@@ -1,6 +1,8 @@
 //! Client input arrival and write-progress deadlines for the local process protocol.
 
+use futures_util::task::AtomicWaker;
 use std::{
+    collections::VecDeque,
     future::Future,
     io,
     pin::Pin,
@@ -9,30 +11,44 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite, Interest, ReadBuf},
+    io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf},
     net::{UnixStream, unix::OwnedReadHalf},
     sync::watch,
     time::{Instant, Sleep, sleep},
 };
 
-/// Retains socket readiness times across request handling and buffer refills.
-pub(super) struct ArrivalReader {
-    reader: Arc<OwnedReadHalf>,
-    unread_since: watch::Sender<Option<UnreadInput>>,
-    pub(super) received_at: Instant,
+use super::INBOUND_READ_AHEAD_BYTES;
+
+struct InputChunk {
+    bytes: Box<[u8]>,
+    received_at: Instant,
 }
 
-#[derive(Clone, Copy)]
-struct UnreadInput {
-    received_at: Instant,
-    remaining_bytes: u64,
+#[derive(Default)]
+struct ReadAhead {
+    chunks: VecDeque<Arc<InputChunk>>,
+    bytes: usize,
+    eof: bool,
+}
+
+/// Shares bounded, timestamped read-ahead with the connection's input collector.
+pub(super) struct ArrivalReader {
+    reader: Arc<OwnedReadHalf>,
+    input: watch::Sender<ReadAhead>,
+    readable: Arc<AtomicWaker>,
+    current: Option<Arc<InputChunk>>,
+    offset: usize,
+    pub(super) received_at: Instant,
 }
 
 impl ArrivalReader {
     pub(super) fn new(reader: OwnedReadHalf) -> Self {
         Self {
             reader: Arc::new(reader),
-            unread_since: watch::channel(None).0,
+            input: watch::channel(ReadAhead::default()).0,
+            readable: Arc::new(AtomicWaker::new()),
+            current: None,
+            offset: 0,
             received_at: Instant::now(),
         }
     }
@@ -41,139 +57,147 @@ impl ArrivalReader {
         &self.reader
     }
 
-    /// Poll alongside all connection work, including admission and request handling.
-    pub(super) fn watch_readiness(&self) -> impl Future<Output = io::Result<()>> + use<> {
+    pub(super) fn buffer(&self) -> &[u8] {
+        self.current
+            .as_ref()
+            .map_or(&[], |chunk| &chunk.bytes[self.offset..])
+    }
+
+    /// Collect while requests execute; buffered admission waits keep their deadlines.
+    pub(super) fn collect_input(
+        &self,
+        bound: Option<Duration>,
+    ) -> impl Future<Output = io::Result<()>> + use<> {
         let reader = self.reader.clone();
-        let unread_since = self.unread_since.clone();
-        let mut changes = unread_since.subscribe();
+        let input = self.input.clone();
+        let readable = self.readable.clone();
+        let mut changes = input.subscribe();
         async move {
             loop {
-                if changes.borrow_and_update().is_some() {
-                    // Do not spin on level readiness while these bytes remain unread.
-                    let _ = changes.changed().await;
-                    continue;
+                let (can_read, deadline) = {
+                    let queued = changes.borrow_and_update();
+                    (
+                        !queued.eof && queued.bytes < INBOUND_READ_AHEAD_BYTES,
+                        bound.and_then(|bound| {
+                            queued.chunks.front().map(|chunk| chunk.received_at + bound)
+                        }),
+                    )
+                };
+                tokio::select! {
+                    biased;
+                    _ = changes.changed() => {}
+                    () = super::wait_for_deadline(deadline) => {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "client frame deadline elapsed"));
+                    }
+                    ready = reader.readable(), if can_read => {
+                        ready?;
+                        match collect_ready_input(reader.as_ref().as_ref(), &input, &readable) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
                 }
-                let socket = reader.as_ref().as_ref();
-                let available = socket
-                    .async_io(Interest::READABLE, || peek_input(socket))
-                    .await?;
-                if available == 0 {
-                    // A write-half close does not end a follow stream or pending receipt.
-                    return std::future::pending().await;
-                }
-                record_input_arrival(socket, &unread_since)?;
             }
         }
     }
-
-    fn try_read_batch(
-        &mut self,
-        capacity: usize,
-        read: impl FnOnce(&UnixStream, usize) -> io::Result<usize>,
-    ) -> io::Result<usize> {
-        let socket = self.reader.as_ref().as_ref();
-        let mut result = Ok(0);
-        self.unread_since.send_modify(|input| {
-            result = (|| {
-                if input.is_none() {
-                    *input = queued_input(socket)?;
-                }
-                let received_at = input.map_or_else(Instant::now, |input| input.received_at);
-                let limit = input.map_or(capacity, |input| {
-                    capacity.min(usize::try_from(input.remaining_bytes).unwrap_or(usize::MAX))
-                });
-                match read(socket, limit) {
-                    Ok(read) => {
-                        if read > 0 {
-                            self.received_at = received_at;
-                        }
-                        if let Some(batch) = input {
-                            batch.remaining_bytes -= read as u64;
-                            if read == 0 || batch.remaining_bytes == 0 {
-                                *input = None;
-                            }
-                        }
-                        Ok(read)
-                    }
-                    Err(error) => {
-                        if error.kind() == io::ErrorKind::WouldBlock {
-                            *input = None;
-                        }
-                        Err(error)
-                    }
-                }
-            })();
-        });
-        result
-    }
 }
 
-fn queued_input(socket: &UnixStream) -> io::Result<Option<UnreadInput>> {
-    let remaining_bytes = rustix::io::ioctl_fionread(socket)?;
-    Ok((remaining_bytes > 0).then(|| UnreadInput {
-        received_at: Instant::now(),
-        remaining_bytes,
-    }))
-}
-
-fn record_input_arrival(
+fn collect_ready_input(
     socket: &UnixStream,
-    unread_since: &watch::Sender<Option<UnreadInput>>,
+    input: &watch::Sender<ReadAhead>,
+    readable: &AtomicWaker,
 ) -> io::Result<()> {
     let mut result = Ok(());
-    unread_since.send_if_modified(|since| {
-        if since.is_some() {
+    let changed = input.send_if_modified(|queued| {
+        if queued.eof || queued.bytes == INBOUND_READ_AHEAD_BYTES {
             return false;
         }
-        // Snapshot the byte count under the same lock used to consume this batch.
-        match queued_input(socket) {
-            Ok(input) => {
-                *since = input;
-                since.is_some()
+        let mut bytes = vec![0; INBOUND_READ_AHEAD_BYTES - queued.bytes];
+        match socket.try_read(&mut bytes) {
+            Ok(0) => queued.eof = true,
+            Ok(read) => {
+                bytes.truncate(read);
+                queued.bytes += read;
+                queued.chunks.push_back(Arc::new(InputChunk {
+                    bytes: bytes.into_boxed_slice(),
+                    received_at: Instant::now(),
+                }));
             }
             Err(error) => {
                 result = Err(error);
-                false
+                return false;
             }
         }
+        true
     });
+    if changed {
+        readable.wake();
+    }
     result
 }
 
-fn peek_input(socket: &UnixStream) -> io::Result<usize> {
-    use rustix::net::{RecvFlags, recv};
-    recv(
-        socket,
-        &mut [0_u8; 1],
-        RecvFlags::PEEK | RecvFlags::DONTWAIT,
-    )
-    .map(|(read, _)| read)
-    .map_err(Into::into)
-}
-
-impl AsyncRead for ArrivalReader {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
+impl AsyncBufRead for ArrivalReader {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let this = self.get_mut();
-        if buffer.remaining() == 0 {
-            return Poll::Ready(Ok(()));
-        }
-        loop {
+        while this.current.is_none() {
+            this.readable.register(cx.waker());
+            let (front, eof) = {
+                let queued = this.input.borrow();
+                (queued.chunks.front().cloned(), queued.eof)
+            };
+            if let Some(chunk) = front {
+                this.received_at = chunk.received_at;
+                this.current = Some(chunk);
+                break;
+            }
+            if eof {
+                return Poll::Ready(Ok(&[]));
+            }
             std::task::ready!(this.reader.as_ref().as_ref().poll_read_ready(cx))?;
-            match this.try_read_batch(buffer.remaining(), |socket, limit| {
-                socket.try_read(buffer.initialize_unfilled_to(limit))
-            }) {
-                Ok(read) => {
-                    buffer.advance(read);
-                    return Poll::Ready(Ok(()));
-                }
+            match collect_ready_input(this.reader.as_ref().as_ref(), &this.input, &this.readable) {
+                Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => return Poll::Ready(Err(error)),
             }
         }
+        Poll::Ready(Ok(this.buffer()))
+    }
+
+    fn consume(self: Pin<&mut Self>, amount: usize) {
+        let this = self.get_mut();
+        let Some(chunk) = this.current.as_ref() else {
+            return;
+        };
+        this.offset += amount.min(chunk.bytes.len() - this.offset);
+        if this.offset == chunk.bytes.len() {
+            this.current = None;
+            this.offset = 0;
+            this.input.send_modify(|queued| {
+                let consumed = queued
+                    .chunks
+                    .pop_front()
+                    .expect("current input stays queued until consumed");
+                queued.bytes -= consumed.bytes.len();
+            });
+        }
+    }
+}
+
+impl AsyncRead for ArrivalReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if buffer.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let available = std::task::ready!(self.as_mut().poll_fill_buf(cx))?;
+        let read = available.len().min(buffer.remaining());
+        buffer.put_slice(&available[..read]);
+        self.consume(read);
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -242,80 +266,134 @@ impl<Writer: AsyncWrite + Unpin> AsyncWrite for ProgressWriter<Writer> {
 mod tests {
     use super::*;
     use crate::process_runtime::{IncomingLine, connection::read_admitted_frame};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
     use tokio::sync::Semaphore;
     use tokio::time::timeout;
 
-    #[tokio::test(start_paused = true)]
-    async fn input_arriving_after_a_read_does_not_inherit_the_drained_batch_deadline() {
-        let (mut client, server) = UnixStream::pair().unwrap();
-        let (server, _writer) = server.into_split();
-        let mut reader = ArrivalReader::new(server);
-        let observer = reader.reader.clone();
-        let socket = observer.as_ref().as_ref();
-        client.write_all(b"b").await.unwrap();
-        socket.readable().await.unwrap();
-        record_input_arrival(socket, &reader.unread_since).unwrap();
-        sleep(Duration::from_millis(900)).await;
-
-        let mut consumed = [0; 1];
-        reader
-            .try_read_batch(consumed.len(), |socket, limit| {
-                let read = socket.try_read(&mut consumed[..limit])?;
-                // C arrives after B drains, before the reader updates its marker.
-                assert_eq!(client.try_write(b"{}\n")?, 3);
-                Ok(read)
-            })
-            .unwrap();
-        assert_eq!(&consumed, b"b");
-        record_input_arrival(socket, &reader.unread_since).unwrap();
-        sleep(Duration::from_millis(200)).await;
-
-        let mut reader = BufReader::new(reader);
-        let (_shutdown, mut shutdown) = watch::channel(false);
-        let (_, frame) = read_admitted_frame(
-            &mut reader,
-            Arc::new(Semaphore::new(1)),
-            &mut shutdown,
-            Some(Duration::from_secs(1)),
-        )
-        .await
-        .expect("C has its own deadline despite B's expired arrival timestamp")
-        .unwrap();
-        assert!(matches!(frame, IncomingLine::Complete(bytes) if bytes == b"{}\n"));
+    async fn wait_for_chunks(changes: &mut watch::Receiver<ReadAhead>, count: usize) {
+        loop {
+            if changes.borrow().chunks.len() >= count {
+                return;
+            }
+            changes.changed().await.unwrap();
+        }
     }
 
     #[tokio::test(start_paused = true)]
-    async fn drained_peek_does_not_age_input_arriving_after_an_idle_gap() {
+    async fn later_frame_keeps_its_arrival_while_an_earlier_frame_is_unread() {
         let (mut client, server) = UnixStream::pair().unwrap();
         let (server, _writer) = server.into_split();
         let mut reader = ArrivalReader::new(server);
-        let observer = reader.reader.clone();
-        let socket = observer.as_ref().as_ref();
+        let bound = Duration::from_secs(1);
+        let collector = reader.collect_input(Some(bound));
+        let mut arrivals = reader.input.subscribe();
+        tokio::select! {
+            biased;
+            result = collector => panic!("collector ended before frames were read: {result:?}"),
+            () = async {
+                // Drive real socket readiness with a running clock, then control only the waits.
+                tokio::time::resume();
+                client.write_all(b"{}\n").await.unwrap();
+                wait_for_chunks(&mut arrivals, 1).await;
+                tokio::time::pause();
+                sleep(Duration::from_millis(400)).await;
+                tokio::time::resume();
+                client.write_all(b"{").await.unwrap();
+                wait_for_chunks(&mut arrivals, 2).await;
+                tokio::time::pause();
+                let later_arrival = arrivals.borrow().chunks.back().unwrap().received_at;
+                // The first frame stays unread throughout the later byte's arrival.
+                sleep(Duration::from_millis(400)).await;
+                let budget = Arc::new(Semaphore::new(1));
+                let (_shutdown, mut shutdown) = watch::channel(false);
+                let first = read_admitted_frame(&mut reader, budget.clone(), &mut shutdown, Some(bound))
+                    .await.unwrap().unwrap();
+                assert!(matches!(&first.1, IncomingLine::Complete(bytes) if bytes == b"{}\n"));
+                drop(first);
+                let error = read_admitted_frame(&mut reader, budget, &mut shutdown, Some(bound))
+                    .await.err().expect("the later partial frame expires");
+                assert!(matches!(error, crate::process_runtime::ProcessConnectionError::PeerIo(error)
+                    if error.kind() == io::ErrorKind::TimedOut));
+                assert!(later_arrival.elapsed() >= bound);
+                assert!(later_arrival.elapsed() < bound + Duration::from_millis(2));
+            } => {}
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_drained_buffer_cancels_its_queued_deadline() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let (server, _writer) = server.into_split();
+        let mut reader = ArrivalReader::new(server);
+        let collector = reader.collect_input(Some(Duration::from_secs(1)));
+        tokio::pin!(collector);
         client.write_all(b"a").await.unwrap();
-        assert_eq!(
-            socket
-                .async_io(Interest::READABLE, || peek_input(socket))
+        assert!(
+            timeout(Duration::from_millis(900), &mut collector)
                 .await
-                .unwrap(),
-            1
+                .is_err()
         );
-
-        // The read wins between the watcher's successful peek and marker publication.
         assert_eq!(reader.read_u8().await.unwrap(), b'a');
-        record_input_arrival(socket, &reader.unread_since).unwrap();
-        sleep(Duration::from_secs(60)).await;
-        client.write_all(b"b").await.unwrap();
-        assert_eq!(reader.read_u8().await.unwrap(), b'b');
-        assert_eq!(reader.received_at, Instant::now());
+        tokio::time::advance(Duration::from_millis(200)).await;
+        assert!(
+            timeout(Duration::from_secs(60), &mut collector)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn socket_arrival_survives_short_reads_until_the_receive_buffer_drains() {
+    async fn full_read_ahead_preserves_expiry_while_the_consumer_waits() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let (server, _writer) = server.into_split();
+        let reader = ArrivalReader::new(server);
+        client
+            .write_all(&vec![b'x'; INBOUND_READ_AHEAD_BYTES * 2])
+            .await
+            .unwrap();
+        let bound = Duration::from_secs(1);
+        let started = Instant::now();
+        let error = reader.collect_input(Some(bound)).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(started.elapsed(), bound);
+        assert_eq!(reader.input.borrow().bytes, INBOUND_READ_AHEAD_BYTES);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_later_chunk_does_not_inherit_the_drained_chunk_deadline() {
         let (mut client, server) = UnixStream::pair().unwrap();
         let (server, _writer) = server.into_split();
         let mut reader = ArrivalReader::new(server);
-        let readiness = reader.watch_readiness();
+        let collector = reader.collect_input(None);
+        let mut arrivals = reader.input.subscribe();
+        tokio::select! {
+            biased;
+            result = collector => panic!("collector ended: {result:?}"),
+            () = async {
+                let budget = Arc::new(Semaphore::new(1));
+                let (_shutdown, mut shutdown) = watch::channel(false);
+                let bound = Duration::from_secs(1);
+                client.write_all(b"{}\n").await.unwrap();
+                wait_for_chunks(&mut arrivals, 1).await;
+                sleep(Duration::from_millis(900)).await;
+                drop(read_admitted_frame(&mut reader, budget.clone(), &mut shutdown, Some(bound))
+                    .await.unwrap().unwrap());
+                client.write_all(b"{}\n").await.unwrap();
+                wait_for_chunks(&mut arrivals, 1).await;
+                sleep(Duration::from_millis(200)).await;
+                let (_, frame) = read_admitted_frame(&mut reader, budget, &mut shutdown, Some(bound))
+                    .await.expect("the later frame has its own deadline").unwrap();
+                assert!(matches!(frame, IncomingLine::Complete(bytes) if bytes == b"{}\n"));
+            } => {}
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn input_chunk_retains_its_timestamp_across_short_reads() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let (server, _writer) = server.into_split();
+        let mut reader = ArrivalReader::new(server);
+        let readiness = reader.collect_input(None);
         tokio::select! {
             biased;
             result = readiness => panic!("readiness watcher ended: {result:?}"),
