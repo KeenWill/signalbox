@@ -2706,7 +2706,7 @@ async fn model_goal_declaration_is_the_final_response_part() -> Result<(), Box<d
             session(SESSION),
             GoalReport::try_new(report_text).expect("fixture report is admitted"),
             provenance,
-            signalbox_domain::FinishCheckVerdict::Unverified,
+            |_, _| std::future::ready(FinishCheckVerdict::Unverified),
         )
         .await
         .expect_err("a nonfinal declaration cannot source a goal event");
@@ -2769,7 +2769,7 @@ async fn a_committed_closure_refuses_late_model_achievement() -> Result<(), Box<
             session(SESSION),
             GoalReport::try_new(report).expect("fixture report is admitted"),
             GoalModelProvenance::new(attached_turn.turn(), declaration_request),
-            signalbox_domain::FinishCheckVerdict::Unverified,
+            |_, _| std::future::ready(FinishCheckVerdict::Unverified),
         )
         .await?;
 
@@ -2841,7 +2841,7 @@ async fn model_goal_declaration_carries_full_report_bound() -> Result<(), Box<dy
                 session(SESSION),
                 report,
                 GoalModelProvenance::new(attached_turn.turn(), request),
-                signalbox_domain::FinishCheckVerdict::Unverified,
+                |_, _| std::future::ready(FinishCheckVerdict::Unverified),
             )
             .await?,
     );
@@ -5045,6 +5045,152 @@ async fn attach_and_declare(
     Ok((turn, GoalModelProvenance::new(turn, declaration_request)))
 }
 
+/// Adoption's condition is evaluated while the committing transition holds the
+/// session lock, including when the declaration started behind adoption.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_adoption_gates_achievement_on_the_locked_finish_check()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::FinishCondition;
+    use tokio::{
+        sync::oneshot,
+        time::{Duration, timeout},
+    };
+
+    const FIXTURE_COMMAND: u128 = 0x9c5;
+    const FIXTURE_CANDIDATES: u128 = 0xbc5;
+    const FIXTURE_REQUEST: u128 = 0xfc5;
+    const CHECK_FAILURE: &str = "The adopted external gate is still open";
+    const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+    let (_container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let (_, provenance) = attach_and_declare(
+        &pool,
+        FIXTURE_COMMAND,
+        FIXTURE_CANDIDATES,
+        FIXTURE_REQUEST,
+        true,
+    )
+    .await?;
+    let commands = SessionLifecycleCommandRepository::new(pool.clone());
+    let release = || {
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            session(SESSION),
+            SessionLifecycleOperation::Release,
+        )
+    };
+    assert!(matches!(
+        commands
+            .handle(release(), CommandPrincipal::Operator)
+            .await?,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(_))
+    ));
+    let mut blocker = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(session(SESSION).into_uuid())
+        .execute(&mut *blocker)
+        .await?;
+    let adoption = tokio::spawn({
+        let commands = commands.clone();
+        async move {
+            commands
+                .handle(
+                    SessionLifecycleCommand::new(
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                        session(SESSION),
+                        SessionLifecycleOperation::Adopt {
+                            finish_condition: Some(FinishCondition::ExternalGate),
+                        },
+                    ),
+                    CommandPrincipal::Operator,
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "adoption waits on the session lock"
+    );
+    let (observed, condition) = oneshot::channel();
+    let (finish, evaluation) = oneshot::channel();
+    let declaration = tokio::spawn({
+        let repository = repository.clone();
+        async move {
+            repository
+                .declare_achieved(
+                    session(SESSION),
+                    GoalReport::try_new(String::from("the fixture work is finished"))
+                        .expect("fixture report"),
+                    provenance,
+                    |condition, _| async move {
+                        observed
+                            .send(condition)
+                            .expect("test receives the evaluated condition");
+                        evaluation.await.expect("test releases evaluation");
+                        FinishCheckVerdict::Failed {
+                            detail: String::from(CHECK_FAILURE),
+                        }
+                    },
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 2).await?,
+        "declaration also waits before evaluation"
+    );
+    blocker.rollback().await?;
+    assert!(matches!(
+        timeout(TEST_TIMEOUT, adoption).await???,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(_))
+    ));
+    assert_eq!(
+        timeout(TEST_TIMEOUT, condition).await??,
+        Some(FinishCondition::ExternalGate)
+    );
+    assert_eq!(
+        repository
+            .load_goal(session(SESSION))
+            .await?
+            .expect("attached goal")
+            .current()
+            .state(),
+        &GoalState::Pursuing
+    );
+    let releasing = tokio::spawn({
+        let command = release();
+        async move { commands.handle(command, CommandPrincipal::Operator).await }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the session lock is held throughout evaluation"
+    );
+    finish.send(()).expect("check is in flight");
+    assert_applied_transition(timeout(TEST_TIMEOUT, declaration).await???);
+    assert!(matches!(
+        timeout(TEST_TIMEOUT, releasing).await???,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(_))
+    ));
+    assert_eq!(
+        repository
+            .load_goal(session(SESSION))
+            .await?
+            .expect("attached goal")
+            .current()
+            .state(),
+        &GoalState::Blocked {
+            reason: signalbox_domain::GoalBlockedReasonKind::FinishCheckFailed,
+            need: GoalNeed::try_new(String::from(CHECK_FAILURE))?,
+        },
+    );
+    pool.close().await;
+    Ok(())
+}
+
 /// A failing finish check appends no achievement, keeps
 /// the goal pursuing, and leaves its detail for the failure that follows.
 #[tokio::test(flavor = "multi_thread")]
@@ -5062,8 +5208,10 @@ async fn a_failing_finish_check_blocks_the_goal_with_its_result() -> Result<(), 
             session(SESSION),
             GoalReport::try_new(String::from("the fixture work is finished"))?,
             provenance,
-            FinishCheckVerdict::Failed {
-                detail: String::from("two review threads are unresolved"),
+            |_, _| {
+                std::future::ready(FinishCheckVerdict::Failed {
+                    detail: String::from("two review threads are unresolved"),
+                })
             },
         )
         .await?;
@@ -5111,7 +5259,7 @@ async fn a_passing_finish_check_settles_achieved_verified() -> Result<(), Box<dy
                 session(SESSION),
                 GoalReport::try_new(String::from("the fixture work is finished"))?,
                 provenance,
-                FinishCheckVerdict::Passed,
+                |_, _| std::future::ready(FinishCheckVerdict::Passed),
             )
             .await?,
     );
@@ -5151,7 +5299,7 @@ async fn a_declared_achievement_settles_achieved_declared() -> Result<(), Box<dy
                 session(SESSION),
                 GoalReport::try_new(String::from("the fixture work is finished"))?,
                 provenance,
-                FinishCheckVerdict::Unverified,
+                |_, _| std::future::ready(FinishCheckVerdict::Unverified),
             )
             .await?,
     );

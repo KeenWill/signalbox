@@ -1039,17 +1039,28 @@ impl GoalRepository {
         .await
     }
 
-    /// Appends a model-declared achievement gated on its finish check: a
-    /// passing verdict commits `achieved_verified` to the session's terminal
-    /// handoff, an unverified one `achieved_declared`, a failing one nothing.
-    pub async fn declare_achieved(
+    /// Evaluates the current finish condition and commits the model-declared
+    /// achievement or failed-check block under the same session lock.
+    pub async fn declare_achieved<Check, Checked>(
         &self,
         session: SessionId,
         report: GoalReport,
         provenance: GoalModelProvenance,
-        verdict: FinishCheckVerdict,
-    ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
-        self.handle_system_transition(
+        check: Check,
+    ) -> Result<GoalTransitionOutcome, GoalRepositoryError>
+    where
+        Check: FnOnce(Option<FinishCondition>, GoalReport) -> Checked,
+        Checked: std::future::Future<Output = FinishCheckVerdict>,
+    {
+        let mut transaction = self.pool.begin().await?;
+        if !lock_session(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::GoalNotAttached);
+        }
+        let condition = Self::load_finish_condition(&mut transaction, session).await?;
+        let verdict = check(condition, report.clone()).await;
+        self.handle_locked_system_transition(
+            transaction,
             session,
             SystemTransition::Achieved {
                 report,
@@ -1060,9 +1071,8 @@ impl GoalRepository {
         .await
     }
 
-    /// Loads the finish condition one session declares.
-    pub async fn load_finish_condition(
-        &self,
+    async fn load_finish_condition(
+        connection: &mut PgConnection,
         session: SessionId,
     ) -> Result<Option<FinishCondition>, GoalRepositoryError> {
         let row = sqlx::query(
@@ -1071,7 +1081,7 @@ impl GoalRepository {
               WHERE session_id = $1",
         )
         .bind(session_id_to_uuid(session))
-        .fetch_optional(&self.pool)
+        .fetch_optional(connection)
         .await?;
         let Some(row) = row else {
             return Ok(None);
@@ -1124,13 +1134,23 @@ impl GoalRepository {
     async fn handle_system_transition(
         &self,
         session: SessionId,
-        mut transition: SystemTransition,
+        transition: SystemTransition,
     ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         if !lock_session(&mut transaction, session).await? {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
         }
+        self.handle_locked_system_transition(transaction, session, transition)
+            .await
+    }
+
+    async fn handle_locked_system_transition(
+        &self,
+        mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+        session: SessionId,
+        mut transition: SystemTransition,
+    ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
         if let SystemTransition::ExecutionFailure {
             need,
             unmonitored_need,
