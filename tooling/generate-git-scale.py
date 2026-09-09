@@ -16,6 +16,8 @@ def git(root, *args, input=None):
 
 
 def generate(root, object_count, pack_bytes, blob_bytes, tracked_bytes, branches):
+    if not 0 < blob_bytes <= tracked_bytes <= pack_bytes:
+        raise ValueError("require 0 < blob_bytes <= tracked_bytes <= pack_bytes")
     root.mkdir(parents=True, exist_ok=False)
     git(root, "init", "--initial-branch=main")
     administration = root / ".git"
