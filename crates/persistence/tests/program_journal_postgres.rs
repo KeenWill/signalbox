@@ -1554,3 +1554,52 @@ async fn cancellation_prevents_accepting_a_pending_terminal_request() -> Result<
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unfinished_registered_runs_exclude_terminal_outcomes_and_bare_streams()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::ProgramRegistrationId;
+    use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+
+    let (_database, pool) = migrated_postgres().await?;
+    let registrations = ProgramRegistrationRepository::new(pool.clone());
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let registration = registrations
+        .register_user(
+            ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            registration_request("recovery"),
+        )
+        .await?;
+    let empty = ProgramRunId::from_uuid(Uuid::now_v7());
+    let waiting = ProgramRunId::from_uuid(Uuid::now_v7());
+    let succeeded = ProgramRunId::from_uuid(Uuid::now_v7());
+    let cancelled = ProgramRunId::from_uuid(Uuid::now_v7());
+    let faulted = ProgramRunId::from_uuid(Uuid::now_v7());
+    for run in [empty, waiting, succeeded, cancelled, faulted] {
+        registrations
+            .start_run(run, registration.id, b"input")
+            .await?;
+    }
+    journal
+        .create_stream(ProgramRunId::from_uuid(Uuid::now_v7()))
+        .await?;
+    journal
+        .append_request(waiting, None, RequestKind::Now(payload(b"clock")))
+        .await?;
+    journal
+        .complete_if_tail(succeeded, 0, payload(b"result"))
+        .await?;
+    journal
+        .append_delivery(cancelled, DeliveryKind::RunCancel(payload(b"cancel")))
+        .await?;
+    journal
+        .append_delivery(
+            faulted,
+            DeliveryKind::Fault(ProgramFault::ProgramError(payload(b"fault"))),
+        )
+        .await?;
+    assert_eq!(registrations.unfinished_runs().await?, vec![empty, waiting]);
+    pool.close().await;
+    Ok(())
+}

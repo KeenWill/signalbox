@@ -5026,6 +5026,7 @@ dependencies = [
  "signalbox-tools-web",
  "signalbox-tools-workspace",
  "signalbox-web-contract",
+ "signalbox-workflow-runtime",
  "sqlx",
  "tempfile",
  "testcontainers-modules",

@@ -86,6 +86,7 @@ pub mod usage_limits;
 mod web_blob_runtime;
 pub mod web_http;
 mod web_imports;
+pub mod workflows;
 mod workspace_instruction_runtime;
 
 pub use attachment_preparation_runtime::AttachmentPreparingModelCallProvider;

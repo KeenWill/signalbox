@@ -69,6 +69,26 @@ impl ProgramRegistrationRepository {
         Self { pool }
     }
 
+    /// Registered runs without cancellation, fault, or accepted success, for startup recovery.
+    pub async fn unfinished_runs(&self) -> Result<Vec<ProgramRunId>, ProgramRegistrationError> {
+        let runs: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT run.run_id FROM program_run_registration AS run
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM program_run_journal_entry AS delivery
+                 WHERE delivery.run_id = run.run_id
+                   AND (delivery.frame_kind IN ('run_cancel', 'fault')
+                     OR (delivery.frame_kind = 'answer' AND EXISTS (
+                         SELECT 1 FROM program_run_journal_entry AS request
+                         WHERE request.run_id = run.run_id AND request.frame_kind = 'terminal'
+                           AND request.request_ordinal = delivery.resolves_request_ordinal
+                     )))
+             ) ORDER BY run.run_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(runs.into_iter().map(ProgramRunId::from_uuid).collect())
+    }
+
     /// Registers exact source bytes and a stripped artifact at the user boundary.
     pub async fn register_user(
         &self,
