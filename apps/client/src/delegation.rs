@@ -165,6 +165,7 @@ pub(crate) fn delegation_rejection_matches(
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
         | RejectionDetail::InterruptAlreadyApplied { .. }
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
+        | RejectionDetail::GoalStopAwaitingApproval { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
         | RejectionDetail::ToolRequestAwaitingApprovalJudge { .. }
