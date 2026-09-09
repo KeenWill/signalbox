@@ -481,7 +481,7 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Compaction', body.compaction_id],
               ['Model call', body.model_call_id],
               ['Summary entry', body.summary_entry_id],
-              ['Result position', body.result_frontier_id],
+              ['Result ID', body.result_frontier_id],
               ['Up to position', body.through_position],
             ]}
           />
@@ -510,7 +510,7 @@ const detailContent = (body: DetailBody): ReactNode => {
                 : body.operation.tool_attempt_id,
             ],
             ['Kind', enumLabel(body.operation.type)],
-            ['Final position', body.terminal_frontier_id],
+            ['Final ID', body.terminal_frontier_id],
           ]}
         />
       )
