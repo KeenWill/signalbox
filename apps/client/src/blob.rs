@@ -404,10 +404,16 @@ pub(crate) async fn read_blob_chunk(
         ServerMessage::BlobChunkRead {
             digest: returned_digest,
             offset_bytes: returned_offset,
+            blob_length_bytes,
             bytes,
         } if returned_digest == digest
             && returned_offset == offset_bytes
-            && u64::try_from(bytes.as_bytes().len()) == Ok(length_bytes.value()) =>
+            && u64::try_from(bytes.as_bytes().len())
+                == Ok(length_bytes.value().min(
+                    blob_length_bytes
+                        .value()
+                        .saturating_sub(offset_bytes.value()),
+                )) =>
         {
             Ok(bytes.into_bytes())
         }

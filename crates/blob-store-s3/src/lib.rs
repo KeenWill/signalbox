@@ -694,54 +694,46 @@ impl S3BlobStore {
         if length == 0 || length > MAX_BLOB_RANGE_BYTES {
             return Err(BlobStoreError::unavailable("validate S3 object range"));
         }
-        let end = offset
-            .checked_add(length)
-            .filter(|end| *end <= expected.byte_length())
-            .ok_or_else(|| BlobStoreError::unavailable("validate S3 object range"))?;
-        let capacity = usize::try_from(length)
-            .map_err(|_| BlobStoreError::unavailable("allocate S3 object range"))?;
-        let credentials = self.credentials().await?;
-        self.ensure_namespace_ready(&credentials).await?;
-        let response = self.open_response(&credentials, key).await?;
-        let mut reader = response_reader(response);
-        let mut hasher = Sha256::new();
-        let mut retained = Vec::with_capacity(capacity);
-        let mut observed_length = 0_u64;
-        let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
-        loop {
-            let count = reader.read(&mut buffer).await.map_err(|_| {
-                BlobStoreError::io("read S3 range verification", SanitizedS3Failure)
-            })?;
-            if count == 0 {
-                break;
-            }
-            let chunk_start = observed_length;
-            observed_length = observed_length.saturating_add(count as u64);
-            if observed_length > expected.byte_length() {
-                return Err(BlobStoreError::verification(
-                    "verify S3 object range",
-                    BlobVerificationFailure::new(expected, None, observed_length),
-                ));
-            }
-            hasher.update(&buffer[..count]);
-            let retain_start = offset.max(chunk_start);
-            let retain_end = end.min(observed_length);
-            if retain_start < retain_end {
-                let local_start = usize::try_from(retain_start - chunk_start)
-                    .map_err(|_| BlobStoreError::unavailable("retain S3 object range"))?;
-                let local_end = usize::try_from(retain_end - chunk_start)
-                    .map_err(|_| BlobStoreError::unavailable("retain S3 object range"))?;
-                retained.extend_from_slice(&buffer[local_start..local_end]);
-            }
-        }
-        let observed_digest = BlobDigest::from_bytes(hasher.finalize().into());
-        if observed_length != expected.byte_length() || observed_digest != expected.digest() {
-            return Err(BlobStoreError::verification(
-                "verify S3 object range",
-                BlobVerificationFailure::new(expected, Some(observed_digest), observed_length),
+        let length = length.min(expected.byte_length().saturating_sub(offset));
+        if length == 0 {
+            return Ok(OpenedBlob::new(
+                0,
+                Box::new(std::io::Cursor::new(Vec::new())),
             ));
         }
-        if retained.len() != capacity {
+        let end = offset + length - 1;
+        let credentials = self.credentials().await?;
+        self.ensure_namespace_ready(&credentials).await?;
+        let action = self.bucket.get_object(Some(&credentials), key.as_str());
+        let response = self
+            .client
+            .get(action.sign(SIGNED_URL_LIFETIME))
+            .header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
+            .send()
+            .await
+            .map_err(|_| BlobStoreError::io("get S3 object range", SanitizedS3Failure))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(classify_absence(response, "get S3 object range").await);
+        }
+        let content_range = format!("bytes {offset}-{end}/{}", expected.byte_length());
+        if response.status() != StatusCode::PARTIAL_CONTENT
+            || response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                != Some(content_range.as_str())
+        {
+            return Err(BlobStoreError::unavailable(
+                "validate S3 object range response",
+            ));
+        }
+        let mut retained = Vec::new();
+        response_reader(response)
+            .take(length + 1)
+            .read_to_end(&mut retained)
+            .await
+            .map_err(|_| BlobStoreError::io("read S3 object range", SanitizedS3Failure))?;
+        if u64::try_from(retained.len()).ok() != Some(length) {
             return Err(BlobStoreError::unavailable(
                 "retain complete S3 object range",
             ));
@@ -2156,5 +2148,6 @@ mod tests {
         assert!(!debug.contains(SECRET_KEY));
         Ok(())
     }
+    mod ranges;
     mod upload_deadlines;
 }

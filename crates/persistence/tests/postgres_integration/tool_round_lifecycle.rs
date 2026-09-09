@@ -397,36 +397,10 @@ async fn prepare_confirmed_tool_attempt(
     Ok((fixture, attempt))
 }
 
-/// One durable `blob_read_tool_charge` projection with its labels preserved.
-#[derive(Debug, sqlx::FromRow)]
-struct StoredBlobReadCharge {
-    blob_digest: Vec<u8>,
-    decoded_byte_count: Decimal,
-    admission: bool,
-}
-
-/// Whether a recorded charge granted the request its decoded bytes.
-#[derive(Debug, Eq, PartialEq)]
-enum BlobReadChargeAdmission {
-    Admitted,
-    Rejected,
-}
-
-impl StoredBlobReadCharge {
-    fn admission(&self) -> BlobReadChargeAdmission {
-        if self.admission {
-            BlobReadChargeAdmission::Admitted
-        } else {
-            BlobReadChargeAdmission::Rejected
-        }
-    }
-}
-
-/// blob-read visibility and decoded-byte charges commit before
-/// dispatch authority.
+/// Visible blob reads receive dispatch authority.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn blob_read_preauthorization_is_visible_bounded_and_durable() -> Result<(), Box<dyn Error>> {
+async fn blob_read_preauthorization_authorizes_visible_pages() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let visible_seed = 0xd000;
     let visible_digest = BlobDigest::digest(b"visible");
@@ -459,21 +433,6 @@ async fn blob_read_preauthorization_is_visible_bounded_and_durable() -> Result<(
         visible,
         ToolAttemptAuthorizationOutcome::Authorized(_)
     ));
-    let charge: StoredBlobReadCharge = sqlx::query_as(
-        "SELECT blob_digest, decoded_byte_count, admitted AS admission
-           FROM blob_read_tool_charge
-          WHERE request_id = (
-                SELECT request_id FROM tool_attempt WHERE attempt_id = $1)",
-    )
-    .bind(visible_attempt.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(charge.blob_digest, visible_digest.as_bytes().as_slice());
-    assert_eq!(
-        charge.decoded_byte_count,
-        Decimal::from(visible_decoded_bytes)
-    );
-    assert_eq!(charge.admission(), BlobReadChargeAdmission::Admitted);
 
     pool.close().await;
     drop(container);
@@ -6086,4 +6045,113 @@ async fn assert_bounded_269_kib_batch(arguments: &str) -> Result<Vec<i64>, Box<d
     pool.close().await;
     drop(container);
     Ok(result_limits)
+}
+
+/// Page admission remains available across 200 distinct requests in one turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn two_hundred_blob_pages_are_authorized_in_one_turn() -> Result<(), Box<dyn Error>> {
+    const SEED: u128 = 0x140_0000;
+    const PAGE_BYTES: u64 = 524_288;
+    const ROUNDS: u128 = 25;
+    const PAGES_PER_ROUND: usize = 8;
+    let (container, pool, _) = migrated_postgres().await?;
+    let digest = BlobDigest::digest(b"visible paged blob");
+    register_fixture_blob(&pool, SEED, digest).await?;
+    let (mut fixture, mut repository, mut authorized) =
+        authorize_checkpointed_model_call_with_attachment(&pool, SEED, Some(digest)).await?;
+    let turn = fixture.turn;
+    let arguments =
+        format!(r#"{{"digest":"{digest}","offset_bytes":"0","length_bytes":"{PAGE_BYTES}"}}"#);
+    let mut authorized_pages = 0;
+    for round in 0..ROUNDS {
+        let (next_fixture, next_repository, _, requests) = commit_authorized_tool_batch(
+            SEED + 0x1000 + round * 0x100,
+            (fixture, repository, authorized),
+            &vec![("blob_read", arguments.as_str()); PAGES_PER_ROUND],
+            InitialToolApproval::PolicyAuto,
+            ProviderReportedTokenUsage::unreported(),
+            None,
+        )
+        .await?;
+        fixture = next_fixture;
+        repository = next_repository;
+        let tools = repository.tool_loop_repository();
+        for request in &requests {
+            let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+            tools
+                .prepare_next_attempt(fixture.session, turn, attempt, ToolEffectClass::EffectFree)
+                .await?;
+            let outcome = tools
+                .authorize_attempt_with_preauthorization(
+                    fixture.session,
+                    turn,
+                    attempt,
+                    ToolPreauthorization::BlobRead {
+                        digest,
+                        decoded_bytes: NonZeroU64::new(PAGE_BYTES).expect("page length"),
+                    },
+                )
+                .await?;
+            let ToolAttemptAuthorizationOutcome::Authorized(page) = outcome else {
+                panic!("page {authorized_pages} for {request:?} must authorize");
+            };
+            tools
+                .commit_observation(
+                    page.executor_fence()
+                        .bind(ToolAttemptObservation::Completed {
+                            result: ToolResultContent::Text(
+                                ToolResultText::try_new("page read".into())
+                                    .expect("bounded page result"),
+                            ),
+                        }),
+                )
+                .await?;
+            authorized_pages += 1;
+        }
+        let call = ModelCallId::from_uuid(Uuid::now_v7());
+        let continuation = tools
+            .prepare_continuation(
+                fixture.session,
+                turn,
+                fixture.call,
+                signalbox_application::ToolContinuationIdentities::new(
+                    requests
+                        .iter()
+                        .map(|_| SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()))
+                        .collect(),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    call,
+                    FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                        ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    ),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                |_| panic!("no pending steering"),
+            )
+            .await?;
+        assert_eq!(
+            continuation,
+            signalbox_application::PrepareToolContinuationOutcome::Checkpointed(call)
+        );
+        let AuthorizeModelCallOutcome::Authorized(next) =
+            repository.authorize_send(fixture.session, call).await?
+        else {
+            panic!("continuation authorizes");
+        };
+        authorized = *next;
+        fixture.call = call;
+    }
+    assert_eq!(authorized_pages, 200);
+    assert_eq!(fixture.turn, turn);
+    let charges: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM blob_read_tool_charge WHERE turn_id = $1")
+            .bind(turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(charges, 0, "page reads create no durable reservations");
+    pool.close().await;
+    drop(container);
+    Ok(())
 }

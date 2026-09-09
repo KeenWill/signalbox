@@ -71,8 +71,7 @@ struct ReadContract;
 impl ToolContract for ReadContract {
     type Arguments = ReadArguments;
     const NAME: &'static str = BLOB_READ_NAME;
-    const DESCRIPTION: &'static str =
-        "Reads one authorized attached-blob byte range as canonical padded base64.";
+    const DESCRIPTION: &'static str = "Reads up to 512 KiB from an attached blob as base64. Returns a short tail across EOF, or empty bytes at or beyond EOF, with the blob length.";
 }
 
 #[derive(Clone, Debug)]
@@ -262,7 +261,9 @@ impl ToolExecutor for BlobToolExecutor {
                         let registry =
                             self.registry.as_deref().ok_or(BlobReadError::Unavailable)?;
                         let entry = read_blob_entry(&self.repository, digest).await?;
-                        read_blob_chunk(registry, &entry, offset, length).await
+                        read_blob_chunk(registry, &entry, offset, length)
+                            .await
+                            .map(|bytes| (bytes, entry.expected().byte_length()))
                     })
                     .await;
                     drop(permit);
@@ -271,7 +272,8 @@ impl ToolExecutor for BlobToolExecutor {
                 .await
                 .unwrap_or(Err(BlobReadError::Unavailable));
                 match traversal {
-                    Ok(bytes) => completed(&ReadResult {
+                    Ok((bytes, blob_length)) => completed(&ReadResult {
+                        blob_length_bytes: blob_length.to_string(),
                         digest: digest.to_string(),
                         offset_bytes: offset.to_string(),
                         bytes_base64: STANDARD.encode(bytes),
@@ -344,6 +346,7 @@ struct MetadataResult {
 
 #[derive(Serialize)]
 struct ReadResult {
+    blob_length_bytes: String,
     digest: String,
     offset_bytes: String,
     bytes_base64: String,
@@ -514,6 +517,7 @@ mod tests {
     fn maximum_blob_read_result_fits_the_existing_text_result_cap() -> Result<(), Box<dyn Error>> {
         let digest = BlobDigest::digest(b"attached bytes");
         let result = completed_text(completed(&ReadResult {
+            blob_length_bytes: MAX_BLOB_READ_TOOL_BYTES.to_string(),
             digest: digest.to_string(),
             offset_bytes: String::from("0"),
             bytes_base64: STANDARD.encode(vec![0_u8; MAX_BLOB_READ_TOOL_BYTES as usize]),

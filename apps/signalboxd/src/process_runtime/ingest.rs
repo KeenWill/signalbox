@@ -627,23 +627,6 @@ where
             .await;
         }
     };
-    if offset_bytes
-        .value()
-        .checked_add(length.get())
-        .is_none_or(|end| end > entry.expected().byte_length())
-    {
-        drop(snapshot_permit);
-        return write_blob_read_error(
-            writer,
-            version,
-            request_id,
-            Some((offset_bytes, length_bytes)),
-            BlobReadError::RangeOutOfBounds {
-                blob_length: entry.expected().byte_length(),
-            },
-        )
-        .await;
-    }
     drop(snapshot_permit);
     let Some(permit) = try_acquire_blob_read_permit(Arc::clone(&services.blob_read_budget)) else {
         return write_error(
@@ -656,7 +639,12 @@ where
     };
     let traversal = tokio::time::timeout_at(
         deadline,
-        read_blob_chunk(registry, &entry, offset_bytes.value(), length),
+        crate::blob_read_runtime::read_blob_chunk_verified(
+            registry,
+            &entry,
+            offset_bytes.value(),
+            length,
+        ),
     );
     let outcome = tokio::select! {
         biased;
@@ -683,6 +671,7 @@ where
                     version,
                     request_id,
                     ServerMessage::BlobChunkRead {
+                        blob_length_bytes: CanonicalU64::new(entry.expected().byte_length()),
                         digest,
                         offset_bytes,
                         bytes: BlobChunk::new(bytes),

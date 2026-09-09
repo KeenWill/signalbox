@@ -234,6 +234,7 @@ async fn blob_range_returns_exact_verified_bytes() -> Result<(), Box<dyn Error>>
     assert_eq!(
         fixture.connection.response().await?.message(),
         &ServerMessage::BlobChunkRead {
+            blob_length_bytes: fixture.expected_length,
             digest: fixture.wire_digest,
             offset_bytes,
             bytes: BlobChunk::new(expected_bytes.to_vec()),
@@ -243,11 +244,10 @@ async fn blob_range_returns_exact_verified_bytes() -> Result<(), Box<dyn Error>>
     fixture.stop().await
 }
 
-/// an exact range outside the catalog length is rejected before store
-/// access with the typed range facts.
+/// A range beyond EOF returns empty bytes and the catalog length.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn blob_range_out_of_bounds_is_typed() -> Result<(), Box<dyn Error>> {
+async fn blob_range_beyond_eof_is_empty() -> Result<(), Box<dyn Error>> {
     let mut fixture = CommittedBlobReadFixture::start(b"out of bounds blob fixture").await?;
     let offset_bytes = CanonicalU64::new(u64::MAX);
     let length_bytes = CanonicalU64::new(1);
@@ -265,14 +265,11 @@ async fn blob_range_out_of_bounds_is_typed() -> Result<(), Box<dyn Error>> {
         .await?;
     assert_eq!(
         fixture.connection.response().await?.message(),
-        &ServerMessage::Error {
-            code: ErrorCode::InvalidRequest,
-            message: String::from("blob read was rejected"),
-            detail: ErrorDetail::invalid_request(RejectionDetail::BlobReadRangeOutOfBounds {
-                offset_bytes,
-                length_bytes,
-                blob_length_bytes: fixture.expected_length,
-            }),
+        &ServerMessage::BlobChunkRead {
+            digest: fixture.wire_digest,
+            offset_bytes,
+            blob_length_bytes: fixture.expected_length,
+            bytes: BlobChunk::new(Vec::new()),
         }
     );
 
@@ -366,6 +363,149 @@ async fn blob_metadata_absent_catalog_entry_is_not_found() -> Result<(), Box<dyn
         }
     );
 
+    drop(connection);
+    runtime.stop().await
+}
+
+/// A multi-gigabyte attached file contributes metadata without any body read.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn blob_four_gib_attachment_preparation_reads_no_body() -> Result<(), Box<dyn Error>> {
+    use signalbox_blob_store::{BlobStore, ExpectedBlob};
+    use signalbox_blob_store_filesystem::FilesystemBlobStore;
+    use signalbox_persistence::blob::{
+        BlobCatalogRepository, BlobReplicaRecord, BlobStoreBindingRecord,
+    };
+    use std::os::unix::fs::DirBuilderExt;
+
+    const FOUR_GIB: u64 = 4 * 1024 * 1024 * 1024;
+    // SHA-256 of FOUR_GIB zero bytes, computed with a bounded streaming buffer.
+    let digest: BlobDigest =
+        "sha256:8479e43911dc45e89f934fe48d01297e16f51d17aa561d4d1c216b1ae0fcddca".parse()?;
+    let runtime = RunningRuntime::start_with_blob_storage().await?;
+    let root = runtime.blob_storage_root.as_ref().expect("blob fixture");
+    let key = BlobObjectKey::for_digest(digest);
+    let path = root.store.join(key.as_str());
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path.parent().expect("object parent"))?;
+    let file = fs::File::create(&path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.set_len(FOUR_GIB)?;
+    let measured = Arc::new(FilesystemBlobStore::try_new_for_conformance(
+        root.store.clone(),
+    )?);
+    let configuration = support::parse_model_configuration(&root.model_configuration())?;
+    let mut registry = BlobStoreRegistry::initialize_for_conformance(
+        configuration.blob_storage(),
+        runtime.pool.clone(),
+    )
+    .await?
+    .expect("configured registry");
+    let (name, _) = registry.routed_store(BlobStorageClass::UserAttachment);
+    let name = name.clone();
+    let expected = ExpectedBlob::try_new(digest, FOUR_GIB)?;
+    BlobCatalogRepository::new(runtime.pool.clone())
+        .register_verified_replica(
+            expected,
+            BlobStoreBindingRecord::new(name.clone(), registry.namespace_id(&name)),
+            BlobReplicaRecord::new(name.clone(), key.clone()),
+        )
+        .await?;
+    assert!(registry.replace_store_for_conformance(&name, measured.clone()));
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    connection
+        .request(
+            4,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::from_parts(vec![UserInputPart::Attachment {
+                    digest: CanonicalBlobDigest::from_digest(digest),
+                    kind: UserAttachmentKind::File,
+                    media_type: "application/octet-stream".into(),
+                    display_filename: None,
+                }]),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    accepted_successor_turn(&mut connection, session_id, 1).await?;
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    activate_turn(&runtime.pool, session).await?;
+    let calls = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("sparse-blob-fixture"),
+    );
+    let call = ModelCallId::from_uuid(Uuid::now_v7());
+    let mut prepared = None;
+    for _ in 0..2 {
+        prepared = Some(
+            calls
+                .prepare_initial_call(
+                    session,
+                    call,
+                    FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                        ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    ),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    |_| panic!("no steering"),
+                )
+                .await?,
+        );
+    }
+    let Some(PrepareInitialModelCallOutcome::Ready {
+        request,
+        credential_reference,
+        system_prompt,
+        tool_entries,
+        reasoning_provenance,
+        ..
+    }) = prepared
+    else {
+        panic!("prepared attachment call is ready");
+    };
+    let operation = PreparedModelOperation::render(
+        *request,
+        credential_reference,
+        system_prompt,
+        Box::new([]),
+        &tool_entries,
+        &reasoning_provenance,
+    )?;
+    let interactions = Arc::new(AtomicUsize::new(0));
+    let counter = AttachmentPreparingModelCallProvider::new(
+        super::compaction::CountingProbe {
+            interactions: interactions.clone(),
+            outcome: ModelCallInputTokenCount::Counted(1),
+        },
+        runtime.pool.clone(),
+        Some(Arc::new(registry)),
+    );
+    assert_eq!(
+        counter
+            .count_input_tokens(operation, std::future::pending())
+            .await?,
+        ModelCallInputTokenCount::Counted(1)
+    );
+    assert_eq!(interactions.load(Ordering::SeqCst), 1);
+    assert_eq!(measured.read_bytes_for_test(), 0);
+    let page = measured
+        .open_range(
+            expected,
+            &key,
+            FOUR_GIB / 2,
+            std::num::NonZeroU64::new(524_288).expect("page length"),
+        )
+        .await?;
+    assert_eq!(page.byte_length(), 524_288);
+    assert_eq!(measured.read_bytes_for_test(), 524_288);
     drop(connection);
     runtime.stop().await
 }

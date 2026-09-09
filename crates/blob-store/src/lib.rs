@@ -282,7 +282,8 @@ pub trait BlobStore: Send + Sync {
         key: &'a BlobObjectKey,
     ) -> BlobStoreFuture<'a, OpenedBlob>;
 
-    /// Re-verifies one exact object generation while retaining one bounded range.
+    /// Reads one bounded range from a catalogued object without hashing its body.
+    /// Returns the available tail, or an empty reader at or beyond the end.
     fn open_range<'a>(
         &'a self,
         expected: ExpectedBlob,

@@ -242,7 +242,7 @@ async fn filesystem_rejects_fifo_candidates_without_waiting_for_a_writer() {
 }
 
 #[tokio::test]
-async fn filesystem_range_reverifies_the_generation_it_reads() {
+async fn filesystem_range_accepts_same_length_in_place_changes() {
     let (root, store) = fixture();
     let expected = signalbox_blob_store::conformance::expected_fixture();
     let key = BlobObjectKey::for_digest(expected.digest());
@@ -262,12 +262,20 @@ async fn filesystem_range_reverifies_the_generation_it_reads() {
     )
     .expect("the published generation is corrupted in place");
 
-    let error = store
+    let mut opened = store
         .open_range(expected, &key, 0, NonZeroU64::MIN)
         .await
-        .expect_err("the range must be retained only from a verified generation");
-
-    assert_eq!(error.kind(), BlobStoreFailureKind::VerificationFailed);
+        .expect("same-length in-place mutation is an accepted residual")
+        .into_reader();
+    let mut bytes = Vec::new();
+    opened
+        .read_to_end(&mut bytes)
+        .await
+        .expect("the range reads");
+    assert_eq!(
+        bytes,
+        &signalbox_blob_store::conformance::corrupt_fixture_content()[..1]
+    );
 }
 
 #[tokio::test]
@@ -334,4 +342,72 @@ async fn filesystem_pins_the_validated_root_namespace() {
     std::fs::remove_dir_all(&configured_root).expect("the replacement root is removed");
     std::fs::rename(&moved_root, &configured_root)
         .expect("the fixture root is restored for automatic cleanup");
+}
+
+/// Sparse data at repository-pack scale must not turn a page read into a scan.
+#[tokio::test]
+async fn twenty_gib_sparse_blob_reads_only_the_requested_pages() {
+    use signalbox_blob_store::ExpectedBlob;
+    use signalbox_domain::BlobDigest;
+    const TWENTY_GIB: u64 = 20 * 1024 * 1024 * 1024;
+    const PAGE: u64 = 524_288;
+    let (root, store) = fixture();
+    // SHA-256 of TWENTY_GIB zero bytes, computed with a bounded streaming buffer.
+    let digest: BlobDigest =
+        "sha256:6cb118a8f8b3c19385874297e291dcbcdf3a9837ba1ca7b00ace2491adbff551"
+            .parse()
+            .expect("fixture digest");
+    let key = BlobObjectKey::for_digest(digest);
+    let path = root.path().join(key.as_str());
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path.parent().expect("object parent"))
+        .expect("private directories");
+    let file = std::fs::File::create(path).expect("sparse file");
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .expect("private file");
+    file.set_len(TWENTY_GIB).expect("sparse length");
+    let expected = ExpectedBlob::try_new(digest, TWENTY_GIB).expect("nonempty fixture");
+    let page = store
+        .open_range(
+            expected,
+            &key,
+            TWENTY_GIB / 2,
+            NonZeroU64::new(PAGE).expect("page length"),
+        )
+        .await
+        .expect("middle page");
+    assert_eq!(page.byte_length(), PAGE);
+    assert_eq!(store.read_bytes_for_test(), PAGE);
+    let tail = store
+        .open_range(
+            expected,
+            &key,
+            TWENTY_GIB - 3,
+            NonZeroU64::new(PAGE).expect("page length"),
+        )
+        .await
+        .expect("short tail");
+    assert_eq!(tail.byte_length(), 3);
+    let mut bytes = Vec::new();
+    tail.into_reader()
+        .read_to_end(&mut bytes)
+        .await
+        .expect("tail bytes");
+    assert_eq!(bytes, [0, 0, 0]);
+    assert_eq!(store.read_bytes_for_test(), PAGE + 3);
+    for offset in [TWENTY_GIB, u64::MAX] {
+        let empty = store
+            .open_range(
+                expected,
+                &key,
+                offset,
+                NonZeroU64::new(PAGE).expect("page length"),
+            )
+            .await
+            .expect("EOF is readable");
+        assert_eq!(empty.byte_length(), 0, "offset {offset}");
+    }
+    assert_eq!(store.read_bytes_for_test(), PAGE + 3);
 }

@@ -691,9 +691,10 @@ pub enum ServerMessage {
         byte_length: CanonicalU64,
         replica_count: CanonicalU64,
     },
-    /// One exact verified byte range.
+    /// One verified byte range, short or empty at the end of the blob.
     #[serde(rename = "blob_chunk")]
     BlobChunkRead {
+        blob_length_bytes: CanonicalU64,
         digest: CanonicalBlobDigest,
         offset_bytes: CanonicalU64,
         bytes: BlobChunk,
@@ -1314,13 +1315,14 @@ impl ServerMessage {
                 return Err(FrameValidationError::BlobReadShape);
             }
             Self::BlobChunkRead {
+                blob_length_bytes,
                 offset_bytes,
                 bytes,
                 ..
-            } if bytes.as_bytes().is_empty()
+            } if blob_length_bytes.value() == 0
                 || bytes.as_bytes().len() > MAX_BLOB_READ_BYTES
                 || u64::try_from(bytes.as_bytes().len()).map_or(true, |length_bytes| {
-                    offset_bytes.value().checked_add(length_bytes).is_none()
+                    length_bytes > blob_length_bytes.value().saturating_sub(offset_bytes.value())
                 }) =>
             {
                 return Err(FrameValidationError::BlobReadShape);

@@ -64,13 +64,11 @@ pub(crate) async fn read_blob_chunk(
 ) -> Result<Vec<u8>, BlobReadError> {
     debug_assert!(length.get() <= MAX_BLOB_RANGE_BYTES);
     let expected = entry.expected();
-    if offset
-        .checked_add(length.get())
-        .is_none_or(|end| end > expected.byte_length())
-    {
-        return Err(BlobReadError::RangeOutOfBounds {
-            blob_length: expected.byte_length(),
-        });
+    let actual_length = length
+        .get()
+        .min(expected.byte_length().saturating_sub(offset));
+    if actual_length == 0 {
+        return Ok(Vec::new());
     }
     let mut saw_missing = false;
     let mut saw_corrupt = false;
@@ -84,15 +82,15 @@ pub(crate) async fn read_blob_chunk(
             .await
         {
             Ok(opened) => {
-                if opened.byte_length() != length.get() {
+                if opened.byte_length() != actual_length {
                     return Err(BlobReadError::Integrity);
                 }
                 let capacity =
-                    usize::try_from(length.get()).map_err(|_| BlobReadError::Integrity)?;
+                    usize::try_from(actual_length).map_err(|_| BlobReadError::Integrity)?;
                 let mut bytes = Vec::with_capacity(capacity);
                 let mut reader = opened.into_reader();
                 if (&mut reader)
-                    .take(length.get())
+                    .take(actual_length)
                     .read_to_end(&mut bytes)
                     .await
                     .is_err()
@@ -133,7 +131,7 @@ pub(crate) async fn read_blob_chunk(
     }
 }
 
-/// Opens one bounded HTTP range after the store verifies the complete object.
+/// Opens one bounded HTTP range from a recorded replica.
 pub(crate) async fn open_recorded_blob_range(
     registry: &BlobStoreRegistry,
     entry: &BlobCatalogEntry,
@@ -152,6 +150,31 @@ pub(crate) async fn open_recorded_blob_range(
     }
     let bytes = read_blob_chunk(registry, entry, offset, length).await?;
     Ok(Box::new(Cursor::new(bytes)))
+}
+
+/// Verifies an explicit operator read before retaining its requested page.
+pub(crate) async fn read_blob_chunk_verified(
+    registry: &BlobStoreRegistry,
+    entry: &BlobCatalogEntry,
+    offset: u64,
+    length: NonZeroU64,
+) -> Result<Vec<u8>, BlobReadError> {
+    let actual_length = length
+        .get()
+        .min(entry.expected().byte_length().saturating_sub(offset));
+    let mut reader = open_recorded_blob_verified(registry, entry).await?;
+    if actual_length == 0 {
+        return Ok(Vec::new());
+    }
+    tokio::io::copy(&mut (&mut reader).take(offset), &mut tokio::io::sink())
+        .await
+        .map_err(|_| BlobReadError::Unavailable)?;
+    let mut bytes = vec![0; usize::try_from(actual_length).map_err(|_| BlobReadError::Integrity)?];
+    reader
+        .read_exact(&mut bytes)
+        .await
+        .map_err(|_| BlobReadError::Unavailable)?;
+    Ok(bytes)
 }
 
 /// Opens one generation-pinned stream after a single complete-object verification pass.

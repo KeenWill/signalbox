@@ -308,12 +308,13 @@ fn blob_range_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> 
     assert_server_message_round_trip(
         request(2)?,
         ServerMessage::BlobChunkRead {
+            blob_length_bytes: CanonicalU64::new(u64::MAX),
             digest,
             offset_bytes,
             bytes: BlobChunk::new(vec![0, 255]),
         },
         &format!(
-            "{{\"type\":\"blob_chunk\",\"digest\":\"{digest}\",\"offset_bytes\":\"{offset}\",\"bytes\":\"AP8=\"}}"
+            "{{\"type\":\"blob_chunk\",\"blob_length_bytes\":\"18446744073709551615\",\"digest\":\"{digest}\",\"offset_bytes\":\"{offset}\",\"bytes\":\"AP8=\"}}"
         ),
     )?;
     Ok(())
@@ -327,6 +328,7 @@ fn blob_range_response_rejects_overflowing_end() -> Result<(), Box<dyn std::erro
         ProtocolVersion::One,
         request(1)?,
         ServerMessage::BlobChunkRead {
+            blob_length_bytes: CanonicalU64::new(u64::MAX),
             digest: CanonicalBlobDigest::from_bytes([0xab; 32]),
             offset_bytes: CanonicalU64::new(u64::MAX),
             bytes: BlobChunk::new(vec![0]),
@@ -379,6 +381,7 @@ fn maximum_blob_read_response_fits_one_frame() -> Result<(), Box<dyn std::error:
         ProtocolVersion::One,
         RequestId::try_new(u64::MAX)?,
         ServerMessage::BlobChunkRead {
+            blob_length_bytes: CanonicalU64::new(u64::MAX),
             digest,
             offset_bytes: CanonicalU64::new(0),
             bytes: BlobChunk::new(vec![b'x'; crate::MAX_BLOB_READ_BYTES]),
@@ -478,5 +481,20 @@ fn blob_upload_length_mismatch_rejects_zero_expected_length()
         ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message),
         Err(FrameValidationError::BlobUploadShape)
     );
+    Ok(())
+}
+
+#[test]
+fn blob_range_response_accepts_empty_bytes_beyond_eof() -> Result<(), Box<dyn std::error::Error>> {
+    let frame = ServerFrame::try_new_for_version(
+        ProtocolVersion::One, request(1)?,
+        ServerMessage::BlobChunkRead {
+            digest: CanonicalBlobDigest::from_bytes([0xab; 32]),
+            blob_length_bytes: CanonicalU64::new(9),
+            offset_bytes: CanonicalU64::new(u64::MAX),
+            bytes: BlobChunk::new(Vec::new()),
+        },
+    )?;
+    assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
     Ok(())
 }

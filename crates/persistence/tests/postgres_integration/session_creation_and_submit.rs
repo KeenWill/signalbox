@@ -3700,16 +3700,11 @@ async fn attachment_budget_fixture() -> Result<AttachmentBudgetFixture, Box<dyn 
     let first_digest = BlobDigest::digest(b"first attachment");
     let second_digest = BlobDigest::digest(b"second attachment");
     let completing_digest = BlobDigest::digest(b"completing attachment");
-    // Each catalogued length is admissible on its own and only their sum
-    // exceeds the maximum, so admission has to aggregate rather than compare
-    // lengths one at a time. Doubling the first length also exceeds the
-    // maximum, so counting one digest twice cannot pass either. The completing
-    // length brings the first to exactly the maximum, which the spec's "must
-    // not exceed" admits, so a `>=` comparison is observable.
+    // Distinct blobs each fit even when their combined lengths exceed the maximum.
     let first_length = 16_u64;
     let second_length = 12_u64;
     let maximum = 20_u64;
-    let completing_length = maximum - first_length;
+    let completing_length = maximum;
     let mut catalog = pool.begin().await?;
     sqlx::query(
         "INSERT INTO blob_store_binding (store_name, namespace_id)
@@ -3802,9 +3797,7 @@ fn repeated_attachment_command(
     )
 }
 
-/// the digest is the accounting key, so two metadata-distinct parts
-/// naming one catalogued digest consume its length only once and reach session
-/// lookup rather than the byte-budget rejection.
+/// Multiple references to an admissible blob reach session lookup.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
@@ -3832,9 +3825,7 @@ async fn attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<
     Ok(())
 }
 
-/// a repeated digest is charged once rather than not at all, so the
-/// same two metadata-distinct parts are rejected under a maximum below their
-/// one catalogued length.
+/// An oversized blob is rejected even when multiple parts reference it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn attachment_admission_charges_a_repeated_digest_at_least_once() -> Result<(), Box<dyn Error>>
@@ -3865,8 +3856,7 @@ async fn attachment_admission_charges_a_repeated_digest_at_least_once() -> Resul
     Ok(())
 }
 
-/// the bound is "must not exceed", so distinct catalogued digests
-/// summing to exactly the maximum are admitted and reach session lookup.
+/// A blob exactly at the per-object maximum reaches session lookup.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn attachment_bytes_equal_to_the_maximum_are_admitted() -> Result<(), Box<dyn Error>> {
@@ -3900,12 +3890,11 @@ async fn attachment_bytes_equal_to_the_maximum_are_admitted() -> Result<(), Box<
     Ok(())
 }
 
-/// distinct catalogued digests, each admissible alone, are rejected
-/// once their summed lengths pass the deployment maximum, and that maximum is
-/// the durable evidence.
+/// Multiple admissible blobs may exceed the maximum in aggregate.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn distinct_attachment_bytes_above_the_maximum_are_rejected() -> Result<(), Box<dyn Error>> {
+async fn distinct_attachments_are_admitted_above_the_combined_maximum() -> Result<(), Box<dyn Error>>
+{
     let fixture = attachment_budget_fixture().await?;
     let distinct_command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xb325));
     let distinct = distinct_attachment_command(&fixture, distinct_command_id);
@@ -3919,30 +3908,25 @@ async fn distinct_attachment_bytes_above_the_maximum_are_rejected() -> Result<()
             )
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
-                maximum_bytes: fixture.maximum,
+            SubmitInputRejectedResult::SessionNotFound {
+                session: fixture.session,
             }
         ))
     );
-    let durable_maximum: Decimal = sqlx::query_scalar(
-        "SELECT result_attachment_maximum_bytes
-           FROM submit_input_command WHERE command_id = $1",
-    )
-    .bind(distinct_command_id.as_uuid())
-    .fetch_one(&fixture.pool)
-    .await?;
-    assert_eq!(durable_maximum, Decimal::from(fixture.maximum));
     fixture.finish().await;
     Ok(())
 }
 
 /// the attachment-byte-bound rejection replays exactly. The replay
-/// runs under a maximum that now admits the same aggregate, so revalidation
+/// runs under a maximum that now admits the same blobs, so revalidation
 /// would return acceptance and only durable replay returns the first maximum.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn attachment_byte_bound_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
-    let fixture = attachment_budget_fixture().await?;
+    let mut fixture = attachment_budget_fixture().await?;
+    fixture.maximum = fixture.first_length - 1;
+    fixture.repository = SubmitInputRepository::new(fixture.pool.clone())
+        .with_attachment_maximum_bytes(fixture.maximum);
     let distinct = distinct_attachment_command(
         &fixture,
         DurableCommandId::from_uuid(Uuid::from_u128(0xb325)),
@@ -3996,7 +3980,9 @@ impl QueuedFrontierFixture {
     }
 }
 
-async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Error>> {
+async fn queued_frontier_fixture(
+    second_blob_length: u64,
+) -> Result<QueuedFrontierFixture, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_digest = BlobDigest::digest(b"first prospective attachment");
     let second_digest = BlobDigest::digest(b"second prospective attachment");
@@ -4009,9 +3995,10 @@ async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Erro
     .bind(Uuid::from_u128(0xb330))
     .execute(&mut *catalog)
     .await?;
-    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7), ($2, 7)")
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7), ($2, $3)")
         .bind(first_digest.as_bytes().as_slice())
         .bind(second_digest.as_bytes().as_slice())
+        .bind(Decimal::from(second_blob_length))
         .execute(&mut *catalog)
         .await?;
     sqlx::query(
@@ -4042,14 +4029,11 @@ async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Erro
     })
 }
 
-/// a newly queued input is rejected when the complete prospective
-/// rendered frontier, rather than either input alone, exceeds the attachment
-/// verification bound.
+/// Queued inputs may carry distinct blobs whose combined lengths exceed the maximum.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn queued_input_checks_the_complete_prospective_attachment_frontier()
--> Result<(), Box<dyn Error>> {
-    let fixture = queued_frontier_fixture().await?;
+async fn queued_inputs_apply_the_attachment_maximum_per_blob() -> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture(7).await?;
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
         configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
     };
@@ -4082,7 +4066,7 @@ async fn queued_input_checks_the_complete_prospective_attachment_frontier()
         delivery,
     );
 
-    assert_eq!(
+    assert!(matches!(
         fixture
             .repository
             .handle(
@@ -4091,12 +4075,10 @@ async fn queued_input_checks_the_complete_prospective_attachment_frontier()
                 Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
             )
             .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
-                maximum_bytes: fixture.maximum,
-            },
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
         ))
-    );
+    ));
     fixture.finish().await;
     Ok(())
 }
@@ -4105,7 +4087,7 @@ async fn queued_input_checks_the_complete_prospective_attachment_frontier()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn queued_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
-    let fixture = queued_frontier_fixture().await?;
+    let fixture = queued_frontier_fixture(11).await?;
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
         configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
     };
@@ -4251,7 +4233,10 @@ async fn prospective_frontier_charges_a_shared_digest_once() -> Result<(), Box<d
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn retained_attachment_maximum_requires_its_rejection_kind() -> Result<(), Box<dyn Error>> {
-    let fixture = attachment_budget_fixture().await?;
+    let mut fixture = attachment_budget_fixture().await?;
+    fixture.maximum = fixture.first_length - 1;
+    fixture.repository = SubmitInputRepository::new(fixture.pool.clone())
+        .with_attachment_maximum_bytes(fixture.maximum);
     let rejected_command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xb325));
     assert_eq!(
         fixture
@@ -4297,7 +4282,7 @@ async fn retained_attachment_maximum_requires_its_rejection_kind() -> Result<(),
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn queued_frontier_rejection_rolls_back_provisional_effects() -> Result<(), Box<dyn Error>> {
-    let fixture = queued_frontier_fixture().await?;
+    let fixture = queued_frontier_fixture(11).await?;
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
         configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
     };
@@ -4372,10 +4357,7 @@ async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn 
     let queued_digest = BlobDigest::digest(b"queued prospective attachment");
     let later_queued_digest = BlobDigest::digest(b"later queued prospective attachment");
     let steering_digest = BlobDigest::digest(b"steering prospective attachment");
-    // Each catalogued attachment is seven bytes. Before steering the queue
-    // totals fourteen; steering adds a third to the rendered base, so the
-    // earlier successor reaches fourteen and only the later one reaches
-    // twenty-one.
+    // The queued blobs fit; the steering blob exceeds the per-object maximum.
     let maximum = 20_u64;
     let mut catalog = pool.begin().await?;
     sqlx::query(
@@ -4385,7 +4367,7 @@ async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn 
     .bind(Uuid::from_u128(0xb340))
     .execute(&mut *catalog)
     .await?;
-    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7), ($2, 7), ($3, 7)")
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7), ($2, 7), ($3, 21)")
         .bind(queued_digest.as_bytes().as_slice())
         .bind(later_queued_digest.as_bytes().as_slice())
         .bind(steering_digest.as_bytes().as_slice())
@@ -4447,16 +4429,10 @@ async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn 
     })
 }
 
-/// pending steering is rejected when it would make a queued
-/// successor's eventual rendered frontier exceed the attachment bound. Two
-/// successors are queued in canonical order: after the steering transition the
-/// earlier one's prospective frontier still fits and only the later one
-/// exceeds the bound, so every affected queued frontier has to be recomputed
-/// rather than just the first.
+/// Oversized steering is rejected while admissible successors are queued.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn pending_steering_rechecks_affected_queued_attachment_frontiers()
--> Result<(), Box<dyn Error>> {
+async fn pending_steering_rejects_an_oversized_blob() -> Result<(), Box<dyn Error>> {
     let fixture = steering_frontier_fixture().await?;
     let queued = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
@@ -5111,7 +5087,7 @@ async fn assert_delegated_attachment_budget(
         ),
         "the retained seven-byte attachment must remain within the ten-byte bound"
     );
-    assert_eq!(
+    assert!(matches!(
         repository
             .handle(
                 SubmitInput::new(
@@ -5126,12 +5102,10 @@ async fn assert_delegated_attachment_budget(
                 None,
             )
             .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
-                maximum_bytes: TOOL_BATCH_ATTACHMENT_MAXIMUM,
-            }
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
         ))
-    );
+    ));
 
     Ok(())
 }
