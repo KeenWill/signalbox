@@ -410,7 +410,7 @@ system_prompt = "Inspect repository activity."
     }
 
     async fn settle(&self) {
-        let lifecycle = signalbox_ownership_seam::LifecycleEventSource::new(self.core.clone());
+        let lifecycle = signalbox_session_ownership::LifecycleEventSource::new(self.core.clone());
         while let Some(event) = lifecycle.next().await.expect("next lifecycle event") {
             self.store
                 .apply_lifecycle_event(&event)

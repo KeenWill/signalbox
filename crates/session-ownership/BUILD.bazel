@@ -7,7 +7,7 @@ CRATE_FEATURES = ["test-support"]
 rust_package()
 
 rust_library(
-    name = "signalbox_ownership_seam",
+    name = "signalbox_session_ownership",
     crate_features = CRATE_FEATURES,
     crate_root = "src/lib.rs",
     deps = [
@@ -19,7 +19,7 @@ rust_library(
 
 rust_unit_test(
     name = "unit_tests",
-    crate = ":signalbox_ownership_seam",
+    crate = ":signalbox_session_ownership",
     crate_features = CRATE_FEATURES,
 )
 
@@ -29,7 +29,7 @@ rust_integration_test(
     crate_features = CRATE_FEATURES,
     crate_root = "tests/lifecycle_vocabulary.rs",
     deps = [
-        ":signalbox_ownership_seam",
+        ":signalbox_session_ownership",
         "//crates/application:signalbox_application",
         "//crates/domain:signalbox_domain",
         "//crates/persistence:signalbox_persistence",
@@ -38,14 +38,14 @@ rust_integration_test(
 
 rust_api_json(
     name = "api_json",
-    crate = ":signalbox_ownership_seam",
+    crate = ":signalbox_session_ownership",
     crate_features = CRATE_FEATURES,
 )
 
 rust_doc_test(
     name = "doc_tests",
-    crate = ":signalbox_ownership_seam",
+    crate = ":signalbox_session_ownership",
     crate_features = ["test-support"],
 )
 
-rust_quality_tests(documented_crates = [":signalbox_ownership_seam"])
+rust_quality_tests(documented_crates = [":signalbox_session_ownership"])

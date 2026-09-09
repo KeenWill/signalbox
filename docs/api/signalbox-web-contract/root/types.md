@@ -891,6 +891,7 @@ pub enum WebTimelineToolFailureCause {
     InvalidArguments,
     ExecutionFailed,
     ResultTooLarge,
+    ResultContainsNull,
     CrashLost,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize

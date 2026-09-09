@@ -1,6 +1,6 @@
 //! Repository-watch v2's bounded module-local persistence surface.
 //!
-//! The crate has one Signalbox dependency: `signalbox-ownership-seam`. SQL is
+//! The crate has one Signalbox dependency: `signalbox-session-ownership`. SQL is
 //! unqualified and must run on a pool whose effective role and search path are
 //! confined to `mod_repo_watch`.
 
@@ -14,7 +14,7 @@ use std::{
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     BranchName, CheckConclusion, ChecksOutcome, CommandOutsideSeam, CommandSettlement, CommitSha,
     CreateSession, CreateSessionOutcome, FinishCondition, LifecycleEvent, LifecycleEventKind,
     MergeableState, ModuleDispatch, OffsetDateTime, PullRequestBody, PullRequestNumber,
@@ -114,7 +114,7 @@ pub struct RepositoryProjection<'a> {
     /// Complete current pull-request projection for the repository.
     pub pull_requests: Vec<PullRequestState<'a>>,
     /// Complete normalized state used by the repository-event differ.
-    pub comparison_baseline: &'a signalbox_ownership_seam::RepoWatchObservation,
+    pub comparison_baseline: &'a signalbox_session_ownership::RepoWatchObservation,
     /// Compact baselines retained for merged pull requests.
     pub merged_baselines: &'a [ingest::MergedPullRequestBaseline],
 }
@@ -272,7 +272,7 @@ pub struct PlannedCommand {
     repository: RepositorySlug,
     rule_id: RepoWatchRuleId,
     rule_revision: RepoWatchRuleVersion,
-    event_id: signalbox_ownership_seam::RepoWatchEventId,
+    event_id: signalbox_session_ownership::RepoWatchEventId,
     trigger_sequence: Option<u64>,
     command: SessionCommand,
 }
@@ -324,7 +324,7 @@ impl PlannedCommand {
     }
 
     /// Returns the triggering normalized GitHub fact.
-    pub const fn event_id(&self) -> signalbox_ownership_seam::RepoWatchEventId {
+    pub const fn event_id(&self) -> signalbox_session_ownership::RepoWatchEventId {
         self.event_id
     }
 
@@ -364,7 +364,7 @@ pub struct RetainedDispatchAction {
     repository: RepositorySlug,
     rule_id: RepoWatchRuleId,
     rule_revision: RepoWatchRuleVersion,
-    event_id: signalbox_ownership_seam::RepoWatchEventId,
+    event_id: signalbox_session_ownership::RepoWatchEventId,
 }
 
 impl RetainedDispatchAction {
@@ -404,7 +404,7 @@ impl RetainedDispatchAction {
     }
 
     /// Returns the retained triggering event identity.
-    pub const fn event_id(&self) -> signalbox_ownership_seam::RepoWatchEventId {
+    pub const fn event_id(&self) -> signalbox_session_ownership::RepoWatchEventId {
         self.event_id
     }
 }
@@ -418,7 +418,7 @@ pub trait CreateSessionCommandFactory {
     fn create_session(
         &mut self,
         dispatch: RepoWatchDispatchId,
-        template: &signalbox_ownership_seam::SessionTemplateName,
+        template: &signalbox_session_ownership::SessionTemplateName,
         event: &RepoWatchEvent,
     ) -> Result<CreateSession, Self::Error>;
 }
@@ -518,7 +518,7 @@ pub enum RuleReconciliationAdmission {
     Stale,
 }
 
-pub use signalbox_ownership_seam::{ReloadIntentInput, RepositoryRuleSet};
+pub use signalbox_session_ownership::{ReloadIntentInput, RepositoryRuleSet};
 
 /// Digests checked per-repository rule sets independently of configuration ordering.
 pub fn repository_rule_set_digest(
@@ -561,7 +561,7 @@ impl WebhookDisposition {
 #[derive(Debug)]
 pub enum StoreError {
     /// Core terminal facts could not be read through the ownership seam.
-    Lifecycle(signalbox_ownership_seam::OutboxDispatchError),
+    Lifecycle(signalbox_session_ownership::OutboxDispatchError),
     /// Persisted poll transport state is malformed or belongs to another reviewer set.
     InvalidPollCache,
     /// A retained reload activation cannot be encoded.
@@ -2307,7 +2307,9 @@ impl RepoWatchStore {
                         rule_id: RepoWatchRuleId::try_new(rule_id)
                             .map_err(|_| StoreError::InvalidRetainedCommand)?,
                         rule_revision,
-                        event_id: signalbox_ownership_seam::RepoWatchEventId::from_uuid(event_id),
+                        event_id: signalbox_session_ownership::RepoWatchEventId::from_uuid(
+                            event_id,
+                        ),
                         trigger_sequence,
                         command,
                     })
@@ -2340,7 +2342,7 @@ impl RepoWatchStore {
             [(dispatch, command)] => {
                 self.origin_for_create_command(
                     RepoWatchDispatchId::from_uuid(*dispatch),
-                    signalbox_ownership_seam::DurableCommandId::from_uuid(*command),
+                    signalbox_session_ownership::DurableCommandId::from_uuid(*command),
                 )
                 .await
             }
@@ -2352,7 +2354,7 @@ impl RepoWatchStore {
     pub async fn origin_for_create_command(
         &self,
         dispatch: RepoWatchDispatchId,
-        command: signalbox_ownership_seam::DurableCommandId,
+        command: signalbox_session_ownership::DurableCommandId,
     ) -> Result<Option<RetainedDispatchAction>, StoreError> {
         type OriginRow = (
             Uuid,
@@ -2425,7 +2427,7 @@ impl RepoWatchStore {
             rule_id: RepoWatchRuleId::try_new(rule_id.clone())
                 .map_err(|_| StoreError::InvalidRetainedCommand)?,
             rule_revision,
-            event_id: signalbox_ownership_seam::RepoWatchEventId::from_uuid(*event_id),
+            event_id: signalbox_session_ownership::RepoWatchEventId::from_uuid(*event_id),
         }))
     }
 
@@ -2468,7 +2470,7 @@ impl RepoWatchStore {
         .bind(
             event
                 .session()
-                .map(signalbox_ownership_seam::SessionId::into_uuid),
+                .map(signalbox_session_ownership::SessionId::into_uuid),
         )
         .execute(&self.pool)
         .await?;
@@ -2823,7 +2825,7 @@ fn event_kind_from_storage(value: &str) -> Option<RepoWatchEventKindNameV1> {
 mod tests {
     use super::{StoreError, WebhookDelivery, canonical_json, validate_webhook};
     use serde_json::{Map, Value};
-    use signalbox_ownership_seam::{OffsetDateTime, RepositorySlug};
+    use signalbox_session_ownership::{OffsetDateTime, RepositorySlug};
     use uuid::Uuid;
 
     #[test]

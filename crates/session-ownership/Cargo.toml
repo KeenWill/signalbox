@@ -1,5 +1,5 @@
 [package]
-name = "signalbox-ownership-seam"
+name = "signalbox-session-ownership"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

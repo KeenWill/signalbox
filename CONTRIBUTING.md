@@ -15,10 +15,9 @@ foundation-weight change — changing normative semantics in a specification pag
 beyond recording implemented behavior, moving a boundary between domain,
 storage, wire, or framework representations, weakening an invariant, introducing
 a technology that constrains several components, or closing a foundation-weight
-open question — is proposed, per the owning rule in [AGENTS.md](AGENTS.md), as a
-specification diff reviewed at the bottom of its implementing stack; the
-contract and pull-request description are under review while the pull request is
-open, and the owner's merge is acceptance.
+open question — is proposed, per the owning rule in [AGENTS.md](AGENTS.md), in a
+design document at the bottom of its implementing stack. The spec page changes
+with the code that builds the design; the owner's merge is acceptance.
 
 ## Contribution rules
 

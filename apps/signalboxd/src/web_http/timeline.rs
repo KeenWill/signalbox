@@ -1458,6 +1458,9 @@ fn tool_attempt_dto(
                     }
                     Some("execution_failed") => Some(WebTimelineToolFailureCause::ExecutionFailed),
                     Some("result_too_large") => Some(WebTimelineToolFailureCause::ResultTooLarge),
+                    Some("result_contains_null") => {
+                        Some(WebTimelineToolFailureCause::ResultContainsNull)
+                    }
                     Some("crash_lost") => Some(WebTimelineToolFailureCause::CrashLost),
                     Some(_) => {
                         return Err(SessionTimelineRequestError::InvalidProjectedToolAttempt);
