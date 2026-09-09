@@ -1045,7 +1045,7 @@ export function ProductApp({
           >
             <Dialog.Title className="sr-only">Artifact inspector</Dialog.Title>
             <Dialog.Description id="artifact-sheet-description" className="sr-only">
-              Look up a stored file by digest.
+              Look up stored content by digest.
             </Dialog.Description>
             <ArtifactInspector
               available={artifactAvailable}
