@@ -55,7 +55,7 @@ cleanup() {
 	if ((status != 0)); then
 		if [[ -f "$DAEMON_LOG" ]]; then
 			echo "signalboxd log:" >&2
-			sed -n '1,240p' "$DAEMON_LOG" >&2
+			cat "$DAEMON_LOG" >&2
 		fi
 		if [[ -f "$POSTGRES_LOG" ]]; then
 			echo "PostgreSQL log:" >&2
@@ -340,9 +340,16 @@ TEST_CMD=(
 )
 printf '+ %q ' "${TEST_CMD[@]}"
 printf '\n'
-"${TEST_CMD[@]}"
+if "${TEST_CMD[@]}"; then
+	:
+else
+	status=$?
+	xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE_PATH" || true
+	exit "$status"
+fi
 
 summary="$(xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE_PATH" --compact)"
+printf '%s\n' "$summary"
 python3 - "$summary" <<'PY'
 import json
 import sys

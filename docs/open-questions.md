@@ -1,10 +1,11 @@
 # Open questions
 
 This is the inventory of unresolved foundational questions. A "leaning" guides
-exploration but is not a decision. Closing a question requires an
-maintainer-accepted pull request or, at foundation weight, a foundation
-specification diff. Accepted cross-component and wire contracts live in the
-[living specification](spec/README.md).
+exploration but is not a decision. Closing a question requires a
+maintainer-accepted pull request. Foundation-weight changes propose a design
+document at the bottom of the implementing stack; the spec page changes with the
+code that builds the design. Built cross-component and wire contracts live in
+the [living specification](spec/README.md).
 
 ## Identity representation
 
