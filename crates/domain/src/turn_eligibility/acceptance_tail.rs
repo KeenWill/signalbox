@@ -81,6 +81,7 @@ pub(super) fn reconstitute_active_acceptance_tail(
             | StoredActiveTurnPhase::AwaitingCredentialAvailability { .. } => None,
         },
         AcceptedInputTurnSchedulingRecordState::Queued
+        | AcceptedInputTurnSchedulingRecordState::Retired
         | AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }
         | AcceptedInputTurnSchedulingRecordState::TerminalCompleted { .. }
         | AcceptedInputTurnSchedulingRecordState::TerminalRefused { .. }

@@ -290,14 +290,22 @@ where
     .bind(session_id_to_uuid(command.session()))
     .fetch_one(&mut *connection)
     .await?;
-    let settles_closure =
-        pending_terminal && settles_committed_closure(connection, &command, principal).await?;
+    let settles_closure = settles_committed_closure(connection, &command, principal).await?;
     if pending_terminal && !settles_closure {
         return Err(
             SubmitInputCorruption::Inconsistent("session has a pending terminal handoff").into(),
         );
     }
-    if settles_closure
+    if pending_terminal
+        && settles_closure
+        && !sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM goal_stop_settlement WHERE interrupt_command_id = $1)",
+        )
+        .bind(crate::mapping::durable_command_id_to_uuid(
+            command.command_id(),
+        ))
+        .fetch_one(&mut *connection)
+        .await?
         && let DeliveryRequest::Interrupt {
             expected_active_turn,
             ..
@@ -517,13 +525,21 @@ async fn settles_committed_closure(
     Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
              SELECT 1
-               FROM session_lifecycle_command
-              WHERE session_id = $1
-                AND applied_effect_kind = 'closure_pending'
-                AND live_turn_id = $2)",
+               FROM session_lifecycle_command AS command
+               JOIN session_lifecycle AS lifecycle USING (session_id)
+              WHERE command.session_id = $1
+                AND command.applied_effect_kind = 'closure_pending'
+                AND command.live_turn_id = $2
+                AND lifecycle.pending_terminal_outcome_kind IS NOT NULL)
+             OR EXISTS (SELECT 1 FROM goal_stop_settlement
+                         WHERE session_id = $1 AND turn_id = $2
+                           AND interrupt_command_id = $3)",
     )
     .bind(session_id_to_uuid(command.session()))
     .bind(turn_id_to_uuid(expected_active_turn))
+    .bind(crate::mapping::durable_command_id_to_uuid(
+        command.command_id(),
+    ))
     .fetch_one(&mut *connection)
     .await?)
 }

@@ -268,6 +268,8 @@ async fn s_goal_process_protocol_supersession_history_round_trips() -> Result<()
                 generation: CanonicalU64::new(2),
                 event: GoalHistoryEvent::UserStopped {
                     command_id: stop_command,
+                    settling_turn_id: None,
+                    abandoned_actions: Some(CanonicalU64::new(0)),
                 },
             },
             ServerMessage::GoalHistoryEnd {

@@ -139,8 +139,8 @@ Signal-driven shutdown affects latency, not correctness: abrupt exit is safe
 because durable rows plus the next guarded startup scan recover work and the
 outbox cursor redelivers.
 
-A goal stop or supersede command is a goal-state transition and creates no
-turn-interrupt authority ([goal-mode](goal-mode.md)).
+A goal stop requests an interrupt for its recorded active turn
+([goal-mode](goal-mode.md)); supersede creates no turn-interrupt authority.
 
 Single-source native-fork ancestry is unschedulable and fails reconstitution.
 Imported ancestry does not alter lifecycle order, eligibility, slot ownership,
@@ -185,7 +185,8 @@ cannot hide an unsummarized prefix, and its end boundary must close every tool
 exchange it covers.
 
 A retired turn contributes no terminal frontier and stays out of queue order and
-predecessor selection. A completed tool-using model round ends the current
+predecessor selection; its immutable origin can still prove the interrupt that
+stopped its predecessor. A completed tool-using model round ends the current
 attempt as a tool-round yield; approval completion creates the next attempt in
 that chain without creating a new turn.
 

@@ -26,6 +26,10 @@ pub enum GoalCommandHandlingOutcome {
     TargetBusy {
         session: signalbox_domain::SessionId,
     },
+    StopAwaitingApproval {
+        turn: signalbox_domain::TurnId,
+        request: signalbox_domain::ToolRequestId,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -127,6 +131,11 @@ pub struct GoalRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl goal::GoalRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
+    #[must_use]
+    pub fn with_tool_dispatch_gate(
+        self,
+        gate: signalbox_application::InProcessToolDispatchGate,
+    ) -> Self;
     pub async fn execution_failure_recovery_cause(
         &self,
         session: signalbox_domain::SessionId,
@@ -271,4 +280,23 @@ impl goal::GoalRepository {
             signalbox_domain::FrozenAliasDefinition,
         >;
 }
+impl goal::GoalRepository {
+    pub async fn load_stop_settlements(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<vec::Vec<goal::GoalStopSettlement>, goal::GoalRepositoryError>;
+}
+```
+
+## GoalStopSettlement
+
+```rust
+pub struct GoalStopSettlement {
+    pub event: signalbox_domain::GoalEventOrdinal,
+    pub turn: option::Option<signalbox_domain::TurnId>,
+    pub defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+    pub interrupt_command: signalbox_domain::DurableCommandId,
+    pub abandoned_actions: option::Option<u64>,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

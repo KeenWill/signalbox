@@ -86,14 +86,14 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
             (SELECT count(*)
                FROM queued_input_origin
               WHERE session_id = $1
-                AND goal_turn_is_runtime_relevant(
+                AND goal_turn_is_scheduling_relevant(
                     session_id, turn_id
                 )) AS queue_count,
             (SELECT count(*)
                FROM turn_lifecycle
               WHERE session_id = $1
                 AND origin_kind = 'accepted_input'
-                AND goal_turn_is_runtime_relevant(
+                AND goal_turn_is_scheduling_relevant(
                     session_id, turn_id
                 )) AS lifecycle_count",
     )
@@ -231,7 +231,7 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
            ON runner_recovery_effect.turn_id = turn.turn_id
           AND runner_recovery_effect.session_id = turn.session_id
         WHERE queued.session_id = $1
-          AND goal_turn_is_runtime_relevant(
+          AND goal_turn_is_scheduling_relevant(
                 queued.session_id, queued.turn_id
           )
         ORDER BY queued.acceptance_position",
@@ -490,7 +490,9 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
             .into());
         }
         let state = match state_kind.as_str() {
-            "queued" => {
+            "queued" | "terminal"
+                if state_kind == "queued" || terminal_disposition.as_deref() == Some("retired") =>
+            {
                 if lineage_kind.is_some()
                     || predecessor.is_some()
                     || starting_frontier.is_some()
@@ -508,13 +510,17 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
                     || terminal_attempt.is_some()
                     || terminal_model_call.is_some()
                     || terminal_tool_attempt.is_some()
-                    || terminal_disposition.is_some()
+                    || (state_kind == "queued" && terminal_disposition.is_some())
                 {
                     return Err(
                         SubmitInputCorruption::Inconsistent("queued scheduling lifecycle").into(),
                     );
                 }
-                AcceptedInputTurnSchedulingRecordState::Queued
+                if state_kind == "queued" {
+                    AcceptedInputTurnSchedulingRecordState::Queued
+                } else {
+                    AcceptedInputTurnSchedulingRecordState::Retired
+                }
             }
             "active" => {
                 if terminal_frontier.is_some()
@@ -2089,7 +2095,7 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
                 terminal.turn_id, terminal.session_id
            ) AS effective ON true
           WHERE queued.session_id = $1
-            AND goal_turn_is_runtime_relevant(
+            AND goal_turn_is_scheduling_relevant(
                     queued.session_id, queued.turn_id
                 )
             AND terminal.origin_kind = 'delegation'

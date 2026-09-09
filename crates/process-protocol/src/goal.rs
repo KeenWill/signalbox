@@ -175,6 +175,12 @@ pub enum GoalHistoryEvent {
     UserStopped {
         /// Durable user command provenance.
         command_id: CommandId,
+        /// The turn whose physical stop settlement belongs to this closure.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        settling_turn_id: Option<CanonicalUuid>,
+        /// Approved actions abandoned at settlement; absent while settling.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        abandoned_actions: Option<CanonicalU64>,
     },
     /// The user atomically replaced the active statement.
     Superseded {

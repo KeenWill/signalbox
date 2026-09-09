@@ -530,6 +530,15 @@ impl fmt::Display for RejectionDisplay {
                 "interrupt_already_applied session={session_id} active_turn={active_turn_id} \
                  existing_command={existing_command_id}"
             ),
+            RejectionDetail::GoalStopAwaitingApproval {
+                session_id,
+                active_turn_id,
+                tool_request_id,
+            } => write!(
+                formatter,
+                "goal_stop_awaiting_approval session={session_id} active_turn={active_turn_id} \
+                 tool_request={tool_request_id}; deny the pending request first"
+            ),
             RejectionDetail::InterruptUnavailableWhileAwaitingApproval {
                 session_id,
                 active_turn_id,
