@@ -709,9 +709,9 @@ for (const growth of [false, true]) {
     await expect(
       page
         .getByRole('region', { name: sessionId, exact: true })
-        .getByRole('definition')
+        .getByRole('definition', { includeHidden: true })
         .filter({ hasText: /^44$/ }),
-    ).toBeVisible()
+    ).toHaveText('44')
     await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
     await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeInViewport()
