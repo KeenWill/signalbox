@@ -1451,7 +1451,7 @@ fn capture_selected_with_hook(
 ) -> Result<(), LocalGitFailure> {
     let mut source = crate::push_objects::ObjectSource::open(
         authority,
-        std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT,
+        Some(std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT),
     )?;
     let database = git2::Odb::new_ext(authority.object_format).expect("fixture object database");
     source.capture(&database, oid)?;

@@ -82,10 +82,8 @@ impl RepositoryShell {
         &self,
         authority: &PinnedRepository,
     ) -> Result<(), LocalGitFailure> {
-        *self.selected_objects.borrow_mut() = Some(Arc::new(Mutex::new(ObjectSource::open(
-            authority,
-            std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT,
-        )?)));
+        *self.selected_objects.borrow_mut() =
+            Some(Arc::new(Mutex::new(ObjectSource::open(authority, None)?)));
         Ok(())
     }
 
@@ -544,10 +542,7 @@ fn config_snapshot_bytes(file: &fs::File) -> Result<Vec<u8>, LocalGitFailure> {
 
 impl PinnedObjectDatabase {
     pub(super) fn capture(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
-        let source = ObjectSource::open(
-            authority,
-            std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT,
-        )?;
+        let source = ObjectSource::open(authority, None)?;
         let pack = openat(
             &authority.git_directory,
             "objects/pack",
@@ -652,5 +647,53 @@ pub(super) fn repository_ignorecase(repository: &Repository) -> Result<bool, Loc
         Ok(ignorecase) => Ok(ignorecase),
         Err(error) if error.code() == ErrorCode::NotFound => Ok(false),
         Err(_) => Err(LocalGitFailure::Repository),
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::{ObjectSource, PinnedObjectDatabase};
+
+    #[test]
+    fn local_snapshots_outlive_the_push_preparation_deadline() {
+        let root = tempfile::tempdir().expect("repository root");
+        git2::Repository::init(root.path()).expect("repository");
+        let (_, executor) = crate::LocalGitTools::try_new(
+            signalbox_tools_workspace::LocalWorkspaceFileSystem,
+            root.path(),
+            crate::GitIdentity::try_new("Deadline fixture", "deadline@example.test")
+                .expect("identity"),
+        )
+        .expect("local tools")
+        .into_parts();
+        let authority = &executor.repository_authority;
+        let deadline = std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT;
+        let later = deadline + std::time::Duration::from_secs(1);
+        let snapshot = PinnedObjectDatabase::capture(authority).expect("local snapshot");
+        assert!(
+            snapshot
+                .source
+                .lock()
+                .expect("snapshot lock")
+                .check_deadline_at(later)
+                .is_ok()
+        );
+        let repository = authority.open_repository_shell().expect("repository shell");
+        repository
+            .capture_objects_on_read(authority)
+            .expect("local read snapshot");
+        assert!(
+            repository
+                .selected_objects
+                .borrow()
+                .as_ref()
+                .expect("selected snapshot")
+                .lock()
+                .expect("selected lock")
+                .check_deadline_at(later)
+                .is_ok()
+        );
+        let push = ObjectSource::open(authority, Some(deadline)).expect("push snapshot");
+        assert!(push.check_deadline_at(later).is_err());
     }
 }
