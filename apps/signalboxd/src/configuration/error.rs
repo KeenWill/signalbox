@@ -141,6 +141,8 @@ pub enum HubModelConfigurationError {
     MissingDaemonToolSettings,
     /// The daemon tool process-settings table was malformed or unsafe.
     InvalidDaemonToolSettings,
+    /// The tool approval wait settings table was malformed.
+    InvalidToolSettings,
     /// The per-tool approval posture table was malformed.
     InvalidToolApprovalPostures,
     /// The approval-judge selection table was malformed.
@@ -380,6 +382,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidDaemonToolSettings => {
                 "model configuration contains invalid daemon tool process settings"
+            }
+            Self::InvalidToolSettings => {
+                "model configuration contains invalid tool approval wait settings"
             }
             Self::DuplicateToolFamily => "model configuration repeats a daemon tool family",
             Self::MissingCompaction => "model configuration has no compaction settings",

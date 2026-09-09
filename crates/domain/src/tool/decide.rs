@@ -84,6 +84,24 @@ impl DecideToolRequest {
         })
     }
 
+    /// Prepares a runtime denial for an expired human approval wait.
+    pub fn prepare_approval_timeout_applied(
+        self,
+        request: &ToolRequest,
+    ) -> Result<PreparedDecideToolRequest, DecideToolRequestPreparationError> {
+        let resolution = ToolApprovalResolution::approval_timeout(self.request);
+        if request.id != self.request || &self.decision != resolution.decision() {
+            return Err(DecideToolRequestPreparationError {
+                command: self,
+                provided_request: request.id,
+            });
+        }
+        Ok(PreparedDecideToolRequest {
+            command: self,
+            result: DecideToolRequestResult::Applied(DecideToolRequestAppliedResult { resolution }),
+        })
+    }
+
     /// Prepares an authoritative missing-request rejection.
     pub const fn prepare_request_not_found(self) -> PreparedDecideToolRequest {
         let request = self.request;
