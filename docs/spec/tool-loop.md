@@ -196,7 +196,9 @@ or in-flight attempt takes the effect-class crash-loss path.
 Foreground waiting on a child through `await_session` is a logical tool
 transition that ends any physical attempt before committing the wait, so restart
 resumes from durable wait and result rows and cannot duplicate an external
-effect.
+effect. A batch can retain multiple foreground waits; continuation and
+interruption associate delivered child results with their await requests in
+proposal order.
 
 The error kind set stays closed; a family whose failures do not fit maps into it
 and may fix the detail to its own closed token vocabulary.
