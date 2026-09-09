@@ -266,6 +266,7 @@ where
 pub(crate) type RuntimeEligibilitySweep = WitnessedEligibilitySweep<PostgresEligibilitySweep>;
 
 pub(crate) struct RunningRuntime {
+    workflow_task: Option<JoinHandle<Result<(), signalboxd::workflows::WorkflowRuntimeError>>>,
     pub(crate) container: TestDatabase,
     pub(crate) pool: PgPool,
     pub(crate) socket_directory: SocketDirectory,
@@ -330,6 +331,28 @@ impl RunningRuntime {
         configuration_override: Option<&str>,
         nudge_capacity: Option<std::num::NonZeroUsize>,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_workflow_options(
+            compaction_model,
+            blob_storage,
+            configuration_override,
+            nudge_capacity,
+            false,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_programs() -> Result<Self, Box<dyn Error>> {
+        Self::start_with_workflow_options(None, BlobStorageFixtureMode::Disabled, None, None, true)
+            .await
+    }
+
+    async fn start_with_workflow_options(
+        compaction_model: Option<ScriptedModel<ModelCallId>>,
+        blob_storage: BlobStorageFixtureMode,
+        configuration_override: Option<&str>,
+        nudge_capacity: Option<std::num::NonZeroUsize>,
+        programs: bool,
+    ) -> Result<Self, Box<dyn Error>> {
         let (container, pool) = postgres().await?;
         let socket_directory = SocketDirectory::create()?;
         let listener = LocalProcessListener::bind(socket_directory.socket())?;
@@ -389,8 +412,19 @@ impl RunningRuntime {
         }
         let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
+        let workflow_task = if programs {
+            let (service, workflows) = signalboxd::workflows::WorkflowRuntime::new(pool.clone())?;
+            runtime = runtime.with_workflows(service);
+            let mut stopped = shutdown_receiver.clone();
+            Some(tokio::spawn(workflows.run(async move {
+                let _ = stopped.changed().await;
+            })))
+        } else {
+            None
+        };
         let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
         Ok(Self {
+            workflow_task,
             container,
             pool,
             socket_directory,
@@ -538,6 +572,9 @@ impl RunningRuntime {
         if let Some(runtime_task) = self.runtime_task.take() {
             self.shutdown.send(true)?;
             timeout(RUNTIME_SETTLE_ALLOWANCE, runtime_task).await???;
+        }
+        if let Some(task) = self.workflow_task.take() {
+            timeout(RUNTIME_SETTLE_ALLOWANCE, task).await???;
         }
         self.pool.close().await;
         self.socket_directory.cleanup()?;

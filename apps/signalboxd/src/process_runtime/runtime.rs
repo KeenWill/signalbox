@@ -4,6 +4,7 @@ use super::*;
 /// durable and streaming fan-outs, and one guarded Unix listener.
 #[derive(Debug)]
 pub struct ProcessRuntime {
+    workflows: Option<crate::workflows::WorkflowService>,
     configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     recovery_reporter: Option<FatalRecoveryReporter>,
     oauth_service: Option<Arc<crate::OauthCredentialService>>,
@@ -30,6 +31,12 @@ pub(super) struct ProcessFanouts {
 }
 
 impl ProcessRuntime {
+    /// Shares admission with the daemon-owned workflow runner.
+    pub fn with_workflows(mut self, workflows: crate::workflows::WorkflowService) -> Self {
+        self.workflows = Some(workflows);
+        self
+    }
+
     /// Shares model dispatch's OAuth cache with credential administration.
     pub fn with_oauth_service(mut self, service: Arc<crate::OauthCredentialService>) -> Self {
         self.oauth_service = Some(service);
@@ -72,6 +79,7 @@ impl ProcessRuntime {
         let (monitor_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         let (runner_recovery, _) = watch::channel(());
         Self {
+            workflows: None,
             configuration_reload: None,
             recovery_reporter: None,
             oauth_service: None,
@@ -215,6 +223,7 @@ impl ProcessRuntime {
             shutdown.clone(),
         );
         let connection_dependencies = ConnectionDependencies {
+            workflows: self.workflows,
             configuration_reload: self.configuration_reload,
             recovery_reporter: self.recovery_reporter,
             oauth_service: self.oauth_service,

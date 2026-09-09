@@ -4,6 +4,26 @@ import XCTest
 @testable import SignalboxNative
 
 final class ProcessProtocolTests: XCTestCase {
+  func testProgramReadRetainsExactResultBytes() throws {
+    let json = #"{"type":"program_run_read","run_id":"11111111-1111-4111-8111-111111111111","run":{"registration_id":"22222222-2222-4222-8222-222222222222","input":[0,255],"outcome":{"state":"succeeded","result":[128,0]}}}"#
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self, from: Data(json.utf8))
+    guard case .programRunRead(let runID, let run) = message else {
+      return XCTFail("Expected a decoded program run")
+    }
+    XCTAssertEqual(runID.rawValue, "11111111-1111-4111-8111-111111111111")
+    XCTAssertEqual(run.registrationID.rawValue, "22222222-2222-4222-8222-222222222222")
+    XCTAssertEqual(run.input, [0, 255])
+    XCTAssertEqual(run.outcome, .succeeded(result: [128, 0]))
+  }
+
+  func testProgramSuccessRequiresResultAndRejectsUnknownFields() throws {
+    XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(
+      SignalboxProgramRunState.self, from: Data(#"{"state":"succeeded"}"#.utf8)))
+    XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(
+      SignalboxProgramRunState.self, from: Data(#"{"state":"cancelled","result":[]}"#.utf8)))
+  }
+
   private let sessionID = "11111111-1111-4111-8111-111111111111"
   private let turnID = "22222222-2222-4222-8222-222222222222"
   private let toolRequestID = "33333333-3333-4333-8333-333333333333"

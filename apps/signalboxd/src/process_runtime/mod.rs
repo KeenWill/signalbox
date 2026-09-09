@@ -304,6 +304,7 @@ impl ContextCompactionModel for UnavailableContextCompactionModel {
 
 #[derive(Clone, Debug)]
 struct ConnectionServices {
+    workflows: Option<crate::workflows::WorkflowService>,
     configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     recovery_reporter: Option<FatalRecoveryReporter>,
     oauth_service: Option<Arc<crate::OauthCredentialService>>,

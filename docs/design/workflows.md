@@ -4,12 +4,6 @@ This committed unbuilt design extends [workflows](../spec/workflows.md).
 
 ## Input and result
 
-User-authorized register, start and read commands use the
-[process protocol](../spec/process-protocol.md) and its durable command
-identity. Read returns retained run state and terminal result bytes.
-
-
-
 Effect method input/output records have checked Rust and TypeScript codecs;
 full-width integer identities use decimal strings and exact payloads use byte
 arrays. Domain values, wire payloads and storage rows remain distinct. Effects

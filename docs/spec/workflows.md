@@ -97,18 +97,25 @@ replay their recorded outcome without appending frames.
 
 ## Daemon runner
 
-The fenced daemon owns one local workflow runner. Internal registration and
-start admission retain executable identity, grants and exact input before waking
-it. Startup resumes registered runs without a terminal outcome, and an active
-run has one attempt at a time. Shutdown drops attempts; restart replays the
-retained requests and deliveries.
+The fenced daemon owns one local workflow runner. User-authorized registration
+and start admission retain executable identity, grants and exact input before
+waking it. Startup resumes registered runs without a terminal outcome, and an
+active run has one attempt at a time. Shutdown drops attempts; restart replays
+the retained requests and deliveries.
 
 The Linux compiled catalog includes `clock` revision `1`: its input is a
 big-endian u64, and its result concatenates that input and a journaled
 big-endian u64 Unix time in seconds. The runner resolves admitted JavaScript
 artifacts from their registrations without requiring a native catalog.
 Registration effects and the clock are composed; other effects and durable waits
-are not composed. There is no public launch command.
+are not composed. The process protocol and CLI expose registration, start, read
+and cancellation. `program register REGISTRATION_ID REGISTRATION_JSON` reads a
+registration description; `program start RUN_ID REGISTRATION_ID --input FILE`
+admits the program codec's exact input bytes. `program read RUN_ID` prints
+retained input, state and result as JSON after the run identity;
+`program cancel RUN_ID --command-id COMMAND_ID` preserves durable cancellation
+identity. Native and JavaScript runtime input decoders check the encoded input
+before program code runs.
 
 ## Native programs
 

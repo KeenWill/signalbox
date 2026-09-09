@@ -2,7 +2,439 @@
 use super::*;
 use signalbox_domain::ProgramRunId;
 use signalbox_persistence::program_journal::ProgramJournalRepository;
+use signalbox_process_protocol::{
+    ProgramExecutableInput, ProgramGrant, ProgramRegistrationInput, ProgramRunState,
+};
 use signalbox_process_protocol::{ProgramRunCancellationOutcome, ProgramRunCancelledState};
+
+async fn program_request(
+    connection: &mut Connection,
+    request: ClientRequest,
+) -> Result<ServerMessage, Box<dyn Error>> {
+    connection
+        .request_version(ProtocolVersion::One, 1, request)
+        .await?;
+    Ok(response_within(connection).await?.message().clone())
+}
+
+fn javascript_registration(artifact: &str) -> ProgramRegistrationInput {
+    ProgramRegistrationInput {
+        name: "socket-program".into(),
+        revision: "1".into(),
+        executable: ProgramExecutableInput::JavaScript {
+            source: artifact.as_bytes().to_vec(),
+            artifact: artifact.into(),
+        },
+        grants: vec![],
+    }
+}
+
+async fn program_result(
+    connection: &mut Connection,
+    run_id: CanonicalUuid,
+) -> Result<signalbox_process_protocol::ProgramRun, Box<dyn Error>> {
+    timeout(RUNTIME_SETTLE_ALLOWANCE, async {
+        loop {
+            let message =
+                program_request(connection, ClientRequest::ReadProgramRun { run_id }).await?;
+            let ServerMessage::ProgramRunRead {
+                run_id: observed,
+                run,
+            } = message
+            else {
+                return Err(format!("expected retained program run: {message:?}").into());
+            };
+            assert_eq!(observed, run_id);
+            if !matches!(run.outcome, ProgramRunState::Running {}) {
+                return Ok(run);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn program_javascript_admission_retries_preserve_input_and_result()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_programs().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let registration_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let artifact = r#"import { defineProgram } from '@signalbox/program-sdk/v1';
+        const codec = { decode(bytes) { if (bytes.length !== 3) throw Error('expected three bytes'); return bytes; }, encode(value) { return value; } };
+        export default defineProgram({ input: codec, output: codec, async run(input) { return input; } });"#;
+    let registration = javascript_registration(artifact);
+    let request = ClientRequest::RegisterProgram {
+        registration_id,
+        registration: registration.clone(),
+    };
+    let registered = program_request(&mut connection, request.clone()).await?;
+    assert_eq!(
+        registered,
+        ServerMessage::ProgramRegistered { registration_id }
+    );
+    assert_eq!(
+        program_request(&mut connection, request).await?,
+        registered,
+        "equal registration retries return the same admission"
+    );
+    let input = vec![0, 255, 128]; // Exact codec fixture includes non-UTF-8 bytes.
+    let start = ClientRequest::StartProgramRun {
+        run_id,
+        registration_id,
+        input: input.clone(),
+    };
+    let started = program_request(&mut connection, start.clone()).await?;
+    assert_eq!(
+        started,
+        ServerMessage::ProgramRunStarted {
+            run_id,
+            registration_id
+        }
+    );
+    let retained = program_result(&mut connection, run_id).await?;
+    assert_eq!(retained.registration_id, registration_id);
+    assert_eq!(retained.input, input);
+    assert_eq!(
+        retained.outcome,
+        ProgramRunState::Succeeded { result: input }
+    );
+    assert_eq!(
+        program_request(&mut connection, start).await?,
+        started,
+        "equal start after completion returns the same admission"
+    );
+    assert_eq!(
+        program_result(&mut connection, run_id).await?,
+        retained,
+        "retries preserve retained result"
+    );
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn program_conflicting_registrations_and_starts_are_refused() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_programs().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let registration_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let registration = javascript_registration("");
+    assert_eq!(
+        program_request(
+            &mut connection,
+            ClientRequest::RegisterProgram {
+                registration_id,
+                registration: registration.clone()
+            }
+        )
+        .await?,
+        ServerMessage::ProgramRegistered { registration_id }
+    );
+    let mut changed = registration.clone();
+    changed.grants = vec![ProgramGrant::Time];
+    assert!(matches!(
+        program_request(
+            &mut connection,
+            ClientRequest::RegisterProgram {
+                registration_id,
+                registration: changed
+            }
+        )
+        .await?,
+        ServerMessage::Error {
+            code: ErrorCode::ConflictingReuse,
+            ..
+        }
+    ));
+    assert!(
+        matches!(
+            program_request(
+                &mut connection,
+                ClientRequest::RegisterProgram {
+                    registration_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
+                    registration
+                }
+            )
+            .await?,
+            ServerMessage::Error {
+                code: ErrorCode::ConflictingReuse,
+                ..
+            }
+        ),
+        "name and revision cannot be rebound under another identity"
+    );
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    program_request(
+        &mut connection,
+        ClientRequest::StartProgramRun {
+            run_id,
+            registration_id,
+            input: vec![],
+        },
+    )
+    .await?;
+    assert!(
+        matches!(
+            program_request(
+                &mut connection,
+                ClientRequest::StartProgramRun {
+                    run_id,
+                    registration_id,
+                    input: vec![1]
+                }
+            )
+            .await?,
+            ServerMessage::Error {
+                code: ErrorCode::ConflictingReuse,
+                ..
+            }
+        ),
+        "start retries cannot change input"
+    );
+    drop(connection);
+    runtime.stop().await
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn program_native_key_resolves_daemon_code_and_checks_input() -> Result<(), Box<dyn Error>> {
+    use signalbox_workflow_runtime::native::NativeValue;
+    use signalboxd::workflows::{ClockInput, ClockResult};
+    let runtime = RunningRuntime::start_programs().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let registration_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let registration = ProgramRegistrationInput {
+        name: "clock-test".into(),
+        revision: "1".into(),
+        executable: ProgramExecutableInput::Native {
+            entry: "clock".into(),
+            revision: "1".into(),
+        },
+        grants: vec![ProgramGrant::Time],
+    };
+    assert_eq!(
+        program_request(
+            &mut connection,
+            ClientRequest::RegisterProgram {
+                registration_id,
+                registration
+            }
+        )
+        .await?,
+        ServerMessage::ProgramRegistered { registration_id }
+    );
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let input = ClockInput(731); // Arbitrary pilot input, distinct from the clock value.
+    program_request(
+        &mut connection,
+        ClientRequest::StartProgramRun {
+            run_id,
+            registration_id,
+            input: input.encode()?,
+        },
+    )
+    .await?;
+    let ProgramRunState::Succeeded { result } =
+        program_result(&mut connection, run_id).await?.outcome
+    else {
+        panic!("native clock must complete")
+    };
+    assert_eq!(ClockResult::decode(&result)?.input, input);
+    let invalid = CanonicalUuid::from_uuid(Uuid::now_v7());
+    program_request(
+        &mut connection,
+        ClientRequest::StartProgramRun {
+            run_id: invalid,
+            registration_id,
+            input: vec![],
+        },
+    )
+    .await?;
+    assert_eq!(
+        program_result(&mut connection, invalid).await?.outcome,
+        ProgramRunState::Faulted {},
+        "native input decoder rejects before code runs"
+    );
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn program_unknown_native_key_is_refused() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_programs().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let registration = ProgramRegistrationInput {
+        name: "unavailable".into(),
+        revision: "1".into(),
+        executable: ProgramExecutableInput::Native {
+            entry: "not-compiled".into(),
+            revision: "1".into(),
+        },
+        grants: vec![],
+    };
+    assert!(matches!(
+        program_request(
+            &mut connection,
+            ClientRequest::RegisterProgram {
+                registration_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
+                registration
+            }
+        )
+        .await?,
+        ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn program_registration_effect_cannot_widen_user_assigned_grants()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_programs().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let child = Uuid::now_v7();
+    let artifact = format!(
+        r#"import {{ defineProgram, jsonCodec, register }} from '@signalbox/program-sdk/v1';
+        export default defineProgram({{
+            input: {{ decode(bytes) {{ return bytes; }} }},
+            output: jsonCodec(value => value),
+            async run() {{ return await register({{ id: '{child}', name: 'child', revision: '1', source: [], artifact: '', grants: ['time'] }}); }}
+        }});"#
+    );
+    let mut registration = javascript_registration(&artifact);
+    registration.grants = vec![ProgramGrant::Register];
+    let registration_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    assert_eq!(
+        program_request(
+            &mut connection,
+            ClientRequest::RegisterProgram {
+                registration_id,
+                registration
+            }
+        )
+        .await?,
+        ServerMessage::ProgramRegistered { registration_id }
+    );
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    program_request(
+        &mut connection,
+        ClientRequest::StartProgramRun {
+            run_id,
+            registration_id,
+            input: vec![],
+        },
+    )
+    .await?;
+    let ProgramRunState::Succeeded { result } =
+        program_result(&mut connection, run_id).await?.outcome
+    else {
+        panic!("program retains the refusal result")
+    };
+    let result: serde_json::Value = serde_json::from_slice(&result)?;
+    assert_eq!(
+        result,
+        serde_json::json!({"kind":"reject", "reason":"capability_denied"})
+    );
+    let registered: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM program_registration WHERE registration_id = $1)",
+    )
+    .bind(child)
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert!(
+        !registered,
+        "refused child registration must not retain widened grants"
+    );
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn program_read_retains_cancellation_and_its_command_identity() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_domain::{
+        ProgramRegistrationId,
+        program_registration::{ProgramGrants, ProgramRegistrationRequest},
+    };
+    let runtime = RunningRuntime::start().await?;
+    let registrations =
+        signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
+            runtime.pool.clone(),
+        );
+    let registration = ProgramRegistrationId::from_uuid(Uuid::now_v7());
+    registrations
+        .register_user(
+            registration,
+            ProgramRegistrationRequest {
+                name: "cancelled".into(),
+                revision: "1".into(),
+                source: vec![],
+                artifact: String::new(),
+                grants: ProgramGrants::new([]),
+            },
+        )
+        .await?;
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let run = ProgramRunId::from_uuid(run_id.into_uuid());
+    registrations
+        .start_run(run, registration, b"retained input")
+        .await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let command_id = command()?;
+    let cancel = ClientRequest::CancelProgramRun { command_id, run_id };
+    let receipt = program_request(&mut connection, cancel.clone()).await?;
+    assert_eq!(
+        receipt,
+        ServerMessage::ProgramRunCancellationReceipt {
+            command_id,
+            run_id,
+            outcome: ProgramRunCancellationOutcome::Applied {
+                terminal_state: ProgramRunCancelledState::Cancelled,
+                result: ()
+            }
+        }
+    );
+    let journal = ProgramJournalRepository::new(runtime.pool.clone());
+    let cancelled = journal
+        .load(run)
+        .await?
+        .expect("retained cancelled journal");
+    assert_eq!(program_request(&mut connection, cancel).await?, receipt);
+    assert_eq!(
+        journal.load(run).await?.as_ref(),
+        Some(&cancelled),
+        "cancel retry appends no second delivery"
+    );
+    let retained = program_result(&mut connection, run_id).await?;
+    assert_eq!(retained.input, b"retained input");
+    assert_eq!(retained.outcome, ProgramRunState::Cancelled {});
+    assert!(matches!(
+        program_request(
+            &mut connection,
+            ClientRequest::CancelProgramRun {
+                command_id,
+                run_id: CanonicalUuid::from_uuid(Uuid::now_v7())
+            }
+        )
+        .await?,
+        ServerMessage::Error {
+            code: ErrorCode::ConflictingReuse,
+            ..
+        }
+    ));
+    drop(connection);
+    runtime.stop().await
+}
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]

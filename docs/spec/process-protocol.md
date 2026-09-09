@@ -577,6 +577,20 @@ durable. An equal `command_id` replay returns its stored receipt before current
 state is evaluated. Both operations are authorized as every other request is:
 reaching the owner-private socket is the authority.
 
+Program commands use ordinary user authority from the owner-private socket.
+`register_program { registration_id, registration }` accepts name, revision,
+grants and a JavaScript source/artifact pair or compiled native entry/revision;
+the daemon supplies the native binary digest. It returns
+`program_registered { registration_id }`.
+`start_program_run { run_id, registration_id, input }` retains exact encoded
+input bytes and returns `program_run_started { run_id, registration_id }`. Equal
+registration and start retries return the same admission; conflicting identity
+reuse returns `conflicting_reuse`, and an unavailable native key returns
+`invalid_request`. `read_program_run { run_id }` returns
+`program_run_read { run_id, run }`, with registration identity, exact input
+bytes, and an outcome tagged by `state`: `running`, `cancelled`, `faulted`, or
+`succeeded` with exact `result` bytes. Missing reads return `not_found`.
+
 Program-run cancellation is the request
 `cancel_program_run { run_id, command_id }` and the receipt
 `program_run_cancellation_receipt { command_id, run_id, outcome }`. The outcome

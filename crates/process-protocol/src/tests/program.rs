@@ -2,6 +2,54 @@ use super::support::*;
 use crate::*;
 
 #[test]
+fn program_registration_rejects_uploaded_native_code_and_unknown_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let registration = ProgramRegistrationInput {
+        name: "clock".into(),
+        revision: "1".into(),
+        executable: ProgramExecutableInput::Native {
+            entry: "clock".into(),
+            revision: "1".into(),
+        },
+        grants: vec![ProgramGrant::Time],
+    };
+    let mut value = serde_json::to_value(&registration)?;
+    value["executable"]["artifact"] = serde_json::json!("uploaded code");
+    assert!(serde_json::from_value::<ProgramRegistrationInput>(value).is_err());
+    let mut value = serde_json::to_value(&registration)?;
+    value["grants"] = serde_json::json!(["arbitrary_authority"]);
+    assert!(serde_json::from_value::<ProgramRegistrationInput>(value).is_err());
+    Ok(())
+}
+
+#[test]
+fn program_run_read_requires_result_only_for_success() -> Result<(), Box<dyn std::error::Error>> {
+    let message = ServerMessage::ProgramRunRead {
+        run_id: uuid(1),
+        run: ProgramRun {
+            registration_id: uuid(2),
+            input: vec![0, 255],
+            outcome: ProgramRunState::Succeeded {
+                result: vec![128, 0],
+            },
+        },
+    };
+    let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(3)?, message)?;
+    assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+    assert!(
+        serde_json::from_value::<ProgramRunState>(serde_json::json!({"state":"succeeded"}))
+            .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ProgramRunState>(
+            serde_json::json!({"state":"cancelled","result":[]})
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn program_cancellation_has_a_closed_version_one_receipt() -> Result<(), Box<dyn std::error::Error>>
 {
     let command_id = command(1)?;

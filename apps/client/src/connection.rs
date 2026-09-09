@@ -258,6 +258,9 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::ListCredentialExclusions { .. }
         | ClientRequest::ReadCredentialPoolPolicy { .. }
         | ClientRequest::ReadRunnerStatus { .. }
+        | ClientRequest::RegisterProgram { .. }
+        | ClientRequest::StartProgramRun { .. }
+        | ClientRequest::ReadProgramRun { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}
