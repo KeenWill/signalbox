@@ -427,9 +427,8 @@ enum LiveScreenRenderer {
             backdrop.windowScene = nil
         }
 
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
         var previous = rendering(of: window, canvas: canvas)
+        var elapsed = Duration.zero
         // How long the rendering has been identical, reset by any change, not
         // how long the screen has been on the air. Gating on total elapsed time
         // and adjacent-frame equality would accept a screen that changed just
@@ -439,16 +438,15 @@ enum LiveScreenRenderer {
         // screen has held it for the whole floor. A screen that never changes
         // is unchanged from the first sample, so the floor still bounds the
         // earliest possible return and the horizon documented on it holds.
-        var unchangedSince = clock.now
-        while clock.now < deadline {
+        var unchanged = Duration.zero
+        while elapsed < timeout {
             try? await Task.sleep(for: settleInterval)
+            elapsed += settleInterval
             let current = rendering(of: window, canvas: canvas)
-            let matchesPrevious = pixels(of: current) == pixels(of: previous)
-            let sampledAt = clock.now
-            if !matchesPrevious {
-                unchangedSince = sampledAt
-            }
-            if sampledAt < deadline && unchangedSince.duration(to: sampledAt) >= minimumSettle {
+            unchanged = pixels(of: current) == pixels(of: previous)
+                ? unchanged + settleInterval
+                : .zero
+            if unchanged >= minimumSettle {
                 return current
             }
             previous = current
