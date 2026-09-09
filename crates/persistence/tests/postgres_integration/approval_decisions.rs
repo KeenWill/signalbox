@@ -14,6 +14,41 @@ const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_loads_creation_dispatch_from_core_session_records()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::session::{RepositoryWatchCreationDispatch, SessionRepository};
+
+    let (container, pool, _) = migrated_postgres().await?;
+    let dispatch = signalbox_domain::RepoWatchDispatchId::from_uuid(next_test_submit_uuid());
+    let command = DurableCommandId::from_uuid(next_test_submit_uuid());
+    let session = SessionId::from_uuid(next_test_submit_uuid());
+    const ARBITRARY_MODEL_SELECTION: u128 = 0x7f91;
+    let creation = CreateSession::new(
+        command,
+        signalbox_domain::SessionCreationProvenance::module_dispatched(
+            signalbox_domain::ModuleDispatch::RepositoryWatch { dispatch },
+        ),
+        SessionConfigurationDefaults::new(direct(ARBITRARY_MODEL_SELECTION)),
+    )
+    .prepare(session)
+    .expect("repository-watch creation is preparable");
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+
+    assert_eq!(
+        SessionRepository::new(pool.clone())
+            .repository_watch_creation_dispatch(session)
+            .await?,
+        Some(RepositoryWatchCreationDispatch { dispatch, command }),
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_has_no_dispatch_authority_for_an_interactive_session()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _) = migrated_postgres().await?;
@@ -39,6 +74,12 @@ async fn approval_judge_has_no_dispatch_authority_for_an_interactive_session()
     );
 
     assert_eq!(prepared.session_context().dispatch(), None);
+    assert_eq!(
+        signalbox_persistence::session::SessionRepository::new(pool.clone())
+            .repository_watch_creation_dispatch(fixture.session)
+            .await?,
+        None,
+    );
     pool.close().await;
     drop(container);
     Ok(())

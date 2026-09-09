@@ -1707,23 +1707,20 @@ async fn approval_judge_loads_repo_watch_authority_before_ledger_settlement()
 
     let mut fixture = CheckoutFixture::with_head_repository("contributor/project").await?;
     fixture.submit_without_lifecycle_settlement().await;
-    let session: Uuid = sqlx::query_scalar(
-        "SELECT created_session_id FROM create_session_command WHERE command_id = $1",
-    )
-    .bind(fixture.command.into_uuid())
-    .fetch_one(&fixture.core)
-    .await?;
-    let dispatch: Uuid =
-        sqlx::query_scalar("SELECT dispatch_ref FROM session WHERE session_id = $1")
-            .bind(session)
-            .fetch_one(&fixture.core)
-            .await?;
-    let settled_session: Option<Uuid> =
-        sqlx::query_scalar("SELECT created_session_id FROM dispatch_ledger WHERE command_id = $1")
-            .bind(fixture.command.into_uuid())
-            .fetch_one(&fixture.module)
-            .await?;
-    assert_eq!(settled_session, None);
+    let checkout = fixture
+        .store
+        .dispatch_checkout(fixture.command)
+        .await?
+        .expect("the dispatch retained its checkout");
+    let session = checkout.location.expect("checkout has a session").session;
+    assert!(
+        fixture
+            .store
+            .reaction_origin_for_session(session)
+            .await?
+            .is_none(),
+        "the lifecycle-created session has not settled on the module ledger",
+    );
     let templates = signalboxd::SessionTemplateConfiguration::read(
         &fixture._files.path().join("templates.toml"),
         || None,
@@ -1741,14 +1738,10 @@ async fn approval_judge_loads_repo_watch_authority_before_ledger_settlement()
         },
     );
     assert_eq!(
-        runtime
-            .approval_judge_authority(SessionId::from_uuid(session))
-            .await?,
+        runtime.approval_judge_authority(session).await?,
         Some(ApprovalJudgeDispatchAuthority::PullRequest(
             ApprovalJudgePullRequestAuthority::new(ApprovalJudgePullRequestAuthorityInput {
-                dispatch: ApprovalJudgeDispatchProvenance::RepoWatch(
-                    signalbox_domain::RepoWatchDispatchId::from_uuid(dispatch),
-                ),
+                dispatch: ApprovalJudgeDispatchProvenance::RepoWatch(checkout.dispatch),
                 repository: RepositorySlug::try_new(String::from("checkout/project"))?,
                 pull_request: PullRequestNumber::new(NonZeroU64::MIN),
                 head_sha: fixture.head.clone(),

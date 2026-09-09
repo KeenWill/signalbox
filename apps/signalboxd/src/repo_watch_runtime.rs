@@ -166,33 +166,25 @@ impl RepositoryWatchRuntime {
             let state = self.state.lock().await;
             (state.store.clone(), state.core_pool.clone())
         };
-        #[derive(sqlx::FromRow)]
-        struct CreationDispatch {
-            dispatch_ref: uuid::Uuid,
-            command_id: uuid::Uuid,
-        }
-        let origin: Option<CreationDispatch> = sqlx::query_as(
-            "SELECT session.dispatch_ref, creation.command_id
-               FROM session
-               JOIN create_session_command AS creation
-                 ON creation.created_session_id = session.session_id
-              WHERE session.session_id = $1
-                AND session.creation_cause = 'module_dispatched'
-                AND session.dispatching_module = 'repo_watch'",
-        )
-        .bind(session.into_uuid())
-        .fetch_optional(&core)
-        .await?;
+        let origin = signalbox_persistence::session::SessionRepository::new(core)
+            .repository_watch_creation_dispatch(session)
+            .await
+            .map_err(|error| match error {
+                signalbox_persistence::session::SessionRepositoryError::Database(error) => {
+                    StoreError::Database(error)
+                }
+                signalbox_persistence::session::SessionRepositoryError::Corruption(_) => {
+                    StoreError::InvalidRetainedCommand
+                }
+            })?;
         let Some(origin) = origin else {
             return Ok(None);
         };
         let checkout = store
-            .dispatch_checkout(signalbox_domain::DurableCommandId::from_uuid(
-                origin.command_id,
-            ))
+            .dispatch_checkout(origin.command)
             .await?
             .ok_or(StoreError::InvalidRetainedCommand)?;
-        if checkout.dispatch.into_uuid() != origin.dispatch_ref {
+        if checkout.dispatch != origin.dispatch {
             return Err(StoreError::InvalidRetainedCommand);
         }
         let signalbox_domain::RepoWatchEventTarget::PullRequest(context) = checkout.event.target()
