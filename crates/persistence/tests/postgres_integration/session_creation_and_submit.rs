@@ -3800,7 +3800,7 @@ fn repeated_attachment_command(
 /// Multiple references to an admissible blob reach session lookup.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
+async fn attachment_admission_accepts_repeated_references() -> Result<(), Box<dyn Error>> {
     let fixture = attachment_budget_fixture().await?;
     let repeated = repeated_attachment_command(
         &fixture,
@@ -3828,8 +3828,7 @@ async fn attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<
 /// An oversized blob is rejected even when multiple parts reference it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn attachment_admission_charges_a_repeated_digest_at_least_once() -> Result<(), Box<dyn Error>>
-{
+async fn attachment_admission_rejects_an_oversized_repeated_blob() -> Result<(), Box<dyn Error>> {
     let fixture = attachment_budget_fixture().await?;
     let narrow_maximum = fixture.first_length - 1;
     let narrow = SubmitInputRepository::new(fixture.pool.clone())
@@ -4141,13 +4140,10 @@ async fn queued_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// the frontier sum is over distinct digests, so one digest referenced
-/// by both the rendered origin and a newly queued input is charged once and the
-/// queued input is admitted, even though doubling that length would exceed the
-/// bound.
+/// A blob shared by the rendered origin and queued input remains admissible.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn prospective_frontier_charges_a_shared_digest_once() -> Result<(), Box<dyn Error>> {
+async fn prospective_frontier_accepts_a_shared_blob() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let shared_digest = BlobDigest::digest(b"shared prospective attachment");
     let shared_length = 7_u64;
@@ -4691,8 +4687,7 @@ const TOOL_REQUEST: u128 = 0x209;
 const TOOL_CALL_ENTRY: u128 = 0x20a;
 const YIELDED_FRONTIER: u128 = 0x20b;
 const CONTINUATION_ATTEMPT: u128 = 0x20c;
-/// Each catalogued attachment in these scenarios. Load-bearing: one fits under
-/// [`TOOL_BATCH_ATTACHMENT_MAXIMUM`] and two do not.
+/// Each blob fits individually; their combined length exceeds the maximum.
 const RETAINED_ATTACHMENT_LENGTH: u64 = 7;
 const TOOL_BATCH_ATTACHMENT_MAXIMUM: u64 = 10;
 
@@ -4761,11 +4756,10 @@ async fn executing_tool_batch_admits_a_bounded_attachment_queue() -> Result<(), 
 /// with no cancellation-requested call, and a delegation origin owns no
 /// accepted-input turn in the scheduling projection. The batch's yielded
 /// frontier and the steering pending against that turn are still retained
-/// context, so their attachments are charged against the bound rather than
-/// being replaced by the earliest queued base.
+/// context; each attachment is admitted independently of their combined size.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegated_executing_tool_batch_charges_its_retained_attachment()
+async fn delegated_executing_tool_batch_admits_individually_bounded_attachments()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool, _) = migrated_postgres().await?;
     let (fixture, _) =
@@ -4781,7 +4775,8 @@ async fn delegated_executing_tool_batch_charges_its_retained_attachment()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegated_approval_wait_charges_its_retained_attachment() -> Result<(), Box<dyn Error>> {
+async fn delegated_approval_wait_admits_individually_bounded_attachments()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool, _) = migrated_postgres().await?;
     let (fixture, _) = delegated_attachment_tool_batch(&pool, InitialToolApproval::Confirm).await?;
     assert_delegated_attachment_budget(
@@ -4795,7 +4790,8 @@ async fn delegated_approval_wait_charges_its_retained_attachment() -> Result<(),
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegated_tool_recovery_charges_its_retained_attachment() -> Result<(), Box<dyn Error>> {
+async fn delegated_tool_recovery_admits_individually_bounded_attachments()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool, _) = migrated_postgres().await?;
     let (fixture, _) =
         delegated_attachment_tool_batch(&pool, InitialToolApproval::PolicyAuto).await?;
@@ -4831,7 +4827,8 @@ async fn delegated_tool_recovery_charges_its_retained_attachment() -> Result<(),
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegated_model_recovery_charges_its_retained_attachment() -> Result<(), Box<dyn Error>> {
+async fn delegated_model_recovery_admits_individually_bounded_attachments()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool, _) = migrated_postgres().await?;
     let fixture =
         authorize_delegated_model_call_fixture(&pool, DELEGATED_BATCH_FIXTURE_SEED).await?;
@@ -4860,7 +4857,8 @@ async fn delegated_model_recovery_charges_its_retained_attachment() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegated_child_wait_charges_its_retained_attachment() -> Result<(), Box<dyn Error>> {
+async fn delegated_child_wait_admits_individually_bounded_attachments() -> Result<(), Box<dyn Error>>
+{
     use signalbox_domain::ChildRelationshipPolicy;
     use signalbox_persistence::session_delegation::SpawnSessionCandidates;
     let (_container, pool, _) = migrated_postgres().await?;

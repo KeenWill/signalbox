@@ -367,10 +367,10 @@ async fn blob_metadata_absent_catalog_entry_is_not_found() -> Result<(), Box<dyn
     runtime.stop().await
 }
 
-/// A multi-gigabyte attached file contributes metadata without any body read.
+/// A sparse attachment stays bounded through preparation and 200 reads in one turn.
 #[tokio::test]
-#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn blob_four_gib_attachment_preparation_reads_no_body() -> Result<(), Box<dyn Error>> {
+async fn blob_ten_gib_preparation_and_two_hundred_reads_stay_bounded() -> Result<(), Box<dyn Error>>
+{
     use signalbox_blob_store::{BlobStore, ExpectedBlob};
     use signalbox_blob_store_filesystem::FilesystemBlobStore;
     use signalbox_persistence::blob::{
@@ -378,10 +378,10 @@ async fn blob_four_gib_attachment_preparation_reads_no_body() -> Result<(), Box<
     };
     use std::os::unix::fs::DirBuilderExt;
 
-    const FOUR_GIB: u64 = 4 * 1024 * 1024 * 1024;
-    // SHA-256 of FOUR_GIB zero bytes, computed with a bounded streaming buffer.
+    const TEN_GIB: u64 = 10 * 1024 * 1024 * 1024;
+    // SHA-256 of TEN_GIB zero bytes, computed with a bounded streaming buffer.
     let digest: BlobDigest =
-        "sha256:8479e43911dc45e89f934fe48d01297e16f51d17aa561d4d1c216b1ae0fcddca".parse()?;
+        "sha256:732377e7f4a2abdc13ddfa1eb4c9c497fd2a2b294674d056cf51581b47dd586d".parse()?;
     let runtime = RunningRuntime::start_with_blob_storage().await?;
     let root = runtime.blob_storage_root.as_ref().expect("blob fixture");
     let key = BlobObjectKey::for_digest(digest);
@@ -392,7 +392,7 @@ async fn blob_four_gib_attachment_preparation_reads_no_body() -> Result<(), Box<
         .create(path.parent().expect("object parent"))?;
     let file = fs::File::create(&path)?;
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.set_len(FOUR_GIB)?;
+    file.set_len(TEN_GIB)?;
     let measured = Arc::new(FilesystemBlobStore::try_new(root.store.clone())?);
     let configuration = support::parse_model_configuration(&root.model_configuration())?;
     let mut registry =
@@ -401,7 +401,7 @@ async fn blob_four_gib_attachment_preparation_reads_no_body() -> Result<(), Box<
             .expect("configured registry");
     let (name, _) = registry.routed_store(BlobStorageClass::UserAttachment);
     let name = name.clone();
-    let expected = ExpectedBlob::try_new(digest, FOUR_GIB)?;
+    let expected = ExpectedBlob::try_new(digest, TEN_GIB)?;
     BlobCatalogRepository::new(runtime.pool.clone())
         .register_verified_replica(
             expected,
@@ -430,14 +430,16 @@ async fn blob_four_gib_attachment_preparation_reads_no_body() -> Result<(), Box<
             },
         )
         .await?;
-    accepted_successor_turn(&mut connection, session_id, 1).await?;
+    let turn = accepted_successor_turn(&mut connection, session_id, 1).await?;
+    let turn = TurnId::from_uuid(turn.into_uuid());
     let session = SessionId::from_uuid(session_id.into_uuid());
     activate_turn(&runtime.pool, session).await?;
     let calls = PostgresModelCallRepository::new(
         runtime.pool.clone(),
         configuration.target_catalog(),
         ModelCallCredentialReference::new("sparse-blob-fixture"),
-    );
+    )
+    .with_continuation_usage_limits(configuration.tool_continuation_usage_limits());
     let call = ModelCallId::from_uuid(Uuid::now_v7());
     let mut prepared = None;
     for _ in 0..2 {
@@ -475,6 +477,7 @@ async fn blob_four_gib_attachment_preparation_reads_no_body() -> Result<(), Box<
         &tool_entries,
         &reasoning_provenance,
     )?;
+    let registry = Arc::new(registry);
     let interactions = Arc::new(AtomicUsize::new(0));
     let counter = AttachmentPreparingModelCallProvider::new(
         super::compaction::CountingProbe {
@@ -482,7 +485,7 @@ async fn blob_four_gib_attachment_preparation_reads_no_body() -> Result<(), Box<
             outcome: ModelCallInputTokenCount::Counted(1),
         },
         runtime.pool.clone(),
-        Some(Arc::new(registry)),
+        Some(registry.clone()),
     );
     assert_eq!(
         counter
@@ -496,12 +499,158 @@ async fn blob_four_gib_attachment_preparation_reads_no_body() -> Result<(), Box<
         .open_range(
             expected,
             &key,
-            FOUR_GIB / 2,
+            TEN_GIB / 2,
             std::num::NonZeroU64::new(524_288).expect("page length"),
         )
         .await?;
     assert_eq!(page.byte_length(), 524_288);
     assert_eq!(measured.read_bytes_for_test(), 524_288);
+    let before_turn_reads = measured.read_bytes_for_test();
+    execute_sparse_blob_turn(
+        &calls,
+        &runtime.pool,
+        session,
+        turn,
+        call,
+        registry,
+        expected,
+    )
+    .await?;
+    // Five full pages, 194 one-byte pages, and one three-byte short tail.
+    assert_eq!(
+        measured.read_bytes_for_test() - before_turn_reads,
+        2_621_637
+    );
     drop(connection);
     runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn blob_operator_range_crossing_eof_returns_the_short_tail() -> Result<(), Box<dyn Error>> {
+    let mut fixture = CommittedBlobReadFixture::start(b"short tail").await?;
+    let offset_bytes = CanonicalU64::new(6);
+    fixture
+        .connection
+        .request(
+            4,
+            ClientRequest::ReadBlobChunk {
+                digest: fixture.wire_digest,
+                offset_bytes,
+                length_bytes: CanonicalU64::new(524_288),
+            },
+        )
+        .await?;
+    assert_eq!(
+        fixture.connection.response().await?.message(),
+        &ServerMessage::BlobChunkRead {
+            digest: fixture.wire_digest,
+            blob_length_bytes: fixture.expected_length,
+            offset_bytes,
+            bytes: BlobChunk::new(b"tail".to_vec()),
+        }
+    );
+    fixture.stop().await
+}
+
+async fn execute_sparse_blob_turn(
+    calls: &PostgresModelCallRepository,
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    mut call: ModelCallId,
+    registry: Arc<BlobStoreRegistry>,
+    expected: ExpectedBlob,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_application::{
+        ToolExecutionService, ToolExecutionServiceOutcome, UuidV7ToolLoopIdGenerator,
+    };
+    use signalbox_domain::{ToolAttemptEnd, ToolResultContent, TurnAttemptId};
+    let (catalog, executor) = signalboxd::BlobTools::try_new(
+        signalbox_persistence::blob::BlobCatalogRepository::new(pool.clone()),
+        Some(registry),
+    )?
+    .into_parts();
+    let mut tools = ToolExecutionService::new(
+        UuidV7ToolLoopIdGenerator,
+        calls.tool_loop_repository(),
+        catalog,
+        executor,
+        InProcessToolDispatchGate::default(),
+    );
+    for round in 0..25 {
+        let AuthorizeModelCallOutcome::Authorized(authorized) =
+            calls.authorize_send(session, call).await?
+        else {
+            panic!("sparse blob model call authorizes");
+        };
+        let response = ToolUsingAssistantResponse::try_from_parts((0..8).map(|page| {
+            let index = round * 8 + page;
+            let offset = if index == 199 { expected.byte_length() - 3 } else { expected.byte_length() / 2 + index };
+            let length = if index < 5 || index == 199 { 524_288 } else { 1 };
+            AssistantResponsePart::ToolCall(ToolCallProposal::new(
+                ToolName::try_new("blob_read".into()).expect("tool name"),
+                NormalizedToolArguments::try_from_provider_text(format!(r#"{{"digest":"{}","offset_bytes":"{offset}","length_bytes":"{length}"}}"#, expected.digest())).expect("range arguments"),
+            ))
+        }).collect()).expect("eight tool requests");
+        let observation = authorized
+            .observation_correlation()
+            .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+                response,
+                retained_input_tokens: None,
+                retained_output_tokens: None,
+            });
+        calls
+            .apply_terminal_observation(
+                session,
+                observation,
+                ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                    (0..8)
+                        .map(|_| {
+                            ToolResponsePartIdentity::tool_call(
+                                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                                ToolRequestId::from_uuid(Uuid::now_v7()),
+                                InitialToolApproval::PolicyAuto,
+                            )
+                        })
+                        .collect(),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    Some(TurnAttemptId::from_uuid(Uuid::now_v7())),
+                )),
+                |_| panic!("no pending steering"),
+            )
+            .await?;
+        for page in 0..8 {
+            assert!(matches!(
+                tools.execute(session, turn).await?,
+                ToolExecutionServiceOutcome::AttemptCheckpointed(_)
+            ));
+            let ToolExecutionServiceOutcome::ObservationCommitted(ended) =
+                tools.execute(session, turn).await?
+            else {
+                panic!("range request completes");
+            };
+            let ToolAttemptEnd::Completed {
+                result: ToolResultContent::Text(text),
+            } = ended.end()
+            else {
+                panic!("page read succeeds: {:?}", ended.end());
+            };
+            let result: serde_json::Value = serde_json::from_str(text.as_str())?;
+            assert_eq!(result["blob_length_bytes"], "10737418240");
+            if round == 24 && page == 7 {
+                assert_eq!(
+                    result["bytes_base64"], "AAAA",
+                    "end-crossing page returns the three-byte tail"
+                );
+            }
+        }
+        let ToolExecutionServiceOutcome::ContinuationCheckpointed(next) =
+            tools.execute(session, turn).await?
+        else {
+            panic!("completed pages continue the same turn");
+        };
+        call = next;
+    }
+    Ok(())
 }

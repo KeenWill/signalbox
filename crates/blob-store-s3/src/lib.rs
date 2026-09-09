@@ -715,13 +715,25 @@ impl S3BlobStore {
         if response.status() == StatusCode::NOT_FOUND {
             return Err(classify_absence(response, "get S3 object range").await);
         }
-        let content_range = format!("bytes {offset}-{end}/{}", expected.byte_length());
+        let content_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split_once('/'));
+        let Some((range, observed_length)) = content_range else {
+            return Err(BlobStoreError::unavailable("read S3 content range"));
+        };
+        let observed_length = observed_length
+            .parse::<u64>()
+            .map_err(|_| BlobStoreError::unavailable("read S3 object length"))?;
+        if observed_length != expected.byte_length() {
+            return Err(BlobStoreError::verification(
+                "check S3 object range length",
+                BlobVerificationFailure::new(expected, None, observed_length),
+            ));
+        }
         if response.status() != StatusCode::PARTIAL_CONTENT
-            || response
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|value| value.to_str().ok())
-                != Some(content_range.as_str())
+            || range != format!("bytes {offset}-{end}")
         {
             return Err(BlobStoreError::unavailable(
                 "validate S3 object range response",

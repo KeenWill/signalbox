@@ -542,7 +542,7 @@ where
             )
             .await
         }
-        Err(error) => write_blob_read_error(writer, version, request_id, None, error).await,
+        Err(error) => write_blob_read_error(writer, version, request_id, error).await,
     }
 }
 
@@ -617,14 +617,7 @@ where
         Ok(entry) => entry,
         Err(error) => {
             drop(snapshot_permit);
-            return write_blob_read_error(
-                writer,
-                version,
-                request_id,
-                Some((offset_bytes, length_bytes)),
-                error,
-            )
-            .await;
+            return write_blob_read_error(writer, version, request_id, error).await;
         }
     };
     drop(snapshot_permit);
@@ -693,14 +686,7 @@ where
         }
         Err(error) => {
             drop(permit);
-            write_blob_read_error(
-                writer,
-                version,
-                request_id,
-                Some((offset_bytes, length_bytes)),
-                error,
-            )
-            .await
+            write_blob_read_error(writer, version, request_id, error).await
         }
     }
 }
@@ -727,7 +713,6 @@ pub(super) async fn write_blob_read_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    range: Option<(CanonicalU64, CanonicalU64)>,
     error: BlobReadError,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -735,20 +720,10 @@ where
 {
     let protocol_error = match error {
         BlobReadError::NotFound => ProtocolError::blob_not_found(),
-        BlobReadError::RangeOutOfBounds { blob_length } => {
-            let Some((offset_bytes, length_bytes)) = range else {
-                return Err(ProcessConnectionError::EncodeInvariant);
-            };
-            ProtocolError::invalid_blob_read(RejectionDetail::BlobReadRangeOutOfBounds {
-                offset_bytes,
-                length_bytes,
-                blob_length_bytes: CanonicalU64::new(blob_length),
-            })
-        }
         BlobReadError::Missing => ProtocolError::without_detail(ErrorCode::BlobMissing),
         BlobReadError::Corrupt => ProtocolError::without_detail(ErrorCode::BlobCorrupt),
         BlobReadError::Unavailable => ProtocolError::without_detail(ErrorCode::Unavailable),
-        BlobReadError::Integrity => {
+        BlobReadError::Integrity | BlobReadError::RangeOutOfBounds => {
             internal_protocol_error(None, InternalDiagnostic::BlobReadIntegrity)
         }
     };

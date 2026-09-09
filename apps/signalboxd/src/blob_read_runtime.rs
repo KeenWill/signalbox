@@ -25,7 +25,7 @@ pub(crate) struct BlobMetadata {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BlobReadError {
     NotFound,
-    RangeOutOfBounds { blob_length: u64 },
+    RangeOutOfBounds,
     Missing,
     Corrupt,
     Unavailable,
@@ -144,9 +144,7 @@ pub(crate) async fn open_recorded_blob_range(
             .checked_add(length.get())
             .is_none_or(|end| end > expected.byte_length())
     {
-        return Err(BlobReadError::RangeOutOfBounds {
-            blob_length: expected.byte_length(),
-        });
+        return Err(BlobReadError::RangeOutOfBounds);
     }
     let bytes = read_blob_chunk(registry, entry, offset, length).await?;
     Ok(Box::new(Cursor::new(bytes)))

@@ -36,9 +36,9 @@ const INVALID_ARGUMENTS: &str = "expected exact canonical blob-read arguments";
 /// preauthorization charges, so the selection stays named at every call site.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BlobToolMode {
-    /// `blob_metadata`: one digest, visibility admission, no byte charge.
+    /// `blob_metadata`: one digest with visibility admission.
     Metadata,
-    /// `blob_read`: digest plus a bounded canonical range, charged by bytes.
+    /// `blob_read`: a visible digest plus a bounded canonical range.
     Read,
 }
 
@@ -361,7 +361,7 @@ fn completed(value: &impl Serialize) -> Result<ToolExecutorEvidence, BlobToolExe
 fn failed(error: BlobReadError) -> Result<ToolExecutorEvidence, BlobToolExecutorError> {
     let detail = match error {
         BlobReadError::NotFound => "blob_not_found",
-        BlobReadError::RangeOutOfBounds { .. } => "range_out_of_bounds",
+        BlobReadError::RangeOutOfBounds => "range_out_of_bounds",
         BlobReadError::Missing => "blob_missing",
         BlobReadError::Corrupt => "blob_corrupt",
         BlobReadError::Unavailable => "blob_unavailable",
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn blob_read_validator_derives_the_exact_bounded_charge() {
+    fn blob_read_validator_derives_the_exact_bounded_page() {
         let digest = BlobDigest::digest(b"attached bytes");
         let validator = BlobValidator {
             mode: BlobToolMode::Read,
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn blob_metadata_validator_derives_visibility_admission_without_a_byte_charge() {
+    fn blob_metadata_validator_derives_visibility_admission() {
         let digest = BlobDigest::digest(b"attached bytes");
         let validator = BlobValidator {
             mode: BlobToolMode::Metadata,

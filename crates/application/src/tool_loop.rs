@@ -204,7 +204,7 @@ pub enum ToolPreauthorization {
         /// Exact digest requested by the logical tool request.
         digest: signalbox_domain::BlobDigest,
     },
-    /// One generic blob read charges its decoded byte length once by request.
+    /// One blob read must name a visible digest and fit the per-read page size.
     BlobRead {
         /// Exact digest requested by the logical tool request.
         digest: signalbox_domain::BlobDigest,

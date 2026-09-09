@@ -317,17 +317,11 @@ impl FilesystemBlobStore {
         self.read_bytes.load(Ordering::Relaxed)
     }
 
-    fn measured_reader(&self, reader: BlobReader) -> BlobReader {
-        #[cfg(feature = "test-support")]
-        {
-            Box::new(MeasuredReader {
-                reader,
-                count: self.read_bytes.clone(),
-            })
-        }
-        #[cfg(not(feature = "test-support"))]
-        {
-            reader
+    fn measured_reader<Reader>(&self, reader: Reader) -> MeasuredReader<Reader> {
+        MeasuredReader {
+            reader,
+            #[cfg(feature = "test-support")]
+            count: self.read_bytes.clone(),
         }
     }
 
@@ -597,7 +591,7 @@ impl FilesystemBlobStore {
             open_private_regular_file(self.root.clone(), key.clone(), "open object").await?;
         Ok(OpenedBlob::new(
             byte_length,
-            self.measured_reader(Box::new(file)),
+            Box::new(self.measured_reader(file)),
         ))
     }
 
@@ -859,8 +853,8 @@ async fn verify_and_retain_range(
     if byte_length.get() > MAX_BLOB_RANGE_BYTES {
         return Err(BlobStoreError::unavailable("validate object range"));
     }
-    let (mut file, observed_length) =
-        open_private_regular_file(root, key, "open object range").await?;
+    let (file, observed_length) = open_private_regular_file(root, key, "open object range").await?;
+    let mut file = store.measured_reader(file);
     if observed_length != expected.byte_length() {
         return Err(BlobStoreError::verification(
             "check object range length",
@@ -877,9 +871,7 @@ async fn verify_and_retain_range(
         file.seek(std::io::SeekFrom::Start(offset))
             .await
             .map_err(|source| BlobStoreError::io("seek object range", source))?;
-        store
-            .measured_reader(Box::new(file))
-            .read_exact(&mut retained)
+        file.read_exact(&mut retained)
             .await
             .map_err(|source| BlobStoreError::io("read object range", source))?;
     }
@@ -2202,23 +2194,40 @@ mod tests {
     }
 }
 
-#[cfg(feature = "test-support")]
-struct MeasuredReader {
-    reader: BlobReader,
+struct MeasuredReader<Reader> {
+    reader: Reader,
+    #[cfg(feature = "test-support")]
     count: Arc<std::sync::atomic::AtomicU64>,
 }
 
-#[cfg(feature = "test-support")]
-impl tokio::io::AsyncRead for MeasuredReader {
+impl<Reader: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for MeasuredReader<Reader> {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
         context: &mut std::task::Context<'_>,
         buffer: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<io::Result<()>> {
+        #[cfg(feature = "test-support")]
         let before = buffer.filled().len();
         let outcome = std::pin::Pin::new(&mut self.reader).poll_read(context, buffer);
+        #[cfg(feature = "test-support")]
         self.count
             .fetch_add((buffer.filled().len() - before) as u64, Ordering::Relaxed);
         outcome
+    }
+}
+
+impl<Reader: tokio::io::AsyncSeek + Unpin> tokio::io::AsyncSeek for MeasuredReader<Reader> {
+    fn start_seek(
+        mut self: std::pin::Pin<&mut Self>,
+        position: std::io::SeekFrom,
+    ) -> io::Result<()> {
+        std::pin::Pin::new(&mut self.reader).start_seek(position)
+    }
+
+    fn poll_complete(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<u64>> {
+        std::pin::Pin::new(&mut self.reader).poll_complete(context)
     }
 }

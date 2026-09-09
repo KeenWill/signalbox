@@ -1,9 +1,9 @@
 use super::*;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
 async fn a_large_s3_blob_uses_one_range_request_for_its_short_tail() -> Result<(), Box<dyn Error>> {
-    const BLOB_LENGTH: u64 = 20 * 1024 * 1024 * 1024;
+    const BLOB_LENGTH: u64 = 10 * 1024 * 1024 * 1024;
     let (_directory, credentials) = credential_fixture(&credential_body())?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let store = S3BlobStore::try_new(
@@ -30,9 +30,9 @@ async fn a_large_s3_blob_uses_one_range_request_for_its_short_tail() -> Result<(
         assert!(
             headers
                 .to_ascii_lowercase()
-                .contains("range: bytes=21474836477-21474836479\r\n")
+                .contains("range: bytes=10737418237-10737418239\r\n")
         );
-        reader.get_mut().write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 21474836477-21474836479/21474836480\r\nConnection: close\r\n\r\nend").await?;
+        reader.get_mut().write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 10737418237-10737418239/10737418240\r\nConnection: close\r\n\r\nend").await?;
         Ok::<(), std::io::Error>(())
     };
     let read = store.open_range_inner(&key, expected, BLOB_LENGTH - 3, 524_288);

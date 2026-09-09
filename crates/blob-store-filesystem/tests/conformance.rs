@@ -338,15 +338,15 @@ async fn filesystem_pins_the_validated_root_namespace() {
 /// Sparse data at repository-pack scale must not turn a page read into a scan.
 #[cfg(feature = "test-support")]
 #[tokio::test]
-async fn twenty_gib_sparse_blob_reads_only_the_requested_pages() {
+async fn ten_gib_sparse_blob_reads_only_the_requested_pages() {
     use signalbox_blob_store::ExpectedBlob;
     use signalbox_domain::BlobDigest;
-    const TWENTY_GIB: u64 = 20 * 1024 * 1024 * 1024;
+    const TEN_GIB: u64 = 10 * 1024 * 1024 * 1024;
     const PAGE: u64 = 524_288;
     let (root, store) = fixture();
-    // SHA-256 of TWENTY_GIB zero bytes, computed with a bounded streaming buffer.
+    // SHA-256 of TEN_GIB zero bytes, computed with a bounded streaming buffer.
     let digest: BlobDigest =
-        "sha256:6cb118a8f8b3c19385874297e291dcbcdf3a9837ba1ca7b00ace2491adbff551"
+        "sha256:732377e7f4a2abdc13ddfa1eb4c9c497fd2a2b294674d056cf51581b47dd586d"
             .parse()
             .expect("fixture digest");
     let key = BlobObjectKey::for_digest(digest);
@@ -359,13 +359,13 @@ async fn twenty_gib_sparse_blob_reads_only_the_requested_pages() {
     let file = std::fs::File::create(path).expect("sparse file");
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .expect("private file");
-    file.set_len(TWENTY_GIB).expect("sparse length");
-    let expected = ExpectedBlob::try_new(digest, TWENTY_GIB).expect("nonempty fixture");
+    file.set_len(TEN_GIB).expect("sparse length");
+    let expected = ExpectedBlob::try_new(digest, TEN_GIB).expect("nonempty fixture");
     let page = store
         .open_range(
             expected,
             &key,
-            TWENTY_GIB / 2,
+            TEN_GIB / 2,
             NonZeroU64::new(PAGE).expect("page length"),
         )
         .await
@@ -376,7 +376,7 @@ async fn twenty_gib_sparse_blob_reads_only_the_requested_pages() {
         .open_range(
             expected,
             &key,
-            TWENTY_GIB - 3,
+            TEN_GIB - 3,
             NonZeroU64::new(PAGE).expect("page length"),
         )
         .await
@@ -389,7 +389,7 @@ async fn twenty_gib_sparse_blob_reads_only_the_requested_pages() {
         .expect("tail bytes");
     assert_eq!(bytes, [0, 0, 0]);
     assert_eq!(store.read_bytes_for_test(), PAGE + 3);
-    for offset in [TWENTY_GIB, u64::MAX] {
+    for offset in [TEN_GIB, u64::MAX] {
         let empty = store
             .open_range(
                 expected,

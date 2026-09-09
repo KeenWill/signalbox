@@ -392,25 +392,6 @@ fn maximum_blob_read_response_fits_one_frame() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-/// an out-of-bounds read is one typed invalid request.
-#[test]
-fn blob_read_out_of_bounds_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
-    assert_server_message_round_trip(
-        request(1)?,
-        ServerMessage::Error {
-            code: ErrorCode::InvalidRequest,
-            message: String::from("blob read was rejected"),
-            detail: ErrorDetail::invalid_request(RejectionDetail::BlobReadRangeOutOfBounds {
-                offset_bytes: CanonicalU64::new(u64::MAX),
-                length_bytes: CanonicalU64::new(1),
-                blob_length_bytes: CanonicalU64::new(9),
-            }),
-        },
-        r#"{"type":"error","code":"invalid_request","message":"blob read was rejected","detail":{"type":"blob_read_range_out_of_bounds","offset_bytes":"18446744073709551615","length_bytes":"1","blob_length_bytes":"9"}}"#,
-    )?;
-    Ok(())
-}
-
 /// exhausting absent replicas has a content-silent missing code.
 #[test]
 fn blob_missing_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {

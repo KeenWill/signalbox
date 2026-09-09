@@ -69,7 +69,7 @@ use crate::{
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
 
-/// Largest decoded byte count one `blob_read` request may charge.
+/// Largest decoded byte count one `blob_read` request may return.
 ///
 /// The durable admission here and the daemon's argument validator are the two
 /// constructors of this bound, so it is declared once here and imported at the
@@ -4544,5 +4544,29 @@ async fn finish_commit<T>(
             transaction.rollback().await?;
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod foreground_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn missing_foreground_reason_is_typed_corruption() {
+        let error = decode_foreground_outcome(ForegroundOutcomeRow {
+            outcome_kind: Some("result_returned".to_owned()),
+            content_text: Some("child result".to_owned()),
+            reason_kind: None,
+            provenance_kind: Some("child_turn".to_owned()),
+            provenance_session_id: Some(Uuid::from_u128(1)),
+            provenance_turn_id: Some(Uuid::from_u128(2)),
+            provenance_goal_generation: None,
+            provenance_command_id: None,
+        })
+        .expect_err("missing reason must fail closed as corruption");
+        assert!(matches!(
+            error,
+            ToolLoopRepositoryError::Corruption(ToolLoopCorruption::Missing("reason_kind"))
+        ));
     }
 }
