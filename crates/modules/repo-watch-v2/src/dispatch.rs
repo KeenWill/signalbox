@@ -6,7 +6,7 @@ use crate::{
     plan_repository_event, plan_retained_lifecycle_reaction,
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     CreateSessionOutcome, DescendantTerminationScope, DurableCommandId, GoalEventKind,
     LifecycleEvent, LifecycleEventKind, LifecycleEventSource, OffsetDateTime, RepoWatchEvent,
     RepoWatchEventId, RepoWatchEventTarget, RepoWatchObservation, RepoWatchPullRequestLifecycle,
@@ -415,9 +415,9 @@ fn singleton_key(
 
 fn stack_root(
     repository: &RepositorySlug,
-    context: &signalbox_ownership_seam::PullRequestEventContext,
+    context: &signalbox_session_ownership::PullRequestEventContext,
     observation: Option<&RepoWatchObservation>,
-) -> signalbox_ownership_seam::PullRequestNumber {
+) -> signalbox_session_ownership::PullRequestNumber {
     if context.head_repository() != repository {
         return context.number();
     }
@@ -477,7 +477,7 @@ fn stack_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use signalbox_ownership_seam::{
+    use signalbox_session_ownership::{
         BranchName, CommitSha, MergeableState, PullRequestBody, PullRequestEventContext,
         PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchEventKindV1,
         RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,

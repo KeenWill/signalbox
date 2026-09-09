@@ -228,6 +228,10 @@ impl CheckoutFixture {
         git2::Repository::init(&root)?;
         let credential = files.path().join("poll-token");
         std::fs::write(&credential, TOKEN)?;
+        std::fs::set_permissions(
+            &credential,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
         let catalog = include_str!("../../../../config/signalboxd.example.toml")
             .replace(
                 "/usr/local/bin/signalbox-exec-supervisor",
@@ -411,7 +415,7 @@ system_prompt = "Inspect repository activity."
     }
 
     async fn settle(&self) {
-        let lifecycle = signalbox_ownership_seam::LifecycleEventSource::new(self.core.clone());
+        let lifecycle = signalbox_session_ownership::LifecycleEventSource::new(self.core.clone());
         while let Some(event) = lifecycle.next().await.expect("next lifecycle event") {
             self.store
                 .apply_lifecycle_event(&event)
@@ -746,6 +750,10 @@ async fn dispatched_push_advances_only_its_retained_head_and_survives_recomposit
     );
     let credential = fixture._files.path().join("push-token");
     std::fs::write(&credential, "push-fixture-token")?;
+    std::fs::set_permissions(
+        &credential,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )?;
     let catalog_text = fixture.catalog.replace(
         "credential_file =",
         &format!(
@@ -2637,6 +2645,34 @@ async fn assert_projected_origin(
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tower::ServiceExt;
 
+    use signalbox_domain::SessionWorkspaceRootKind;
+    use signalbox_persistence::session_workspace::{WorkspaceRootBinding, record_binding};
+    assert_eq!(
+        record_binding(&fixture.core, session, WorkspaceRootBinding::Configured).await?,
+        SessionWorkspaceRootKind::Configured
+    );
+    assert_eq!(
+        record_binding(
+            &fixture.core,
+            session,
+            WorkspaceRootBinding::Derived {
+                dispatch_marker: None
+            }
+        )
+        .await?,
+        SessionWorkspaceRootKind::Derived
+    );
+    assert_eq!(
+        record_binding(
+            &fixture.core,
+            session,
+            WorkspaceRootBinding::Derived {
+                dispatch_marker: Some(planned.dispatch())
+            }
+        )
+        .await?,
+        SessionWorkspaceRootKind::Provisioned
+    );
     let models = (*fixture.sink.models).clone();
     let templates = signalboxd::SessionTemplateConfiguration::default();
     let watch = RepositoryWatchRuntime::unstarted(
@@ -2681,6 +2717,10 @@ async fn assert_projected_origin(
     assert_eq!(response.status(), axum::http::StatusCode::OK);
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let descriptor: WebSessionTimelineDescriptor = serde_json::from_slice(&bytes)?;
+    assert_eq!(
+        descriptor.workspace_root_kind,
+        Some(signalbox_web_contract::WebSessionWorkspaceRootKind::Provisioned)
+    );
     let web = descriptor.repository_watch.expect("browser origin");
     assert_eq!(
         serde_json::to_value(&web.dispatch_id)?,
@@ -2730,6 +2770,7 @@ async fn assert_projected_origin(
     tokio::time::timeout(Duration::from_secs(30), reader.read_until(b'\n', &mut line)).await??;
     let frame = decode_server_line(&line)?;
     let ServerMessage::TranscriptSnapshotStart {
+        workspace_root_kind: Some(signalbox_process_protocol::SessionWorkspaceRootKind::Provisioned),
         repository_watch: Some(wire),
         ..
     } = frame.message()

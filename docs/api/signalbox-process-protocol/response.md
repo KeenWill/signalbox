@@ -386,6 +386,7 @@ pub enum ServerMessage {
         entry_count: CanonicalU64,
     },
     TranscriptSnapshotStart {
+        workspace_root_kind: option::Option<SessionWorkspaceRootKind>,
         repository_watch: option::Option<RepositoryWatchProvenance>,
         session_id: CanonicalUuid,
         cursor: CanonicalU64,

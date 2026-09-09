@@ -20,11 +20,17 @@ use crate::{
 pub(crate) struct TranscriptSnapshot {
     cursor: u64,
     runner: Option<RunnerProjection>,
+    workspace_root_kind: Option<signalbox_process_protocol::SessionWorkspaceRootKind>,
     repository_watch: Option<signalbox_process_protocol::RepositoryWatchProvenance>,
     spool: File,
 }
 
 impl TranscriptSnapshot {
+    pub(crate) fn workspace_root_kind(
+        &self,
+    ) -> Option<signalbox_process_protocol::SessionWorkspaceRootKind> {
+        self.workspace_root_kind
+    }
     pub(crate) const fn cursor(&self) -> u64 {
         self.cursor
     }
@@ -126,6 +132,7 @@ impl TranscriptSnapshot {
         Ok(Self {
             cursor,
             runner,
+            workspace_root_kind: None,
             repository_watch: None,
             spool,
         })
@@ -225,26 +232,32 @@ pub(crate) async fn read_snapshot(
     connection: &mut Connection,
     expected_session: CanonicalUuid,
 ) -> Result<TranscriptSnapshot, ClientError> {
-    let (session_id, cursor, runner, repository_watch) = match connection.message().await? {
-        ServerMessage::TranscriptSnapshotStart {
-            session_id,
-            cursor,
-            runner,
-            repository_watch,
-        } if session_id == expected_session => {
-            (session_id, cursor.value(), runner, repository_watch)
-        }
-        ServerMessage::Error {
-            code,
-            message,
-            detail,
-        } => return Err(ClientError::remote(code, message, detail)),
-        _ => {
-            return Err(ClientError::Protocol(
-                "snapshot did not begin with its matching start frame",
-            ));
-        }
-    };
+    let (session_id, cursor, runner, repository_watch, workspace_root_kind) =
+        match connection.message().await? {
+            ServerMessage::TranscriptSnapshotStart {
+                session_id,
+                cursor,
+                runner,
+                repository_watch,
+                workspace_root_kind,
+            } if session_id == expected_session => (
+                session_id,
+                cursor.value(),
+                runner,
+                repository_watch,
+                workspace_root_kind,
+            ),
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(code, message, detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "snapshot did not begin with its matching start frame",
+                ));
+            }
+        };
 
     let mut spool = tempfile::tempfile()?;
     let mut turn_ids = FixedDiskSet::<16>::new()?;
@@ -401,6 +414,7 @@ pub(crate) async fn read_snapshot(
                 return Ok(TranscriptSnapshot {
                     cursor,
                     runner,
+                    workspace_root_kind,
                     repository_watch,
                     spool,
                 });

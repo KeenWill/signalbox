@@ -27,6 +27,7 @@ const productNavigationCommands = [
         registration: { kind: 'sequence', sequence: ['G', 'A'] as HotkeySequence },
       },
     ],
+    available: (context: ProductCommandContext) => !context.navigationLocked,
     run: (context: ProductCommandContext) => context.navigate('/attention'),
   },
   {
@@ -40,6 +41,7 @@ const productNavigationCommands = [
         registration: { kind: 'sequence', sequence: ['G', 'S'] as HotkeySequence },
       },
     ],
+    available: (context: ProductCommandContext) => !context.navigationLocked,
     run: (context: ProductCommandContext) => context.navigate('/sessions'),
   },
   {
@@ -48,6 +50,7 @@ const productNavigationCommands = [
     description: 'Open conversation import operations.',
     category: 'Navigate',
     bindings: [],
+    available: (context: ProductCommandContext) => !context.navigationLocked,
     run: (context: ProductCommandContext) => context.navigate('/imports'),
   },
   {
@@ -56,6 +59,7 @@ const productNavigationCommands = [
     description: 'Open approval work and history.',
     category: 'Navigate',
     bindings: [],
+    available: (context: ProductCommandContext) => !context.navigationLocked,
     run: (context: ProductCommandContext) => context.navigate('/reviews'),
   },
   {
@@ -64,6 +68,7 @@ const productNavigationCommands = [
     description: 'Open runner capacity and health.',
     category: 'Navigate',
     bindings: [],
+    available: (context: ProductCommandContext) => !context.navigationLocked,
     run: (context: ProductCommandContext) => context.navigate('/runners'),
   },
   {
@@ -72,6 +77,7 @@ const productNavigationCommands = [
     description: 'Open cross-session search.',
     category: 'Navigate',
     bindings: [],
+    available: (context: ProductCommandContext) => !context.navigationLocked,
     run: (context: ProductCommandContext) => context.navigate('/search'),
   },
   {
@@ -80,6 +86,7 @@ const productNavigationCommands = [
     description: 'Open token and cost analysis.',
     category: 'Navigate',
     bindings: [],
+    available: (context: ProductCommandContext) => !context.navigationLocked,
     run: (context: ProductCommandContext) => context.navigate('/usage'),
   },
   {
@@ -93,6 +100,7 @@ const productNavigationCommands = [
         registration: { kind: 'sequence', sequence: ['G', ','] as HotkeySequence },
       },
     ],
+    available: (context: ProductCommandContext) => !context.navigationLocked,
     run: (context: ProductCommandContext) => context.navigate('/settings'),
   },
   {
@@ -101,6 +109,7 @@ const productNavigationCommands = [
     description: 'Open the streaming interaction scenario.',
     category: 'Navigate',
     bindings: [],
+    available: (context: ProductCommandContext) => !context.navigationLocked,
     run: (context: ProductCommandContext) => context.navigate('/scenario/streaming'),
   },
 ] as const
@@ -143,6 +152,7 @@ export const invokeProductCommand = (
   id: ProductCommandId,
   context: ProductCommandContext,
 ): void => {
+  if (!productCommandAvailable(id, context)) return
   const navigationCommand = productNavigationCommands.find((command) => command.id === id)
   if (navigationCommand) navigationCommand.run(context)
   else invokeCommand(id as CommandId, context)

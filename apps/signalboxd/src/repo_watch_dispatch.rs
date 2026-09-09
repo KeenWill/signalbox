@@ -15,7 +15,6 @@ use signalbox_module_repo_watch_v2::{
     CreateSessionCommandFactory, DispatchReferenceGenerator, SessionCommandCodec,
     dispatch::{CommandSubmission, LifecycleCommandFactory, SessionCommandSink},
 };
-use signalbox_ownership_seam::{SessionCommand, SessionCommandPayload};
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
     repo_watch_command::RepoWatchCommandRecord,
@@ -23,6 +22,7 @@ use signalbox_persistence::{
         SessionLifecycleCommandHandlingOutcome, SessionLifecycleCommandRepository,
     },
 };
+use signalbox_session_ownership::{SessionCommand, SessionCommandPayload};
 use sqlx::PgPool;
 use std::{
     ffi::OsString,
@@ -68,7 +68,7 @@ async fn submit_with_checkout<Runner: signalbox_tools_exec::ProcessRunner>(
     (),
     signalbox_module_repo_watch_v2::dispatch::SubmissionError<RepositoryWatchCommandError>,
 > {
-    let source = signalbox_ownership_seam::LifecycleEventSource::new(sink.pool.clone());
+    let source = signalbox_session_ownership::LifecycleEventSource::new(sink.pool.clone());
     store
         .submit_pending(
             &mut RepositoryWatchCommandCodec,

@@ -801,12 +801,13 @@ pub(crate) async fn attach_empty_follower(
         )
         .await?;
     assert!(matches!(
-        response_within(&mut follow).await?.message(),
-        ServerMessage::TranscriptSnapshotStart {
-            session_id: snapshot_session,
-            ..
-        } if *snapshot_session == session_id
-    ));
+           response_within(&mut follow).await?.message(),
+           ServerMessage::TranscriptSnapshotStart {
+    workspace_root_kind: None,
+               session_id: snapshot_session,
+               ..
+           } if *snapshot_session == session_id
+       ));
     assert!(matches!(
         response_within(&mut follow).await?.message(),
         ServerMessage::TranscriptModelCallsEnd { model_call_count }
@@ -988,7 +989,10 @@ pub(crate) fn transcript_snapshot_start_cursor(
 ) -> u64 {
     match message {
         ServerMessage::TranscriptSnapshotStart {
-            session_id, cursor, ..
+            workspace_root_kind: None,
+            session_id,
+            cursor,
+            ..
         } if *session_id == expected_session => cursor.value(),
         message => panic!("fixture expected transcript-snapshot start, got {message:?}"),
     }
@@ -1136,12 +1140,13 @@ pub(crate) async fn read_transcript_messages(
         .await?;
     let start = response_within(connection).await?;
     assert!(matches!(
-        start.message(),
-        ServerMessage::TranscriptSnapshotStart {
-            session_id: snapshot_session,
-            ..
-        } if *snapshot_session == session_id
-    ));
+           start.message(),
+           ServerMessage::TranscriptSnapshotStart {
+    workspace_root_kind: None,
+               session_id: snapshot_session,
+               ..
+           } if *snapshot_session == session_id
+       ));
     let mut messages = Vec::new();
     loop {
         let frame = response_within(connection).await?;

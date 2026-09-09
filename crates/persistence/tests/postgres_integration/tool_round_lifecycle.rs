@@ -4,6 +4,63 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn null_result_failure_survives_commit_and_batch_reload() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    // Supplies distinct identities for the tool-round fixture.
+    const ARBITRARY_SEED: u128 = 0x9575_7000;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, ARBITRARY_SEED, "current_time", "{}").await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    let error = ToolExecutionError::new(ToolExecutionErrorKind::ResultContainsNull, None);
+    repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::KnownFailed {
+                    error: error.clone(),
+                }),
+        )
+        .await?;
+
+    let batch = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the completed attempt remains in its active batch");
+    let Some(signalbox_domain::ReconstitutedToolAttempt::Ended(ended)) = batch.attempt(request)
+    else {
+        panic!("the committed attempt reloads as ended");
+    };
+    assert_eq!(ended.end(), &ToolAttemptEnd::KnownFailed { error });
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_reread_reports_decode_corruption_after_an_earlier_mismatch()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;

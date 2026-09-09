@@ -57,6 +57,7 @@ pub enum ToolExecutionErrorKind {
     PreauthorizationRejected,
     ExecutionFailed,
     ResultTooLarge,
+    ResultContainsNull,
     CrashLost,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd

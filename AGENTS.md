@@ -86,14 +86,13 @@ owner's private repositories may be named as provenance, not cited as rules.
   `devenv shell -- python3 scripts/render_domain_spine.py` in the same pull
   request.
 - A change to behavior a `docs/spec/` page describes updates that page in the
-  same pull request. In a stack, the bottom spec diff covers the behavior its
-  children implement; a child adds a spec edit only for behavior the bottom diff
-  does not describe.
+  same pull request as the code that builds it.
 - Foundation-weight changes (cross-crate or wire semantics, a boundary between
   domain, storage, wire, or framework representations, weakening an invariant, a
   technology that constrains several components, closing a recorded open
-  question) are proposed as a spec diff at the bottom of the implementing stack
-  and merge only with that stack. Owner merge is acceptance.
+  question) are proposed in a design document at the bottom of the implementing
+  stack. The design document states committed unbuilt behavior; the spec page
+  changes with the code that builds it. Owner merge is acceptance.
 - Raising a hard safety ceiling requires a reviewed code change with a test and
   rationale.
 - Keep domain types distinct from storage records, protocol messages, and
@@ -111,24 +110,25 @@ owner's private repositories may be named as provenance, not cited as rules.
 - The description claims only what the code enforces; a contract binding future
   implementers is described as a contract. Keep it under 350 words.
 - Reply to every review comment in its thread: name the fixing commit, or state
-  why the finding is declined. Accept a review finding only when it names a
-  false statement (a claim the code or the page's own text contradicts), a
-  broken link or cross-reference, a contradiction within the pull request's own
-  files, undecided material presented as committed, a failing gating check, a
-  defect in the pull request's own behavior, or a mechanism the task does not
-  need. Decline everything else in one line and resolve the thread: restorations
-  of inventories the code already owns (producer lists, lock orders, dispatch
+  why the finding is declined. Accept a bot finding only when it names a false
+  statement (a claim the code or the page's own text contradicts), a broken link
+  or cross-reference, a contradiction within the pull request's own files,
+  undecided material presented as committed, a failing gating check, a defect in
+  the pull request's own behavior, or a mechanism the task does not need.
+  Decline everything else in one line and resolve the thread: restorations of
+  inventories the code already owns (producer lists, lock orders, dispatch
   correlations, admission-rule lists), constants, grammars, conventions, hedges,
   tone, and new content. Reviewers reward building less.
+- Request bot review after validation passes, never while a review is pending.
+  Limit bot review to five waves per pull request.
 - Stacks: each pull request targets the branch below it and is reviewed against
   that base. Check that a base branch still exists before stacking on it; when a
   base merges, retarget or rebase the rest. Open pull requests early. Each push
-  triggers a full re-review, so batch fixes into at most one push per pull
-  request per hour after the first, and merge the base forward only when the
-  pull request is conflicting or about to merge. Do not force-push or rewrite a
-  shared branch unless it is necessary and safe, and preserve owner-authored and
-  externally added commits. Tell the owner before replacing an open stack with a
-  rewrite.
+  triggers a full re-review. Push each validated fix batch as soon as it is
+  ready, and merge the base forward only when the pull request is conflicting or
+  about to merge. Do not force-push or rewrite a shared branch unless it is
+  necessary and safe, and preserve owner-authored and externally added commits.
+  Tell the owner before replacing an open stack with a rewrite.
 
 ## Validation
 
@@ -147,8 +147,8 @@ python3 scripts/check_docs_consistency.py
 python3 scripts/test_check_docs_consistency.py
 python3 scripts/check_migration_versions.py
 python3 scripts/test_check_migration_versions.py
-python3 scripts/check_ownership_seam.py
-python3 scripts/test_check_ownership_seam.py
+python3 scripts/check_session_ownership.py
+python3 scripts/test_check_session_ownership.py
 python3 scripts/test_postgres_integration_suites.py
 mdformat --check *.md docs/
 git diff --check

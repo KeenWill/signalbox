@@ -590,6 +590,7 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
     return decodeWebSessionTimelineDescriptor({
       session_id: sessionId,
       repository_watch: null,
+      workspace_root_kind: null,
       sizes: {
         item_count: String(SESSION_FOUNDATION_TOTAL),
         projected_text_bytes: '48000000',

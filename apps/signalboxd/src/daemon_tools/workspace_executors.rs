@@ -31,6 +31,62 @@ use signalbox_tools_workspace::{
 use std::{fmt, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
+#[allow(
+    clippy::unnecessary_cast,
+    reason = "device numbers have platform-specific widths"
+)]
+pub(super) fn read_dispatch_marker(
+    path: &std::path::Path,
+    identity: ComposedWorkspaceIdentity,
+) -> Option<signalbox_domain::RepoWatchDispatchId> {
+    use rustix::fs::{FileType, Mode, OFlags, fstat, open, openat};
+    use std::io::Read;
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = open(path, directory_flags, Mode::empty()).ok()?;
+    let root_stat = fstat(&root).ok()?;
+    if (root_stat.st_dev as u64, root_stat.st_ino) != (identity.root.device, identity.root.inode) {
+        return None;
+    }
+    let administration = openat(
+        &root,
+        super::session_workspace_roots::GIT_ADMINISTRATION_DIRECTORY,
+        directory_flags,
+        Mode::empty(),
+    )
+    .ok()?;
+    let administration_stat = fstat(&administration).ok()?;
+    if (
+        administration_stat.st_dev as u64,
+        administration_stat.st_ino,
+    ) != (
+        identity.administration.device,
+        identity.administration.inode,
+    ) {
+        return None;
+    }
+    let marker = openat(
+        &administration,
+        crate::repo_watch_checkout::DISPATCH_MARKER,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    if FileType::from_raw_mode(fstat(&marker).ok()?.st_mode) != FileType::RegularFile {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::from(marker)
+        .take((uuid::fmt::Hyphenated::LENGTH + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() != uuid::fmt::Hyphenated::LENGTH {
+        return None;
+    }
+    uuid::Uuid::try_parse_ascii(&bytes)
+        .ok()
+        .map(signalbox_domain::RepoWatchDispatchId::from_uuid)
+}
+
 /// Resolves the workspace-bound executors one session's tool calls dispatch to.
 ///
 /// The configured root's own set is composed at startup and shared by every
@@ -40,6 +96,8 @@ pub(super) struct SessionWorkspaceExecutors<
     FileSystem: WorkspaceMutationFileSystem,
     ExecRunner: ProcessRunner,
 > {
+    binding_evidence: Arc<Mutex<std::collections::BTreeSet<SessionId>>>,
+    pub(super) binding_pool: Option<sqlx::PgPool>,
     roots: SessionWorkspaceRoots,
     pub(super) repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
     git_identity: GitIdentity,
@@ -56,6 +114,8 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
 {
     fn clone(&self) -> Self {
         Self {
+            binding_evidence: self.binding_evidence.clone(),
+            binding_pool: self.binding_pool.clone(),
             roots: self.roots.clone(),
             repository_watch: self.repository_watch.clone(),
             git_identity: self.git_identity.clone(),
@@ -97,6 +157,8 @@ where
         } = composition;
         let failure_details = SessionWorkspaceFailureDetails::try_new()?;
         Ok(Self {
+            binding_evidence: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+            binding_pool: None,
             roots,
             repository_watch: None,
             git_identity,
@@ -134,6 +196,44 @@ where
     }
 
     async fn resolve(
+        &mut self,
+        session: SessionId,
+    ) -> Result<WorkspaceBoundExecutors<FileSystem, ExecRunner>, SessionWorkspaceFailure> {
+        let executors = self.resolve_binding(session).await?;
+        let mut evidence = self.binding_evidence.lock().await;
+        if evidence.contains(&session) {
+            return Ok(executors);
+        }
+        use signalbox_domain::SessionWorkspaceRootKind;
+        use signalbox_persistence::session_workspace::WorkspaceRootBinding;
+        let binding = match self.state.lock().await.bindings.get(&session) {
+            Some(RecordedSessionBinding::ConfiguredRoot) => WorkspaceRootBinding::Configured,
+            Some(RecordedSessionBinding::DerivedRoot { identity, .. }) => {
+                WorkspaceRootBinding::Derived {
+                    dispatch_marker: read_dispatch_marker(
+                        &self.roots.derived_path(session),
+                        *identity,
+                    ),
+                }
+            }
+            None => return Err(SessionWorkspaceFailure::UnresolvableRoot),
+        };
+        let kind = if let Some(pool) = &self.binding_pool {
+            signalbox_persistence::session_workspace::record_binding(pool, session, binding)
+                .await
+                .map_err(|_| SessionWorkspaceFailure::BindingEvidenceUnavailable)?
+        } else {
+            match binding {
+                WorkspaceRootBinding::Configured => SessionWorkspaceRootKind::Configured,
+                WorkspaceRootBinding::Derived { .. } => SessionWorkspaceRootKind::Derived,
+            }
+        };
+        evidence.insert(session);
+        tracing::info!(session_id = %session.as_uuid(), workspace_root_kind = match kind { SessionWorkspaceRootKind::Derived => "derived", SessionWorkspaceRootKind::Configured => "configured", SessionWorkspaceRootKind::Provisioned => "provisioned" }, "session workspace guard bound root");
+        Ok(executors)
+    }
+
+    async fn resolve_binding(
         &mut self,
         session: SessionId,
     ) -> Result<WorkspaceBoundExecutors<FileSystem, ExecRunner>, SessionWorkspaceFailure> {
