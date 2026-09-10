@@ -15,6 +15,9 @@ use crate::{FileCredentialAccess, WatchedRepositoryConfiguration};
 /// Non-secret reference for the repository-scoped push transport.
 pub(crate) const GIT_PUSH_CREDENTIAL_REFERENCE: &str = "repository-watch-git-push";
 
+/// Bounds observation credential lookups and requests, matching the push timeout.
+pub(crate) const OBSERVATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Resolves only the credential assigned to one configured repository.
 #[derive(Clone, Debug)]
 pub struct RepositoryWatchClientLoader {
@@ -85,7 +88,8 @@ impl RepositoryWatchClientLoader {
             credentials: FileCredentialAccess::from_github(
                 repository.credential(),
                 reference.clone(),
-            ),
+            )
+            .with_request_timeout(Some(OBSERVATION_TIMEOUT)),
             reference,
         }
     }
@@ -175,21 +179,20 @@ pub(crate) fn with_app_authentication(
                 std::sync::Arc::new(move |request, path| {
                     let app = app.clone();
                     Box::pin(async move {
-                        let response =
-                            app.send(request, None)
-                                .await
-                                .map_err(|failure| match failure {
-                                    signalbox_github_transport::AppRequestFailure::Credential(
-                                        _,
-                                    ) => GitHubClientError::InvalidCredential,
-                                    signalbox_github_transport::AppRequestFailure::Request(
-                                        source,
-                                    ) => GitHubClientError::Request {
+                        let response = app.send(request, Some(OBSERVATION_TIMEOUT)).await.map_err(
+                            |failure| match failure {
+                                signalbox_github_transport::AppRequestFailure::Credential(_) => {
+                                    GitHubClientError::InvalidCredential
+                                }
+                                signalbox_github_transport::AppRequestFailure::Request(source) => {
+                                    GitHubClientError::Request {
                                         path: path.clone(),
                                         status: None,
                                         source,
-                                    },
-                                })?;
+                                    }
+                                }
+                            },
+                        )?;
                         let credential = signalbox_github_transport::response_credential(&response)
                             .ok_or(GitHubClientError::InvalidCredential)?
                             .to_vec();
@@ -508,6 +511,32 @@ mod tests {
                 .await
                 .expect("unchanged responses retain their status");
         assert_eq!(response.status(), reqwest::StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn app_observations_expire_while_credentials_are_stalled() {
+        // Arbitrary App identities; the pending key reader prevents any network request.
+        let app = signalbox_github_transport::AppAuthentication::new(
+            42,
+            73,
+            std::sync::Arc::new(|| Box::pin(std::future::pending())),
+        );
+        let client = super::with_app_authentication(
+            super::GitHubClient::try_new("observation-timeout-fixture", INITIAL_TOKEN).unwrap(),
+            Some(std::sync::Arc::new(app)),
+        );
+        let started = tokio::time::Instant::now();
+        let (rest, graphql) = tokio::time::timeout(std::time::Duration::from_secs(301), async {
+            tokio::join!(
+                client.conditional_page(OBSERVATION_PATH, None),
+                client.graphql(b"{}".to_vec()),
+            )
+        })
+        .await
+        .expect("both the exchange and its concurrent cache waiter must expire");
+        assert!(matches!(rest, Err(GitHubClientError::InvalidCredential)));
+        assert!(matches!(graphql, Err(GitHubClientError::InvalidCredential)));
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(300));
     }
 
     #[tokio::test(start_paused = true)]

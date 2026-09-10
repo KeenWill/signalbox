@@ -1058,6 +1058,25 @@ impl CredentialScrubber {
         }
     }
 
+    fn redact_trailing_prefix(&self, text: &mut String) {
+        let prefix = [&self.exact, &self.json_escaped]
+            .into_iter()
+            .map(|secret| {
+                let limit = secret.len().min(text.len() + 1);
+                (1..limit)
+                    .rev()
+                    .filter(|length| secret.is_char_boundary(*length))
+                    .find(|length| text.ends_with(&secret[..*length]))
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(0);
+        if prefix > 0 {
+            text.truncate(text.len() - prefix);
+            text.push_str("[redacted]");
+        }
+    }
+
     fn redact_value(&self, value: &mut serde_json::Value) {
         match value {
             serde_json::Value::String(text) => {

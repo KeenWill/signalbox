@@ -1599,8 +1599,10 @@ impl GitHubCodeHostTransport {
             minimum_optional_limit(self.bounds.job_log_bytes(), self.bounds.result_text_bytes());
         let (bytes, completeness) =
             read_optionally_bounded(response.bytes_stream(), retained_limit).await?;
-        let (text, completeness) =
-            job_log_text(&bytes, completeness, retained_limit, scrubber.as_ref());
+        let initial_scrubber = super::CredentialScrubber::try_new(credential)
+            .ok_or(CodeHostTransportFailure::InvalidCredential)?;
+        let scrubbers = [Some(&initial_scrubber), scrubber.as_ref()];
+        let (text, completeness) = job_log_text(&bytes, completeness, retained_limit, &scrubbers);
         let result = CiJobLogResult::try_new(self.bounds, arguments.job_id(), text, completeness)
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         Ok(CodeHostResult::CiJobLog(result))
@@ -2395,11 +2397,16 @@ fn job_log_text(
     bytes: &[u8],
     completeness: CodeHostResultCompleteness,
     limit: Option<usize>,
-    scrubber: Option<&super::CredentialScrubber>,
+    scrubbers: &[Option<&super::CredentialScrubber>],
 ) -> (String, CodeHostResultCompleteness) {
     let mut text = String::from_utf8_lossy(bytes).into_owned();
-    if let Some(scrubber) = scrubber {
+    for scrubber in scrubbers.iter().flatten() {
         scrubber.redact_text(&mut text);
+    }
+    if completeness == CodeHostResultCompleteness::Truncated {
+        for scrubber in scrubbers.iter().rev().flatten() {
+            scrubber.redact_trailing_prefix(&mut text);
+        }
     }
     bounded_lossy_text(text.as_bytes(), completeness, limit)
 }
@@ -3273,7 +3280,7 @@ mod tests {
             body.as_bytes(),
             CodeHostResultCompleteness::Complete,
             None,
-            Some(&scrubber),
+            &[Some(&scrubber)],
         );
         assert_eq!(text, "Authorization: Bearer [redacted]\nfinished\n");
         assert_eq!(completeness, CodeHostResultCompleteness::Complete);
@@ -3288,10 +3295,61 @@ mod tests {
             b"token",
             CodeHostResultCompleteness::Complete,
             Some(5),
-            Some(&scrubber),
+            &[Some(&scrubber)],
         );
         assert_eq!(text, "[reda");
         assert_eq!(completeness, CodeHostResultCompleteness::Truncated);
+    }
+
+    #[tokio::test]
+    async fn downloaded_job_log_scrubs_credentials_split_at_the_retained_limit() {
+        const INITIAL_TOKEN: &str = "initial-installation-token";
+        const REFRESHED_TOKEN: &str = "refreshed\"installation\\token";
+        let initial =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new(INITIAL_TOKEN))
+                .unwrap();
+        let refreshed =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new(REFRESHED_TOKEN))
+                .unwrap();
+        // The smaller result bound retains only twelve bytes of each credential.
+        let retained_limit = minimum_optional_limit(Some(24), Some(19));
+        for token_text in [
+            INITIAL_TOKEN,
+            REFRESHED_TOKEN,
+            r#"refreshed\"installation\\token"#,
+        ] {
+            let body = format!("output\n{token_text}\nfinished\n");
+            let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(body)]);
+            let (bytes, completeness) = read_optionally_bounded(stream, retained_limit)
+                .await
+                .unwrap();
+            let (text, completeness) = job_log_text(
+                &bytes,
+                completeness,
+                retained_limit,
+                &[Some(&initial), Some(&refreshed)],
+            );
+            assert_eq!(
+                text, "output\n[redacted]",
+                "credential spelling: {token_text}"
+            );
+            assert_eq!(completeness, CodeHostResultCompleteness::Truncated);
+        }
+    }
+
+    #[test]
+    fn complete_job_logs_retain_text_that_only_matches_a_credential_prefix() {
+        const TOKEN: &str = "installation-token";
+        let scrubber =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new(TOKEN)).unwrap();
+        let (text, completeness) = job_log_text(
+            b"finished installation",
+            CodeHostResultCompleteness::Complete,
+            None,
+            &[Some(&scrubber)],
+        );
+        assert_eq!(text, "finished installation");
+        assert_eq!(completeness, CodeHostResultCompleteness::Complete);
     }
 
     #[tokio::test]

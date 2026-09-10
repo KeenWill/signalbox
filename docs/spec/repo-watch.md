@@ -346,6 +346,10 @@ scrub the token used for that response, including its JSON-escaped form, from
 observation text and retained validators before poll-cache and PR-state
 persistence.
 
+App-backed repository-watch and goal-verification credential lookups and
+observation requests have a 300-second timeout. Each request shares that budget
+across cache waits, token exchanges, authentication retries, and HTTP transport.
+
 The module's dedicated PostgreSQL login role owns `mod_repo_watch`, has no
 membership path back to the core identity, and has no table privileges in
 `public`. Module SQL uses an unqualified search path confined to its schema.
