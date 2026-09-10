@@ -2703,9 +2703,15 @@ async fn run_hub_incarnation(
     let supervision_nudge = eligibility_nudge.clone();
     let mut supervision_shutdown = process_shutdown.subscribe();
     let mut drain_interrupted = false;
+    drop(guard_loss);
+    let (guard_ready, guarded_admission) = oneshot::channel();
+    let mut guard_loss = Box::pin(monitor_runtime_guard(&mut database, guard_ready));
     let mut outcome = {
         let mut cause = {
             let runtime = async {
+                if guarded_admission.await.is_err() {
+                    return RuntimeStopCause::GuardLost;
+                }
                 runtime_tasks.spawn(async move {
                     select! {
                         () = session_supervision.park_failed_sessions(supervision_pool, supervision_nudge) => {},
@@ -3736,12 +3742,18 @@ mod tests {
                     .with_recovery_observer(observer.clone());
                 async move {
                     observer.guard_lost();
-                    let (ready, mut admission) = tokio::sync::oneshot::channel();
-                    super::monitor_runtime_guard(&mut database, ready).await;
-                    assert_eq!(
-                        admission.try_recv(),
-                        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-                    );
+                    let (ready, admission) = tokio::sync::oneshot::channel();
+                    let admission = async {
+                        admission
+                            .await
+                            .expect("admission requires a fresh guard check");
+                        panic!("workers must not start after guard death between admission checks");
+                    };
+                    tokio::select! {
+                        biased;
+                        () = super::monitor_runtime_guard(&mut database, ready) => {},
+                        () = admission => {},
+                    }
                     assert!(observer.is_recovering());
                     let _ = database.close().await;
                     GuardedIncarnationOutcome::Finished(())

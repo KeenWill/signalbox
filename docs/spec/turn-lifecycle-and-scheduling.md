@@ -453,9 +453,9 @@ delay. A configured elapsed recovery bound includes pool shutdown and fence
 establishment; `none` leaves recovery unbounded. Expiry exits with the typed
 recovery-exhausted reason. A fresh generation and startup reconstitution precede
 resumed admission. The runtime guard watcher completes a successful guard check
-before repository-watch recovery can start workers and stays active through
-runtime admission and shutdown. Shutdown signals remain effective during
-recovery.
+before repository-watch recovery can start workers. Final runtime admission
+requires another successful check, with its watcher retained through shutdown.
+Shutdown signals remain effective during recovery.
 
 On SIGINT or SIGTERM the listener stops accepting requests, follow streams
 close, the dispatcher stops starting transactions, the scheduler stops admitting
