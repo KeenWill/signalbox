@@ -537,6 +537,11 @@ Composed `file_inspect` and `file_read` declare external effect. Their resolver
 uses the same rendered-frontier attachment proof before source or worker I/O; a
 visibility refusal returns a typed known failure from the executor.
 
+`github_pull_request_metadata` returns GitHub's nullable `mergeable` member
+alongside the exact base and head revisions: true means mergeable, false means
+conflicting, and null means GitHub has not computed mergeability. This metadata
+read does not require a convergence policy.
+
 Every code-host declaration, reads included, is `ExternalEffect`; read-only
 declarations default to automatic approval and mutations to confirmation, so the
 approval transaction authorizes each mutation before credentials resolve.
