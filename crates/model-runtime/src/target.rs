@@ -50,7 +50,7 @@ impl ResolvedTarget {
 ///
 /// Evidence only: recorded exactly as observed, absent when the provider
 /// reported none.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProviderReportedModel(String);
 
 impl ProviderReportedModel {

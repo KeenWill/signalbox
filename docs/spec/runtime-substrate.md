@@ -543,6 +543,16 @@ replaced with a redaction marker. Under an ambient CLI login no credential value
 crosses the adapter boundary, so CLI-controlled text and JSON pass through
 unmodified.
 
+The exact-value observation sink also checks each forwarded fact with a shadow
+predicate over its canonical JSON bytes and decoded content, using the same
+credential-length-minus-one byte lookbehind. The content projection joins string
+leaves across fields and facts, decodes complete embedded JSON, and reconstructs
+text, thinking, and JSON-escaped argument streams by kind and part index within
+one request. A match increments
+`signalbox_credential_redaction_disagreements_total` on the daemon's Prometheus
+surface and fails runtime unit tests; production forwarding retains the existing
+redaction behavior.
+
 Each CLI adapter's build derives its supported-version constant from the exact
 version in its pin manifest, so the manifest is the sole source. The daemon
 composition probes only the Codex CLI executable, and refuses startup before
