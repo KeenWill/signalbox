@@ -44,6 +44,14 @@ impl FileMediaRegistry {
         source: &dyn VerifiedBlobSource,
         cancellation: &dyn CancellationSignal,
     ) -> result::Result<FileReadResult, FileMediaFailure>;
+    pub async fn read_with_reader(
+        &self,
+        processor: &dyn FileMediaProcessor,
+        request: FileReadRequest,
+        source: &dyn VerifiedBlobSource,
+        cancellation: &dyn CancellationSignal,
+        expected_reader: option::Option<&ReaderIdentity>,
+    ) -> result::Result<(ReaderIdentity, FileReadResult), FileMediaFailure>;
 }
 ```
 

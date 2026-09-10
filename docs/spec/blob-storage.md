@@ -273,11 +273,12 @@ exactly one line ending in `parts=<json>`, the canonical compact ordered parts
 array with its fixed member order.
 
 A rendered accepted input shows the model each attachment as a bounded textual
-stub naming kind, media type, filename, byte length, and digest, never the
-bytes. At preparation the daemon derives an allow-set from the attachment stubs
-in the rendered frontier; a catalogued digest outside that set is unauthorized.
-A digest absent from the frontier closes the prepared attempt as a known failure
-with the fixed detail `blob_not_visible`.
+stub naming kind, media type, filename, byte length, digest, and a visible-part
+selector consisting of the semantic entry identity and zero-based part ordinal,
+never the bytes. At preparation the daemon derives an allow-set from the
+attachment stubs in the rendered frontier; a catalogued digest outside that set
+is unauthorized. A digest absent from the frontier closes the prepared attempt
+as a known failure with the fixed detail `blob_not_visible`.
 
 Before durable send authorization, preparation checks each distinct attachment's
 catalogued length against its rendered stub and the per-blob maximum, then opens

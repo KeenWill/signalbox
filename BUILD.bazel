@@ -636,10 +636,40 @@ test_suite(
     ],
 )
 
+rust_selection_test(
+    name = "file_media_daemon_sandbox",
+    test = "//apps/signalboxd:unit_tests",
+    args = [
+        "file_tools_enter_the_daemon_catalog_with_a_composed_frontier_resolver",
+        "--ignored",
+    ],
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+)
+
+rust_selection_test(
+    name = "file_media_text_sandbox",
+    test = "//crates/file-media-adapters-text:adapters",
+    args = [
+        "file_read_five_gibibyte_source_stays_within_worker_memory_limit",
+        "--ignored",
+    ],
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+)
+
 test_suite(
     name = "host_integration_tests",
     tags = ["manual"],
     tests = [
+        ":file_media_daemon_sandbox",
+        ":file_media_text_sandbox",
         "//crates/file-media-adapters-audio:adapters",
         "//crates/file-media-processor-runtime:isolation",
         "//crates/tools-exec:bwrap",

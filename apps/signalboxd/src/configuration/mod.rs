@@ -155,6 +155,7 @@ pub struct HubModelConfiguration {
     convergence: Option<signalbox_convergence::ConvergencePolicy>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
+    file_media: bool,
     workspace_instructions: WorkspaceInstructionConfiguration,
 }
 
@@ -192,6 +193,7 @@ impl HubModelConfiguration {
             compaction_prompt,
             conversation_import_max_source_bytes,
             blob_storage,
+            file_media,
             web_fetch_egress_policy,
             daemon_tools,
             credential_profiles,
@@ -620,6 +622,7 @@ impl HubModelConfiguration {
             convergence,
             repository_watch,
             blob_storage,
+            file_media,
             workspace_instructions,
         })
     }
@@ -1140,6 +1143,11 @@ impl HubModelConfiguration {
     /// Returns the maximum assembled source bytes for one conversation import.
     pub const fn conversation_import_max_source_bytes(&self) -> usize {
         self.conversation_import_max_source_bytes
+    }
+
+    /// Whether the compiled sandboxed file tools are enabled at startup.
+    pub const fn file_media(&self) -> bool {
+        self.file_media
     }
 
     /// Returns the validated blob-store registry and write routes, when enabled.
