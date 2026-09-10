@@ -2942,13 +2942,13 @@ fn bounded_prefix(text: &str, bound: usize) -> &str {
     text.get(..end).unwrap_or_default()
 }
 
-const fn judge_failure_disposition(
-    error: ApprovalJudgeModelError,
-) -> FailedApprovalJudgeDisposition {
+fn judge_failure_disposition(error: ApprovalJudgeModelError) -> FailedApprovalJudgeDisposition {
     match error {
-        ApprovalJudgeModelError::Refused(_) => FailedApprovalJudgeDisposition::Refused,
-        ApprovalJudgeModelError::CancellationConfirmed => FailedApprovalJudgeDisposition::Cancelled,
-        ApprovalJudgeModelError::BoundaryLoss(_)
+        ApprovalJudgeModelError::Refused(..) => FailedApprovalJudgeDisposition::Refused,
+        ApprovalJudgeModelError::CancellationConfirmed(_) => {
+            FailedApprovalJudgeDisposition::Cancelled
+        }
+        ApprovalJudgeModelError::BoundaryLoss(..)
         | ApprovalJudgeModelError::CorrelationMismatch(_) => {
             FailedApprovalJudgeDisposition::Ambiguous
         }
@@ -2959,11 +2959,11 @@ const fn judge_failure_disposition(
         | ApprovalJudgeModelError::PreparationCorrelationMismatch
         | ApprovalJudgeModelError::PreparationFailed
         | ApprovalJudgeModelError::PreparationDefect
-        | ApprovalJudgeModelError::ProviderError(_)
+        | ApprovalJudgeModelError::ProviderError(..)
         | ApprovalJudgeModelError::ProvenUnsent
-        | ApprovalJudgeModelError::ProviderTargetSubstituted(_)
-        | ApprovalJudgeModelError::IncompleteDecision(_)
-        | ApprovalJudgeModelError::InvalidDecision(_) => {
+        | ApprovalJudgeModelError::ProviderTargetSubstituted(..)
+        | ApprovalJudgeModelError::IncompleteDecision(..)
+        | ApprovalJudgeModelError::InvalidDecision(..) => {
             FailedApprovalJudgeDisposition::KnownFailed
         }
     }
@@ -5216,17 +5216,19 @@ mod tests {
     fn widened_rendering_leaves_every_judge_failure_disposition_fail_closed() {
         assert_eq!(
             super::judge_failure_disposition(ApprovalJudgeModelError::Refused(
-                TokenUsage::unreported()
+                TokenUsage::unreported(),
+                None
             )),
             FailedApprovalJudgeDisposition::Refused
         );
         assert_eq!(
-            super::judge_failure_disposition(ApprovalJudgeModelError::CancellationConfirmed),
+            super::judge_failure_disposition(ApprovalJudgeModelError::CancellationConfirmed(None)),
             FailedApprovalJudgeDisposition::Cancelled
         );
         assert_eq!(
             super::judge_failure_disposition(ApprovalJudgeModelError::BoundaryLoss(
-                TokenUsage::unreported()
+                TokenUsage::unreported(),
+                None
             )),
             FailedApprovalJudgeDisposition::Ambiguous
         );

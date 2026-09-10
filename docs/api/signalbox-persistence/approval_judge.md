@@ -158,6 +158,18 @@ impl approval_judge::PostgresApprovalJudgeRepository {
 }
 ```
 
+## load_commissioned_dispatch_authority
+
+```rust
+pub async fn load_commissioned_dispatch_authority(
+    connection: &mut connection::PgConnection,
+    session: signalbox_domain::SessionId,
+) -> result::Result<
+    option::Option<signalbox_application::ApprovalJudgeDispatchAuthority>,
+    approval_judge::ApprovalJudgeRepositoryError,
+>;
+```
+
 ## ApprovalJudgeCorruption
 
 ```rust

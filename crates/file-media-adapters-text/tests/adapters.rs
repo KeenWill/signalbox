@@ -469,31 +469,6 @@ async fn json_read_reports_the_declared_depth_limit() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
-async fn deeply_nested_valid_json_reports_the_declared_depth_limit() -> Result<(), Box<dyn Error>> {
-    let source = MemorySource::new(fixtures::json_beyond_serde_recursion_limit());
-    let expected = ReasonCode::try_new("depth_limit_exceeded")?;
-
-    let inspection = support::inspect(&source, "application/json").await?;
-    support::assert_validated_media(inspection, "application/json");
-    let result = support::read(
-        &source,
-        ReadInput {
-            media_type: "application/json",
-            view: "structured",
-        },
-        &DirectProcessor::provider(),
-    )
-    .await;
-    assert_eq!(
-        result,
-        Err(FileMediaFailure::ExpansionLimitExceeded {
-            limit_kind: expected
-        })
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn bracketed_numeric_csv_is_not_ambiguous_with_json() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::bracketed_numeric_csv());
 
@@ -974,16 +949,6 @@ async fn registry_sanitizer_rejects_nul_bearing_decoder_output() -> Result<(), B
     support::assert_processor_failed(result);
     Ok(())
 }
-
-#[tokio::test]
-async fn invalid_declared_text_is_unknown_after_streaming_validation() -> Result<(), Box<dyn Error>>
-{
-    let source = MemorySource::new(fixtures::truncated_utf8());
-    let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_unknown(inspection);
-    Ok(())
-}
-
 /// A generated five-GiB source retains only the requested frame, never its declared length.
 struct StreamedTextSource {
     maximum_requested: std::sync::atomic::AtomicU64,

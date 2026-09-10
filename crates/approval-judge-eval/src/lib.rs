@@ -272,13 +272,13 @@ mod tests {
 pub mod live {
     use std::collections::BTreeMap;
 
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
     use signalbox_domain::{DelegateApprovalRecommendation, ProviderReportedTokenUsage};
 
     /// Closed scorecard grouping; deserialization is the single source of truth,
     /// so an unknown spelling fails the corpus load and a new variant fails
     /// compilation anywhere a match is not exhaustive.
-    #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+    #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, Ord, PartialEq, PartialOrd)]
     #[serde(rename_all = "snake_case")]
     pub enum CaseCategory {
         GitPush,
@@ -312,7 +312,7 @@ pub mod live {
     /// Closed expected-verdict vocabulary; deserialization is the single source
     /// of truth, and every comparison or render goes through its exhaustive
     /// label match.
-    #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+    #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
     #[serde(rename_all = "snake_case")]
     pub enum ExpectedVerdict {
         Approve,
@@ -332,7 +332,7 @@ pub mod live {
     }
 
     /// One JSONL case with its expected label and authority context.
-    #[derive(Debug, Deserialize)]
+    #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
     #[serde(deny_unknown_fields)]
     pub struct CorpusCase {
         /// Stable case identity used to seed the rendered request.
@@ -363,7 +363,7 @@ pub mod live {
     }
 
     /// The repository-watch pull-request fence a dispatched case carries.
-    #[derive(Debug, Deserialize)]
+    #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
     #[serde(deny_unknown_fields)]
     pub struct CorpusDispatchFence {
         /// Watched repository named by the dispatch.
