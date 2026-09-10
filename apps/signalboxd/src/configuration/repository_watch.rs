@@ -104,7 +104,8 @@ pub enum RepositoryWatchWebhookMode {
 pub struct WatchedRepositoryConfiguration {
     repository: RepositorySlug,
     poll_interval: Duration,
-    credential_file: PathBuf,
+    credential: crate::credential_pools::GithubCredentialProfile,
+    credential_profile: Option<String>,
     push_credential_file: Option<PathBuf>,
     webhook: Option<WatchedRepositoryWebhookConfiguration>,
     convergence_pull_requests: Box<[PullRequestNumber]>,
@@ -122,8 +123,21 @@ impl WatchedRepositoryConfiguration {
     }
 
     /// Returns the deployment-owned credential-file reference.
-    pub fn credential_file(&self) -> &Path {
-        &self.credential_file
+    pub fn credential_file(&self) -> Option<&Path> {
+        match self.credential.delivery() {
+            crate::credential_pools::GithubCredentialDelivery::File(path) => Some(path),
+            crate::credential_pools::GithubCredentialDelivery::GithubApp { .. } => None,
+        }
+    }
+
+    /// Configured GitHub credential shared by polling and App-authorized pushes.
+    pub fn credential(&self) -> &crate::credential_pools::GithubCredentialProfile {
+        &self.credential
+    }
+
+    /// Whether a deployment credential enables Git pushes.
+    pub fn admits_push(&self) -> bool {
+        self.push_credential_file.is_some() || self.credential.authentication().is_some()
     }
 
     /// Returns the optional deployment-owned credential file for configured pushes.
@@ -287,6 +301,10 @@ impl RepositoryWatchConfiguration {
 pub(super) fn parse_repository_watch_configuration(
     item: &Item,
     numeric_bounds: &NumericBoundsConfiguration,
+    github_profiles: &std::collections::HashMap<
+        String,
+        crate::credential_pools::GithubCredentialProfile,
+    >,
 ) -> Result<RepositoryWatchConfiguration, HubModelConfigurationError> {
     let table = item
         .as_table()
@@ -380,6 +398,7 @@ pub(super) fn parse_repository_watch_configuration(
                 "repository",
                 "poll_interval_seconds",
                 "credential_file",
+                "credential_profile",
                 "push_credential_file",
                 "webhook_hook_id",
                 "webhook_secret_file",
@@ -402,19 +421,34 @@ pub(super) fn parse_repository_watch_configuration(
             .and_then(parse_duration_seconds)
             .filter(|value| !value.is_zero())
             .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-        let credential_file = PathBuf::from(
-            required_string(repository, "credential_file")
-                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?,
-        );
-        if !credential_file.is_absolute() {
-            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
-        }
-        if credential_file
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-        {
-            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
-        }
+        let credential = if let Some(profile) = repository.get("credential_profile") {
+            if repository.get("credential_file").is_some() {
+                return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+            }
+            github_profiles
+                .get(
+                    profile
+                        .as_str()
+                        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?,
+                )
+                .cloned()
+                .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
+        } else {
+            let credential_file =
+                PathBuf::from(required_string(repository, "credential_file").map_err(|_| {
+                    HubModelConfigurationError::InvalidRepositoryWatchConfiguration
+                })?);
+            if !credential_file.is_absolute() {
+                return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+            }
+            if credential_file
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+            {
+                return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+            }
+            crate::credential_pools::GithubCredentialProfile::file(credential_file)
+        };
         let push_credential_file = repository
             .get("push_credential_file")
             .map(|_| {
@@ -432,13 +466,17 @@ pub(super) fn parse_repository_watch_configuration(
                 Ok(path)
             })
             .transpose()?;
-        let resolved_credential_file = resolved_credential_file_reference(&credential_file)?;
-        if credential_file_references.iter().any(|existing| {
-            credential_file_references_conflict(existing, &resolved_credential_file)
-        }) {
-            return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
+        if let crate::credential_pools::GithubCredentialDelivery::File(credential_file) =
+            credential.delivery()
+        {
+            let resolved_credential_file = resolved_credential_file_reference(credential_file)?;
+            if credential_file_references.iter().any(|existing| {
+                credential_file_references_conflict(existing, &resolved_credential_file)
+            }) {
+                return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
+            }
+            credential_file_references.push(resolved_credential_file);
         }
-        credential_file_references.push(resolved_credential_file);
         if let Some(path) = &push_credential_file {
             let resolved_push_credential_file = resolved_credential_file_reference(path)?;
             if credential_file_references.iter().any(|existing| {
@@ -513,7 +551,11 @@ pub(super) fn parse_repository_watch_configuration(
         repositories.push(WatchedRepositoryConfiguration {
             repository: repository_slug,
             poll_interval: interval,
-            credential_file,
+            credential,
+            credential_profile: repository
+                .get("credential_profile")
+                .and_then(Item::as_str)
+                .map(str::to_owned),
             push_credential_file,
             webhook: repository_webhook,
             convergence_pull_requests: convergence_pull_requests.into_boxed_slice(),
@@ -1010,4 +1052,22 @@ fn parse_repository_watch_actions(
             Ok(RepoWatchRuleActionV1::DispatchSession { template })
         })
         .collect()
+}
+
+impl RepositoryWatchConfiguration {
+    pub(super) fn reuse_github_credentials(
+        &mut self,
+        profiles: &std::collections::HashMap<
+            String,
+            crate::credential_pools::GithubCredentialProfile,
+        >,
+    ) {
+        for repository in &mut self.repositories {
+            if let Some(name) = &repository.credential_profile
+                && let Some(profile) = profiles.get(name)
+            {
+                repository.credential = profile.clone();
+            }
+        }
+    }
 }
