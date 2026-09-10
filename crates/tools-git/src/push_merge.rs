@@ -250,6 +250,25 @@ pub(super) fn verify_merge(
             }
             None => Hunks::new()?,
         };
+        let own_delta = own_index.and_then(|index| own.get_delta(index));
+        let base_delta = base_index.and_then(|index| base_changes.get_delta(index));
+        if streamed::regeneratable_path(source_path) {
+            let ancestor = base_delta.or(own_delta).map(|delta| delta.old_file());
+            if let Some(old) = ancestor
+                && let Some(contents) = merge_contents(
+                    &source,
+                    [
+                        old,
+                        own_delta.map_or(old, Change::new_file),
+                        base_delta.map_or(old, Change::new_file),
+                        delta.new_file(),
+                    ],
+                    deadline,
+                )?
+            {
+                base_hunks = streamed::protected_base_hunks(source_path, contents, deadline)?;
+            }
+        }
         let mut retained = result_hunks.permitted(streamed::EffectsToMatch::Text, deadline)?;
         let mut permitted = branch_hunks.permitted(streamed::EffectsToMatch::Metadata, deadline)?;
         let missing_base = base_hunks.first_dropped(
@@ -385,11 +404,22 @@ fn preserves_nonconflicting_text(
     sides: [Side<'_>; 4],
     deadline: Instant,
 ) -> Result<bool, GitPushFailure> {
+    let Some([ancestor, branch, base, result]) = merge_contents(source, sides, deadline)? else {
+        return Ok(true);
+    };
+    streamed::preserves_nonconflicting_text(ancestor, branch, base, result, deadline)
+}
+
+fn merge_contents(
+    source: &ObjectSource,
+    sides: [Side<'_>; 4],
+    deadline: Instant,
+) -> Result<Option<[crate::streamed_object::ObjectContent; 4]>, GitPushFailure> {
     if sides
         .iter()
         .any(|side| side.mode() == git2::FileMode::Commit)
     {
-        return Ok(true);
+        return Ok(None);
     }
     let mut contents = Vec::new();
     for side in sides {
@@ -412,13 +442,11 @@ fn preserves_nonconflicting_text(
             .map_err(repository_failure)?
             .contains(&0)
         {
-            return Ok(true);
+            return Ok(None);
         }
         contents.push(content);
     }
-    let [ancestor, branch, base, result]: [_; 4] =
-        contents.try_into().map_err(repository_failure)?;
-    streamed::preserves_nonconflicting_text(ancestor, branch, base, result, deadline)
+    Ok(Some(contents.try_into().map_err(repository_failure)?))
 }
 
 fn diff_options() -> DiffOptions {
