@@ -1,6 +1,7 @@
 //! Daemon admission and compiled workflow catalog; governed by docs/spec/workflows.md.
 
 pub mod eval;
+mod observation;
 pub mod repo_watch;
 pub mod runtime;
 
@@ -42,6 +43,7 @@ pub struct WorkflowService {
     registrations: ProgramRegistrationRepository,
     wake: mpsc::UnboundedSender<runtime::WorkflowWake>,
     clock_executable: Option<ProgramExecutable>,
+    observation_executable: Option<ProgramExecutable>,
     eval_executable: Option<ProgramExecutable>,
     eval_ready: Arc<AtomicBool>,
 }
@@ -102,6 +104,7 @@ impl WorkflowService {
     ) -> Result<ProgramRegistration, WorkflowRuntimeError> {
         let executable = request.clone().into_content().executable;
         if Some(&executable) != self.clock_executable.as_ref()
+            && Some(&executable) != self.observation_executable.as_ref()
             && Some(&executable) != self.eval_executable()
         {
             return Err(WorkflowRuntimeError::NativeUnavailable);
@@ -132,6 +135,12 @@ fn compiled_catalog() -> Result<NativeCatalog, WorkflowRuntimeError> {
     let mut catalog = NativeCatalog::new().map_err(WorkflowRuntimeError::Runtime)?;
     catalog
         .insert::<ClockProgram>(CLOCK_ENTRY.into(), CLOCK_REVISION.into())
+        .map_err(WorkflowRuntimeError::Catalog)?;
+    catalog
+        .insert::<repo_watch::observe::ObserveRepository>(
+            repo_watch::observe::OBSERVE_ENTRY.into(),
+            repo_watch::observe::OBSERVE_REVISION.into(),
+        )
         .map_err(WorkflowRuntimeError::Catalog)?;
     catalog
         .insert::<eval::ApprovalJudgeEval>(eval::EVAL_ENTRY.into(), eval::EVAL_REVISION.into())
@@ -213,6 +222,7 @@ mod tests {
             registrations: ProgramRegistrationRepository::new(pool.clone()),
             wake,
             clock_executable: None,
+            observation_executable: None,
             eval_executable: None,
             eval_ready: Arc::new(AtomicBool::new(false)),
         };

@@ -282,7 +282,7 @@ fn runtime_model_capabilities(
     ))
 }
 
-const fn runtime_reasoning_level(value: ReasoningLevel) -> RuntimeReasoningLevel {
+pub(super) const fn runtime_reasoning_level(value: ReasoningLevel) -> RuntimeReasoningLevel {
     match value {
         ReasoningLevel::None => RuntimeReasoningLevel::None,
         ReasoningLevel::Minimal => RuntimeReasoningLevel::Minimal,
@@ -295,7 +295,7 @@ const fn runtime_reasoning_level(value: ReasoningLevel) -> RuntimeReasoningLevel
     }
 }
 
-const fn runtime_service_tier(value: ServiceTier) -> RuntimeServiceTier {
+pub(super) const fn runtime_service_tier(value: ServiceTier) -> RuntimeServiceTier {
     match value {
         ServiceTier::Anthropic(value) => RuntimeServiceTier::Anthropic(match value {
             AnthropicServiceTier::Auto => RuntimeAnthropicServiceTier::Auto,

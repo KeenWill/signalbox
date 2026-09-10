@@ -1973,7 +1973,8 @@ async fn run_hub_incarnation(
             .workspace_instructions()
             .roots()
             .to_vec(),
-    );
+    )
+    .with_discovery_limits(model_configuration.workspace_instructions().limits());
     let checkout_runner = tools.process_runner();
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
@@ -2397,6 +2398,40 @@ async fn run_hub_incarnation(
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let approval_judge_repository_watch = repository_watch_runtime.clone();
     let workflow_repository_watch = repository_watch_runtime.clone();
+    let eval_runtime_factory = runtime_factory.clone();
+    let workflows =
+        signalboxd::workflows::WorkflowRuntime::new(pool.clone()).map(|(service, runtime)| {
+            let runtime = if let Some(stores) = &blob_store_registry {
+                let eval_pool = pool.clone();
+                let eval_stores = stores.clone();
+                let eval_reload = configuration_reload.clone();
+                runtime.with_eval(move || {
+                    let configuration = eval_reload.catalogs().models;
+                    let model = eval_runtime_factory
+                        .build(&configuration)
+                        .map_err(|error| {
+                            signalbox_workflow_runtime::LiveDeliveryFailure::new(error.to_string())
+                        })?;
+                    Ok(signalboxd::workflows::eval::EvalServices::new(
+                        eval_pool.clone(),
+                        eval_stores.clone(),
+                        Arc::new(RuntimeApprovalJudgeModel::new(
+                            model,
+                            configuration.runtime_model_catalog(),
+                        )),
+                        signalboxd::workflows::eval::configured_binding(&configuration)
+                            .unwrap_or_else(|_| signalboxd::workflows::eval::recorded_binding()),
+                        configuration,
+                    ))
+                })
+            } else {
+                runtime
+            };
+            (
+                service,
+                runtime.with_repository_watch(workflow_repository_watch),
+            )
+        });
     let mut termination_signals = TerminationSignals::new();
     let (guard_ready, guarded_startup) = oneshot::channel();
     let mut guard_loss = Box::pin(monitor_runtime_guard(&mut database, guard_ready));
@@ -2540,7 +2575,6 @@ async fn run_hub_incarnation(
     let pass_nudge = eligibility_nudge.clone();
     let pass_invocation_processes = invocation_processes.clone();
     let pass_blobs = blob_store_registry.clone();
-    let eval_runtime_factory = runtime_factory.clone();
     let compose_pass = move |model_configuration: &HubModelConfiguration| {
         let runtime_models = model_configuration.runtime_model_catalog();
         let runtime = runtime_factory
@@ -2576,7 +2610,13 @@ async fn run_hub_incarnation(
         .with_runner_recovery(runner_recovery.clone())
         .with_same_credential_attempt_bound(same_credential_attempt_bound)
         .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
-        .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
+        .with_continuation_usage_limits(
+            model_configuration
+                .tool_continuation_usage_limits(&signalbox_application::ToolCatalog::definitions(
+                    &tool_catalog,
+                ))
+                .map_err(signalboxd::model_catalog_runtime::ModelRuntimeBuildError::from)?,
+        );
         let provider = AttachmentPreparingModelCallProvider::new(
             UsageLimitedModelCallProvider::new(provider, model_configuration),
             pass_pool.clone(),
@@ -2685,39 +2725,6 @@ async fn run_hub_incarnation(
         );
     }
     let (workflow_shutdown, workflow_shutdown_receiver) = oneshot::channel();
-    let workflows =
-        signalboxd::workflows::WorkflowRuntime::new(pool.clone()).map(|(service, runtime)| {
-            let runtime = if let Some(stores) = &blob_store_registry {
-                let eval_pool = pool.clone();
-                let eval_stores = stores.clone();
-                let eval_reload = configuration_reload.clone();
-                runtime.with_eval(move || {
-                    let configuration = eval_reload.catalogs().models;
-                    let model = eval_runtime_factory
-                        .build(&configuration)
-                        .map_err(|error| {
-                            signalbox_workflow_runtime::LiveDeliveryFailure::new(error.to_string())
-                        })?;
-                    Ok(signalboxd::workflows::eval::EvalServices::new(
-                        eval_pool.clone(),
-                        eval_stores.clone(),
-                        Arc::new(RuntimeApprovalJudgeModel::new(
-                            model,
-                            configuration.runtime_model_catalog(),
-                        )),
-                        signalboxd::workflows::eval::configured_binding(&configuration)
-                            .unwrap_or_else(|_| signalboxd::workflows::eval::recorded_binding()),
-                        configuration,
-                    ))
-                })
-            } else {
-                runtime
-            };
-            (
-                service,
-                runtime.with_repository_watch(workflow_repository_watch),
-            )
-        });
     let process_runtime = match &workflows {
         Ok((service, _)) => process_runtime.with_workflows(service.clone()),
         Err(_) => process_runtime,
