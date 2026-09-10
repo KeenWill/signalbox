@@ -3029,6 +3029,65 @@ async fn webhook_delivery_status(
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn repository_watch_database_logins_survive_another_database_startup()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_runtime::connect_repository_watch_pool;
+    use sqlx::{Connection, PgConnection};
+
+    let (container, first_core, database_url) = unmigrated_postgres().await?;
+    migrate(&first_core).await?;
+    let first_module = connect_repository_watch_pool(&first_core)
+        .await
+        .expect("first database module login");
+    let first_options = first_module.connect_options().as_ref().clone();
+    first_module.close().await;
+
+    sqlx::query("CREATE DATABASE another_repository_watch")
+        .execute(&first_core)
+        .await?;
+    let second_core = PgPoolOptions::new()
+        .connect_with(
+            local_test_connection_options(&database_url)?.database("another_repository_watch"),
+        )
+        .await?;
+    migrate(&second_core).await?;
+    let second_module = connect_repository_watch_pool(&second_core)
+        .await
+        .expect("second database module login");
+    let second_login: String = sqlx::query_scalar("SELECT session_user")
+        .fetch_one(&second_module)
+        .await?;
+
+    // A fresh connection must still authenticate after the other startup rotated its secret.
+    let mut reconnected = PgConnection::connect_with(&first_options).await?;
+    let first_login: String = sqlx::query_scalar("SELECT session_user")
+        .fetch_one(&mut reconnected)
+        .await?;
+    assert_ne!(first_login, second_login);
+    sqlx::query("SET ROLE mod_repo_watch")
+        .execute(&mut reconnected)
+        .await?;
+    let module_user: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(&mut reconnected)
+        .await?;
+    assert_eq!(module_user, "mod_repo_watch");
+    assert!(
+        sqlx::query("SELECT * FROM public.session_lifecycle")
+            .fetch_all(&mut reconnected)
+            .await
+            .is_err(),
+        "reconnected module cannot read core session tables"
+    );
+    reconnected.close().await?;
+    second_module.close().await;
+    second_core.close().await;
+    first_core.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn composed_repository_watch_dispatches_and_reloads_its_running_listener()
 -> Result<(), Box<dyn Error>> {
     use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};

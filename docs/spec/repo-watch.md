@@ -368,10 +368,12 @@ The daemon's repository-specific client loader rereads the configured credential
 file on each load and returns only an authenticated client handle. Credential
 and client-construction failures have distinct redacted error classes.
 
-The module's dedicated PostgreSQL login role owns `mod_repo_watch`, has no
-membership path back to the core identity, and has no table privileges in
-`public`. Module SQL uses an unqualified search path confined to its schema.
-Core and other modules receive no privileges on the module tables.
+The module authenticates through a database-specific PostgreSQL login and
+assumes the role owning `mod_repo_watch`. Startup rotates only that database's
+login secret. Neither role has a membership path back to the core identity or
+table privileges in `public`. Module SQL uses an unqualified search path
+confined to its schema. Core and other modules receive no privileges on the
+module tables.
 
 A created session indexes its retained rule revision, event, dispatch, and
 action ordinal, so lifecycle reaction planning survives rule removal and process
