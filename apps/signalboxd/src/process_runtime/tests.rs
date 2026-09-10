@@ -619,6 +619,46 @@ pub(crate) mod tests {
         assert_eq!(bounded.matches("compaction text truncated").count(), 2);
     }
 
+    #[tokio::test]
+    async fn bounded_compaction_preserves_content_before_identity_metadata() -> Result<(), Box<dyn Error>> {
+        use signalbox_persistence::{blob::BlobCatalogRepository, process_read::ProcessTranscriptEntry};
+
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+        let catalog = BlobCatalogRepository::new(pool);
+        let source_session = SessionId::from_uuid(Uuid::new_v4());
+        let turn = TurnId::from_uuid(Uuid::new_v4());
+        let model_call = ModelCallId::from_uuid(Uuid::new_v4());
+        let task = "Implement the durable frontier suffix regression.";
+        let arguments = r#"{"path":"crates/process-protocol/src/request.rs"}"#;
+        let entries = [
+            (ProcessTranscriptEntry::Assistant {
+                entry_index: 0, source_session,
+                entry: SemanticTranscriptEntryId::from_uuid(Uuid::new_v4()),
+                turn, model_call, content: task.to_owned(),
+            }, task),
+            (ProcessTranscriptEntry::AssistantToolUse {
+                entry_index: 1, source_session,
+                entry: SemanticTranscriptEntryId::from_uuid(Uuid::new_v4()),
+                turn, model_call, request: ToolRequestId::from_uuid(Uuid::new_v4()),
+                name: "read_file".to_owned(), arguments: arguments.to_owned(), approval: None,
+            }, "crates/process-protocol/src/request.rs"),
+        ];
+        // The metadata alone exceeds this entry's source allowance.
+        let entry_byte_budget = 220;
+        for (entry, expected_content) in entries {
+            let value = super::context_compaction_entry_value(&entry, &catalog)
+                .await
+                .expect("text and tool arguments need no blob lookup");
+            let source = serde_json::json!([value]).to_string();
+            let bounded = super::bounded_compaction_source(source, entry_byte_budget);
+            assert!(bounded.contains(expected_content), "content lost: {bounded}");
+            assert!(bounded.len() <= entry_byte_budget as usize);
+            assert!(bounded.contains("compaction text truncated"));
+        }
+        Ok(())
+    }
+
     #[test]
     fn snapshot_delta_boundary_consumes_only_the_queued_prefix() {
         let mut queued = 2;
