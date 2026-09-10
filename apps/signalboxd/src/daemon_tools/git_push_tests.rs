@@ -156,7 +156,63 @@ async fn ssh_push_streams_a_generated_gigabyte_blob() {
     exercise_ssh_push(false, false, 1_000_000_000).await;
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn ssh_push_keeps_account_trust_visible_under_workspace() {
+    const CHILD_ENVIRONMENT: &str = "SIGNALBOX_TEST_SSH_WORKSPACE_HOME";
+    if std::env::var_os(CHILD_ENVIRONMENT).is_some() {
+        for home in [
+            Path::new("/workspace"),
+            Path::new("/workspace/account-home"),
+        ] {
+            for scp_style in [false, true] {
+                exercise_ssh_push_with_home(false, scp_style, 1024, Some(home)).await;
+            }
+        }
+        return;
+    }
+    // Give the fixture a host account home under /workspace without changing the host.
+    let home = tempfile::tempdir().expect("outer account home");
+    let mut command = Command::new("bwrap");
+    command.args(["--die-with-parent", "--tmpfs", "/"]);
+    for entry in fs::read_dir("/").expect("host root entries") {
+        let entry = entry.expect("host root entry");
+        if entry.file_name() != "workspace"
+            && entry.file_name() != "tmp"
+            && entry.file_name() != "dev"
+            && entry.file_name() != "proc"
+        {
+            command
+                .arg("--ro-bind-try")
+                .arg(entry.path())
+                .arg(entry.path());
+        }
+    }
+    let output = command
+        .args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind"])
+        .arg(home.path()).arg("/workspace")
+        .args(["--setenv", "TMPDIR", "/tmp", "--setenv", CHILD_ENVIRONMENT, "1"])
+        .arg(std::env::current_exe().expect("test executable"))
+        .args(["--exact", "daemon_tools::git_push::ssh_tests::ssh_push_keeps_account_trust_visible_under_workspace", "--nocapture"])
+        .output().expect("nested sandbox fixture starts");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 async fn exercise_ssh_push(use_key: bool, scp_style: bool, blob_bytes: u64) {
+    exercise_ssh_push_with_home(use_key, scp_style, blob_bytes, None).await;
+}
+
+async fn exercise_ssh_push_with_home(
+    use_key: bool,
+    scp_style: bool,
+    blob_bytes: u64,
+    home: Option<&Path>,
+) {
     let fixture = tempfile::tempdir().expect("SSH fixture");
     let root = fixture.path().join("worktree");
     let remote = fixture.path().join("remote.git");
@@ -199,7 +255,7 @@ async fn exercise_ssh_push(use_key: bool, scp_style: bool, blob_bytes: u64) {
     let agent = fixture.path().join(agent_name);
     let outside = fixture.path().join("outside-sandbox");
     fs::write(&outside, b"host-only fixture sentinel").expect("outside sentinel");
-    let account_home = fixture.path().join("account-home");
+    let account_home = home.map_or_else(|| fixture.path().join("account-home"), Path::to_owned);
     let ssh_directory = account_home.join(".ssh");
     fs::create_dir_all(&ssh_directory).expect("account SSH directory");
     let first_trust = ssh_directory.join("known_hosts");
@@ -238,10 +294,12 @@ if agent:
     assert os.getcwd() == '/workspace'
     account = pwd.getpwuid(os.getuid())
     assert account.pw_name == 'fixture'
-    assert account.pw_dir == str(Path(FIRST_TRUST_FILE).parent.parent)
+    assert account.pw_dir == FIXTURE_ACCOUNT_HOME
     assert not Path(FIXTURE_OUTSIDE).exists()
-    assert Path(FIRST_TRUST_FILE).read_text() == 'fixture primary trust\n'
-    assert Path(SECOND_TRUST_FILE).read_text() == 'fixture fallback trust\n'
+    trust_files = next((argument.split('=', 1)[1].split() for argument in arguments if argument.startswith('UserKnownHostsFile=')), [str(Path(account.pw_dir) / '.ssh' / name) for name in ['known_hosts', 'known_hosts2']])
+    assert len(trust_files) == 2
+    assert Path(trust_files[0]).read_text() == 'fixture primary trust\n'
+    assert Path(trust_files[1]).read_text() == 'fixture fallback trust\n'
 connection = socket.socket(socket.AF_UNIX)
 connection.connect(agent or FIXTURE_SOCKET)
 connection.sendall((json.dumps({'arguments': arguments, 'agent': agent, 'confined': bool(agent)}) + '\n').encode())
@@ -264,15 +322,10 @@ while True:
 "###
         .replace("FIXTURE_OUTSIDE", &serde_json::to_string(&outside).expect("outside path literal"))
         .replace("FIXTURE_SOCKET", &serde_json::to_string(&agent.to_str()).expect("socket path literal"));
-    let script = script
-        .replace(
-            "FIRST_TRUST_FILE",
-            &serde_json::to_string(&first_trust).expect("first trust path"),
-        )
-        .replace(
-            "SECOND_TRUST_FILE",
-            &serde_json::to_string(&second_trust).expect("second trust path"),
-        );
+    let script = script.replace(
+        "FIXTURE_ACCOUNT_HOME",
+        &serde_json::to_string(&account_home).expect("account home literal"),
+    );
     fs::write(&shim, script).expect("SSH shim");
     fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).expect("executable shim");
     let key = fixture.path().join("key");
@@ -327,7 +380,9 @@ while True:
     assert_eq!(retained_agent, agent);
     let transport = ProcessGitPushTransport {
         runner,
-        credentials: crate::repo_watch_credentials::RepositoryWatchClientLoader::for_git_push(key.clone()),
+        credentials: crate::repo_watch_credentials::RepositoryWatchClientLoader::for_git_push(
+            key.clone(),
+        ),
         credential_file: use_key.then_some(key),
         ssh_agent_socket: Some(retained_agent.into_os_string()),
         sandbox,

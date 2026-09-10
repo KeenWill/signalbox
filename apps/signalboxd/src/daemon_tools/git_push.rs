@@ -16,6 +16,8 @@ use crate::repo_watch_credentials::{
 const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
 
 const SANDBOX_SSH_AGENT_SOCKET: &str = "/run/signalbox-ssh-agent.sock";
+const SANDBOX_SSH_KNOWN_HOSTS: &str = "/run/signalbox-ssh-known-hosts";
+const SANDBOX_SSH_KNOWN_HOSTS2: &str = "/run/signalbox-ssh-known-hosts2";
 
 struct SshAccount {
     home: PathBuf,
@@ -93,7 +95,11 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
             environment.insert("GIT_CONFIG_KEY_0".into(), "credential.helper".into());
             environment.insert("GIT_CONFIG_VALUE_0".into(), "".into());
             let private_key = match &self.credential_file {
-                Some(path) => Some(snapshot_ssh_key(path).await?),
+                Some(path) => Some(
+                    tokio::time::timeout_at(deadline, snapshot_ssh_key(path))
+                        .await
+                        .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)??,
+                ),
                 None => None,
             };
             let mut command = String::from("ssh -F /dev/null -o BatchMode=yes");
@@ -112,6 +118,9 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
                     .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?;
                 environment.insert("SSH_AUTH_SOCK".into(), socket.clone());
                 command.push_str(" -o IdentityFile=none");
+                command.push_str(&format!(
+                    " -o 'UserKnownHostsFile={SANDBOX_SSH_KNOWN_HOSTS} {SANDBOX_SSH_KNOWN_HOSTS2}'"
+                ));
             }
             environment.insert("GIT_SSH_COMMAND".into(), command.into());
             environment.insert("GIT_SSH_VARIANT".into(), "ssh".into());
@@ -151,18 +160,8 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
             })
             .await?
         } else {
-            self.run(
-                &request,
-                &environment,
-                &[
-                    "push",
-                    "--porcelain",
-                    "--",
-                    request.remote().url(),
-                    &request.refspec(),
-                ],
-            )
-            .await
+            self.run_ssh(push_request.clone(), request.git_directory(), deadline)
+                .await?
         };
         classify_push(&push)?;
         let remote_ref = format!("refs/heads/{}", request.branch());
@@ -184,8 +183,19 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
                 ))
                 .await
         } else {
-            self.run(&request, &environment, &confirmation_arguments)
-                .await
+            self.run_ssh(
+                process_request(
+                    &request,
+                    &environment,
+                    &confirmation_arguments,
+                    remaining_push_timeout(deadline)
+                        .ok_or(GitPushTransportFailure::DispatchUnknown)?,
+                ),
+                request.git_directory(),
+                deadline,
+            )
+            .await
+            .map_err(|_| GitPushTransportFailure::DispatchUnknown)?
         };
         let expected_ref = format!("{}\t{remote_ref}", request.commit());
         if !matches!(
@@ -206,48 +216,28 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
 }
 
 impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
-    async fn run(
+    async fn run_ssh(
         &mut self,
-        request: &GitPushRequest,
-        environment: &BTreeMap<OsString, OsString>,
-        arguments: &[&str],
-    ) -> ProcessRunResult {
-        if !request.remote().url().starts_with("https://") && self.credential_file.is_none() {
+        mut process: ProcessRequest,
+        git_directory: &std::path::Path,
+        deadline: tokio::time::Instant,
+    ) -> Result<ProcessRunResult, GitPushTransportFailure> {
+        process.timeout = remaining_push_timeout(deadline)
+            .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?;
+        if self.credential_file.is_none() {
             return self
-                .run_agent_sandbox(request, environment, arguments)
-                .await
-                .unwrap_or_else(|_| ProcessRunResult {
-                    outcome: ProcessOutcome::SpawnFailed {
-                        reason: signalbox_tools_exec::ProcessSpawnFailure::SandboxSetup,
-                    },
-                    stdout: signalbox_tools_exec::ProcessOutput {
-                        bytes: Vec::new(),
-                        completeness: CaptureCompleteness::Complete,
-                    },
-                    stderr: signalbox_tools_exec::ProcessOutput {
-                        bytes: Vec::new(),
-                        completeness: CaptureCompleteness::Complete,
-                    },
-                });
+                .run_agent_sandbox(&process, git_directory, deadline)
+                .await;
         }
-        self.runner
-            .run(ProcessRequest {
-                program: "git".into(),
-                arguments: arguments.iter().map(OsString::from).collect(),
-                working_directory: request.repository_root().to_owned(),
-                // Uses the exec family's command duration and output capture bounds.
-                timeout: Duration::from_secs(300),
-                capture_bytes: 64 * 1024,
-                environment: environment.clone(),
-                environment_inheritance: ProcessEnvironment::Clear,
-                status_protocol: ProcessStatusProtocol::Direct,
-            })
+        Ok(tokio::time::timeout_at(deadline, self.runner.run(process))
             .await
+            .unwrap_or_else(|_| timed_out_push()))
     }
 
     async fn account(
         &mut self,
-        request: &GitPushRequest,
+        root: &std::path::Path,
+        deadline: tokio::time::Instant,
     ) -> Result<SshAccount, GitPushTransportFailure> {
         use std::io::Write;
         use std::os::unix::ffi::OsStrExt;
@@ -256,22 +246,24 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
         if let Some(path) = std::env::var_os("PATH") {
             environment.insert("PATH".into(), path);
         }
-        let result = self
-            .runner
-            .run(ProcessRequest {
+        let result = tokio::time::timeout_at(
+            deadline,
+            self.runner.run(ProcessRequest {
                 program: "getent".into(),
                 arguments: vec![
                     "passwd".into(),
                     rustix::process::getuid().as_raw().to_string().into(),
                 ],
-                working_directory: request.repository_root().to_owned(),
-                timeout: Duration::from_secs(300),
+                working_directory: root.to_owned(),
+                timeout: remaining_push_timeout(deadline).ok_or_else(failure)?,
                 capture_bytes: 64 * 1024,
                 environment,
                 environment_inheritance: ProcessEnvironment::Clear,
                 status_protocol: ProcessStatusProtocol::Direct,
-            })
-            .await;
+            }),
+        )
+        .await
+        .map_err(|_| failure())?;
         if !matches!(result.outcome, ProcessOutcome::Exited { code: Some(0) })
             || result.stdout.completeness != CaptureCompleteness::Complete
         {
@@ -306,16 +298,16 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
 
     async fn run_agent_sandbox(
         &mut self,
-        request: &GitPushRequest,
-        environment: &BTreeMap<OsString, OsString>,
-        arguments: &[&str],
+        process: &ProcessRequest,
+        git_directory: &std::path::Path,
+        deadline: tokio::time::Instant,
     ) -> Result<ProcessRunResult, GitPushTransportFailure> {
         use signalbox_tools_exec::{
             ExecArguments, SandboxNetwork, SandboxReadOnlyMount, SandboxedCommandRunner,
         };
         let failure = || GitPushTransportFailure::PreDispatchInfrastructure;
         let socket = self.ssh_agent_socket.clone().ok_or_else(failure)?;
-        let account = self.account(request).await?;
+        let account = self.account(&process.working_directory, deadline).await?;
         let mut configuration = self.sandbox.clone();
         configuration.network = SandboxNetwork::Host;
         configuration.read_only_mounts.extend([
@@ -339,18 +331,23 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
                 configuration.read_only_binds.push(path);
             }
         }
-        for name in ["known_hosts", "known_hosts2"] {
+        for (name, destination) in [
+            ("known_hosts", SANDBOX_SSH_KNOWN_HOSTS),
+            ("known_hosts2", SANDBOX_SSH_KNOWN_HOSTS2),
+        ] {
             let known_hosts = account.home.join(".ssh").join(name);
             if known_hosts.is_file() {
-                configuration.read_only_binds.push(known_hosts);
+                configuration.read_only_mounts.push(SandboxReadOnlyMount {
+                    source: known_hosts,
+                    destination: PathBuf::from(destination),
+                });
             }
         }
-        let mut runner =
-            SandboxedCommandRunner::try_new(self.runner.clone(), request.git_directory())
-                .map_err(|_| failure())?
-                .with_sandbox_configuration(configuration);
+        let mut runner = SandboxedCommandRunner::try_new(self.runner.clone(), git_directory)
+            .map_err(|_| failure())?
+            .with_sandbox_configuration(configuration);
         let mut command = Vec::new();
-        for (name, value) in environment {
+        for (name, value) in &process.environment {
             let name = name.to_str().ok_or_else(failure)?;
             // The sandbox runner supplies its admitted runtime PATH and mounts the
             // private push snapshot as the current workspace.
@@ -364,16 +361,29 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
             command.push(format!("{name}={value}"));
         }
         command.push("git".to_owned());
-        command.extend(arguments.iter().map(|argument| (*argument).to_owned()));
-        let result = runner
-            .try_run(ExecArguments {
+        command.extend(
+            process
+                .arguments
+                .iter()
+                .map(|argument| argument.to_str().map(str::to_owned).ok_or_else(failure))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let timeout = remaining_push_timeout(deadline).ok_or_else(failure)?;
+        let result = match tokio::time::timeout_at(
+            deadline,
+            runner.try_run(ExecArguments {
                 program: "env".to_owned(),
                 arguments: command,
                 working_directory: ".".to_owned(),
-                timeout_seconds: 300,
-            })
-            .await
-            .map_err(|_| failure())?;
+                // The outer deadline also covers the sandbox probe and fractional seconds.
+                timeout_seconds: timeout.as_secs().max(1),
+            }),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|_| failure())?,
+            Err(_) => return Ok(timed_out_push()),
+        };
         Ok(ProcessRunResult {
             outcome: result.outcome,
             stdout: signalbox_tools_exec::ProcessOutput {
@@ -385,6 +395,20 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
                 completeness: result.stderr.completeness,
             },
         })
+    }
+}
+
+fn timed_out_push() -> ProcessRunResult {
+    ProcessRunResult {
+        outcome: ProcessOutcome::TimedOut,
+        stdout: signalbox_tools_exec::ProcessOutput {
+            bytes: Vec::new(),
+            completeness: CaptureCompleteness::Complete,
+        },
+        stderr: signalbox_tools_exec::ProcessOutput {
+            bytes: Vec::new(),
+            completeness: CaptureCompleteness::Complete,
+        },
     }
 }
 
@@ -559,6 +583,152 @@ mod tests {
             "",
             "fatal: Authentication failed for 'https://github.com/fixture/project.git/'",
         )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ssh_push_and_confirmation_share_the_time_left_after_preparation() {
+        let started = tokio::time::Instant::now();
+        let deadline = started + PUSH_TIMEOUT;
+        let (mut runner, mut request) = push_fixture([
+            result(ProcessOutcome::Exited { code: Some(0) }, "", ""),
+            result(ProcessOutcome::Exited { code: Some(0) }, "", ""),
+        ]);
+        runner.delays = [Duration::from_secs(40), Duration::from_secs(100)].into();
+        request.arguments[3] = "ssh://git@fixture/project.git".into();
+        let mut transport = ProcessGitPushTransport {
+            runner,
+            credentials: RepositoryWatchClientLoader::for_git_push("/unused/key".into()),
+            credential_file: Some("/unused/key".into()),
+            ssh_agent_socket: None,
+            sandbox: Default::default(),
+        };
+        tokio::time::advance(Duration::from_secs(240)).await;
+        let first = transport
+            .run_ssh(
+                request.clone(),
+                std::path::Path::new("/unused/git"),
+                deadline,
+            )
+            .await
+            .expect("push runs");
+        assert_eq!(classify_push(&first), Ok(()));
+        request.arguments = [
+            "ls-remote",
+            "--refs",
+            "--",
+            "ssh://git@fixture/project.git",
+            "refs/heads/review",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let confirmation = transport
+            .run_ssh(request, std::path::Path::new("/unused/git"), deadline)
+            .await
+            .expect("confirmation starts");
+        assert_eq!(confirmation.outcome, ProcessOutcome::TimedOut);
+        assert_eq!(started.elapsed(), PUSH_TIMEOUT);
+        assert_eq!(
+            transport.runner.requests[0].timeout,
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            transport.runner.requests[1].timeout,
+            Duration::from_secs(20)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone)]
+    struct AgentBudgetRunner {
+        requests: std::sync::Arc<std::sync::Mutex<Vec<ProcessRequest>>>,
+        launcher: std::sync::Arc<std::fs::File>,
+        home: PathBuf,
+        account_delay: Duration,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl ProcessRunner for AgentBudgetRunner {
+        fn sandbox_launcher_program(&self) -> &std::path::Path {
+            std::path::Path::new("/unused/launcher")
+        }
+        fn sandbox_launcher_descriptor(&self) -> Option<i32> {
+            Some(std::os::fd::AsRawFd::as_raw_fd(self.launcher.as_ref()))
+        }
+        async fn bwrap_availability(
+            &mut self,
+            _: ProcessRequest,
+        ) -> signalbox_tools_exec::BwrapAvailability {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            signalbox_tools_exec::BwrapAvailability::Available
+        }
+        async fn run(&mut self, request: ProcessRequest) -> ProcessRunResult {
+            let account = request.program == "getent";
+            self.requests.lock().expect("requests").push(request);
+            tokio::time::sleep(if account {
+                self.account_delay
+            } else {
+                Duration::from_secs(100)
+            })
+            .await;
+            let output = if account {
+                format!(
+                    "fixture:x:{}:0::{}:/bin/sh\n",
+                    rustix::process::getuid().as_raw(),
+                    self.home.display()
+                )
+            } else {
+                String::new()
+            };
+            result(ProcessOutcome::Exited { code: Some(0) }, &output, "")
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn ssh_account_lookup_sandbox_setup_and_git_share_one_deadline() {
+        for account_delay in [Duration::from_secs(20), Duration::from_secs(100)] {
+            let home = tempfile::tempdir().expect("account fixture");
+            let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let runner = AgentBudgetRunner {
+                requests: requests.clone(),
+                launcher: std::sync::Arc::new(tempfile::tempfile().expect("launcher descriptor")),
+                home: home.path().to_owned(),
+                account_delay,
+            };
+            let mut transport = ProcessGitPushTransport {
+                runner,
+                credentials: RepositoryWatchClientLoader::for_git_push(
+                    home.path().join("unused-token"),
+                ),
+                credential_file: None,
+                ssh_agent_socket: Some(home.path().join("agent.sock").into_os_string()),
+                sandbox: Default::default(),
+            };
+            let started = tokio::time::Instant::now();
+            let deadline = started + PUSH_TIMEOUT;
+            tokio::time::advance(Duration::from_secs(240)).await;
+            let (_, mut request) = push_fixture([]);
+            request.working_directory = home.path().to_owned();
+            let response = transport.run_ssh(request, home.path(), deadline).await;
+            assert_eq!(started.elapsed(), PUSH_TIMEOUT);
+            let requests = requests.lock().expect("requests");
+            assert_eq!(requests[0].timeout, Duration::from_secs(60));
+            if account_delay == Duration::from_secs(20) {
+                assert_eq!(
+                    response.expect("Git started").outcome,
+                    ProcessOutcome::TimedOut
+                );
+                assert_eq!(requests.len(), 2);
+                assert!(requests[1].timeout <= Duration::from_secs(40));
+            } else {
+                assert_eq!(
+                    response.err(),
+                    Some(GitPushTransportFailure::PreDispatchInfrastructure)
+                );
+                assert_eq!(requests.len(), 1);
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -857,3 +1027,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "git_push_tests.rs"]
+mod ssh_tests;
