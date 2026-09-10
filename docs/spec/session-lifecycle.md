@@ -166,8 +166,9 @@ operator resume reconciles that evidence. An ambiguous park commit is checked
 against its exact durable supervision identity without replaying the park.
 Transient connection failures retry that identity read at the pool acquisition
 interval; a closed pool or deterministic read failure stops the check. An
-acknowledged park releases local suspension and requeues eligibility so a
-concurrent durable resume is honored. A failed write retains the pending request
+acknowledged park releases local suspension and requeues a durable eligibility
+check that honors a concurrent durable resume but never dispatches while the
+park or pending supervision remains. A failed write retains the pending request
 and local suspension, reports its cause, and retries at the pool acquisition
 interval until acknowledged. A corrupt terminal session retains its terminal
 outcome and receives a pending supervision item instead of a park. Successful
