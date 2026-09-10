@@ -175,8 +175,14 @@ impl<Ids, Factory, Codec, Sink> RepoWatchEffects<Ids, Factory, Codec, Sink> {
         &self,
         journals: &signalbox_persistence::program_journal::ProgramJournalRepository,
     ) -> Result<(), LiveDeliveryFailure> {
-        let mut receipts: Vec<_> = self
-            .store
+        Self::acknowledge_store_receipts(&self.store, journals).await
+    }
+
+    pub(crate) async fn acknowledge_store_receipts(
+        store: &RepoWatchStore,
+        journals: &signalbox_persistence::program_journal::ProgramJournalRepository,
+    ) -> Result<(), LiveDeliveryFailure> {
+        let mut receipts: Vec<_> = store
             .evaluation_receipts()
             .await
             .map_err(failure)?
@@ -184,7 +190,7 @@ impl<Ids, Factory, Codec, Sink> RepoWatchEffects<Ids, Factory, Codec, Sink> {
             .map(|receipt| ("repo.commitEvaluation", receipt))
             .collect();
         receipts.extend(
-            self.store
+            store
                 .submission_receipts()
                 .await
                 .map_err(failure)?
@@ -219,14 +225,8 @@ impl<Ids, Factory, Codec, Sink> RepoWatchEffects<Ids, Factory, Codec, Sink> {
                 .await
                 .map_err(failure)?
             {
-                self.store
-                    .release_evaluation(&receipt)
-                    .await
-                    .map_err(failure)?;
-                self.store
-                    .release_submission(&receipt)
-                    .await
-                    .map_err(failure)?;
+                store.release_evaluation(&receipt).await.map_err(failure)?;
+                store.release_submission(&receipt).await.map_err(failure)?;
             }
         }
         Ok(())

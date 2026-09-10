@@ -1,5 +1,6 @@
 //! Daemon composition of repository ingestion, dispatch, and lifecycle consumption.
 
+mod observation;
 mod workflows;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -121,6 +122,8 @@ pub async fn connect_repository_watch_pool(
 pub struct RepositoryWatchRuntime {
     measurements_store: RepoWatchStore,
     state: Arc<Mutex<RuntimeState>>,
+    observers: observation::Observers,
+    workflow_service: Arc<std::sync::OnceLock<crate::workflows::WorkflowService>>,
 }
 
 impl std::fmt::Debug for RepositoryWatchRuntime {
@@ -137,6 +140,8 @@ enum WorkerState {
 }
 
 struct RuntimeState {
+    observers: observation::Observers,
+    workflow_service: Arc<std::sync::OnceLock<crate::workflows::WorkflowService>>,
     workers: WorkerState,
     module_pool: PgPool,
     store: RepoWatchStore,
@@ -329,9 +334,15 @@ impl RepositoryWatchRuntime {
     pub fn unstarted(module_pool: PgPool, services: RepositoryWatchServices) -> Self {
         let (repository_shutdown, _) = watch::channel(false);
         let store = RepoWatchStore::new(module_pool.clone());
+        let observers = observation::Observers::default();
+        let workflow_service = Arc::new(std::sync::OnceLock::new());
         Self {
             measurements_store: store.clone(),
+            observers: observers.clone(),
+            workflow_service: workflow_service.clone(),
             state: Arc::new(Mutex::new(RuntimeState {
+                observers,
+                workflow_service,
                 workers: WorkerState::Prepared,
                 paused: true,
                 changed: Arc::new(Notify::new()),
@@ -744,6 +755,17 @@ impl RuntimeState {
     async fn stop_repositories(&mut self) {
         let _ = self.repository_shutdown.send(true);
         while self.repositories.join_next().await.is_some() {}
+        let observers = self
+            .observers
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for observer in observers {
+            drop(observer.lock().await);
+        }
+        self.observers.lock().await.clear();
     }
 
     async fn start_repositories(&mut self) -> Result<(), RepositoryWatchRuntimeError> {
@@ -773,12 +795,44 @@ impl RuntimeState {
                     clients: RepositoryWatchClientLoader::new(repository),
                     store: self.store.clone(),
                 };
-                self.repositories.spawn(run_repository_task(
-                    task,
-                    repository.poll_interval(),
-                    wake,
-                    self.repository_shutdown.subscribe(),
-                ));
+                if let Some(service) = self.workflow_service.get().cloned() {
+                    let production = if configuration.workflows_enabled() {
+                        self.observers.lock().await.insert(
+                            repository.repository().clone(),
+                            Arc::new(Mutex::new(observation::ConfiguredObserver {
+                                task,
+                                shutdown: self.repository_shutdown.subscribe(),
+                            })),
+                        );
+                        None
+                    } else {
+                        Some(task)
+                    };
+                    self.repositories.spawn(run_repository_task(
+                        observation::WorkflowRepositoryTask {
+                            repository: repository.repository().clone(),
+                            store: self.store.clone(),
+                            core: self.core_pool.clone(),
+                            service,
+                            registration: None,
+                            production,
+                            current: None,
+                        },
+                        repository.poll_interval(),
+                        wake,
+                        self.repository_shutdown.subscribe(),
+                    ));
+                } else {
+                    if configuration.workflows_enabled() {
+                        return Err(RepositoryWatchRuntimeError::RepositoryWorker);
+                    }
+                    self.repositories.spawn(run_repository_task(
+                        task,
+                        repository.poll_interval(),
+                        wake,
+                        self.repository_shutdown.subscribe(),
+                    ));
+                }
             }
         }
         Ok(())

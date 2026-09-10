@@ -41,12 +41,14 @@ impl RepositoryWatchRuntime {
         &self,
         journals: &ProgramJournalRepository,
     ) -> Result<(), LiveDeliveryFailure> {
-        self.state
-            .lock()
-            .await
-            .workflow_effects()
-            .acknowledge_delivered_receipts(journals)
-            .await
+        RepoWatchEffects::<
+            RepositoryWatchDispatchIds,
+            RepositoryWatchCommandFactory,
+            RepositoryWatchCommandCodec,
+            (),
+        >::acknowledge_store_receipts(&self.measurements_store, journals)
+        .await?;
+        crate::workflows::repo_watch::observe::acknowledge(&self.measurements_store, journals).await
     }
 }
 

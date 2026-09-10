@@ -1,5 +1,6 @@
 //! Daemon admission and compiled workflow catalog; governed by docs/spec/workflows.md.
 
+mod observation;
 pub mod repo_watch;
 pub mod runtime;
 
@@ -37,6 +38,7 @@ pub struct WorkflowService {
     registrations: ProgramRegistrationRepository,
     wake: mpsc::UnboundedSender<runtime::WorkflowWake>,
     clock_executable: Option<ProgramExecutable>,
+    observation_executable: Option<ProgramExecutable>,
 }
 
 impl WorkflowService {
@@ -87,7 +89,10 @@ impl WorkflowService {
         id: ProgramRegistrationId,
         request: NativeProgramRegistrationRequest,
     ) -> Result<ProgramRegistration, WorkflowRuntimeError> {
-        if Some(&request.clone().into_content().executable) != self.clock_executable.as_ref() {
+        let executable = request.clone().into_content().executable;
+        if Some(&executable) != self.clock_executable.as_ref()
+            && Some(&executable) != self.observation_executable.as_ref()
+        {
             return Err(WorkflowRuntimeError::NativeUnavailable);
         }
         Ok(self.registrations.register_native_user(id, request).await?)
@@ -116,6 +121,12 @@ fn compiled_catalog() -> Result<NativeCatalog, WorkflowRuntimeError> {
     let mut catalog = NativeCatalog::new().map_err(WorkflowRuntimeError::Runtime)?;
     catalog
         .insert::<ClockProgram>(CLOCK_ENTRY.into(), CLOCK_REVISION.into())
+        .map_err(WorkflowRuntimeError::Catalog)?;
+    catalog
+        .insert::<repo_watch::observe::ObserveRepository>(
+            repo_watch::observe::OBSERVE_ENTRY.into(),
+            repo_watch::observe::OBSERVE_REVISION.into(),
+        )
         .map_err(WorkflowRuntimeError::Catalog)?;
     Ok(catalog)
 }
@@ -194,6 +205,7 @@ mod tests {
             registrations: ProgramRegistrationRepository::new(pool.clone()),
             wake,
             clock_executable: None,
+            observation_executable: None,
         };
         let command = CancelProgramRun {
             command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7()),

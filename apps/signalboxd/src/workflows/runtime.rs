@@ -99,6 +99,7 @@ pub(super) enum WorkflowWake {
 
 /// One runner per fenced daemon; only this runner starts its run attempts.
 pub struct WorkflowRuntime {
+    service: WorkflowService,
     pool: PgPool,
     host: WorkflowHost,
     journal: ProgramJournalRepository,
@@ -120,24 +121,39 @@ impl WorkflowRuntime {
         let journal = ProgramJournalRepository::new(pool.clone());
         let host = WorkflowHost::new(journal.clone());
         #[cfg(target_os = "linux")]
-        let (host, clock_executable) = {
+        let (host, clock_executable, observation_executable) = {
             let catalog = compiled_catalog()?;
             let executable = catalog
                 .executable(CLOCK_ENTRY, CLOCK_REVISION)
                 .ok_or(WorkflowRuntimeError::NativeUnavailable)?;
-            (host.with_native_catalog(catalog), Some(executable))
+            let observation = catalog
+                .executable(
+                    super::repo_watch::observe::OBSERVE_ENTRY,
+                    super::repo_watch::observe::OBSERVE_REVISION,
+                )
+                .ok_or(WorkflowRuntimeError::NativeUnavailable)?;
+            (
+                host.with_native_catalog(catalog),
+                Some(executable),
+                Some(observation),
+            )
         };
         #[cfg(not(target_os = "linux"))]
         let clock_executable = None;
+        #[cfg(not(target_os = "linux"))]
+        let observation_executable = None;
         let registrations = ProgramRegistrationRepository::new(pool.clone());
         let (wake, receiver) = mpsc::unbounded_channel();
+        let service = WorkflowService {
+            registrations: admission,
+            wake,
+            clock_executable,
+            observation_executable,
+        };
         Ok((
-            WorkflowService {
-                registrations: admission,
-                wake,
-                clock_executable,
-            },
+            service.clone(),
             Self {
+                service,
                 pool,
                 host,
                 journal,
@@ -153,6 +169,9 @@ impl WorkflowRuntime {
         mut self,
         runtime: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
     ) -> Self {
+        if let Some(runtime) = &runtime {
+            runtime.set_workflow_service(self.service.clone());
+        }
         self.repository_watch = runtime;
         self
     }

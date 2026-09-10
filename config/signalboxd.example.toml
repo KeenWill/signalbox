@@ -1028,3 +1028,13 @@ selection_id = "2669e033-22f8-4ea9-b046-cbf21fe8b2d7"
 [[aliases]]
 alias_id = "540ce009-c2ec-4a04-b823-c411ea189778"
 selection_id = "a5fec003-0edd-4118-96d1-18af31157bd3"
+
+# Optional repository observations; workflow mode defaults to false.
+# [repository_watch]
+# version = 1
+# workflows_enabled = false
+# signal_reviewers = ["example-reviewer"]
+# [[repository_watch.repositories]]
+# repository = "example/project"
+# poll_interval_seconds = 60
+# credential_file = "/etc/signalbox/repository-token"
