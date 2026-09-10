@@ -1144,6 +1144,99 @@ async fn push_accepts_reexpressed_branch_imports_preserving_main_lines() {
 }
 
 #[tokio::test]
+async fn push_refuses_rewriting_branch_text_outside_conflicts() {
+    for (case, ancestor_files, branch_files, base_files, merge_files) in [
+        (
+            "base leaves the branch path untouched",
+            vec![(b"shared.txt".as_slice(), "original\n")],
+            vec![(b"shared.txt".as_slice(), "branch\n")],
+            vec![
+                (b"shared.txt".as_slice(), "original\n"),
+                (b"main.txt".as_slice(), "main\n"),
+            ],
+            vec![
+                (b"shared.txt".as_slice(), "arbitrary\n"),
+                (b"main.txt".as_slice(), "main\n"),
+            ],
+        ),
+        (
+            "base lacks the branch-added file",
+            vec![],
+            vec![(b"branch.txt".as_slice(), "branch\n")],
+            vec![(b"main.txt".as_slice(), "main\n")],
+            vec![
+                (b"branch.txt".as_slice(), "arbitrary\n"),
+                (b"main.txt".as_slice(), "main\n"),
+            ],
+        ),
+        (
+            "the result omits the branch-added path entirely",
+            vec![],
+            vec![(b"branch.txt".as_slice(), "branch\n")],
+            vec![(b"main.txt".as_slice(), "main\n")],
+            vec![(b"main.txt".as_slice(), "main\n")],
+        ),
+        (
+            "parents touch separate hunks in one path",
+            vec![(
+                b"shared.txt".as_slice(),
+                "old main\nanchor one\nanchor two\nold branch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "old main\nanchor one\nanchor two\nbranch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "main\nanchor one\nanchor two\nold branch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "main\nanchor one\nanchor two\narbitrary\n",
+            )],
+        ),
+        (
+            "a conflicting hunk does not authorize rewriting an independent branch hunk",
+            vec![(
+                b"shared.txt".as_slice(),
+                "old conflict\nanchor one\nanchor two\nold branch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "branch conflict\nanchor one\nanchor two\nbranch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "main conflict\nanchor one\nanchor two\nold branch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "main conflict\nresolved conflict\nanchor one\nanchor two\narbitrary\n",
+            )],
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository");
+        let ancestor = merge_test_commit_files(&repository, &ancestor_files, &[]);
+        let branch = merge_test_commit_files(&repository, &branch_files, &[ancestor]);
+        let base = merge_test_commit_files(&repository, &base_files, &[ancestor]);
+        let merge = merge_test_commit_files(&repository, &merge_files, &[branch, base]);
+        let transport = RecordingPushTransport::default();
+        let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+        let result = executor
+            .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+            .await;
+
+        assert!(
+            matches!(result, Err(GitPushFailure::MergeDroppedBaseChanges(_))),
+            "{case}: {result:?}"
+        );
+        assert!(!transport.has_request(), "{case}");
+    }
+}
+
+#[tokio::test]
 async fn push_refuses_resolutions_reversing_main_line_changes() {
     for (case, resolution) in [
         ("dropped main addition", "branch regrouped\n"),
@@ -1180,10 +1273,10 @@ async fn push_accepts_moved_main_added_lines_verbatim() {
     let repository = Repository::open(fixture.root()).expect("repository");
     let ancestor = merge_test_commit(&repository, "shared\n", &[]);
     let branch = merge_test_commit(&repository, "branch\nshared\n", &[ancestor]);
-    let base = merge_test_commit(&repository, "shared\nmain added\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "main added\nshared\n", &[ancestor]);
     let merge = merge_test_commit(
         &repository,
-        "main added\nbranch regrouped\nshared\n",
+        "branch regrouped\nmain added\nshared\n",
         &[branch, base],
     );
     let transport = RecordingPushTransport::default();
@@ -1240,7 +1333,7 @@ async fn push_accepts_independent_branch_additions_matching_main_removed_text() 
     );
     let merge = merge_test_commit(
         &repository,
-        "main new\nanchor one\nanchor two\nanchor three\nmain old\nbranch regrouped\n",
+        "main new\nanchor one\nanchor two\nanchor three\nmain old\nbranch\n",
         &[branch, base],
     );
     let transport = RecordingPushTransport::default();
