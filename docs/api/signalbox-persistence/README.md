@@ -22,6 +22,7 @@
 | credential_capacity | 0 | 0 | 1 | [credential_capacity](credential_capacity.md) |
 | credential_exclusions | 6 | 0 | 2 | [credential_exclusions](credential_exclusions.md) |
 | credential_invocations | 0 | 0 | 6 | [credential_invocations](credential_invocations.md) |
+| evaluation | 2 | 0 | 0 | [evaluation](evaluation.md) |
 | goal | 12 | 0 | 0 | [goal](goal.md) |
 | goal_turn | 2 | 0 | 0 | [goal_turn](goal_turn.md) |
 | hub_fence | 4 | 0 | 3 | [hub_fence](hub_fence.md) |

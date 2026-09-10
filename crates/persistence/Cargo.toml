@@ -61,6 +61,11 @@ expectable = { git = "https://github.com/KeenWill/expectable-rs", tag = "v0.1.0"
 tempfile = "3.25.0"
 
 [[test]]
+name = "evaluation_postgres"
+path = "tests/evaluation_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
 name = "approval_judge_eval_postgres"
 path = "tests/approval_judge_eval_postgres.rs"
 required-features = ["postgres-integration"]
