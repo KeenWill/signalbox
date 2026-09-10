@@ -339,6 +339,7 @@ pub trait FileMediaProcessor: marker::Send + marker::Sync {
 
 ```rust
 pub enum FileMediaFailure {
+    SourceIntegrity,
     BlobNotVisible,
     BlobMissing,
     BlobCorrupt,

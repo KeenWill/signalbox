@@ -65,6 +65,22 @@ impl fmt::Debug for ModelAttachmentStub {
 }
 ```
 
+## RenderedAttachmentSelector
+
+```rust
+pub struct RenderedAttachmentSelector {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl RenderedAttachmentSelector {
+    pub const fn new(entry: signalbox_domain::SemanticTranscriptEntryId, part_ordinal: u8) -> Self;
+    pub const fn entry(self) -> signalbox_domain::SemanticTranscriptEntryId;
+    pub const fn part_ordinal(self) -> u8;
+    pub fn parse(value: &str) -> option::Option<Self>;
+}
+impl fmt::Display for RenderedAttachmentSelector {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+```
+
 ## ProviderReasoningProvenance
 
 ```rust
@@ -750,6 +766,7 @@ pub struct InProcessAttemptDispatchPermit {/* private */}
 
 ```rust
 pub fn render_model_user_content(
+    entry: signalbox_domain::SemanticTranscriptEntryId,
     content: signalbox_domain::UserContent,
     attachment_byte_length: impl function::FnMut(
         signalbox_domain::BlobDigest,

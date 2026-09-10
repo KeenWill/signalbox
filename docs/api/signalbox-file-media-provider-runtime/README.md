@@ -4,4 +4,5 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| continuation | 1 | 0 | 0 | [continuation](continuation.md) |
 | root | 4 | 1 | 1 | [root](root.md) |
