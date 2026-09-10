@@ -66,7 +66,8 @@ pub(super) fn diff<FileSystem: WorkspaceFileSystem>(
                 let (size, _) = repository
                     .read_object_header(file.id())
                     .map_err(|_| LocalGitFailure::Operation)?;
-                truncated |= size > MAX_DIFF_BYTES;
+                truncated |=
+                    delta.old_file().id() != delta.new_file().id() && size > MAX_DIFF_BYTES;
             }
             buffers.push(content);
         }
