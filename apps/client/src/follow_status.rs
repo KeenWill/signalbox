@@ -269,6 +269,7 @@ pub(crate) async fn status(
     let mut spool = tempfile::tempfile()?;
     let mut phase = OperatorStatusPhase::LifecycleWeeks;
     let mut counts = OperatorStatusCounts::default();
+    let outbox_quarantines;
     loop {
         let frame = connection.frame().await?;
         let item_phase = match frame.message() {
@@ -301,6 +302,7 @@ pub(crate) async fn status(
                                 .value(),
                         }) =>
                 {
+                    outbox_quarantines = item.outbox_quarantine_count.value();
                     break;
                 }
                 OperatorStatusMessage::Start {} | OperatorStatusMessage::End(_) => {
@@ -337,6 +339,7 @@ pub(crate) async fn status(
         lifecycle_weeks: counts.lifecycle_weeks,
         session_supervision: counts.session_supervision,
         lifecycle_deadline_violations: counts.lifecycle_deadline_violations,
+        outbox_quarantines,
     })?;
     spool.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(spool);

@@ -43,7 +43,7 @@ use signalbox_persistence::{
     local_test_connection_options,
     outbox::{
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState, OutboxCorruption,
-        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
         RunnerStateTransitionOutboxTestEvent, RunnerStateTransitionOutboxTestSource,
         append_runner_state_transition_for_test,
     },

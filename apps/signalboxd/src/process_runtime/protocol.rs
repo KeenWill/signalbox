@@ -1532,6 +1532,14 @@ impl ProtocolError {
         }
     }
 
+    pub(super) const fn invalid_tool_denial_reason(detail: RejectionDetail) -> Self {
+        Self {
+            code: ErrorCode::InvalidRequest,
+            message: "tool denial reason was rejected",
+            detail: ErrorDetail::invalid_request(detail),
+        }
+    }
+
     pub(super) const fn mutation_definitely_unavailable() -> Self {
         Self::without_detail(ErrorCode::Unavailable)
     }
