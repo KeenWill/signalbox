@@ -111,7 +111,28 @@ impl FencedHubDatabase {
     /// Globally closes the fenced pool, waits for every outstanding checkout,
     /// and only then releases the singleton guard.
     pub async fn close(mut self) -> Result<(), SingleHubGuardError> {
-        self.pool.close().await;
+        let pool = self.pool.clone();
+        let drain = pool.close();
+        tokio::pin!(drain);
+        let guard_loss = {
+            let monitor = async {
+                loop {
+                    if let Err(error) = self.check_guard().await {
+                        return error;
+                    }
+                    tokio::time::sleep(crate::GUARD_CHECK_INTERVAL).await;
+                }
+            };
+            tokio::pin!(monitor);
+            tokio::select! {
+                biased;
+                error = &mut monitor => {
+                    drain.await;
+                    Some(error)
+                }
+                () = &mut drain => None,
+            }
+        };
         let Some(guard) = self.guard.as_mut() else {
             return Err(SingleHubGuardError::GuardLost(None));
         };
@@ -123,7 +144,10 @@ impl FencedHubDatabase {
             .take()
             .ok_or(SingleHubGuardError::GuardLost(None))?;
         let closed = guard.close().await;
-        retirement.and(closed)
+        match guard_loss {
+            Some(error) => Err(error),
+            None => retirement.and(closed),
+        }
     }
 }
 

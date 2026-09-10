@@ -351,3 +351,98 @@ async fn guard_recovery_rebuilds_a_fenced_pool_after_loss() -> Result<(), Box<dy
     drop(container);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn guard_loss_during_pool_drain_starts_the_recovery_elapsed_bound()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::guard_recovery::{
+        GuardRecoveryPolicy, GuardRecoveryStop, GuardedIncarnationOutcome, run_guarded_incarnations,
+    };
+    use std::time::Duration;
+    let (container, control_pool, database_url) = postgres().await?;
+    let database =
+        FencedHubDatabase::connect_with(local_test_connection_options(&database_url)?, None)
+            .await?;
+    let checkout = database.pool().acquire().await?;
+    let guard_backend: i32 = sqlx::query_scalar(
+        "SELECT DISTINCT pid FROM pg_locks
+         WHERE locktype = 'advisory' AND mode = 'ExclusiveLock' AND granted
+           AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+    )
+    .fetch_one(&control_pool)
+    .await?;
+    let mut database = Some(database);
+    let recovery = run_guarded_incarnations(
+        GuardRecoveryPolicy::new(
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            Some(Duration::from_millis(100)),
+        )
+        .unwrap(),
+        |observer| {
+            let database = database.take().unwrap().with_recovery_observer(observer);
+            async move { GuardedIncarnationOutcome::Finished(database.close().await) }
+        },
+        std::future::pending(),
+    );
+    tokio::pin!(recovery);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut recovery)
+            .await
+            .is_err(),
+        "a healthy guard does not impose a recovery bound on pool drain"
+    );
+    sqlx::query("SELECT pg_terminate_backend($1)")
+        .bind(guard_backend)
+        .execute(&control_pool)
+        .await?;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(10), &mut recovery).await?,
+        Err(GuardRecoveryStop::ElapsedBoundExhausted)
+    ));
+    checkout.close().await?;
+    control_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn shutdown_interrupts_a_lost_guard_pool_drain_without_an_elapsed_bound()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::guard_recovery::{
+        GuardRecoveryPolicy, GuardRecoveryStop, GuardedIncarnationOutcome, run_guarded_incarnations,
+    };
+    use std::time::Duration;
+    let (container, control_pool, database_url) = postgres().await?;
+    let database =
+        FencedHubDatabase::connect_with(local_test_connection_options(&database_url)?, None)
+            .await?;
+    let checkout = database.pool().acquire().await?;
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_locks
+         WHERE locktype = 'advisory' AND mode = 'ExclusiveLock' AND granted
+           AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+    )
+    .execute(&control_pool)
+    .await?;
+    let mut database = Some(database);
+    let recovery = run_guarded_incarnations(
+        GuardRecoveryPolicy::new(Duration::from_millis(10), Duration::from_millis(20), None)
+            .unwrap(),
+        |observer| {
+            let database = database.take().unwrap().with_recovery_observer(observer);
+            async move { GuardedIncarnationOutcome::Finished(database.close().await) }
+        },
+        tokio::time::sleep(Duration::from_millis(100)),
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(10), recovery).await?,
+        Err(GuardRecoveryStop::ShutdownRequested)
+    ));
+    checkout.close().await?;
+    control_pool.close().await;
+    drop(container);
+    Ok(())
+}

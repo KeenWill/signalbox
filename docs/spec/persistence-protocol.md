@@ -337,7 +337,9 @@ construction of the new pool. `fenced_pool_options` caps connections at
 Guard reacquisition in one process closes the old pool before releasing its
 guard connection and advances the generation before constructing a replacement
 pool. A failed retirement does not retain the dedicated connection after the
-pool has drained. The daemon never reuses a pool whose guard was lost.
+pool has drained. Guard checks continue during pool drain; observed loss starts
+the recovery clock while outstanding checkouts are still draining. The daemon
+never reuses a pool whose guard was lost.
 
 The bottom pull request of a stack that adds migrations declares a reserved
 prefix block in its description, and sibling stacks pick disjoint blocks.

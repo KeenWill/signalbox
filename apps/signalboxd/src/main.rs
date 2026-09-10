@@ -1698,22 +1698,32 @@ async fn run_hub_incarnation(
     .with_recovery_observer(guard_recovery.clone());
     let pool = database.pool().clone();
     let fenced_pool_floor_pool = pool.clone();
-    if let Err(error) = migrate_hub_database(&pool).await {
-        return startup_failure_after_close(error, database.close().await);
+    match await_while_guarded(&mut database, migrate_hub_database(&pool)).await {
+        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Err(error)) => {
+            return startup_failure_after_close(error, database.close().await);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
     }
-    let pending_reload =
-        match signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
+    let reload_repository =
+        signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
             pool.clone(),
-        )
-        .pending()
-        .await
-        {
-            Ok(pending) => pending,
-            Err(error) => {
-                let failure = reload_recovery_failure(&error);
-                return startup_failure_after_close(failure, database.close().await);
-            }
-        };
+        );
+    let pending_reload = match await_while_guarded(&mut database, reload_repository.pending()).await
+    {
+        GuardedAwait::Completed(Ok(pending)) => pending,
+        GuardedAwait::Completed(Err(error)) => {
+            let failure = reload_recovery_failure(&error);
+            return startup_failure_after_close(failure, database.close().await);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
+    };
     let retained_startup = pending_reload
         .first()
         .map(|(_, intent)| {
@@ -2051,15 +2061,16 @@ async fn run_hub_incarnation(
             Ok(())
         },
         || std::future::ready(()),
-    )
-    .await;
-    if let Err(error) = startup {
-        return startup_failure_after_close(error, database.close().await);
-    }
-
-    if database.check_guard().await.is_err() {
-        let _ = database.close().await;
-        return Ok(ShutdownOutcome::GuardLost);
+    );
+    match await_while_guarded(&mut database, startup).await {
+        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Err(error)) => {
+            return startup_failure_after_close(error, database.close().await);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
     }
     let blob_store_registry = match await_while_guarded(
         &mut database,
@@ -3622,6 +3633,128 @@ mod tests {
             matches!(super::recovery_incarnation_outcome(result, false), GuardedIncarnationOutcome::Finished(Err(error)) if error == failure)
         );
         control.close().await;
+        drop(container);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn guarded_startup_interrupts_ambiguous_supervision_reconciliation_after_database_loss()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalbox_domain::{
+            CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
+            SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance,
+            SessionId, TranscriptAncestry,
+        };
+        use signalbox_persistence::{
+            SessionCredentialPin, SessionModelCredential,
+            create_session::CreateSessionRepository,
+            session_lifecycle::SessionLifecycleRepositoryError,
+            startup::{StartupScanCorruption, StartupScanRepositoryError},
+        };
+        use signalboxd::guard_recovery::{
+            GuardRecoveryPolicy, GuardedIncarnationOutcome, run_guarded_incarnations,
+        };
+        use testcontainers_modules::{
+            postgres::Postgres,
+            testcontainers::{ImageExt, runners::AsyncRunner},
+        };
+        let container = Postgres::default()
+            // Same PostgreSQL image as tests/process_substrate.rs.
+            .with_tag("18.4-alpine3.23")
+            .with_cmd(signalbox_persistence::disposable_postgres_server_args())
+            .with_mount(signalbox_persistence::disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(signalbox_persistence::disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?,
+        );
+        let database = signalboxd::FencedHubDatabase::connect_with(
+            signalbox_persistence::local_test_connection_options(&url)?,
+            None,
+        )
+        .await?;
+        signalbox_persistence::migrate(database.pool()).await?;
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+        let creation = CreateSession::new(
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(2)),
+            SessionCreationProvenance::new(
+                SessionCreationCause::Interactive,
+                TranscriptAncestry::None,
+            ),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(uuid::Uuid::from_u128(3)),
+            )),
+        )
+        .prepare(session)
+        .unwrap();
+        CreateSessionRepository::new(
+            database.pool().clone(),
+            SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+                "startup-test-family",
+                "startup-test-profile",
+            )])
+            .expect("the startup fixture has one credential pin"),
+        )
+        .handle(creation)
+        .await?;
+        let failure = StartupScanRepositoryError::from(StartupScanCorruption::Missing(
+            "startup supervision fixture",
+        ));
+        let mut database = Some(database);
+        let result = run_guarded_incarnations(
+            GuardRecoveryPolicy::new(Duration::from_secs(1), Duration::from_secs(2), None).unwrap(),
+            |observer| {
+                let mut database = database
+                    .take()
+                    .unwrap()
+                    .with_recovery_observer(observer.clone());
+                let pool = database.pool().clone();
+                let container = &container;
+                let failure = &failure;
+                async move {
+                    let result = {
+                        let (ambiguous, observed) = tokio::sync::oneshot::channel();
+                        let record =
+                        signalbox_persistence::test_support::record_supervision_failure_with_commit(
+                            &pool,
+                            session,
+                            failure,
+                            |transaction| async move {
+                                transaction.commit().await?;
+                                container
+                                    .stop()
+                                    .await
+                                    .expect("stop the disposable PostgreSQL server");
+                                ambiguous.send(()).expect("observe the ambiguous acknowledgement");
+                                Err(SessionLifecycleRepositoryError::CommitAmbiguous(
+                                    sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+                                ))
+                            },
+                        );
+                        tokio::pin!(record);
+                        tokio::select! {
+                            biased;
+                            result = &mut record => panic!("identity reconciliation ended while PostgreSQL was down: {result:?}"),
+                            result = observed => result.expect("the park entered identity reconciliation"),
+                        }
+                        super::await_while_guarded(&mut database, &mut record).await
+                    };
+                    assert!(matches!(result, super::GuardedAwait::GuardLost));
+                    assert!(observer.is_recovering());
+                    let _ = database.close().await;
+                    GuardedIncarnationOutcome::Finished(())
+                }
+            },
+            std::future::pending(),
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), result).await?,
+            Ok(())
+        );
         drop(container);
         Ok(())
     }
