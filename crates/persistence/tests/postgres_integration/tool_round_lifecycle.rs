@@ -6310,3 +6310,73 @@ async fn image_result_commit_is_atomic_and_terminal_reference_is_immutable()
     assert!(sqlx::query("UPDATE tool_attempt SET result_media_reference = jsonb_set(result_media_reference, '{byte_length}', '65') WHERE attempt_id = $1").bind(attempt.into_uuid()).execute(&pool).await.is_err());
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_watch_push_evidence_requires_a_completed_configured_push()
+-> Result<(), Box<dyn Error>> {
+    let (_database, pool, _) = migrated_postgres().await?;
+    let reader = OutboxConsumerReader::new(pool.clone(), OutboxConsumer::RepoWatch);
+    let result = ToolResultContent::Text(
+        ToolResultText::try_new("confirmed push".to_owned()).expect("fixture result"),
+    );
+    let failed = ToolAttemptObservation::KnownFailed {
+        error: ToolExecutionError::new(ToolExecutionErrorKind::ResultContainsNull, None),
+    };
+    for (seed, tool, observation, expected) in [
+        (
+            0x820_1000,
+            "git_push_configured",
+            ToolAttemptObservation::Completed {
+                result: result.clone(),
+            },
+            true,
+        ),
+        (
+            0x820_2000,
+            "file_read",
+            ToolAttemptObservation::Completed { result },
+            false,
+        ),
+        (0x820_3000, "git_push_configured", failed, false),
+    ] {
+        let (fixture, _, _, request) =
+            checkpoint_confirmed_tool_round(&pool, seed, tool, "{}").await?;
+        let repository = PostgresToolLoopRepository::new(pool.clone());
+        repository
+            .decide(
+                decide_tool_request(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    request,
+                    ToolApprovalDecision::Approve,
+                ),
+                || TurnAttemptId::from_uuid(Uuid::now_v7()),
+            )
+            .await?;
+        let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+        repository
+            .prepare_next_attempt(
+                fixture.session,
+                fixture.turn,
+                attempt,
+                ToolEffectClass::ExternalEffect,
+            )
+            .await?;
+        let authorized = repository
+            .authorize_attempt(fixture.session, fixture.turn, attempt)
+            .await?;
+        assert!(
+            !reader.session_pushed(fixture.session).await?,
+            "in-flight {tool}"
+        );
+        repository
+            .commit_observation(authorized.executor_fence().bind(observation))
+            .await?;
+        assert_eq!(
+            reader.session_pushed(fixture.session).await?,
+            expected,
+            "{tool}, fixture {seed}"
+        );
+    }
+    Ok(())
+}

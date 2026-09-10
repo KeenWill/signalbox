@@ -2116,6 +2116,90 @@ async fn goal_command_operation_matches_the_applied_event_kind() -> Result<(), B
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn rejected_goal_resume_keeps_supervision_visible() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xb84);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(ATTACH_COMMAND),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("resume after execution repair")),
+                ),
+                Some(attached_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(
+        activate_goal_turn(&pool, 0xd84).await?,
+        attached_turn.turn()
+    );
+    terminalize_goal_turn_as_failed(&pool, 0xe84).await?;
+    assert_applied_transition(
+        repository
+            .block_execution_failure(
+                session(SESSION),
+                GoalNeed::try_new(String::from("repair execution")).unwrap(),
+                GoalSchedulerProvenance::new(attached_turn.turn()),
+            )
+            .await?,
+    );
+    let maximum = SessionInputPosition::try_from_u64(u64::MAX).unwrap();
+    set_goal_turn_acceptance_position(&pool, attached_turn.turn(), maximum).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let failure = signalbox_persistence::startup::StartupScanRepositoryError::from(
+        signalbox_persistence::startup::StartupScanCorruption::Missing("fixture supervision"),
+    );
+    lifecycle
+        .record_supervision_failure(session(SESSION), &failure)
+        .await?;
+    let history = repository.load_goal(session(SESSION)).await?.unwrap();
+    let resume = GoalUserCommand::new(
+        command(RESUME_COMMAND),
+        session(SESSION),
+        GoalUserAction::Resume(None),
+    );
+    let rejected = GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(
+        GoalCommandRejection::AcceptancePositionExhausted,
+    ));
+    assert_eq!(
+        repository
+            .handle_user_command(resume.clone(), Some(turn_candidates(0xb85)), |_| None)
+            .await?,
+        rejected
+    );
+    assert_eq!(
+        repository
+            .handle_user_command(resume, Some(turn_candidates(0xb86)), |_| None)
+            .await?,
+        rejected
+    );
+    assert_eq!(
+        repository.load_goal(session(SESSION)).await?.unwrap(),
+        history
+    );
+    let parked = lifecycle.load(session(SESSION)).await?.unwrap();
+    assert!(parked.state().is_parked());
+    assert!(parked.supervision_failure().unwrap().pending);
+    let mut status =
+        signalbox_persistence::operator_status::ProcessOperatorStatusRepository::new(pool.clone())
+            .open()
+            .await?;
+    while status.next_item().await?.is_some() {}
+    assert_eq!(status.counts().unwrap().session_supervision(), 1);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// exhausting the session acceptance ordinal yields typed scheduler
 /// backpressure and a durable, replayable user-command rejection.
 #[tokio::test(flavor = "multi_thread")]

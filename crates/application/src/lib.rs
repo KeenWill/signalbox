@@ -68,9 +68,10 @@ pub use commissioned_dispatch::{
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,
     ImportConversationService, ImportedConversationConversionReport, ImportedConversationConverter,
-    ImportedConversationIdGenerator, ImportedConversationSkippedRecord, ImportedConversationStore,
-    ImportedConversationStoreOutcome, ResilientImportedConversationConverter,
-    UuidV7ImportedConversationIdGenerator,
+    ImportedConversationDropFacts, ImportedConversationIdGenerator,
+    ImportedConversationSkippedRecord, ImportedConversationStore, ImportedConversationStoreOutcome,
+    ImportedConversationStreamItem, ResilientImportedConversationConverter, StreamConversionError,
+    StreamingResilientImportedConversationConverter, UuidV7ImportedConversationIdGenerator,
 };
 pub use create_session::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,

@@ -2252,9 +2252,9 @@ pub(crate) fn parse(
         CliCommand::Import(arguments) => Command::Import {
             format: match arguments.format {
                 ImportFormatArgument::ClaudeCode => {
-                    ConversationImportFormat::ClaudeCodeSessionJsonlV2
+                    ConversationImportFormat::ClaudeCodeSessionJsonlV3
                 }
-                ImportFormatArgument::Codex => ConversationImportFormat::CodexRolloutJsonlV1,
+                ImportFormatArgument::Codex => ConversationImportFormat::CodexRolloutJsonlV2,
             },
             source: match (arguments.path, arguments.scan) {
                 (Some(path), None) => ImportSourceArgument::File(path),
@@ -4831,7 +4831,7 @@ mod tests {
         let Command::Import { format, source } = arguments.command else {
             panic!("the successful import parse selects the import command");
         };
-        assert_eq!(format, ConversationImportFormat::CodexRolloutJsonlV1);
+        assert_eq!(format, ConversationImportFormat::CodexRolloutJsonlV2);
         let ImportSourceArgument::File(path) = source else {
             panic!("the positional import source selects one file");
         };
@@ -4846,7 +4846,7 @@ mod tests {
         let Command::Import { format, source } = arguments.command else {
             panic!("the successful import parse selects the import command");
         };
-        assert_eq!(format, ConversationImportFormat::CodexRolloutJsonlV1);
+        assert_eq!(format, ConversationImportFormat::CodexRolloutJsonlV2);
         let ImportSourceArgument::Scan(path) = source else {
             panic!("the scan option selects one directory");
         };

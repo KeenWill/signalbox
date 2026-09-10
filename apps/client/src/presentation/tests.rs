@@ -159,6 +159,7 @@ fn operator_status_renders_all_sections_and_explains_omitted_usage() {
         let mut output = Output::new(&mut stdout, &mut stderr, false);
         output
             .operator_status_counts(super::OperatorStatusPresentationCounts {
+                session_supervision: 1,
                 lifecycle_weeks: 1,
                 lifecycle_deadline_violations: 1,
             })
@@ -197,6 +198,16 @@ fn operator_status_renders_all_sections_and_explains_omitted_usage() {
                 )),
             )))
             .expect("in-memory output cannot fail");
+        output.operator_status_item(&ServerMessage::OperatorStatus(Box::new(
+            OperatorStatusMessage::SessionSupervision(Box::new(
+                signalbox_process_protocol::OperatorStatusSessionSupervisionMessage {
+                    session_id: wire_uuid(7),
+                    terminal: true,
+                    failure_class: signalbox_process_protocol::OperatorStatusSupervisionFailureClass::Corruption,
+                    cause_code: String::from("durable_state_corruption"),
+                },
+            )),
+        ))).expect("in-memory output cannot fail");
         output
             .operator_status_model_usage_omitted()
             .expect("in-memory output cannot fail");
@@ -204,9 +215,10 @@ fn operator_status_renders_all_sections_and_explains_omitted_usage() {
 
     let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
     expect![[r#"
-        status lifecycle_weeks=1 nonterminal_past_deadline=1
+        status lifecycle_weeks=1 nonterminal_past_deadline=1 session_supervision=1
         lifecycle_week week=2026-08-31 completion_failure=3/40@75000ppm failed_unknown=1/40@25000ppm overflow=5/44@113636ppm finish_given_overflow=4/5@800000ppm wall=0/38@0ppm wall_occurrences=0 turn_cause_completeness=980/985@994923ppm model_call_cause_completeness=91/95@957894ppm
         nonterminal_past_deadline session=00000000-0000-0000-0000-000000000006 state=parked deadline=armed expired=1m30s
+        session_supervision {"session_id":"00000000-0000-0000-0000-000000000007","terminal":true,"failure_class":"corruption","cause_code":"durable_state_corruption"}
         model_usage=omitted reason=no_cheap_status_aggregate
     "#]]
     .assert_eq(&rendered);
@@ -333,12 +345,18 @@ fn imported_names_its_entry_count_as_the_greatest_selectable_position() {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     Output::new(&mut stdout, &mut stderr, false)
-        .imported_conversation_entry_count(2)
+        .imported_conversation_entry_count(
+            2,
+            crate::conversation_import::ConversationImportDropFacts {
+                dropped_record_count: CanonicalU64::new(0),
+                first_dropped_record_position: None,
+            },
+        )
         .expect("in-memory output cannot fail");
 
     let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
     expect![[r#"
-        entry_count=2
+        entry_count=2 dropped_record_count=0 first_dropped_record_position=none
     "#]]
     .assert_eq(&rendered);
     assert!(stderr.is_empty());
