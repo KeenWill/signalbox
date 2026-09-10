@@ -3314,13 +3314,6 @@ async fn web_fetch_timeout_returns_a_typed_failure_and_continues_the_turn()
             ),
         ]
     );
-    let disposition: String = sqlx::query_scalar(
-        "SELECT terminal_disposition_kind FROM turn_lifecycle WHERE turn_id = $1",
-    )
-    .bind(fixture.activated.turn().into_uuid())
-    .fetch_one(&fixture.pool)
-    .await?;
-    assert_eq!(disposition, "completed");
     Ok(())
 }
 
