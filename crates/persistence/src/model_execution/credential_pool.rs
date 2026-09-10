@@ -252,7 +252,7 @@ use super::{credential_pool_evidence, credential_pool_records};
 /// A quarantine spans pools, so the profile reference alone is the lock key. Callers needing
 /// several profiles take them in sorted order, so two sessions preparing calls
 /// over the same pool cannot deadlock against each other.
-async fn lock_credential_pool_action_head(
+pub(crate) async fn lock_credential_pool_action_head(
     connection: &mut PgConnection,
     credential_reference: &str,
 ) -> Result<(), ModelCallRepositoryError> {

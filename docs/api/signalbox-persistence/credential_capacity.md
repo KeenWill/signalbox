@@ -2,6 +2,25 @@
 
 # credential_capacity
 
+## retain_credential_capacity_probe
+
+```rust
+pub async fn retain_credential_capacity_probe(
+    pool: &sqlx_postgres::PgPool,
+    credential_reference: &str,
+    snapshot: &signalbox_domain::ProviderRateLimitSnapshot,
+) -> result::Result<bool, model_execution::ModelCallRepositoryError>;
+```
+
+## waiting_capacity_profiles
+
+```rust
+pub async fn waiting_capacity_profiles(
+    pool: &sqlx_postgres::PgPool,
+    configured_profiles: &[string::String],
+) -> result::Result<vec::Vec<string::String>, model_execution::ModelCallRepositoryError>;
+```
+
 ## load_credential_rate_limits
 
 ```rust

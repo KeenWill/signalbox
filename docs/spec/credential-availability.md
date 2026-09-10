@@ -217,9 +217,18 @@ deadlines and dropped hints, without a configured reconciliation sweep. A
 durable member-availability update or a successful operator clear grants
 eligibility to waits naming that member in the same transaction. Eligibility
 prepares no call and consumes no wait. Startup alone leaves exhausted waits
-unchanged; deadline-free waits have no timer. Pooled capacity observations and
-wait admission acquire the model-call order guard, profile action locks and
-invocation-capacity locks before updating waits.
+unchanged; deadline-free waits have no expiry timer. Pooled capacity
+observations and wait admission acquire the model-call order guard, profile
+action locks and invocation-capacity locks before updating waits.
+
+The daemon re-reads Codex account capacity for configured `codex_home` members
+whose live waits retain a headroom exclusion, using the reconciliation-sweep
+interval (or the invocation-recovery interval when absent) and the Codex CLI
+probe bound. This read starts no model thread or turn. A successful out-of-call
+observation has no model-call provenance and follows the same newest-observation
+and transactional wake rules; failed reads retain the prior evidence and retry
+on the next pass. An external quota reset can therefore release a parked wait
+before its previously observed reset deadline.
 
 Contended-wait: no member is admitted and at least one otherwise-admissible
 member is skipped only for its configured invocation bound. Either exhaustion
