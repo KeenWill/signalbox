@@ -744,8 +744,8 @@ for (const viewport of [
     const provenance = page.getByLabel('Repository watch')
     await expect(provenance).toContainText('Repository watch · signalbox/example #81')
     await expect(provenance).toContainText('Rule review-response v3 · Review submitted')
-    await provenance.getByText('Trigger details', { exact: true }).click()
-    await expect(provenance).toContainText(`Dispatch ${origin.dispatch_id} · Step 2`)
+    await provenance.getByText('Dispatch details', { exact: true }).click()
+    await expect(provenance).toContainText(`Dispatch ${origin.dispatch_id} · Action 2`)
     await expect(provenance).toContainText(`Event ${origin.event_id}`)
     if (browserName === 'chromium') {
       await expect(page).toHaveScreenshot(`repository-watch-origin-${viewport.name}.png`, {
