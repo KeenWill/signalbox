@@ -534,10 +534,10 @@ export function SessionWorkspaceSurface({
               {' · '}
               {enumLabel(displayedSession.descriptor.repository_watch.event_kind)}
               <details>
-                <summary>Trigger details</summary>
+                <summary>Dispatch details</summary>
                 <p>
                   Dispatch {displayedSession.descriptor.repository_watch.dispatch_id}
-                  {' · Step '}
+                  {' · Action '}
                   {displayedSession.descriptor.repository_watch.action_ordinal}
                 </p>
                 <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>

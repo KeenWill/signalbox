@@ -109,7 +109,7 @@ const labels = new Map<string, string>(
     goal: 'Goal',
     goal_changed: 'Goal changed',
     goal_turn_retired: 'Turn retired before it started',
-    head_changed: 'Latest commit changed',
+    head_changed: 'Head commit changed',
     high: 'High',
     human: 'Human',
     idle: 'Idle',
