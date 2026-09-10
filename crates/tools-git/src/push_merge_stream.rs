@@ -989,7 +989,7 @@ pub(super) fn protected_base_hunks(
                 b[0]..b[1],
                 deadline,
             )?;
-            if a[..2] == b[..2] && same_file(&own_effects, &base_effects, deadline)? {
+            if !generated && a[..2] == b[..2] && same_file(&own_effects, &base_effects, deadline)? {
                 continue;
             }
             if generated {
@@ -1029,6 +1029,7 @@ pub(super) fn protected_base_hunks(
 
 // Fixed line-hash spans are separated by conflict wildcards; all storage stays on disk.
 pub(super) fn preserves_nonconflicting_text(
+    path: &std::path::Path,
     ancestor: ObjectContent,
     branch: ObjectContent,
     base: ObjectContent,
@@ -1039,6 +1040,8 @@ pub(super) fn preserves_nonconflicting_text(
     let branch = Lines::new(branch, deadline)?;
     let base = Lines::new(base, deadline)?;
     let result = Lines::new(result, deadline)?;
+    let generated =
+        path.extension().is_some_and(|extension| extension == "md") && generated_marker(&base)?;
     let own = changed_ranges(&ancestor, &branch, deadline)?;
     let main = changed_ranges(&ancestor, &base, deadline)?;
     let mut fixed = tempfile::tempfile().map_err(failed)?;
@@ -1079,7 +1082,7 @@ pub(super) fn preserves_nonconflicting_text(
         append_hashes(&mut fixed, &ancestor, cursor, start, deadline)?;
         let mut a = replacement_hashes(&ancestor, &branch, &own, first_i..i, start..end, deadline)?;
         let mut b = replacement_hashes(&ancestor, &base, &main, first_j..j, start..end, deadline)?;
-        if i != first_i && j != first_j && !same_file(&a, &b, deadline)? {
+        if i != first_i && j != first_j && (generated || !same_file(&a, &b, deadline)?) {
             let span_end = fixed.stream_position().map_err(failed)? / 32;
             spans.push([span_start, span_end, 0, 0])?;
             span_start = span_end;

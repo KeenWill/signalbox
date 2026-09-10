@@ -407,7 +407,14 @@ fn preserves_nonconflicting_text(
     let Some([ancestor, branch, base, result]) = merge_contents(source, sides, deadline)? else {
         return Ok(true);
     };
-    streamed::preserves_nonconflicting_text(ancestor, branch, base, result, deadline)
+    streamed::preserves_nonconflicting_text(
+        sides[2].path().unwrap_or(Path::new("")),
+        ancestor,
+        branch,
+        base,
+        result,
+        deadline,
+    )
 }
 
 fn merge_contents(
