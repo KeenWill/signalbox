@@ -38,21 +38,33 @@ use signalbox_domain::{
     ImportedTranscriptPosition,
 };
 use signalbox_persistence::{
+    MIGRATOR,
     conversation_import::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
         StreamingImportedConversationReport, corrupt_integration_imported_blob,
-        load_normalized_entry_page,
     },
     conversation_import_discovery::{
         ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
-        ImportedEntryWindowAnchor,
+        ImportedEntryContentProjection, ImportedEntryWindowAnchor,
     },
-    local_test_connection_options,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
+    disposable_test_container_labels, local_test_connection_options,
 };
 use sqlx::{PgPool, Transaction, postgres::PgPoolOptions, types::Uuid};
+use testcontainers_modules::{
+    postgres::Postgres,
+    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+};
+
+#[path = "../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+use postgres_test_image::POSTGRES_IMAGE_TAG;
 
 const ARBITRARY_LINEAGE_ENTRY_ID_START: u128 = 1;
+const MIGRATION_DATABASE_NAME: &str = "signalbox_conversation_import_migration";
+const MIGRATION_DATABASE_USER: &str = "signalbox";
+const MIGRATION_DATABASE_PASSWORD: &str = "signalbox-test-only";
 
 enum EntryIdentitySupply {
     Fixed(VecDeque<ImportedTranscriptEntryId>),
@@ -155,6 +167,29 @@ impl ImportedConversationIdGenerator for SequentialIds {
 
 async fn migrated_postgres() -> Result<(TestDatabase, PgPool, String), Box<dyn Error>> {
     signalbox_persistence::test_support::postgres::migrated_postgres(4).await
+}
+
+async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(MIGRATION_DATABASE_NAME)
+        .with_user(MIGRATION_DATABASE_USER)
+        .with_password(MIGRATION_DATABASE_PASSWORD)
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url = format!(
+        "postgres://{MIGRATION_DATABASE_USER}:{MIGRATION_DATABASE_PASSWORD}@{host}:{port}/{MIGRATION_DATABASE_NAME}"
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    Ok((container, pool))
 }
 
 #[derive(Clone, Copy)]
@@ -951,6 +986,81 @@ async fn import_round_trip_fixture() -> Result<ImportRoundTripFixture, Box<dyn E
     })
 }
 
+/// dropped-record facts upgrade existing headers without mutating append-only rows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn dropped_record_migration_upgrades_existing_append_only_imports()
+-> Result<(), Box<dyn Error>> {
+    const MIGRATION_VERSION: i64 = 202609091460;
+    let (container, pool) = unmigrated_postgres().await?;
+    let previous = sqlx::migrate::Migrator::with_migrations(
+        MIGRATOR
+            .iter()
+            .filter(|migration| migration.version != MIGRATION_VERSION)
+            .cloned()
+            .collect(),
+    );
+    previous.run(&pool).await?;
+    sqlx::query(
+        "ALTER TABLE imported_conversation
+            ADD COLUMN dropped_record_count numeric(20,0),
+            ADD COLUMN first_dropped_record_position numeric(20,0)",
+    )
+    .execute(&pool)
+    .await?;
+    let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x777));
+    let mut importer = ImportConversationService::new(
+        FixedIds::new(&[0x777], [0x778]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    let outcome = importer
+        .execute(br#"{"type":"user","message":{"content":"migration fixture"}}"#)
+        .await?;
+    assert_eq!(
+        outcome,
+        ImportConversationOutcome::Inserted { conversation }
+    );
+    sqlx::query(
+        "ALTER TABLE imported_conversation
+            DROP COLUMN dropped_record_count,
+            DROP COLUMN first_dropped_record_position",
+    )
+    .execute(&pool)
+    .await?;
+
+    MIGRATOR.run(&pool).await?;
+
+    let facts: (Decimal, Option<Decimal>) = sqlx::query_as(
+        "SELECT dropped_record_count, first_dropped_record_position
+           FROM imported_conversation
+          WHERE imported_conversation_id = $1",
+    )
+    .bind(conversation.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(facts, (Decimal::ZERO, None));
+    let append_only = sqlx::query(
+        "UPDATE imported_conversation
+            SET dropped_record_count = 1,
+                first_dropped_record_position = 1
+          WHERE imported_conversation_id = $1",
+    )
+    .bind(conversation.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("the migration retains the imported-header append-only trigger");
+    assert!(
+        append_only
+            .to_string()
+            .contains("imported_conversation is append-only")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// exact reingestion resolves the immutable imported winner.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -981,19 +1091,20 @@ async fn normalized_entry_pages_bound_and_advance_the_imported_transcript()
 -> Result<(), Box<dyn Error>> {
     let fixture = import_round_trip_fixture().await?;
     let limit = NonZeroUsize::new(1).expect("the fixture page limit is positive");
-
-    let first = load_normalized_entry_page(&fixture.pool, fixture.winner, 0, limit)
+    let discovery = ImportedConversationDiscoveryRepository::new(fixture.pool.clone());
+    let inventory = discovery
+        .entry_inventory(fixture.winner)
         .await?
         .expect("the imported conversation exists");
-    assert_eq!(first.entries().len(), 1);
-    assert_eq!(first.entries()[0].position().as_u64(), 1);
+
+    let first = discovery.entry_page(inventory, 0, limit, 16, 16).await?;
+    assert_eq!(first.items().len(), 1);
+    assert_eq!(first.items()[0].frontier.position, 1);
     assert!(first.has_more());
 
-    let second = load_normalized_entry_page(&fixture.pool, fixture.winner, 1, limit)
-        .await?
-        .expect("the imported conversation exists");
-    assert_eq!(second.entries().len(), 1);
-    assert_eq!(second.entries()[0].position().as_u64(), 2);
+    let second = discovery.entry_page(inventory, 1, limit, 16, 16).await?;
+    assert_eq!(second.items().len(), 1);
+    assert_eq!(second.items()[0].frontier.position, 2);
     assert!(!second.has_more());
 
     fixture.finish().await;
@@ -2538,6 +2649,35 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
     assert_eq!(window.items[2].frontier, descriptor.latest);
     assert!(!window.has_before);
     assert!(!window.has_after);
+
+    let inventory = discovery
+        .entry_inventory(conversation)
+        .await?
+        .ok_or("entry inventory fixture import must exist")?;
+    let page = discovery
+        .entry_page(
+            inventory,
+            0,
+            NonZeroUsize::new(3).ok_or("entry-page fixture bound must be nonzero")?,
+            8,
+            12,
+        )
+        .await?;
+    assert_eq!(page.items().len(), 3);
+    let projected = page
+        .items()
+        .iter()
+        .map(|entry| match &entry.content {
+            ImportedEntryContentProjection::Text(ImportedSourceAttestation::Attested(text)) => {
+                (text.leading_text.clone(), text.complete)
+            }
+            other => panic!("expected a text projection, found {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(projected[0], (String::from("first im"), false));
+    assert_eq!(projected[1], (String::from("seco"), false));
+    assert_eq!(projected[2], (String::new(), false));
+    assert!(!page.has_more());
 
     pool.close().await;
     drop(container);

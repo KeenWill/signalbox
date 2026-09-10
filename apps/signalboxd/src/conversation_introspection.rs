@@ -11,14 +11,11 @@ use signalbox_application::{
     ConversationListItem as ApplicationListItem, ConversationListQuery, ConversationOriginFilter,
     ConversationPageReader, ListConversationsService, OperatorFailureClass,
 };
-use signalbox_domain::{
-    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptContent,
-    ImportedTranscriptEntryInput,
-};
+use signalbox_domain::{ImportedSourceAttestation, ImportedSpeaker};
 use signalbox_persistence::{
-    conversation_import::{
-        ImportedConversationRepositoryError, ImportedRawBlobStorageError,
-        load_normalized_entry_page,
+    conversation_import_discovery::{
+        ImportedConversationDiscoveryError, ImportedConversationDiscoveryRepository,
+        ImportedEntryContentProjection, ImportedEntryProjection,
     },
     conversation_listing::{ConversationListingRepository, ConversationListingRepositoryError},
     process_read::{
@@ -92,29 +89,18 @@ impl ConversationIntrospectionError {
         }
     }
 
-    fn from_import(error: ImportedConversationRepositoryError) -> Self {
+    fn from_import_discovery(error: ImportedConversationDiscoveryError) -> Self {
         Self {
             class: match error {
-                ImportedConversationRepositoryError::Database(_) => {
+                ImportedConversationDiscoveryError::Database(_) => {
                     OperatorFailureClass::Infrastructure {
                         commit_ambiguous: false,
                     }
                 }
-                ImportedConversationRepositoryError::IdentityCollision(_) => {
-                    OperatorFailureClass::IdentityCollision
+                ImportedConversationDiscoveryError::Request(_) => {
+                    OperatorFailureClass::CallerOrHubBug
                 }
-                ImportedConversationRepositoryError::BlobStorage(
-                    ImportedRawBlobStorageError::Unavailable,
-                ) => OperatorFailureClass::Infrastructure {
-                    commit_ambiguous: false,
-                },
-                ImportedConversationRepositoryError::BlobStorage(
-                    ImportedRawBlobStorageError::Integrity,
-                ) => OperatorFailureClass::FailClosedCorruption,
-                ImportedConversationRepositoryError::BlobCatalog(_) => {
-                    OperatorFailureClass::FailClosedCorruption
-                }
-                ImportedConversationRepositoryError::Corruption(_) => {
+                ImportedConversationDiscoveryError::Corruption(_) => {
                     OperatorFailureClass::FailClosedCorruption
                 }
             },
@@ -220,15 +206,26 @@ impl ConversationIntrospectionPort for PostgresConversationIntrospection {
         let limit = NonZeroUsize::new(request.max_entries())
             .ok_or_else(ConversationIntrospectionError::caller_bug)?;
         let after = request.after_position().map_or(0, NonZeroU64::get);
-        let Some(page) =
-            load_normalized_entry_page(&self.pool, request.conversation(), after, limit)
-                .await
-                .map_err(ConversationIntrospectionError::from_import)?
+        let repository = ImportedConversationDiscoveryRepository::new(self.pool.clone());
+        let Some(inventory) = repository
+            .entry_inventory(request.conversation())
+            .await
+            .map_err(ConversationIntrospectionError::from_import_discovery)?
         else {
             return Ok(None);
         };
+        let page = repository
+            .entry_page(
+                inventory,
+                after,
+                limit,
+                request.max_bytes(),
+                request.max_bytes(),
+            )
+            .await
+            .map_err(ConversationIntrospectionError::from_import_discovery)?;
         let mut builder = TranscriptPageBuilder::new(request.max_entries(), request.max_bytes());
-        for entry in page.entries() {
+        for entry in page.items() {
             if !builder.push(visible_imported_entry(entry)?) {
                 return Ok(Some(builder.finish(true)));
             }
@@ -275,6 +272,7 @@ struct VisibleEntry {
     position: NonZeroU64,
     kind: TranscriptEntryKind,
     content: String,
+    content_truncated: bool,
 }
 
 fn visible_process_entry(
@@ -416,6 +414,7 @@ fn visible_process_entry(
         position,
         kind,
         content,
+        content_truncated: false,
     })
 }
 
@@ -443,44 +442,53 @@ fn process_imported_marker(kind: ProcessImportedContentKind) -> String {
 }
 
 fn visible_imported_entry(
-    entry: &ImportedTranscriptEntryInput,
+    entry: &ImportedEntryProjection,
 ) -> Result<VisibleEntry, ConversationIntrospectionError> {
-    let position = NonZeroU64::new(entry.position().as_u64())
+    let position = NonZeroU64::new(entry.frontier.position)
         .ok_or_else(ConversationIntrospectionError::caller_bug)?;
-    let kind = imported_content_kind(entry.source_speaker(), entry.content());
-    let content = match entry.content() {
-        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text)) => {
-            text.as_str().to_owned()
+    let kind = imported_content_kind(&entry.source_speaker, &entry.content);
+    let (content, content_truncated) = match &entry.content {
+        ImportedEntryContentProjection::Text(ImportedSourceAttestation::Attested(text)) => {
+            (text.leading_text.clone(), !text.complete)
         }
-        ImportedTranscriptContent::SourceEvent { .. } => String::from("imported source event"),
-        ImportedTranscriptContent::SourceMessageBlock { .. } => {
-            String::from("imported message block")
+        ImportedEntryContentProjection::SourceEvent => {
+            (String::from("imported source event"), false)
         }
-        ImportedTranscriptContent::Text(_) => String::from("imported unattested text"),
-        ImportedTranscriptContent::ToolCall { .. } => String::from("imported tool call"),
-        ImportedTranscriptContent::ToolResult { .. } => String::from("imported tool result"),
-        ImportedTranscriptContent::Thinking { .. } => String::from("imported thinking block"),
-        ImportedTranscriptContent::RedactedThinking { .. } => {
-            String::from("imported redacted-thinking block")
+        ImportedEntryContentProjection::SourceMessageBlock => {
+            (String::from("imported message block"), false)
         }
-        ImportedTranscriptContent::Document { .. } => String::from("imported document block"),
-        ImportedTranscriptContent::MessageContentAbsent(_) => {
-            String::from("imported message content absent")
+        ImportedEntryContentProjection::Text(_) => {
+            (String::from("imported unattested text"), false)
+        }
+        ImportedEntryContentProjection::ToolCall => (String::from("imported tool call"), false),
+        ImportedEntryContentProjection::ToolResult => (String::from("imported tool result"), false),
+        ImportedEntryContentProjection::Thinking => {
+            (String::from("imported thinking block"), false)
+        }
+        ImportedEntryContentProjection::RedactedThinking => {
+            (String::from("imported redacted-thinking block"), false)
+        }
+        ImportedEntryContentProjection::Document => {
+            (String::from("imported document block"), false)
+        }
+        ImportedEntryContentProjection::MessageContentAbsent => {
+            (String::from("imported message content absent"), false)
         }
     };
     Ok(VisibleEntry {
         position,
         kind,
         content,
+        content_truncated,
     })
 }
 
 fn imported_content_kind(
     speaker: &ImportedSourceAttestation<ImportedSpeaker>,
-    content: &ImportedTranscriptContent,
+    content: &ImportedEntryContentProjection,
 ) -> TranscriptEntryKind {
     match content {
-        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(_)) => {
+        ImportedEntryContentProjection::Text(ImportedSourceAttestation::Attested(_)) => {
             imported_speaker_kind(speaker)
         }
         _ => TranscriptEntryKind::System,
@@ -526,6 +534,7 @@ impl TranscriptPageBuilder {
             return false;
         }
         let mut content = visible.content;
+        let source_truncated = visible.content_truncated;
         if content.len() > self.remaining_bytes {
             let boundary = content
                 .char_indices()
@@ -536,6 +545,7 @@ impl TranscriptPageBuilder {
             content.truncate(boundary);
             self.content_truncated = true;
         }
+        self.content_truncated |= source_truncated;
         self.remaining_bytes = self.remaining_bytes.saturating_sub(content.len());
         self.entries.push(TranscriptEntry::new(
             visible.position,
@@ -553,16 +563,12 @@ impl TranscriptPageBuilder {
 
 #[cfg(test)]
 mod tests {
-    use signalbox_domain::ImportedMessageContentAbsence;
-
     use super::*;
 
     #[test]
     fn non_text_import_with_attested_user_speaker_is_a_system_marker() {
         let speaker = ImportedSourceAttestation::Attested(ImportedSpeaker::User);
-        let content = ImportedTranscriptContent::MessageContentAbsent(
-            ImportedMessageContentAbsence::EmptyBlockArray,
-        );
+        let content = ImportedEntryContentProjection::MessageContentAbsent;
 
         assert_eq!(
             imported_content_kind(&speaker, &content),

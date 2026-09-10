@@ -1,12 +1,9 @@
 ALTER TABLE imported_conversation
-    ADD COLUMN dropped_record_count numeric(20,0),
+    ADD COLUMN dropped_record_count numeric(20,0) NOT NULL DEFAULT 0,
     ADD COLUMN first_dropped_record_position numeric(20,0);
 
-UPDATE imported_conversation
-SET dropped_record_count = 0;
-
 ALTER TABLE imported_conversation
-    ALTER COLUMN dropped_record_count SET NOT NULL,
+    ALTER COLUMN dropped_record_count DROP DEFAULT,
     DROP CONSTRAINT imported_conversation_converter_version_supported,
     ADD CONSTRAINT imported_conversation_converter_version_supported
         CHECK (converter_version = ANY (ARRAY[1, 2, 3])),

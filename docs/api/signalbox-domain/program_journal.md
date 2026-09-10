@@ -72,6 +72,7 @@ pub enum ProgramCapability {
     EvalRecord,
     Blob,
     Register,
+    RepoWatch,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 ```

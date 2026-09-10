@@ -64,6 +64,11 @@ pub struct ProgramJournalRepository {/* private */}
 impl program_journal::ProgramJournalRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub fn registrations(&self) -> program_registration::ProgramRegistrationRepository;
+    pub async fn has_effect_answer(
+        &self,
+        request: &signalbox_domain::EffectRequest,
+        answer: &signalbox_domain::InlineFramePayload,
+    ) -> result::Result<bool, program_journal::ProgramJournalRepositoryError>;
     pub async fn listen(
         &self,
         runs: &[signalbox_domain::ProgramRunId],

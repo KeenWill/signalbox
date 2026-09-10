@@ -203,23 +203,26 @@ the exact format and source bytes.
 The inspection read exposes no imported content a transcript snapshot does not
 already carry, and adds nothing for events, tools, results, thinking, media,
 absence, or raw records. It creates nothing, seeds no session, performs no
-durable write, and decodes stored positions, identities, content, and metadata
-fail-closed before presentation. The client resolves `latest` against this
-read's entry count before constructing the durable command, prints the resolved
+durable write, validates the immutable entry inventory once, and pages stored
+positions, identities, speaker evidence, and byte-bounded content projections
+fail-closed from PostgreSQL. The client resolves `latest` against this read's
+entry count before constructing the durable command, prints the resolved
 ordinal, and sends a concrete position.
 
 Ingestion publishes and verifies each raw blob with no database transaction
 open, then records its catalog evidence in a short transaction. Connection-local
 temporary tables stage normalized rows without a long-lived transaction. After
 conversion, one transaction resolves or inserts the complete aggregate. An
-accepted raw record cannot exceed `blob_storage.max_blob_bytes`; the complete
-source has no cumulative blob-byte ceiling. Conversion rejects an oversized
-physical record before buffering or parsing beyond that per-record ceiling. One
-admitted import awaits at most one raw blob publication or verification at a
-time while holding the process-wide bulk-ingest permit; it never fans out
-concurrently. Writers acquire shared raw hashes and globally unique entry
-identities in their respective sorted key order and store physical positions
-explicitly.
+import requires configured blob storage and fails unavailable before conversion
+when that storage is absent. An accepted raw record cannot exceed
+`blob_storage.max_blob_bytes`; the complete source has no cumulative blob-byte
+ceiling. Conversion rejects an oversized physical record before buffering or
+parsing beyond that per-record ceiling. One admitted import awaits at most one
+raw blob publication or verification at a time while holding the process-wide
+bulk-ingest permit; it never fans out concurrently. Conversion and storage run
+inside the connection task, so runtime cancellation stops them and releases the
+permit. Writers acquire shared raw hashes and globally unique entry identities
+in their respective sorted key order and store physical positions explicitly.
 
 Once a header exists, any hash mismatch, missing member, gap, duplicate entry
 identity, unknown version, invalid value, or lineage mismatch is typed

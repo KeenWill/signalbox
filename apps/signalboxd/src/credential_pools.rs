@@ -744,7 +744,7 @@ impl CredentialPool {
     }
 }
 
-/// Parses the complete `[[credential_profiles]]` array.
+/// Parses model-provider entries in the `[[credential_profiles]]` array.
 pub(crate) fn parse_credential_profiles(
     item: Option<&Item>,
 ) -> Result<HashMap<Arc<str>, CredentialProfile>, HubModelConfigurationError> {
@@ -758,6 +758,9 @@ pub(crate) fn parse_credential_profiles(
     let mut ambient_adapters = HashSet::new();
     let mut file_paths = HashSet::new();
     for profile in tables {
+        if profile.get("adapter").and_then(Item::as_str) == Some("github") {
+            continue;
+        }
         let name = validated_credential_catalog_name(required_string(profile, "name")?)?;
         let adapter = ModelAdapter::parse(required_string(profile, "adapter")?)?;
         let billing_kind = BillingKind::parse(required_string(profile, "billing_kind")?)?;
@@ -1036,4 +1039,149 @@ fn reject_unobserved_capacity_policy(
         });
     }
     Ok(())
+}
+
+/// GitHub integration delivery, independent of model billing and pools.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GithubCredentialDelivery {
+    /// Token file resolved at each use.
+    File(PathBuf),
+    /// App installation authenticated with a deployment-owned RSA private key.
+    GithubApp {
+        /// GitHub App identifier.
+        app_id: u64,
+        /// Installation identifier.
+        installation_id: u64,
+        /// Absolute key file, admitted when minting a token.
+        private_key_file: PathBuf,
+    },
+}
+
+/// One configured GitHub delivery and its process-shared installation cache.
+#[derive(Clone)]
+pub struct GithubCredentialProfile {
+    delivery: GithubCredentialDelivery,
+    authentication: Option<Arc<signalbox_github_transport::AppAuthentication>>,
+}
+
+impl fmt::Debug for GithubCredentialProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GithubCredentialProfile([REDACTED])")
+    }
+}
+impl PartialEq for GithubCredentialProfile {
+    fn eq(&self, other: &Self) -> bool {
+        self.delivery == other.delivery
+    }
+}
+impl Eq for GithubCredentialProfile {}
+
+impl GithubCredentialProfile {
+    /// Declared delivery, containing no credential bytes.
+    pub fn delivery(&self) -> &GithubCredentialDelivery {
+        &self.delivery
+    }
+    /// Shared App authentication, absent for token-file delivery.
+    pub fn authentication(&self) -> Option<Arc<signalbox_github_transport::AppAuthentication>> {
+        self.authentication.clone()
+    }
+    pub(crate) fn file(path: PathBuf) -> Self {
+        Self {
+            delivery: GithubCredentialDelivery::File(path),
+            authentication: None,
+        }
+    }
+}
+
+pub(crate) fn parse_github_credential_profiles(
+    item: Option<&Item>,
+) -> Result<HashMap<String, GithubCredentialProfile>, HubModelConfigurationError> {
+    let mut profiles = HashMap::new();
+    let mut names = HashSet::new();
+    for table in item
+        .and_then(Item::as_array_of_tables)
+        .into_iter()
+        .flatten()
+    {
+        let name = required_string(table, "name")?;
+        if !names.insert(name) {
+            return Err(HubModelConfigurationError::DuplicateCredentialProfile {
+                credential_profile: Arc::from(name),
+            });
+        }
+        if required_string(table, "adapter")? != "github" {
+            continue;
+        }
+        validated_credential_catalog_name(name)?;
+        let profile = match required_string(table, "delivery")? {
+            "file" => {
+                reject_unknown_fields(table, &["name", "adapter", "delivery", "file"])?;
+                GithubCredentialProfile::file(normalize_absolute_path(required_string(
+                    table, "file",
+                )?)?)
+            }
+            "github_app" => {
+                reject_unknown_fields(
+                    table,
+                    &[
+                        "name",
+                        "adapter",
+                        "delivery",
+                        "app_id",
+                        "installation_id",
+                        "private_key_file",
+                    ],
+                )?;
+                let field_error =
+                    |field| HubModelConfigurationError::InvalidGithubCredentialField { field };
+                let id = |field| {
+                    table
+                        .get(field)
+                        .and_then(Item::as_integer)
+                        .and_then(|id| u64::try_from(id).ok())
+                        .filter(|id| *id > 0)
+                        .ok_or_else(|| field_error(field))
+                };
+                let app_id = id("app_id")?;
+                let installation_id = id("installation_id")?;
+                let private_key_file = normalize_absolute_path(
+                    table
+                        .get("private_key_file")
+                        .and_then(Item::as_str)
+                        .ok_or_else(|| field_error("private_key_file"))?,
+                )
+                .map_err(|_| field_error("private_key_file"))?;
+                let path = private_key_file.clone();
+                let read_key: signalbox_github_transport::AppKeyReader = Arc::new(move || {
+                    let path = path.clone();
+                    Box::pin(async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::configuration::read_github_app_key(&path)
+                        })
+                        .await
+                        .unwrap_or(Err(
+                            signalbox_github_transport::AppCredentialFailure::KeyUnreadable,
+                        ))
+                    })
+                });
+                GithubCredentialProfile {
+                    delivery: GithubCredentialDelivery::GithubApp {
+                        app_id,
+                        installation_id,
+                        private_key_file,
+                    },
+                    authentication: Some(Arc::new(
+                        signalbox_github_transport::AppAuthentication::new(
+                            app_id,
+                            installation_id,
+                            read_key,
+                        ),
+                    )),
+                }
+            }
+            _ => return Err(HubModelConfigurationError::InvalidCredentialDelivery),
+        };
+        profiles.insert(name.to_owned(), profile);
+    }
+    Ok(profiles)
 }
