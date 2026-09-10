@@ -4823,6 +4823,54 @@ fn configured_openai_models_route_through_the_pinned_api_key_profile() {
 }
 
 #[test]
+fn continuation_overhead_covers_nondefault_reasoning_and_service_tier() {
+    use signalbox_model_runtime::{
+        ConversationMessage, ModelOperation, ModelSettings, OpenAiServiceTier, ReasoningLevel,
+        RequestedTarget, ResolvedTarget, ServiceTier,
+    };
+
+    let configuration =
+        HubModelConfiguration::parse(&format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}"))
+            .expect("fixture settings capabilities are valid");
+    let selection = DirectModelSelection::from_uuid(
+        Uuid::parse_str("10000000-0000-4000-8000-00000000000e").expect("fixture UUID is valid"),
+    );
+    let route = configuration
+        .resolve_direct_model(selection)
+        .expect("fixture route exists");
+    let definition = configuration
+        .runtime_models
+        .resolve(route.target())
+        .expect("fixture target exists");
+    let mut operation = ModelOperation::new(
+        (),
+        CredentialReference::new("continuation-measurement"),
+        RequestedTarget::new(definition.provider_model()),
+        ResolvedTarget::new(definition.provider_model()),
+        vec![ConversationMessage::user_text("Retained summary.")],
+        ModelSettings::new(definition.max_output_tokens()),
+    );
+    let omitted = signalbox_model_runtime_openai::serialized_request_bytes(&operation)
+        .expect("default settings serialize");
+    let allowance = configuration
+        .continuation_request_bytes(route.target(), ModelAdapter::OpenAi, &operation)
+        .expect("supported settings have an allowance");
+    // These are valid turn overrides even though neither is a configured default.
+    operation.settings.reasoning_level = Some(ReasoningLevel::Minimal);
+    operation.settings.service_tier = Some(ServiceTier::OpenAi(OpenAiServiceTier::Priority));
+    let request = signalbox_model_runtime_openai::serialized_request_bytes(&operation)
+        .expect("nondefault effective settings serialize");
+    assert!(
+        request > omitted,
+        "omitting these settings would admit an oversized request"
+    );
+    assert!(
+        allowance >= request,
+        "the allowance includes effective settings from turn overrides"
+    );
+}
+
+#[test]
 fn configuration_accepts_an_opaque_openai_profile_name() {
     let other_profile = "openai-secondary";
     let configuration = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}")

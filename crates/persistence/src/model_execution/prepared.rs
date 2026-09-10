@@ -209,16 +209,19 @@ pub(crate) async fn insert_prepared_call(
     .bind(
         serving_evidence
             .limit
+            .as_ref()
             .map(|limit| Decimal::from(limit.max_output_tokens())),
     )
     .bind(
         serving_evidence
             .limit
+            .as_ref()
             .map(|limit| Decimal::from(limit.context_window_tokens())),
     )
     .bind(
         serving_evidence
             .limit
+            .as_ref()
             .map(ToolContinuationUsageLimit::replays_provider_compaction),
     )
     .bind(call.frontier().snapshot().into_uuid())

@@ -218,7 +218,7 @@ function CommandPalette({
             <div>
               <Dialog.Title>Command palette</Dialog.Title>
               <Dialog.Description id="product-palette-description" className="sr-only">
-                Search and run commands.
+                Choose a command.
               </Dialog.Description>
             </div>
             <Dialog.Close asChild>
@@ -542,10 +542,10 @@ export function ProductApp({
   const artifactAvailable = bootstrap.data?.capabilities.immutable_blob_content === true
   const bootstrapFailure = bootstrap.error
     ? bootstrap.error instanceof ProductTransportError
-      ? "Can't reach the server"
+      ? 'Daemon unreachable'
       : bootstrap.error instanceof ProductContractError
-        ? 'Unexpected server response'
-        : 'Server unavailable'
+        ? 'Unexpected daemon response'
+        : 'Daemon unavailable'
     : null
   const inspectorInSheet = app.layout === 'focus' || narrowInspector
   // Imports reads and continuation mutations are admitted by the same bootstrap the shell validated.

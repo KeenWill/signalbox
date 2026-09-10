@@ -236,6 +236,25 @@ impl tool_loop::PostgresToolLoopRepository {
             signalbox_domain::SemanticTranscriptEntryId,
             signalbox_domain::TurnId,
         );
+    pub async fn fail_compaction_checkpoint<NextSteering>(
+        &self,
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+        producing_call: signalbox_domain::ModelCallId,
+        checkpoint: signalbox_domain::ContextFrontierId,
+        identities: signalbox_application::ToolContinuationIdentities,
+        next_steering: NextSteering,
+    ) -> result::Result<
+        signalbox_application::PrepareToolContinuationOutcome,
+        tool_loop::ToolLoopRepositoryError,
+    >
+    where
+        NextSteering: function::FnMut(
+            signalbox_domain::AcceptedInputId,
+        ) -> (
+            signalbox_domain::SemanticTranscriptEntryId,
+            signalbox_domain::TurnId,
+        );
 }
 impl signalbox_application::DecideToolRequestTransaction for tool_loop::PostgresToolLoopRepository {
     type Error = tool_loop::ToolLoopRepositoryError;
