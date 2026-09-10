@@ -21,6 +21,10 @@ impl<Source> ResolvedFileUse<Source> {
         source: Source,
         selector: signalbox_file_media_runtime::VisiblePartSelector,
     ) -> Self;
+    pub fn with_image_target(
+        self,
+        capability: option::Option<signalbox_model_runtime::ImagePresentationCapability>,
+    ) -> Self;
     pub const fn file_use(&self) -> &signalbox_file_media_runtime::FileUse;
     pub const fn source(&self) -> &Source;
     pub fn into_parts(
@@ -74,6 +78,27 @@ pub trait FileUseResolver: marker::Send {
 }
 ```
 
+## FileMediaArtifactPublisher
+
+```rust
+pub trait FileMediaArtifactPublisher: marker::Send + marker::Sync + fmt::Debug {
+    fn publish<'a>(
+        &'a self,
+        artifact: &'a signalbox_file_media_runtime::ValidatedMediaArtifact,
+    ) -> pin::Pin<
+        boxed::Box<
+            dyn future::Future<
+                    Output = result::Result<
+                        (),
+                        signalbox_tools_file_media::FileMediaServiceFailure,
+                    >,
+                > + marker::Send
+                + 'a,
+        >,
+    >;
+}
+```
+
 ## RegistryFileMediaAgentService
 
 ```rust
@@ -88,6 +113,10 @@ impl<Resolver, Processor, Cancellation>
         processor: Processor,
         cancellation: Cancellation,
         continuations: ContinuationAuthority,
+    ) -> Self;
+    pub fn with_artifact_publisher(
+        self,
+        publisher: sync::Arc<dyn FileMediaArtifactPublisher>,
     ) -> Self;
     pub const fn registry(&self) -> &signalbox_file_media_runtime::FileMediaRegistry;
 }

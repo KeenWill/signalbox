@@ -22,6 +22,8 @@ version = 1
 
 [numeric_bounds]
 max_git_object_bytes = "none"
+max_image_presentation_bytes = "none"
+max_image_request_bytes = "none"
 # Time to complete a client frame after its first byte arrives.
 client_frame_deadline = "30s"
 # Time a client socket write may remain blocked without sending bytes.

@@ -286,23 +286,17 @@ pub(crate) struct ThreadOptions {
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TurnInput {
-    pub(crate) input: Vec<TextInput>,
+    pub(crate) input: Vec<UserInput>,
     pub(crate) output_schema: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) effort: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-pub(crate) struct TextInput {
-    #[serde(rename = "type")]
-    pub(crate) kind: TextInputKind,
-    pub(crate) text: String,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum TextInputKind {
-    Text,
+#[serde(tag = "type", rename_all = "camelCase")]
+pub(crate) enum UserInput {
+    Text { text: String },
+    Image { url: String },
 }
 
 #[derive(Debug, Deserialize)]

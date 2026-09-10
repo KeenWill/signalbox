@@ -43,6 +43,18 @@ rust_integration_test(
     deps = CRATE_DEPS,
 )
 
+rust_integration_test(
+    name = "presentation",
+    size = "small",
+    srcs = glob(["tests/**/*.rs"]),
+    crate_root = "tests/presentation.rs",
+    data = [":signalbox-file-media-image-worker"],
+    env = {"NEXTEST_BIN_EXE_signalbox_file_media_image_worker": "$(rootpath :signalbox-file-media-image-worker)"},
+    env_inherit = ["SIGNALBOX_FILE_MEDIA_CGROUP_ROOT"],
+    rustc_env = {"CARGO_BIN_EXE_signalbox-file-media-image-worker": "$(rootpath :signalbox-file-media-image-worker)"},
+    deps = CRATE_DEPS,
+)
+
 rust_doc_test(
     name = "doc_tests",
     crate = ":signalbox_file_media_adapters_image",
