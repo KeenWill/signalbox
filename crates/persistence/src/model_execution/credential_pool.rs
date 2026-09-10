@@ -595,7 +595,7 @@ pub(super) async fn select_runtime_pool_credential(
                 .position(|member| member.credential_reference() == reference)
         })
         .map_or(0, |position| position.saturating_add(1));
-    let selected = predecessor_reference
+    let predecessor_member = predecessor_reference
         .as_deref()
         .filter(|reference| !excluded.contains(*reference))
         .and_then(|reference| {
@@ -603,7 +603,9 @@ pub(super) async fn select_runtime_pool_credential(
                 .members()
                 .iter()
                 .find(|member| member.credential_reference() == reference)
-        })
+        });
+    let selected = predecessor_member
+        .filter(|_| !predecessor_rotated)
         .or_else(|| {
             if predecessor_reference.is_some() && !predecessor_rotated {
                 return None;
@@ -622,6 +624,11 @@ pub(super) async fn select_runtime_pool_credential(
                         .skip(start)
                         .chain(policy.members().iter().take(start))
                         .filter(|member| !excluded.contains(member.credential_reference()))
+                        .filter(|member| {
+                            !predecessor_rotated
+                                || predecessor_reference.as_deref()
+                                    != Some(member.credential_reference())
+                        })
                         .min_by_key(|member| {
                             let remaining = headroom
                                 .get(member.credential_reference())
@@ -638,6 +645,7 @@ pub(super) async fn select_runtime_pool_credential(
                         })
                 })
         })
+        .or(predecessor_member.filter(|_| predecessor_rotated))
         .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
     let retry_contended = predecessor_reference
         .as_deref()
