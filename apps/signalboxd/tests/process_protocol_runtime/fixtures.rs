@@ -290,6 +290,7 @@ pub(crate) struct RunningRuntime {
 pub(crate) enum BlobStorageFixtureMode {
     Disabled,
     Enabled,
+    EnabledWithMaximum(u64),
 }
 
 impl RunningRuntime {
@@ -317,6 +318,18 @@ impl RunningRuntime {
 
     pub(crate) async fn start_with_blob_storage() -> Result<Self, Box<dyn Error>> {
         Self::start_with_options(None, BlobStorageFixtureMode::Enabled, None, None).await
+    }
+
+    pub(crate) async fn start_with_blob_storage_maximum(
+        maximum_blob_bytes: u64,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_options(
+            None,
+            BlobStorageFixtureMode::EnabledWithMaximum(maximum_blob_bytes),
+            None,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn start_with_model_configuration(
@@ -393,13 +406,22 @@ impl RunningRuntime {
         };
         let blob_storage_root = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
-            BlobStorageFixtureMode::Enabled => Some(BlobStorageFixture::create()?),
+            BlobStorageFixtureMode::Enabled | BlobStorageFixtureMode::EnabledWithMaximum(_) => {
+                Some(BlobStorageFixture::create()?)
+            }
         };
         let configuration = configuration_override.map_or_else(
             || {
                 blob_storage_root.as_ref().map_or_else(
                     || String::from(MODEL_CONFIGURATION),
-                    BlobStorageFixture::model_configuration,
+                    |fixture| {
+                        fixture.model_configuration_with_maximum(match blob_storage {
+                            BlobStorageFixtureMode::EnabledWithMaximum(maximum) => maximum,
+                            BlobStorageFixtureMode::Disabled | BlobStorageFixtureMode::Enabled => {
+                                21_474_836_480
+                            }
+                        })
+                    },
                 )
             },
             String::from,
@@ -407,7 +429,7 @@ impl RunningRuntime {
         let model_configuration = support::parse_model_configuration(&configuration)?;
         let blob_store_registry = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
-            BlobStorageFixtureMode::Enabled => {
+            BlobStorageFixtureMode::Enabled | BlobStorageFixtureMode::EnabledWithMaximum(_) => {
                 BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone())
                     .await?
                     .map(Arc::new)
@@ -639,12 +661,16 @@ impl BlobStorageFixture {
     }
 
     pub(crate) fn model_configuration(&self) -> String {
+        self.model_configuration_with_maximum(21_474_836_480)
+    }
+
+    pub(crate) fn model_configuration_with_maximum(&self, maximum_blob_bytes: u64) -> String {
         format!(
             r#"{MODEL_CONFIGURATION}
 [blob_storage]
 version = 1
 staging_directory = "{}"
-max_blob_bytes = 21474836480
+max_blob_bytes = {maximum_blob_bytes}
 
 [[blob_storage.stores]]
 name = "primary"
