@@ -351,6 +351,13 @@ fn option_field_is_not_required() {
 }
 
 #[test]
+fn option_alias_field_is_not_required() {
+    let schema = AliasedOptionalField::schema();
+
+    assert!(schema.get("required").is_none());
+}
+
+#[test]
 fn collection_and_nested_shapes_render_exactly() {
     let schema = CollectionFields::schema();
 
