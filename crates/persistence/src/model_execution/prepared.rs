@@ -130,7 +130,7 @@ pub(crate) async fn insert_prepared_call(
         "SELECT m.turn_instruction_manifest_id,
                 m.eligibility_hash_algorithm, m.eligibility_hash,
                 m.admitted_set_hash_algorithm, m.admitted_set_hash,
-                m.manifest_hash_algorithm, m.manifest_hash, d.scan_complete
+                m.manifest_hash_algorithm, m.manifest_hash
            FROM turn_instruction_manifest AS m
            JOIN instruction_discovery AS d
              ON d.instruction_discovery_id = m.instruction_discovery_id
@@ -143,9 +143,6 @@ pub(crate) async fn insert_prepared_call(
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(ModelCallCorruption::Missing("turn instruction manifest"))?;
-    if !instruction_manifest.try_get::<bool, _>("scan_complete")? {
-        return Err(ModelCallCorruption::Inconsistent("instruction discovery completeness").into());
-    }
     if instruction_manifest.try_get::<String, _>("eligibility_hash_algorithm")? != "sha256_v1"
         || instruction_manifest.try_get::<String, _>("admitted_set_hash_algorithm")? != "sha256_v1"
         || instruction_manifest.try_get::<String, _>("manifest_hash_algorithm")? != "sha256_v1"
