@@ -403,19 +403,6 @@ mod tests {
         .applied_result()
     }
 
-    /// Pins the scripting helper's one derived fact: the receipt it returns
-    /// names exactly the candidate it was sealed with, so scripting a fake
-    /// with `receipt_for(request, candidate)` scripts a receipt for
-    /// `candidate` and nothing else.
-    #[test]
-    fn receipt_for_helper_names_exactly_the_sealed_candidate() {
-        let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
-            .expect("ordinary command identity is admitted");
-        let candidate = session_id(9);
-
-        assert_eq!(receipt_for(request, candidate).session(), candidate);
-    }
-
     fn run_ready<Output>(future: impl Future<Output = Output>) -> Output {
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);

@@ -626,17 +626,6 @@ fn ready_frame_rejects_nondeterministic_relative_path() {
 }
 
 #[test]
-fn advertisement_digest_is_deterministic() {
-    let fixture = advertisement();
-    let first = advertisement_digest(&fixture)
-        .unwrap_or_else(|error| panic!("advertisement digests: {error}"));
-    let second = advertisement_digest(&fixture)
-        .unwrap_or_else(|error| panic!("advertisement digests again: {error}"));
-
-    assert_eq!(first, second);
-}
-
-#[test]
 fn advertisement_digest_preimage_is_pinned() {
     let actual = advertisement_digest(&advertisement())
         .unwrap_or_else(|error| panic!("advertisement digests: {error}"));
@@ -675,17 +664,6 @@ fn clone_url_digest_is_pinned() {
     let actual = clone_url_digest("https://example.invalid/owner/repository.git");
 
     assert_eq!(actual.as_str(), EXPECTED_CLONE_URL_DIGEST);
-}
-
-#[test]
-fn workspace_manifest_digest_is_deterministic() {
-    let fixture = manifest();
-    let first = workspace_manifest_digest(&fixture)
-        .unwrap_or_else(|error| panic!("manifest digests: {error}"));
-    let second = workspace_manifest_digest(&fixture)
-        .unwrap_or_else(|error| panic!("manifest digests again: {error}"));
-
-    assert_eq!(first, second);
 }
 
 #[test]

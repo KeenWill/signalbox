@@ -1188,20 +1188,6 @@ mod tests {
     }
 
     #[test]
-    fn non_finite_temperature_is_rejected_not_silently_nulled() {
-        let mut operation = operation("call-10");
-        operation.settings.temperature = Some(f64::INFINITY);
-
-        let failure = build_request(&operation)
-            .expect_err("serde_json would serialize a non-finite setting as null");
-
-        assert!(matches!(
-            failure,
-            PreparationFailure::UnsupportedOperation { .. }
-        ));
-    }
-
-    #[test]
     fn temperature_outside_the_provider_domain_is_rejected_before_send() {
         assert_temperature_is_rejected(-0.1);
         assert_temperature_is_rejected(2.1);

@@ -1220,7 +1220,7 @@ async fn load_dispatch_authority(
 ///
 /// The row is written by the commissioning transaction itself, and the session
 /// identity is unique in the table.
-async fn load_commissioned_dispatch_authority(
+pub async fn load_commissioned_dispatch_authority(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<Option<ApprovalJudgeDispatchAuthority>, ApprovalJudgeRepositoryError> {

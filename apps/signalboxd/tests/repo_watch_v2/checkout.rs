@@ -1665,6 +1665,29 @@ async fn dispatched_git_tools_accept_large_unrelated_packed_objects() -> Result<
 #[ignore = "requires disposable PostgreSQL"]
 async fn dispatched_push_advances_only_its_retained_head_and_survives_recomposition()
 -> Result<(), Box<dyn Error>> {
+    assert_push_retained_fences(PushSessionOrigin::RepositoryDispatch).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn commissioned_push_advances_only_its_retained_head_without_repository_watch()
+-> Result<(), Box<dyn Error>> {
+    assert_push_retained_fences(PushSessionOrigin::Commissioned).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn commissioned_push_uses_its_bound_configured_workspace() -> Result<(), Box<dyn Error>> {
+    assert_push_retained_fences(PushSessionOrigin::CommissionedConfiguredRoot).await
+}
+
+enum PushSessionOrigin {
+    RepositoryDispatch,
+    Commissioned,
+    CommissionedConfiguredRoot,
+}
+
+async fn assert_push_retained_fences(origin: PushSessionOrigin) -> Result<(), Box<dyn Error>> {
     use signalbox_application::ToolExecutorEvidence;
     use signalbox_domain::TurnId;
     let mut fixture = CheckoutFixture::new().await?;
@@ -1680,9 +1703,30 @@ async fn dispatched_push_advances_only_its_retained_head_and_survives_recomposit
             .is_none()
     );
     let credential = fixture.enable_push()?;
-    fixture.dispatch().await;
-    let session = fixture.session().await;
-    let root = fixture.root(session);
+    let (session, root) = match origin {
+        PushSessionOrigin::RepositoryDispatch => {
+            fixture.dispatch().await;
+            let session = fixture.session().await;
+            (session, fixture.root(session))
+        }
+        PushSessionOrigin::Commissioned => {
+            let session = fixture.commission_push().await?;
+            (session, fixture.root(session))
+        }
+        PushSessionOrigin::CommissionedConfiguredRoot => {
+            let session = fixture.commission_push().await?;
+            let configured = fixture
+                .sink
+                .models
+                .daemon_tools()
+                .expect("tools")
+                .workspace_root()
+                .to_owned();
+            std::fs::remove_dir_all(&configured)?;
+            std::fs::rename(fixture.root(session), &configured)?;
+            (session, configured)
+        }
+    };
     let (catalog, executor) = fixture.push_tools().await?;
     let turn = TurnId::from_uuid(Uuid::now_v7());
     std::fs::write(root.join("review.txt"), "fixed by dispatched session\n")?;
@@ -3323,6 +3367,83 @@ async fn assert_git_status(
 }
 
 impl CheckoutFixture {
+    async fn commission_push(&mut self) -> Result<SessionId, Box<dyn Error>> {
+        use signalbox_application::{
+            CommissionDispatchRequest, CommissionedDispatchFence,
+            UuidV7CommissionedDispatchIdGenerator, UuidV7SubmitInputIdGenerator,
+        };
+        use signalbox_persistence::commissioned_dispatch::{
+            CommissionDispatchOutcome, PostgresCommissionedDispatchStore,
+        };
+        let credential = self._files.path().join("push-token");
+        let catalog = self
+            .catalog
+            .split("[[repository_watch.rules]]")
+            .next()
+            .expect("catalog prefix")
+            .replace("enabled = true", "enabled = false")
+            .replace(
+                "credential_file =",
+                &format!(
+                    "push_credential_file = \"{}\"\ncredential_file =",
+                    credential.display()
+                ),
+            );
+        self.sink.models = Arc::new(HubModelConfiguration::parse(&catalog)?);
+        let templates = signalboxd::SessionTemplateConfiguration::read(
+            &self._files.path().join("templates.toml"),
+            || None,
+            &self.sink.models,
+        )?;
+        let name = signalbox_domain::SessionTemplateName::try_new("watch".to_owned())?;
+        let template = templates.resolve(&name).expect("commission template");
+        let request = CommissionDispatchRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            name,
+            CommissionedDispatchFence::PullRequest {
+                repository: RepositorySlug::try_new("checkout/project".to_owned())?,
+                pull_request: PullRequestNumber::new(
+                    NonZeroU64::new(1).expect("positive fixture PR"),
+                ),
+                head_sha: self.head.clone(),
+                head_repository: RepositorySlug::try_new("checkout/project".to_owned())?,
+                head_branch: BranchName::try_new("review".to_owned())?,
+                base_branch: BranchName::try_new("main".to_owned())?,
+            },
+            signalbox_domain::GoalStatement::try_new("Push the reviewed change.".to_owned())?,
+            signalbox_domain::UserContent::try_text("Commit and push to review.".to_owned())
+                .expect("fixture input is admitted"),
+        )?;
+        let prepared = request.prepare(
+            &mut UuidV7CommissionedDispatchIdGenerator,
+            template.provenance().clone(),
+            template.defaults().clone(),
+        )?;
+        let outcome = PostgresCommissionedDispatchStore::new(
+            self.core.clone(),
+            self.sink.models.session_credential_pin(),
+        )
+        .commission(prepared, &mut UuidV7SubmitInputIdGenerator, |alias| {
+            self.sink.models.resolve_alias(alias)
+        })
+        .await?;
+        let CommissionDispatchOutcome::Dispatched { session, .. } = outcome else {
+            panic!("fresh commission: {outcome:?}");
+        };
+        git2::Repository::clone(
+            self.runner.bare.to_str().expect("fixture remote"),
+            self.root(session),
+        )?;
+        let dispatched: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM dispatch_ledger WHERE created_session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&self.module)
+        .await?;
+        assert_eq!(dispatched, 0);
+        Ok(session)
+    }
+
     async fn push_tools(
         &self,
     ) -> Result<

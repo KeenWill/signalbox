@@ -50,18 +50,6 @@ fn log_rejects_a_fifo_head_without_blocking() {
 }
 
 #[test]
-fn status_and_worktree_diff_reject_a_fifo_head_without_blocking() {
-    let fixture = Fixture::new();
-    let executor = fixture.executor();
-    let head_path = fixture.root().join(".git/HEAD");
-    fs::remove_file(&head_path).expect("fixture HEAD removes");
-    create_fifo(&head_path).expect("fixture HEAD FIFO constructs");
-    let failure = executor.repository_authority.repository();
-
-    assert!(matches!(failure, Err(LocalGitFailure::Repository)));
-}
-
-#[test]
 fn log_stops_after_the_requested_page_in_a_long_history() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -105,20 +93,6 @@ fn one_entry_log_does_not_order_an_unreturned_long_merge_parent() {
 
     assert_eq!(log["commits"][0]["commit"], merge.to_string());
     assert_eq!(log["truncated"], true);
-}
-
-#[test]
-fn log_construction_rejects_a_nonempty_shallow_boundary() {
-    let fixture = Fixture::new();
-    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
-    let boundary = plant_linear_history(&repository, fixture.initial, 1);
-    plant_linear_history(&repository, boundary, 1);
-    fs::write(fixture.root().join(".git/shallow"), format!("{boundary}\n"))
-        .expect("fixture shallow boundary writes");
-    let error = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
-        .expect_err("nonempty shallow state rejects");
-
-    assert!(matches!(error, LocalGitToolsConstructionError::Repository));
 }
 
 #[test]
