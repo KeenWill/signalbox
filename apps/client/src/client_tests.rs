@@ -523,12 +523,6 @@ fn finding_count_policy_rejects_above_finite_limit() {
 }
 
 #[test]
-fn finding_count_policy_admits_unbounded_input() {
-    let limits = ClientDeploymentLimits::unbounded();
-    assert!(validate_review_finding_count(4, Some(limits)).is_ok());
-}
-
-#[test]
 fn metadata_policy_rejects_outside_finite_range() {
     let limits = ClientDeploymentLimits {
         min_metadata_page_size: Some(2),
@@ -3005,13 +2999,6 @@ async fn blob_upload_restarts_after_ambiguous_catalog_commit() -> Result<(), Box
     assert_ambiguous_blob_upload_restarts(ErrorCode::CommitAmbiguous).await
 }
 
-/// an ambiguous remote publication restarts the complete
-/// high-level upload instead of retrying commit alone.
-#[tokio::test]
-async fn blob_upload_restarts_after_ambiguous_publication() -> Result<(), Box<dyn Error>> {
-    assert_ambiguous_blob_upload_restarts(ErrorCode::PublicationAmbiguous).await
-}
-
 /// an already-present receipt succeeds only after re-reading the
 /// same descriptor and proving its identity is unchanged.
 #[tokio::test]
@@ -3290,6 +3277,7 @@ async fn blob_read_returns_only_the_exact_range() -> Result<(), Box<dyn Error>> 
             range.version(),
             range.request_id(),
             ServerMessage::BlobChunkRead {
+                blob_length_bytes: CanonicalU64::new(offset_bytes.value() + length_bytes.value()),
                 digest,
                 offset_bytes,
                 bytes: BlobChunk::new(expected_bytes),

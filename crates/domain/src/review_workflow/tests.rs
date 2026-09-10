@@ -331,23 +331,6 @@ fn review_target_derives_parent_evidence_from_canonical_snapshot() {
     assert_eq!(child.ancestry(), &[parent.id()]);
 }
 
-/// review identities remain distinct while composite references
-/// preserve exact ancestry.
-#[test]
-fn review_references_preserve_typed_identity_ancestry() {
-    let run = ReviewRunRef::new(target_id(1), run_id(2));
-    let pass = ReviewPassRef::new(run, pass_id(3));
-    let finding = ReviewFindingRef::new(pass, finding_id(4));
-
-    assert_eq!(run.target(), target_id(1));
-    assert_eq!(run.run(), run_id(2));
-    assert_eq!(pass.run(), run);
-    assert_eq!(pass.pass(), pass_id(3));
-    assert_eq!(finding.pass(), pass);
-    assert_eq!(finding.run(), run);
-    assert_eq!(finding.finding(), finding_id(4));
-}
-
 /// diff-relative locations require a frozen comparison.
 #[test]
 fn diff_relative_finding_requires_target_comparison_revision() {

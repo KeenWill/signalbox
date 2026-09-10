@@ -286,7 +286,9 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     return failures
 
 
-def run_suite(suites: tuple[Suite, ...], name: str, shard_index: int) -> int:
+def run_suite(
+    suites: tuple[Suite, ...], name: str, shard_index: int, build_event_json: str | None = None
+) -> int:
     """Execute one manifest partition as an argument vector, without a shell."""
     suite = next((suite for suite in suites if suite.name == name), None)
     if suite is None:
@@ -301,6 +303,8 @@ def run_suite(suites: tuple[Suite, ...], name: str, shard_index: int) -> int:
         f"--test_env=SIGNALBOX_TEST_TOTAL_SHARDS={suite.shards}",
         "--test_env=DOCKER_HOST=unix:///var/run/docker.sock",
     ]
+    if build_event_json is not None:
+        command.append(f"--build_event_json_file={build_event_json}")
     command.append("//:postgres_" + suite.name.replace("-", "_"))
     return subprocess.run(command, check=False).returncode
 
@@ -682,14 +686,17 @@ def main() -> int:
     )
     mode.add_argument("--run-suite", metavar="NAME", help="run one manifest suite partition")
     parser.add_argument("--shard-index", type=int, help="zero-based suite partition")
+    parser.add_argument("--build-event-json", help="write Bazel events for cache/retry accounting")
     arguments = parser.parse_args()
+    if arguments.build_event_json is not None and arguments.run_suite is None:
+        parser.error("--build-event-json requires --run-suite")
     if (arguments.run_suite is not None) != (arguments.shard_index is not None):
         parser.error("--run-suite and --shard-index are required together")
 
     try:
         suites = load_suites(ROOT)
         if arguments.run_suite is not None:
-            return run_suite(suites, arguments.run_suite, arguments.shard_index)
+            return run_suite(suites, arguments.run_suite, arguments.shard_index, arguments.build_event_json)
     except ManifestError as error:
         print(f"suite manifest FAILED: {error}", file=sys.stderr)
         return 1

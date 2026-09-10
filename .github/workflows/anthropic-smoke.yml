@@ -87,14 +87,51 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
-      - name: Decide whether compatibility smoke is required
-        id: gate
+      - name: Fetch exact comparison revisions
+        if: ${{ github.event_name == 'pull_request' }}
+        id: comparison
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_BASE: 'true'
+          GH_TOKEN: ${{ github.token }}
+        shell: python3 {0}
+        run: |
+          import base64
+          import json
+          import os
+          import re
+          import subprocess
+          import urllib.request
+
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+          if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base, head)):
+              raise SystemExit("Comparison requires exact base and head commit SHAs")
+          token = os.environ["GH_TOKEN"]
+          if os.environ["MERGE_BASE"] == "true":
+              url = f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}/compare/{base}...{head}"
+              request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  base = json.load(response)["merge_base_commit"]["sha"]
+              if not re.fullmatch(r"[0-9a-f]{40}", base):
+                  raise SystemExit("GitHub returned an invalid merge-base SHA")
+          # Authenticate only this fetch; checkout credentials remain unpersisted.
+          authorization = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+          environment = dict(os.environ, GIT_CONFIG_COUNT="1",
+                             GIT_CONFIG_KEY_0="http.extraheader",
+                             GIT_CONFIG_VALUE_0=f"AUTHORIZATION: basic {authorization}")
+          subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", base, head],
+                         env=environment, check=True)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"base={base}\nhead={head}\n")
+      - name: Decide whether compatibility smoke is required
+        id: gate
+        env:
+          BASE_SHA: ${{ steps.comparison.outputs.base }}
+          HEAD_SHA: ${{ steps.comparison.outputs.head }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPOSITORY: ${{ github.repository }}
         run: |
@@ -107,7 +144,7 @@ jobs:
 
           changed_paths="${RUNNER_TEMP}/anthropic-smoke-changed-files"
           git diff --no-renames --name-only -z \
-            "${BASE_SHA}...${HEAD_SHA}" > "${changed_paths}"
+            "${BASE_SHA}" "${HEAD_SHA}" > "${changed_paths}"
           crate_changed=false
           while IFS= read -r -d '' path; do
             if [[ "${path}" == crates/model-runtime-anthropic/* \

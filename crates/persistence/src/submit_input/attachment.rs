@@ -394,28 +394,28 @@ pub(super) async fn prospective_attachment_frontier_exceeds_bound(
     }
 
     let mut digests = BTreeMap::<BlobDigest, u64>::new();
-    let mut total = 0_u64;
+    let mut largest = 0_u64;
     for accepted_input in &base_origins {
         add_prospective_attachment_lengths(
             &mut digests,
-            &mut total,
+            &mut largest,
             attachments
                 .get(accepted_input)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
         )?;
     }
-    if check_base && total > maximum_bytes {
+    if check_base && largest > maximum_bytes {
         return Ok(true);
     }
     for (index, accepted_input) in queued_inputs.iter().enumerate() {
         if let Some(reset_origins) = queued_reset_origins.get(&index) {
             digests.clear();
-            total = 0;
+            largest = 0;
             for reset_origin in reset_origins {
                 add_prospective_attachment_lengths(
                     &mut digests,
-                    &mut total,
+                    &mut largest,
                     attachments
                         .get(reset_origin)
                         .map(Vec::as_slice)
@@ -425,13 +425,13 @@ pub(super) async fn prospective_attachment_frontier_exceeds_bound(
         }
         add_prospective_attachment_lengths(
             &mut digests,
-            &mut total,
+            &mut largest,
             attachments
                 .get(accepted_input)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
         )?;
-        if index >= first_changed_queue && total > maximum_bytes {
+        if index >= first_changed_queue && largest > maximum_bytes {
             return Ok(true);
         }
     }
@@ -697,7 +697,7 @@ async fn delegated_parked_attachment_frontier_origins(
 
 fn add_prospective_attachment_lengths(
     digests: &mut BTreeMap<BlobDigest, u64>,
-    total: &mut u64,
+    largest: &mut u64,
     attachments: &[(BlobDigest, u64)],
 ) -> Result<(), SubmitInputRepositoryError> {
     for (digest, length) in attachments {
@@ -710,11 +710,7 @@ fn add_prospective_attachment_lengths(
             }
             Some(_) => {}
             None => {
-                *total = total
-                    .checked_add(*length)
-                    .ok_or(SubmitInputCorruption::Inconsistent(
-                        "prospective attachment byte length sum",
-                    ))?;
+                *largest = (*largest).max(*length);
                 digests.insert(*digest, *length);
             }
         }
@@ -740,7 +736,7 @@ pub(super) async fn prepare_attachment_authority_rejection(
         return Ok(None);
     }
 
-    let mut total_bytes = 0_u64;
+    let maximum_bytes = maximum_bytes.ok_or(SubmitInputRepositoryError::BlobStorageUnavailable)?;
     for digest in digests {
         let row = sqlx::query(
             "SELECT blob.byte_length,
@@ -768,28 +764,13 @@ pub(super) async fn prepare_attachment_authority_rejection(
         }
         let byte_length = positive_u64_from_numeric(required(&row, "byte_length")?)
             .map_err(|_| SubmitInputCorruption::Inconsistent("attachment blob byte length"))?;
-        let Some(next_total) = total_bytes.checked_add(byte_length) else {
-            let maximum_bytes = maximum_bytes.ok_or(SubmitInputCorruption::Inconsistent(
-                "attachment authority maximum is unavailable",
-            ))?;
+        if byte_length > maximum_bytes {
             return Ok(Some(
                 command
                     .clone()
                     .prepare_attachment_byte_budget_exceeded(maximum_bytes),
             ));
-        };
-        total_bytes = next_total;
-    }
-
-    let maximum_bytes = maximum_bytes.ok_or(SubmitInputCorruption::Inconsistent(
-        "attachment authority maximum is unavailable",
-    ))?;
-    if total_bytes > maximum_bytes {
-        return Ok(Some(
-            command
-                .clone()
-                .prepare_attachment_byte_budget_exceeded(maximum_bytes),
-        ));
+        }
     }
     Ok(None)
 }

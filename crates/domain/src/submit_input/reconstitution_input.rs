@@ -515,7 +515,7 @@ pub struct SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput {
     pub stored_actor: Actor,
     /// The target session identity stored in the result.
     pub result_session: SessionId,
-    /// The configured maximum aggregate byte count stored in the result.
+    /// The configured maximum per-blob byte count stored in the result.
     pub result_maximum_bytes: u64,
 }
 
