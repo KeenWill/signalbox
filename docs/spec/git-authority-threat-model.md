@@ -23,7 +23,8 @@ configuration, references, lock state, and object data into private snapshots;
 the typed Git library, `git2`, works only on those snapshots. Status, diff, and
 log capture objects on demand into a private database and revalidate their
 source bindings before returning; unrelated historical object contents are not
-copied.
+copied. Packed-object decoding packs are discarded after the selected object is
+copied into the private database.
 
 Pushing is a separate surface with its own authority. A push names a branch; its
 destination is a remote the deployment configured, never one the caller chose. A
