@@ -106,6 +106,20 @@ py_test(
     deps = [requirement("PyYAML")],
 )
 
+py_library(
+    name = "ci_bazel_scope",
+    srcs = ["ci_bazel_scope.py"],
+    imports = ["."],
+    deps = [":postgres_integration_suites"],
+)
+
+py_test(
+    name = "test_ci_bazel_scope",
+    size = "small",
+    srcs = ["test_ci_bazel_scope.py"],
+    deps = [":ci_bazel_scope"],
+)
+
 test_suite(
     name = "checker_tests",
     visibility = ["//visibility:public"],
