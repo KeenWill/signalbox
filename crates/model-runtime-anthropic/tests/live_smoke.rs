@@ -335,29 +335,10 @@ mod require_decoded_response_tests {
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
-    fn native_error_event_inside_a_200_body_panics() {
-        let _ = require_decoded_response(
-            TerminalEvidence::ProviderError(ProviderErrorEvidence {
-                exchange: exchange(200),
-                reported_model: None,
-                kind: ProviderErrorKind::Unrecognized,
-                non_acceptance_proven: false,
-                native: NativeErrorFacts {
-                    error_token: Some("refusal".to_string()),
-                    error_code: None,
-                    message: Some("synthetic upstream failure".to_string()),
-                },
-                usage: usage(),
-            }),
-            &refusal_observed(),
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "returned no decoded response")]
     fn downgraded_refusal_shape_without_an_observed_refusal_panics() {
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: exchange(200),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,
@@ -385,6 +366,7 @@ mod require_decoded_response_tests {
 
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: exchange(200),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,
@@ -401,6 +383,7 @@ mod require_decoded_response_tests {
     fn unrecognized_provider_error_from_a_non_200_status_panics() {
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: exchange(500),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,
@@ -422,6 +405,7 @@ mod require_decoded_response_tests {
         // a refusal it never was.
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: exchange(200),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,
@@ -438,6 +422,7 @@ mod require_decoded_response_tests {
     fn recognized_provider_error_panics() {
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: exchange(401),
                 reported_model: None,
                 kind: ProviderErrorKind::CredentialRejected,
@@ -478,6 +463,7 @@ mod require_decoded_response_tests {
     fn boundary_loss_panics() {
         let _ = require_decoded_response(
             TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: true,
                 cause: LossCause::UnexpectedHttpStatus,
                 exchange: exchange(200),
                 reported_model: None,

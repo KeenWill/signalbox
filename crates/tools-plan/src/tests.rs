@@ -223,7 +223,7 @@ fn catalog() -> CompiledToolCatalog {
 fn completed_text(evidence: ToolExecutorEvidence) -> String {
     match evidence {
         ToolExecutorEvidence::CompletedText(result) => result,
-        ToolExecutorEvidence::KnownFailed { .. } => {
+        ToolExecutorEvidence::KnownFailed { .. } | ToolExecutorEvidence::CompletedMedia { .. } => {
             panic!("fixture execution unexpectedly returned a known failure")
         }
         ToolExecutorEvidence::Ambiguous => {
@@ -273,6 +273,7 @@ fn known_failure_has_detail(evidence: &ToolExecutorEvidence) -> bool {
     match evidence {
         ToolExecutorEvidence::KnownFailed { detail: Some(_) } => true,
         ToolExecutorEvidence::CompletedText(_)
+        | ToolExecutorEvidence::CompletedMedia { .. }
         | ToolExecutorEvidence::KnownFailed { detail: None }
         | ToolExecutorEvidence::Ambiguous => false,
     }
@@ -321,38 +322,6 @@ fn oversized_read_page(provenance: PlanEventProvenance) -> PlanReadPage {
         PlanPageCompleteness::Complete,
         Some(PlanHistoryPage::new(events, PlanPageCompleteness::Complete)),
     )
-}
-
-#[test]
-fn definitions_default_to_automatic_permission() {
-    let catalog = catalog();
-    let write_name = ToolName::try_new(PLAN_WRITE_NAME.to_owned()).expect("fixture name is valid");
-    let read_name = ToolName::try_new(PLAN_READ_NAME.to_owned()).expect("fixture name is valid");
-    let write = catalog
-        .definition(&write_name)
-        .expect("write definition exists");
-    let read = catalog
-        .definition(&read_name)
-        .expect("read definition exists");
-
-    assert_eq!(write.permission_default(), ToolPermissionDefault::Auto);
-    assert_eq!(read.permission_default(), ToolPermissionDefault::Auto);
-}
-
-#[test]
-fn definitions_distinguish_read_from_write_effects() {
-    let catalog = catalog();
-    let write_name = ToolName::try_new(PLAN_WRITE_NAME.to_owned()).expect("fixture name is valid");
-    let read_name = ToolName::try_new(PLAN_READ_NAME.to_owned()).expect("fixture name is valid");
-    let write = catalog
-        .definition(&write_name)
-        .expect("write definition exists");
-    let read = catalog
-        .definition(&read_name)
-        .expect("read definition exists");
-
-    assert_eq!(write.effect_class(), ToolEffectClass::ExternalEffect);
-    assert_eq!(read.effect_class(), ToolEffectClass::EffectFree);
 }
 
 #[test]

@@ -314,7 +314,8 @@ fn assert_safe_evidence(
             assert_independent_component_absence(&result.snippet, credential)?;
             Ok(())
         }
-        Ok(signalbox_application::ToolExecutorEvidence::KnownFailed { .. })
+        Ok(signalbox_application::ToolExecutorEvidence::CompletedMedia { .. })
+        | Ok(signalbox_application::ToolExecutorEvidence::KnownFailed { .. })
         | Ok(signalbox_application::ToolExecutorEvidence::Ambiguous) => Err(TestCaseError::fail(
             "success evidence changed terminal kind",
         )),

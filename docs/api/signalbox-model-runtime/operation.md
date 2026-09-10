@@ -52,6 +52,7 @@ pub enum ToolChoice {
 
 ```rust
 pub struct ModelOperation<C> {
+    pub image_presentation: option::Option<ImagePresentationCapability>,
     pub correlation: C,
     pub credential_reference: CredentialReference,
     pub requested_target: RequestedTarget,

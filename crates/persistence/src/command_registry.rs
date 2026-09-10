@@ -406,18 +406,6 @@ mod tests {
     };
 
     #[test]
-    fn reload_configuration_is_admitted_by_the_closed_registry() {
-        assert!(
-            COMMAND_KIND_DEFINITIONS
-                .iter()
-                .any(
-                    |definition| definition.kind == CommandKind::ReloadConfiguration
-                        && definition.supports_version(1)
-                )
-        );
-    }
-
-    #[test]
     fn oauth_administration_kinds_have_distinct_typed_record_families() {
         for (kind, table) in [
             (

@@ -75,6 +75,7 @@ impl IssuedModelCallCorrelation {
             retry_after: None,
             non_acceptance_proven: false,
             rate_limits: None,
+            credential_recovery: None,
         }
     }
 
@@ -88,7 +89,7 @@ impl IssuedModelCallCorrelation {
         self.bind_provider_failure_observation_with_retry_after(cause, usage, None, false)
     }
 
-    /// Binds a classified provider error and its optional provider-directed
+    /// Binds a classified call failure and its optional provider-directed
     /// retry delay without retaining provider-authored error material.
     pub fn bind_provider_failure_observation_with_retry_after(
         self,
@@ -105,6 +106,7 @@ impl IssuedModelCallCorrelation {
             retry_after,
             non_acceptance_proven,
             rate_limits: None,
+            credential_recovery: None,
         }
     }
 }
@@ -183,12 +185,11 @@ impl ProviderReportedTokenUsage {
     }
 }
 
-/// Closed, provider-neutral classification of one definitive provider error.
+/// Closed, provider-neutral classification of one known call failure.
 ///
 /// These values contain no provider-authored text, credential material, model
-/// content, or request/response body. Absence on a known failure means the
-/// failure arose outside a definitive provider error or predates persistence of
-/// this classification.
+/// content, or request/response body. Absence on a known failure means no
+/// provider-availability classification was retained.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ProviderModelCallFailureCause {
     /// The provider rejected the request credential.
@@ -207,7 +208,8 @@ pub enum ProviderModelCallFailureCause {
     QuotaExhausted,
     /// The provider reported overload.
     Overloaded,
-    /// The provider reported an internal error.
+    /// A provider-internal error or transport loss before observed response content.
+    /// Both use the transient same-credential retry policy.
     ProviderInternal,
     /// The adapter did not recognize a definitive provider error class.
     Unrecognized,
@@ -216,6 +218,7 @@ pub enum ProviderModelCallFailureCause {
 /// One provider-neutral terminal observation bound to exact issued authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CorrelatedModelCallTerminalObservation {
+    pub(super) credential_recovery: Option<CredentialRejectionRecovery>,
     pub(super) rate_limits: Option<Box<crate::ProviderRateLimitSnapshot>>,
     pub(super) correlation: IssuedModelCallCorrelation,
     pub(super) observation: ModelCallTerminalObservation,
@@ -225,7 +228,30 @@ pub struct CorrelatedModelCallTerminalObservation {
     pub(super) non_acceptance_proven: bool,
 }
 
+/// Delivery recovery observed after a credential rejection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialRejectionRecovery {
+    /// Retry this profile with its refreshed access token.
+    Refreshed,
+    /// Rotate because refresh failed or the refreshed token was rejected.
+    Unavailable,
+}
+
 impl CorrelatedModelCallTerminalObservation {
+    /// Attaches delivery recovery to this exact rejected provider call.
+    pub fn with_credential_recovery(
+        mut self,
+        recovery: Option<CredentialRejectionRecovery>,
+    ) -> Self {
+        self.credential_recovery = recovery;
+        self
+    }
+
+    /// Returns the delivery recovery observed for this credential rejection.
+    pub const fn credential_recovery(&self) -> Option<CredentialRejectionRecovery> {
+        self.credential_recovery
+    }
+
     /// Attaches capacity evidence observed during this exact provider call.
     pub fn with_rate_limits(mut self, snapshot: Option<crate::ProviderRateLimitSnapshot>) -> Self {
         self.rate_limits = snapshot.map(Box::new);

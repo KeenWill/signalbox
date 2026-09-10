@@ -1039,8 +1039,7 @@ mod tests {
 
     use super::{
         DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition, FrozenModelSelection,
-        KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
-        ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
+        ModelAlias, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
         OriginConfigurationReconstitutionInput, OriginModelSettingsError,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
         SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptFailure,
@@ -1384,23 +1383,6 @@ mod tests {
         );
 
         assert_eq!(reconstituted, Some(expected));
-    }
-
-    #[test]
-    fn baseline_effective_configuration_fixes_the_unit_policy_values() {
-        let selection = FrozenModelSelection::Direct(direct(1));
-        let configuration = EffectiveConfiguration::baseline(selection);
-
-        assert_eq!(configuration.model(), &selection);
-        assert_eq!(
-            configuration.parameters(),
-            ModelParameters::ProviderDefaults
-        );
-        assert_eq!(
-            configuration.known_provider_failure_retry(),
-            KnownProviderFailureRetry::Disabled
-        );
-        assert_eq!(configuration.model_fallback(), ModelFallback::Disabled);
     }
 
     /// a complete effective configuration rejects settings

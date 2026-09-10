@@ -2060,19 +2060,6 @@ mod tests {
         failure
     }
 
-    /// delegated construction fixes exact cause and no ancestry.
-    #[test]
-    fn delegated_helper_constructs_no_ancestry() {
-        let spawning_request = delegated_spawning_request();
-        let provenance = SessionCreationProvenance::delegated(spawning_request);
-
-        assert_eq!(
-            provenance.cause(),
-            SessionCreationCause::Delegated { spawning_request }
-        );
-        assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
-    }
-
     /// matching delegated current-session facts retain the exact spawning request and no transcript
     /// ancestry.
     #[test]

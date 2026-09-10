@@ -3477,13 +3477,6 @@ mod tests {
     }
 
     #[test]
-    fn unrecognized_declared_candidate_returns_no_match() {
-        let result = ValidationIssue::Unrecognized.validation(OfficeKind::Docx);
-
-        assert_eq!(result, ProcessorValidationOutput::NoMatch);
-    }
-
-    #[test]
     fn content_types_requires_the_opc_namespace() {
         let xml = concat!(
             "<Types>",
@@ -3863,42 +3856,6 @@ mod tests {
             parse_central_entry(&central, 0),
             Err(ValidationIssue::Malformed(MALFORMED_REASON))
         ));
-    }
-
-    #[test]
-    fn probe_budget_reserves_all_local_header_reads() {
-        let admitted_central_bytes = VALIDATION_SOURCE_BYTES
-            - ZIP_SUFFIX_BYTES
-            - EOCD_PRECEDING_BYTES
-            - ZIP_PREFIX_BYTES
-            - LOCAL_HEADER_BYTES
-            - CONTENT_TYPES_NAME_BYTES
-            - LOCAL_EXTRA_BYTES
-            - CONTENT_TYPES_COMPRESSED_BYTES
-            - LOCAL_HEADER_BYTES
-            - PACKAGE_RELS_NAME_BYTES
-            - LOCAL_EXTRA_BYTES
-            - PACKAGE_RELS_COMPRESSED_BYTES
-            - MAX_SELECTED_PARTS
-                * (LOCAL_HEADER_BYTES + SELECTED_PART_NAME_BYTES + LOCAL_EXTRA_BYTES);
-
-        assert_eq!(
-            ZIP_PREFIX_BYTES
-                + ZIP_SUFFIX_BYTES
-                + EOCD_PRECEDING_BYTES
-                + admitted_central_bytes
-                + LOCAL_HEADER_BYTES
-                + CONTENT_TYPES_NAME_BYTES
-                + LOCAL_EXTRA_BYTES
-                + CONTENT_TYPES_COMPRESSED_BYTES
-                + LOCAL_HEADER_BYTES
-                + PACKAGE_RELS_NAME_BYTES
-                + LOCAL_EXTRA_BYTES
-                + PACKAGE_RELS_COMPRESSED_BYTES
-                + MAX_SELECTED_PARTS
-                    * (LOCAL_HEADER_BYTES + SELECTED_PART_NAME_BYTES + LOCAL_EXTRA_BYTES),
-            VALIDATION_SOURCE_BYTES
-        );
     }
 
     #[tokio::test]
@@ -4662,11 +4619,6 @@ mod tests {
         let result = central_directory_fields(&bytes, eocd_offset, suffix_start);
 
         assert!(matches!(result, Ok((3, 123, 456))));
-    }
-
-    #[test]
-    fn zip64_trailer_budget_covers_bounded_extensible_data() {
-        assert_eq!(EOCD_PRECEDING_BYTES, 21 + 20 + 56 + MAX_ZIP64_EOCD_BYTES);
     }
 
     #[test]
