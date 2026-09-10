@@ -2683,3 +2683,98 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
     drop(container);
     Ok(())
 }
+
+/// Stores the supplied text bytes in the version-two attested-text envelope;
+/// the temporary column lets PostgreSQL compress the value before validation.
+async fn store_import_text_for_validation(
+    connection: &mut sqlx::PgConnection,
+    text: &[u8],
+) -> Result<(), sqlx::Error> {
+    sqlx::query("CREATE TEMP TABLE compressed_import_text (content_encoding bytea NOT NULL)")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "INSERT INTO compressed_import_text
+         SELECT decode('02010102', 'hex') || int8send(octet_length($1)::bigint) || $1",
+    )
+    .bind(text)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn compressed_import_text_preserves_nul_and_multibyte_utf8() -> Result<(), Box<dyn Error>> {
+    // Arbitrary repetition count large enough to exercise compressed storage.
+    const COMPRESSIBLE_REPETITIONS: usize = 32 * 1024;
+    let (_database, pool, _) = migrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    let text = "a\0é🦀".repeat(COMPRESSIBLE_REPETITIONS);
+    store_import_text_for_validation(&mut connection, text.as_bytes()).await?;
+    let compressed: bool = sqlx::query_scalar(
+        "SELECT pg_column_size(content_encoding) < octet_length(content_encoding)
+           FROM compressed_import_text",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    assert!(compressed, "the validator must receive compressed storage");
+    let kind: i16 = sqlx::query_scalar(
+        "SELECT imported_content_encoding_kind(content_encoding) FROM compressed_import_text",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    assert_eq!(kind, 1, "NUL and multibyte UTF-8 remain attested text");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn compressed_import_text_rejects_an_invalid_utf8_suffix() -> Result<(), Box<dyn Error>> {
+    // Arbitrary repetition count large enough to exercise compressed storage.
+    const COMPRESSIBLE_REPETITIONS: usize = 32 * 1024;
+    let (_database, pool, _) = migrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    let mut text = "a\0é🦀".repeat(COMPRESSIBLE_REPETITIONS).into_bytes();
+    text.push(0xff);
+    store_import_text_for_validation(&mut connection, &text).await?;
+    let error = sqlx::query_scalar::<_, i16>(
+        "SELECT imported_content_encoding_kind(content_encoding) FROM compressed_import_text",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .expect_err("an invalid UTF-8 suffix must fail after the compressed valid prefix");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514"),
+        "the imported-content constraint rejects malformed UTF-8"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn import_content_validation_survives_an_empty_restore_search_path()
+-> Result<(), Box<dyn Error>> {
+    const ARBITRARY_VALID_TEXT: &[u8] = b"a";
+    let (_database, pool, _) = migrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    store_import_text_for_validation(&mut connection, ARBITRARY_VALID_TEXT).await?;
+    sqlx::query("SET search_path = ''")
+        .execute(&mut *connection)
+        .await?;
+    let kind: i16 = sqlx::query_scalar(
+        "SELECT public.imported_content_encoding_kind(content_encoding)
+           FROM pg_temp.compressed_import_text",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    assert_eq!(
+        kind, 1,
+        "restore resolves the attested-text validator's helpers"
+    );
+    Ok(())
+}

@@ -1536,7 +1536,7 @@ async fn checkpoint_restart_model_call_with_input(
     .expect("one restart fixture target forms a catalog");
     let repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
-            .with_continuation_usage_limits(limits.iter().copied());
+            .with_continuation_usage_limits(limits.iter().cloned());
     assert!(matches!(
         repository
             .prepare_initial_call(
@@ -1891,6 +1891,47 @@ async fn commit_authorized_tool_batch(
     ),
     Box<dyn Error>,
 > {
+    let proposals = proposals
+        .iter()
+        .map(|(name, arguments)| {
+            ToolCallProposal::new(
+                ToolName::try_new(String::from(*name)).expect("valid fixture tool name"),
+                NormalizedToolArguments::try_from_provider_text(String::from(*arguments))
+                    .expect("valid fixture arguments"),
+            )
+        })
+        .collect::<Vec<_>>();
+    commit_authorized_tool_proposals(
+        seed,
+        authorized_call,
+        &proposals,
+        initial_approval,
+        usage,
+        provider_compaction,
+    )
+    .await
+}
+
+async fn commit_authorized_tool_proposals(
+    seed: u128,
+    authorized_call: (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        AuthorizedModelCall,
+    ),
+    proposals: &[ToolCallProposal],
+    initial_approval: InitialToolApproval,
+    usage: ProviderReportedTokenUsage,
+    provider_compaction: Option<ProviderCompactionBlock>,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        Vec<signalbox_domain::ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
     let (fixture, model_repository, authorized) = authorized_call;
     let requests = proposals
         .iter()
@@ -1906,13 +1947,12 @@ async fn commit_authorized_tool_batch(
             .iter()
             .cloned()
             .map(AssistantResponsePart::ProviderCompaction)
-            .chain(proposals.iter().map(|(tool_name, arguments)| {
-                AssistantResponsePart::ToolCall(ToolCallProposal::new(
-                    ToolName::try_new(String::from(*tool_name)).expect("valid fixture tool name"),
-                    NormalizedToolArguments::try_from_provider_text(String::from(*arguments))
-                        .expect("bounded fixture arguments"),
-                ))
-            }))
+            .chain(
+                proposals
+                    .iter()
+                    .cloned()
+                    .map(AssistantResponsePart::ToolCall),
+            )
             .collect(),
     )
     .expect("the proposals form a tool-using response");
@@ -1939,7 +1979,11 @@ async fn commit_authorized_tool_batch(
                     seed + 0x80 + u128::try_from(index).expect("the bounded batch index fits u128"),
                 )),
                 *request,
-                initial_approval,
+                if proposals[index].inadmissible_reason().is_some() {
+                    InitialToolApproval::Inadmissible
+                } else {
+                    initial_approval
+                },
             )
         }))
         .collect();

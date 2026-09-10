@@ -206,7 +206,7 @@ test('reads durable transcript growth and sends a message by keyboard', async ({
   await page.getByRole('textbox', { name: 'Message' }).fill('Continue with the next step.')
   await page.getByRole('button', { name: 'Send message', exact: true }).focus()
   await page.keyboard.press('Enter')
-  await expect(page.getByRole('status').filter({ hasText: 'Message sent' })).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'Message accepted' })).toBeVisible()
   expect(api.state.submissions).toHaveLength(1)
   expect(api.state.submissions[0]?.message).toBe('Continue with the next step.')
   await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue('')
@@ -260,7 +260,7 @@ test('retries an unconfirmed acceptance with the same command and text', async (
   api.grow()
   await expect(page.getByText('Live updates unavailable.')).toBeVisible()
   await page.getByRole('button', { name: 'Retry message' }).click()
-  await expect(page.getByText('Message sent')).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'Message accepted' })).toBeVisible()
   expect(attempts).toHaveLength(2)
   expect(attempts[1]).toEqual(attempts[0])
   api.grow()
@@ -295,7 +295,7 @@ test('retains a command whose response is lost while its composer is unmounted',
     'Keep the in-flight identity.',
   )
   await page.getByRole('button', { name: 'Retry message' }).click()
-  await expect(page.getByText('Message sent')).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'Message accepted' })).toBeVisible()
   expect(attempts).toHaveLength(2)
   expect(attempts[1]).toEqual(attempts[0])
   api.grow()
@@ -319,7 +319,7 @@ test('reports the daemon rejection reason and keeps the draft editable', async (
   await page.getByRole('textbox', { name: 'Message' }).fill('Keep the rejected draft.')
   await page.getByRole('button', { name: 'Send message', exact: true }).click()
   await expect(
-    page.getByText('Not accepted: input cannot start a turn while another turn is active'),
+    page.getByText('Message rejected: input cannot start a turn while another turn is active'),
   ).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Message' })).toBeEditable()
   api.grow()
@@ -376,7 +376,7 @@ test('keeps header-only history when transcript detail is not advertised', async
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('row')).toHaveCount(3)
   await page.getByRole('row').first().press('Enter')
-  await expect(page.getByText('Timeline detail is unavailable.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Timeline detail unavailable.', { exact: true })).toBeVisible()
   expect(detailRequests).toEqual([])
 })
 
@@ -420,7 +420,7 @@ test('refuses new session input at the retained-command limit while allowing exa
   })
   await open(sessionId)
   await page.getByRole('button', { name: 'Retry message' }).click()
-  await expect(page.getByText('Message sent')).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'Message accepted' })).toBeVisible()
   expect(attempts[4]).toEqual(attempts[0])
   await open(last)
   await page.getByRole('textbox', { name: 'Message' }).fill('Capacity is available again.')
@@ -453,7 +453,7 @@ test('times out an unanswered send and retries its retained identity', async ({ 
   await page.clock.fastForward(30_001)
   await expect(page.getByText('Delivery unconfirmed')).toBeVisible()
   await page.getByRole('button', { name: 'Retry message' }).click()
-  await expect(page.getByText('Message sent')).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'Message accepted' })).toBeVisible()
   expect(attempts[1]).toEqual(attempts[0])
   release()
   api.grow()
@@ -744,8 +744,8 @@ for (const viewport of [
     const provenance = page.getByLabel('Repository watch')
     await expect(provenance).toContainText('Repository watch · signalbox/example #81')
     await expect(provenance).toContainText('Rule review-response v3 · Review submitted')
-    await provenance.getByText('Trigger details', { exact: true }).click()
-    await expect(provenance).toContainText(`Dispatch ${origin.dispatch_id} · Step 2`)
+    await provenance.getByText('Dispatch details', { exact: true }).click()
+    await expect(provenance).toContainText(`Dispatch ${origin.dispatch_id} · Action 2`)
     await expect(provenance).toContainText(`Event ${origin.event_id}`)
     if (browserName === 'chromium') {
       await expect(page).toHaveScreenshot(`repository-watch-origin-${viewport.name}.png`, {
@@ -773,7 +773,7 @@ for (const size of ['short viewport', 'expanded textarea']) {
     const send = page.getByRole('button', { name: 'Send message', exact: true })
     await expect(send).toBeInViewport({ ratio: 1 })
     await send.click()
-    await expect(page.getByRole('status').filter({ hasText: 'Message sent' })).toBeVisible()
+    await expect(page.getByRole('status').filter({ hasText: 'Message accepted' })).toBeVisible()
     expect(api.state.submissions).toHaveLength(1)
     expect(api.state.submissions[0]?.message).toBe('Continue after resizing.')
   })
@@ -785,7 +785,7 @@ test('replaces the sent notice when followed work starts', async ({ page }) => {
   const composer = page.getByRole('form', { name: 'Message composer' })
   await composer.getByRole('textbox', { name: 'Message', exact: true }).fill('Start the next turn.')
   await composer.getByRole('button', { name: 'Send message', exact: true }).click()
-  await expect(composer.getByRole('status')).toHaveText('Message sent')
+  await expect(composer.getByRole('status')).toHaveText('Message accepted')
   api.state.active = true
   api.grow()
   await expect(composer.getByRole('status')).toHaveText('Turn: Running')

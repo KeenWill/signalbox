@@ -94,9 +94,10 @@ use signalbox_domain::{
     SessionTemplateName, SessionTemplateProvenance, SettingOverlay as DomainSettingOverlay,
     StartGate as DomainStartGate, StopStickiness, SubmitInput, SubmitInputAppliedResult,
     SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision, ToolDenialReason,
-    ToolRequestId, TurnId, TurnModelSettingsResolved as DomainTurnModelSettingsResolved,
-    UnsupportedModelSetting, UpdateSessionPlacementRejectionKind, UpdateSessionPlacementResult,
-    UserContent, ValidatedModelSettings,
+    ToolDenialReasonFailure, ToolRequestId, TurnId,
+    TurnModelSettingsResolved as DomainTurnModelSettingsResolved, UnsupportedModelSetting,
+    UpdateSessionPlacementRejectionKind, UpdateSessionPlacementResult, UserContent,
+    ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,

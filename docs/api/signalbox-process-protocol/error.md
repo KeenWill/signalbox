@@ -148,6 +148,10 @@ pub enum RejectionDetail {
     ToolDenialAlreadyOverridden {
         tool_request_id: CanonicalUuid,
     },
+    ToolDenialReasonTooLong {
+        maximum_bytes: CanonicalU64,
+        actual_bytes: CanonicalU64,
+    },
     DelegationRequestNotInTurn {
         session_id: CanonicalUuid,
         turn_id: CanonicalUuid,

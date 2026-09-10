@@ -15,6 +15,12 @@ pub struct ContextCompactionModelRequest {
     pub rendered_range: string::String,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ContextCompactionModelRequest {
+    pub fn into_operation(
+        self,
+        definition: &RuntimeModelDefinition,
+    ) -> signalbox_model_runtime::ModelOperation<signalbox_domain::ModelCallId>;
+}
 ```
 
 ## ContextCompactionModelResult

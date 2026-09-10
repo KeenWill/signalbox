@@ -1097,6 +1097,18 @@ impl crate::ToolInadmissibleReason {
     /// Renders this request-level reason through the existing typed error shape.
     pub fn execution_error(self) -> ToolExecutionError {
         match self {
+            Self::ProposalLimitExceeded { limit } => ToolExecutionError::new(
+                ToolExecutionErrorKind::ExecutionFailed,
+                Some(ToolExecutionErrorDetail(format!(
+                    "proposal_limit_exceeded: maximum {limit} proposals per response"
+                ))),
+            ),
+            Self::ArgumentBytesExceeded { limit, bytes } => ToolExecutionError::new(
+                ToolExecutionErrorKind::InvalidArguments,
+                Some(ToolExecutionErrorDetail(format!(
+                    "argument payload has {bytes} bytes; maximum {limit} bytes"
+                ))),
+            ),
             Self::PlacementLost => ToolExecutionError::new(
                 ToolExecutionErrorKind::ExecutionFailed,
                 Some(ToolExecutionErrorDetail("placement_lost".to_owned())),

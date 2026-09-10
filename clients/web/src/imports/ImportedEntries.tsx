@@ -17,9 +17,9 @@ const sourceLabel = (entry: WebImportedEntry): string => {
     case 'attested_absent':
       return 'No speaker'
     case 'user':
-      return 'User (from source)'
+      return 'Source user role'
     case 'assistant':
-      return 'Assistant (from source)'
+      return 'Source assistant role'
   }
 }
 

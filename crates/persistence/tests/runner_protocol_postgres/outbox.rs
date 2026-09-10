@@ -242,12 +242,12 @@ async fn runner_suspect_outbox_failure_rolls_back_connection() -> Result<(), Box
     Ok(())
 }
 
-/// dispatch rejects a non-connection state that retains
+/// dispatch quarantines a non-connection state that retains
 /// connection provenance after post-admission corruption.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn runner_outbox_dispatch_rejects_pinned_connection_provenance() -> Result<(), Box<dyn Error>>
-{
+async fn runner_outbox_dispatch_quarantines_pinned_connection_provenance()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
@@ -279,15 +279,7 @@ async fn runner_outbox_dispatch_rejects_pinned_connection_provenance() -> Result
     sqlx::query("ALTER TABLE runner_state_transition_outbox_event ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    let rejected = OutboxDispatcher::new(pool.clone())
-        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-        .await
-        .expect_err("a pinned event cannot retain connection provenance");
-
-    assert!(matches!(
-        rejected,
-        OutboxDispatchError::Corruption(OutboxCorruption::InvalidRunnerEvent)
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidRunnerEvent).await?;
     drop(pool);
     Ok(())
 }
@@ -766,7 +758,8 @@ async fn runner_directory_relocation_rejects_replaced_state() -> Result<(), Box<
 /// post-admission state corruption cannot publish an ordinary replacement.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn runner_outbox_dispatch_rejects_corrupted_relocation_state() -> Result<(), Box<dyn Error>> {
+async fn runner_outbox_dispatch_quarantines_corrupted_relocation_state()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -808,15 +801,7 @@ async fn runner_outbox_dispatch_rejects_corrupted_relocation_state() -> Result<(
     sqlx::query("ALTER TABLE runner_state_transition_outbox_event ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    let rejected = OutboxDispatcher::new(pool.clone())
-        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-        .await
-        .expect_err("a corrupted relocation state cannot be offered");
-
-    assert!(matches!(
-        rejected,
-        OutboxDispatchError::Corruption(OutboxCorruption::InvalidRunnerEvent)
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidRunnerEvent).await?;
     drop(pool);
     Ok(())
 }
@@ -865,10 +850,10 @@ async fn runner_abandoned_outbox_round_trips() -> Result<(), Box<dyn Error>> {
 }
 
 /// dispatch revalidates the immutable placement source and
-/// rejects a runner event whose stored runner was corrupted after admission.
+/// quarantines a runner event whose stored runner was corrupted after admission.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn runner_outbox_dispatch_rejects_cross_wired_source() -> Result<(), Box<dyn Error>> {
+async fn runner_outbox_dispatch_quarantines_cross_wired_source() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -901,15 +886,7 @@ async fn runner_outbox_dispatch_rejects_cross_wired_source() -> Result<(), Box<d
     sqlx::query("ALTER TABLE runner_state_transition_outbox_event ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    let rejected = OutboxDispatcher::new(pool.clone())
-        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-        .await
-        .expect_err("a cross-wired runner event cannot be offered");
-
-    assert!(matches!(
-        rejected,
-        OutboxDispatchError::Corruption(OutboxCorruption::InvalidRunnerEvent)
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidRunnerEvent).await?;
     drop(pool);
     Ok(())
 }

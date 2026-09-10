@@ -1094,7 +1094,7 @@ async fn runner_reconnect_after_suspicion_publishes_connected() -> Result<(), Bo
 /// post-admission corruption cannot turn an established epoch into recovery.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn reconnect_dispatch_rejects_corrupted_predecessor() -> Result<(), Box<dyn Error>> {
+async fn reconnect_dispatch_quarantines_corrupted_predecessor() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let first_connection = store
@@ -1129,15 +1129,7 @@ async fn reconnect_dispatch_rejects_corrupted_predecessor() -> Result<(), Box<dy
     sqlx::query("ALTER TABLE runner_connection_event ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    let rejected = OutboxDispatcher::new(pool.clone())
-        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-        .await
-        .expect_err("corrupted predecessor state cannot publish reconnect recovery");
-
-    assert!(matches!(
-        rejected,
-        OutboxDispatchError::Corruption(OutboxCorruption::InvalidRunnerEvent)
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidRunnerEvent).await?;
     drop(pool);
     Ok(())
 }

@@ -229,7 +229,7 @@ pub use tool_loop::{
     ToolDefinition, ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
     ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorDisposition,
     ToolExecutorEvidence, ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure,
-    ToolPreauthorization, UuidV7ToolLoopIdGenerator,
+    ToolPreauthorization, ToolProposalLimits, UuidV7ToolLoopIdGenerator,
 };
 pub use tool_loop_ports::{
     DecideToolRequestTransaction, OverrideDeniedToolRequestTransaction,
@@ -265,7 +265,8 @@ pub use usage::{
 };
 pub use workspace_instructions::{
     InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
-    InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
+    InstructionDiscoveryLimits, InstructionDiscoveryRoot, InstructionDiscoverySnapshot,
+    discover_workspace_instructions, discover_workspace_instructions_with_limits,
 };
 
 /// Verified host-side session attribution for program input.

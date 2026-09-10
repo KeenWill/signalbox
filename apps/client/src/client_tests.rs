@@ -6218,6 +6218,7 @@ async fn operator_status_counts_and_displays_supervision_and_repository_ingestio
                 repository_ingestion_count: CanonicalU64::new(1),
                 lifecycle_week_count: CanonicalU64::new(0),
                 lifecycle_deadline_violation_count: CanonicalU64::new(0),
+                outbox_quarantine_count: CanonicalU64::new(2),
             })),
         ] {
             let frame = ServerFrame::try_new_for_version(

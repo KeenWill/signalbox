@@ -7,6 +7,7 @@ use std::{
     time::Instant,
 };
 
+use bstr::ByteSlice;
 use git2::{Delta, Diff, DiffFindOptions, DiffOptions, ObjectType, Odb, Oid, Patch};
 use serde::Serialize;
 
@@ -159,13 +160,22 @@ pub(super) fn verify_merge(
             ))
         })
         .collect::<Result<_, GitPushFailure>>()?;
-    let base_deletions: HashSet<_> = base_changes
+    let base_by_path: BTreeMap<_, _> = base_changes
         .deltas()
-        .filter(|delta| delta.status() == Delta::Deleted)
-        .map(|delta| delta.old_file().path().ok_or(GitPushFailure::Repository))
-        .collect::<Result<_, _>>()?;
+        .enumerate()
+        .map(|(index, delta)| {
+            Ok((
+                delta
+                    .old_file()
+                    .path()
+                    .or_else(|| delta.new_file().path())
+                    .ok_or(GitPushFailure::Repository)?,
+                index,
+            ))
+        })
+        .collect::<Result<_, GitPushFailure>>()?;
     let mut own_by_path = BTreeMap::new();
-    let mut retained_rename_results = BTreeMap::new();
+    let mut own_sources = BTreeMap::new();
     for (index, delta) in own.deltas().enumerate() {
         let path = delta
             .new_file()
@@ -177,35 +187,39 @@ pub(super) fn verify_merge(
         } else {
             path
         };
-        if delta.status() == Delta::Renamed && base_deletions.contains(source_path) {
-            retained_rename_results.insert(path, (delta.new_file().id(), delta.new_file().mode()));
+        if delta.status() == Delta::Renamed {
+            own_sources.insert(path, source_path);
         }
         own_by_path.entry(source_path).or_insert(index);
     }
+    let mut checked_branch = HashSet::new();
     for (index, delta) in carried.deltas().enumerate() {
         let path = delta
             .new_file()
             .path()
             .or_else(|| delta.old_file().path())
             .ok_or(GitPushFailure::Repository)?;
-        if delta.status() == Delta::Added
-            && retained_rename_results.get(path)
-                == Some(&(delta.new_file().id(), delta.new_file().mode()))
-        {
-            continue;
-        }
         let source_path = if delta.status() == Delta::Renamed {
             delta.old_file().path().ok_or(GitPushFailure::Repository)?
         } else {
             path
         };
-        let source_path = base_sources
-            .get(source_path)
-            .copied()
-            .unwrap_or(source_path);
+        let source_path = if delta.status() == Delta::Added {
+            // A branch rename may appear as add/delete against a heavily edited base.
+            own_sources.get(path).copied().unwrap_or(source_path)
+        } else {
+            base_sources
+                .get(source_path)
+                .copied()
+                .unwrap_or(source_path)
+        };
         let own_index = own_by_path.get(source_path).copied();
+        let base_index = base_by_path.get(source_path).copied();
+        checked_branch.extend(own_index);
         // Capture compared paths only, in addition to the rename candidates.
-        for delta in std::iter::once(delta).chain(own_index.and_then(|index| own.get_delta(index)))
+        for delta in std::iter::once(delta)
+            .chain(own_index.and_then(|index| own.get_delta(index)))
+            .chain(base_index.and_then(|index| base_changes.get_delta(index)))
         {
             for file in [delta.old_file(), delta.new_file()] {
                 if !file.id().is_zero() && file.mode() != git2::FileMode::Commit {
@@ -215,34 +229,140 @@ pub(super) fn verify_merge(
                 }
             }
         }
+        let delta = carried.get_delta(index).ok_or(GitPushFailure::Repository)?;
         let branch_hunks = own_index
             .map(|index| hunks(&own, index, None))
             .transpose()?
             .unwrap_or_default();
+        let base_hunks = base_index
+            .map(|index| hunks(&base_changes, index, None))
+            .transpose()?
+            .unwrap_or_default();
+        let carried_hunks = hunks(&carried, index, Some(source_path))?;
+        let ancestor_delta = base_index
+            .and_then(|index| base_changes.get_delta(index))
+            .or_else(|| own_index.and_then(|index| own.get_delta(index)));
+        let blob = |file: git2::DiffFile<'_>| {
+            if file.id().is_zero() || file.mode() == git2::FileMode::Commit {
+                Ok(None)
+            } else {
+                repository
+                    .find_blob(file.id())
+                    .map(Some)
+                    .map_err(repository_failure)
+            }
+        };
+        let old = ancestor_delta
+            .map(|delta| blob(delta.old_file()))
+            .transpose()?
+            .flatten();
+        let new = blob(delta.new_file())?;
+        let old_bytes: &[u8] = old.as_ref().map_or(&[], git2::Blob::content);
+        let new_bytes: &[u8] = new.as_ref().map_or(&[], git2::Blob::content);
+        let patch =
+            Patch::from_buffers(old_bytes, None, new_bytes, None, Some(&mut diff_options()))
+                .map_err(repository_failure)?;
+        let result_hunks = text_hunks(&patch)?;
+        let preserves_branch =
+            preserves_nonconflicting_text(old_bytes, new_bytes, &branch_hunks, &base_hunks);
+        let mut retained = BTreeMap::new();
+        for effect in result_hunks
+            .iter()
+            .flat_map(Hunk::effects)
+            .filter(|effect| is_text_change(effect))
+        {
+            *retained.entry(effect).or_insert(0usize) += 1;
+        }
         let mut permitted = BTreeMap::new();
-        for effect in branch_hunks.iter().flat_map(Hunk::effects) {
+        for effect in branch_hunks
+            .iter()
+            .flat_map(Hunk::effects)
+            .filter(|effect| !is_text_change(effect))
+        {
             *permitted.entry(effect).or_insert(0usize) += 1;
         }
-        for hunk in hunks(&carried, index, Some(source_path))? {
-            let carried = hunk.effects().all(|effect| {
-                let Some(remaining) = permitted.get_mut(effect) else {
-                    return false;
-                };
-                if *remaining == 0 {
-                    return false;
+        let missing_base = base_hunks.iter().find(|hunk| {
+            !hunk
+                .effects()
+                .filter(|effect| is_text_change(effect))
+                .all(|effect| consume_effect(&mut retained, effect))
+        });
+        let invalid_metadata = || {
+            carried_hunks.iter().find(|hunk| {
+                !hunk
+                    .effects()
+                    .filter(|effect| !is_text_change(effect))
+                    .all(|effect| consume_effect(&mut permitted, effect))
+            })
+        };
+        if let Some(hunk) = missing_base
+            .or_else(invalid_metadata)
+            .or_else(|| (!preserves_branch).then(|| carried_hunks.first()).flatten())
+        {
+            record_dropped_hunk(&mut dropped, &mut preview_bytes, path, hunk);
+        }
+    }
+    for (index, delta) in own.deltas().enumerate() {
+        if checked_branch.contains(&index) {
+            continue;
+        }
+        let path = delta.new_file().path().ok_or(GitPushFailure::Repository)?;
+        let source_path = delta.old_file().path().ok_or(GitPushFailure::Repository)?;
+        let base_index = base_by_path.get(source_path).copied();
+        let base_delta = base_index.and_then(|index| base_changes.get_delta(index));
+        let result_path = base_delta
+            .as_ref()
+            .and_then(|delta| delta.new_file().path())
+            .unwrap_or(path);
+        let result_entry = match merge_tree.get_path(result_path) {
+            Ok(entry) => Some(entry),
+            Err(error) if error.code() == git2::ErrorCode::NotFound => None,
+            Err(error) => return Err(repository_failure(error)),
+        };
+        let mut old = None;
+        if !delta.old_file().id().is_zero() && delta.old_file().mode() != git2::FileMode::Commit {
+            source
+                .capture(&database, delta.old_file().id())
+                .map_err(repository_failure)?;
+            old = Some(
+                repository
+                    .find_blob(delta.old_file().id())
+                    .map_err(repository_failure)?,
+            );
+        }
+        let mut new = None;
+        if let Some(entry) = result_entry.filter(|entry| entry.kind() == Some(ObjectType::Blob)) {
+            source
+                .capture(&database, entry.id())
+                .map_err(repository_failure)?;
+            new = Some(
+                repository
+                    .find_blob(entry.id())
+                    .map_err(repository_failure)?,
+            );
+        }
+        for delta in std::iter::once(delta).chain(base_delta) {
+            for file in [delta.old_file(), delta.new_file()] {
+                if !file.id().is_zero() && file.mode() != git2::FileMode::Commit {
+                    source
+                        .capture(&database, file.id())
+                        .map_err(repository_failure)?;
                 }
-                *remaining -= 1;
-                true
-            });
-            if !carried {
-                let prefix = hunk.bytes.len().min(preview_bytes);
-                let (preview, shortened) =
-                    crate::bounded::bounded_bytes(&hunk.bytes[..prefix], preview_bytes);
-                let truncated = shortened || prefix < hunk.bytes.len();
-                preview_bytes -= preview.len();
-                dropped.insert(path.to_owned(), (preview, truncated));
-                break;
             }
+        }
+        let branch_hunks = hunks(&own, index, None)?;
+        let base_hunks = base_index
+            .map(|index| hunks(&base_changes, index, None))
+            .transpose()?
+            .unwrap_or_default();
+        if !preserves_nonconflicting_text(
+            old.as_ref().map_or(&[], git2::Blob::content),
+            new.as_ref().map_or(&[], git2::Blob::content),
+            &branch_hunks,
+            &base_hunks,
+        ) && let Some(hunk) = branch_hunks.first()
+        {
+            record_dropped_hunk(&mut dropped, &mut preview_bytes, path, hunk);
         }
     }
     source.validate(authority).map_err(repository_failure)?;
@@ -263,6 +383,19 @@ pub(super) fn verify_merge(
                 .collect::<Result<_, GitPushFailure>>()?,
         ))
     }
+}
+
+fn record_dropped_hunk(
+    dropped: &mut BTreeMap<std::path::PathBuf, (String, bool)>,
+    preview_bytes: &mut usize,
+    path: &Path,
+    hunk: &Hunk,
+) {
+    let prefix = hunk.bytes.len().min(*preview_bytes);
+    let (preview, shortened) = crate::bounded::bounded_bytes(&hunk.bytes[..prefix], *preview_bytes);
+    let truncated = shortened || prefix < hunk.bytes.len();
+    *preview_bytes -= preview.len();
+    dropped.insert(path.to_owned(), (preview, truncated));
 }
 
 fn detect_renames(
@@ -303,6 +436,7 @@ fn diff_options() -> DiffOptions {
 struct Hunk {
     bytes: Vec<u8>,
     changes: Vec<Range<usize>>,
+    old_lines: Option<Range<usize>>,
 }
 
 impl Hunk {
@@ -311,12 +445,151 @@ impl Hunk {
         Self {
             bytes,
             changes: std::iter::once(0..end).collect(),
+            old_lines: None,
         }
     }
 
     fn effects(&self) -> impl Iterator<Item = &[u8]> {
         self.changes.iter().map(|range| &self.bytes[range.clone()])
     }
+}
+
+// Non-conflicting spans are literal; only overlapping parent edits admit new text.
+fn preserves_nonconflicting_text(
+    ancestor: &[u8],
+    result: &[u8],
+    branch: &[Hunk],
+    base: &[Hunk],
+) -> bool {
+    let lines: Vec<_> = ancestor.split_inclusive(|byte| *byte == b'\n').collect();
+    let mut edits: Vec<_> = branch
+        .iter()
+        .map(|hunk| (false, hunk))
+        .chain(base.iter().map(|hunk| (true, hunk)))
+        .filter_map(|(side, hunk)| hunk.old_lines.as_ref().map(|range| (range, side, hunk)))
+        .collect();
+    if edits.is_empty() {
+        return ancestor == result
+            || branch
+                .iter()
+                .chain(base)
+                .flat_map(Hunk::effects)
+                .any(|effect| effect.starts_with(b"object "));
+    }
+    edits.sort_by_key(|(range, _, _)| (range.start, range.end));
+    let mut fixed = Vec::new();
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    let mut index = 0;
+    while index < edits.len() {
+        let start = edits[index].0.start;
+        let mut end = edits[index].0.end;
+        let first = index;
+        index += 1;
+        while index < edits.len() && edits[index].0.start <= end {
+            end = end.max(edits[index].0.end);
+            index += 1;
+        }
+        for line in &lines[cursor..start] {
+            fixed.extend_from_slice(line);
+        }
+        let region = &edits[first..index];
+        let replacement = |side| {
+            let mut bytes = Vec::new();
+            let mut cursor = start;
+            for (range, _, hunk) in region.iter().filter(|(_, source, _)| *source == side) {
+                for line in &lines[cursor..range.start] {
+                    bytes.extend_from_slice(line);
+                }
+                for effect in hunk
+                    .effects()
+                    .filter(|effect| effect.first() == Some(&b'+'))
+                {
+                    bytes.extend_from_slice(&effect[1..]);
+                }
+                cursor = range.end;
+            }
+            for line in &lines[cursor..end] {
+                bytes.extend_from_slice(line);
+            }
+            bytes
+        };
+        let branch_changed = region.iter().any(|(_, side, _)| !side);
+        let base_changed = region.iter().any(|(_, side, _)| *side);
+        let branch_text = replacement(false);
+        let base_text = replacement(true);
+        if branch_changed && base_changed && branch_text != base_text {
+            spans.push(std::mem::take(&mut fixed));
+        } else {
+            fixed.extend_from_slice(if branch_changed {
+                &branch_text
+            } else {
+                &base_text
+            });
+        }
+        cursor = end;
+    }
+    for line in &lines[cursor..] {
+        fixed.extend_from_slice(line);
+    }
+    if spans.is_empty() {
+        return result == fixed;
+    }
+    let Some(mut remainder) = result.strip_prefix(spans[0].as_slice()) else {
+        return false;
+    };
+    for span in &spans[1..] {
+        if span.is_empty() {
+            continue;
+        }
+        let Some(offset) = remainder.find(span) else {
+            return false;
+        };
+        remainder = &remainder[offset + span.len()..];
+    }
+    remainder.ends_with(&fixed)
+}
+
+fn is_text_change(effect: &[u8]) -> bool {
+    matches!(effect.first(), Some(b'+' | b'-'))
+}
+
+fn consume_effect(permitted: &mut BTreeMap<&[u8], usize>, effect: &[u8]) -> bool {
+    let Some(remaining) = permitted.get_mut(effect) else {
+        return false;
+    };
+    if *remaining == 0 {
+        return false;
+    }
+    *remaining -= 1;
+    true
+}
+
+fn text_hunks(patch: &Patch<'_>) -> Result<Vec<Hunk>, GitPushFailure> {
+    let mut hunks = Vec::new();
+    for index in 0..patch.num_hunks() {
+        let (header, lines) = patch.hunk(index).map_err(repository_failure)?;
+        let start = header
+            .old_start()
+            .saturating_sub(u32::from(header.old_lines() != 0)) as usize;
+        let mut hunk = Hunk {
+            old_lines: Some(start..start + header.old_lines() as usize),
+            ..Hunk::default()
+        };
+        for line in 0..lines {
+            let line = patch
+                .line_in_hunk(index, line)
+                .map_err(repository_failure)?;
+            let start = hunk.bytes.len();
+            hunk.bytes.push(line.origin() as u8);
+            hunk.bytes.extend_from_slice(line.content());
+            if matches!(line.origin(), '+' | '-') {
+                hunk.changes.push(start..hunk.bytes.len());
+            }
+        }
+        hunks.push(hunk);
+    }
+    Ok(hunks)
 }
 
 fn hunks(
@@ -352,20 +625,7 @@ fn hunks(
         ));
     }
     if let Some(patch) = Patch::from_diff(diff, index).map_err(repository_failure)? {
-        for index in 0..patch.num_hunks() {
-            let (_, lines) = patch.hunk(index).map_err(repository_failure)?;
-            let mut hunk = Hunk::default();
-            for line in 0..lines {
-                let line = patch
-                    .line_in_hunk(index, line)
-                    .map_err(repository_failure)?;
-                let start = hunk.bytes.len();
-                hunk.bytes.push(line.origin() as u8);
-                hunk.bytes.extend_from_slice(line.content());
-                hunk.changes.push(start..hunk.bytes.len());
-            }
-            hunks.push(hunk);
-        }
+        hunks.extend(text_hunks(&patch)?);
         if patch.num_hunks() > 0 || delta.old_file().id() == delta.new_file().id() {
             return Ok(hunks);
         }

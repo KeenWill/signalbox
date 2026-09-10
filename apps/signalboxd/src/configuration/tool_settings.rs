@@ -29,9 +29,15 @@ pub struct DaemonToolConfiguration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceInstructionConfiguration {
     pub(super) roots: Box<[InstructionPath]>,
+    limits: signalbox_application::InstructionDiscoveryLimits,
 }
 
 impl WorkspaceInstructionConfiguration {
+    /// Returns configured scan limits, with `None` denoting no limit.
+    pub const fn limits(&self) -> signalbox_application::InstructionDiscoveryLimits {
+        self.limits
+    }
+
     /// Returns explicit roots in deterministic configuration order.
     pub fn roots(&self) -> &[InstructionPath] {
         &self.roots
@@ -89,13 +95,24 @@ pub(super) fn parse_workspace_instruction_configuration(
     let Some(item) = item else {
         return Ok(WorkspaceInstructionConfiguration {
             roots: Box::new([]),
+            limits: signalbox_application::InstructionDiscoveryLimits::default(),
         });
     };
     let table = item
         .as_table()
         .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
-    reject_unknown_fields(table, &["version", "registered_roots"])
-        .map_err(|_| HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+    reject_unknown_fields(
+        table,
+        &[
+            "version",
+            "registered_roots",
+            "max_classified_entries",
+            "max_findings",
+            "max_candidate_source_bytes",
+            "max_elapsed",
+        ],
+    )
+    .map_err(|_| HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
     if table.get("version").and_then(Item::as_integer) != Some(1) {
         return Err(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration);
     }
@@ -119,8 +136,47 @@ pub(super) fn parse_workspace_instruction_configuration(
         }
         roots.push(root);
     }
+    let defaults = signalbox_application::InstructionDiscoveryLimits::default();
+    let integer = |field: &str, default: Option<u64>| match table.get(field) {
+        None => Ok(default),
+        Some(item) if item.as_str() == Some("none") => Ok(None),
+        Some(item) => item
+            .as_integer()
+            .and_then(|value| u64::try_from(value).ok())
+            .map(Some)
+            .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration),
+    };
+    let findings = integer(
+        "max_findings",
+        defaults.findings.map(|value| value.get() as u64),
+    )?
+    .map(|value| {
+        usize::try_from(value)
+            .ok()
+            .and_then(std::num::NonZeroUsize::new)
+            .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)
+    })
+    .transpose()?;
+    let elapsed = match table.get("max_elapsed") {
+        None => defaults.elapsed,
+        Some(item) if item.as_str() == Some("none") => None,
+        Some(item) => Some(
+            item.as_str()
+                .and_then(super::numeric_bounds::parse_numeric_bound_duration)
+                .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?,
+        ),
+    };
     Ok(WorkspaceInstructionConfiguration {
         roots: roots.into_boxed_slice(),
+        limits: signalbox_application::InstructionDiscoveryLimits {
+            classified_entries: integer("max_classified_entries", defaults.classified_entries)?,
+            findings,
+            candidate_source_bytes: integer(
+                "max_candidate_source_bytes",
+                defaults.candidate_source_bytes,
+            )?,
+            elapsed,
+        },
     })
 }
 
@@ -450,4 +506,32 @@ pub(super) fn parse_approval_wait_timeout(
             .map(Some)
             .ok_or(HubModelConfigurationError::InvalidToolSettings),
     }
+}
+
+pub(super) fn parse_tool_proposal_limits(
+    item: Option<&Item>,
+) -> Result<signalbox_application::ToolProposalLimits, HubModelConfigurationError> {
+    let defaults = signalbox_application::ToolProposalLimits::default();
+    let Some(item) = item else {
+        return Ok(defaults);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidField)?;
+    reject_unknown_fields(table, &["max_requests", "max_argument_bytes"])?;
+    let bound = |key, default| -> Result<Option<u64>, HubModelConfigurationError> {
+        match table.get(key) {
+            None => Ok(default),
+            Some(item) if item.as_str() == Some("none") => Ok(None),
+            Some(item) => item
+                .as_integer()
+                .and_then(|value| u64::try_from(value).ok())
+                .map(Some)
+                .ok_or(HubModelConfigurationError::InvalidField),
+        }
+    };
+    Ok(signalbox_application::ToolProposalLimits {
+        max_requests: bound("max_requests", defaults.max_requests)?,
+        max_argument_bytes: bound("max_argument_bytes", defaults.max_argument_bytes)?,
+    })
 }
