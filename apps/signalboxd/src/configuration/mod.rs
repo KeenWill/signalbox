@@ -95,7 +95,8 @@ use toml_scalars::{
 };
 pub(crate) use toml_scalars::{reject_unknown_fields, required_string, validated_name};
 pub use tool_settings::{
-    DaemonToolConfiguration, MAX_COMPACTION_PROMPT_UTF8_BYTES, WorkspaceInstructionConfiguration,
+    DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES, DaemonToolConfiguration,
+    MAX_COMPACTION_PROMPT_UTF8_BYTES, WorkspaceInstructionConfiguration,
 };
 use tool_settings::{
     parse_approval_judge, parse_daemon_tool_settings, parse_git_identity,
@@ -145,6 +146,7 @@ pub struct HubModelConfiguration {
     claude_cli: Option<ClaudeCliConfiguration>,
     claude_cli_credential_profile: Option<Arc<str>>,
     compaction_prompt: Arc<str>,
+    conversation_import_max_source_bytes: usize,
     web_fetch_egress_policy: WebFetchEgressPolicy,
     daemon_tools: Option<DaemonToolConfiguration>,
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
@@ -189,6 +191,7 @@ impl HubModelConfiguration {
             global_model_settings,
             model_settings_profiles,
             compaction_prompt,
+            conversation_import_max_source_bytes,
             blob_storage,
             file_media,
             web_fetch_egress_policy,
@@ -652,6 +655,7 @@ impl HubModelConfiguration {
             claude_cli,
             claude_cli_credential_profile,
             compaction_prompt,
+            conversation_import_max_source_bytes,
             web_fetch_egress_policy,
             daemon_tools,
             tool_approval_postures,
@@ -1178,10 +1182,16 @@ impl HubModelConfiguration {
         &self.numeric_bounds
     }
 
+    /// Returns the maximum assembled source bytes for one conversation import.
+    pub const fn conversation_import_max_source_bytes(&self) -> usize {
+        self.conversation_import_max_source_bytes
+    }
+
     /// Whether the compiled sandboxed file tools are enabled at startup.
     pub const fn file_media(&self) -> bool {
         self.file_media
     }
+
     /// Returns the validated blob-store registry and write routes, when enabled.
     pub const fn blob_storage(&self) -> Option<&BlobStorageConfiguration> {
         self.blob_storage.as_ref()

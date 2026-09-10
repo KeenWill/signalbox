@@ -333,8 +333,6 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(lastPage.count, 1)
     XCTAssertEqual(lastPage.first?.sourceSpeakerLabel, "Assistant")
     XCTAssertNotEqual(firstPage.first?.importedEntryID, lastPage.first?.importedEntryID)
-    XCTAssertEqual(inventory.dropFacts.droppedRecordCount.rawValue, 1)
-    XCTAssertEqual(inventory.dropFacts.firstDroppedRecordPosition?.rawValue, 2)
     XCTAssertThrowsError(try inventory.entries(in: 0..<(inventory.entryCount + 1)))
   }
 
@@ -7142,9 +7140,7 @@ private enum ProcessDriverFixture {
           "request_id":"1",
           "message":{
             "type":"imported_conversation_start",
-            "imported_conversation_id":"\(conversationID.rawValue)",
-            "dropped_record_count":"0",
-            "first_dropped_record_position":null
+            "imported_conversation_id":"\(conversationID.rawValue)"
           }
         }
         """.utf8

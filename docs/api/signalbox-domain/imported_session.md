@@ -8,7 +8,6 @@
 pub struct CreateSessionFromImportedFrontierAppliedResult {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl CreateSessionFromImportedFrontierAppliedResult {
-    pub const fn from_session(session: SessionId) -> Self;
     pub const fn session(&self) -> SessionId;
 }
 ```
@@ -380,7 +379,7 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
-        imported_entries: vec::Vec<ImportedTranscriptEntryInput>,
+        imported_conversation: ImportedConversation,
         seed_records: vec::Vec<ImportedSessionSeedReconstitutionInput>,
         seed_snapshots: vec::Vec<ResolvedContextFrontierReconstitutionInput>,
         semantic_entries: vec::Vec<SemanticTranscriptEntryReconstitutionInput>,
@@ -398,7 +397,7 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
     pub const fn defaults_session(&self) -> SessionId;
     pub const fn defaults_version(&self) -> SessionConfigurationDefaultsVersion;
     pub const fn defaults(&self) -> &SessionConfigurationDefaults;
-    pub fn imported_entries(&self) -> &[ImportedTranscriptEntryInput];
+    pub const fn imported_conversation(&self) -> &ImportedConversation;
     pub fn seed_records(&self) -> &[ImportedSessionSeedReconstitutionInput];
     pub fn seed_snapshots(&self) -> &[ResolvedContextFrontierReconstitutionInput];
     pub fn semantic_entries(&self) -> &[SemanticTranscriptEntryReconstitutionInput];

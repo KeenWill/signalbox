@@ -2544,12 +2544,12 @@ fn import_transport_selects_single_shot_only_when_the_exact_frame_fits()
     let request_id = RequestId::try_new(1)?;
 
     assert!(source_fits_single_shot_import(
-        ConversationImportFormat::CodexRolloutJsonlV2,
+        ConversationImportFormat::CodexRolloutJsonlV1,
         small_source,
         request_id,
     )?);
     assert!(!source_fits_single_shot_import(
-        ConversationImportFormat::CodexRolloutJsonlV2,
+        ConversationImportFormat::CodexRolloutJsonlV1,
         &oversized_source,
         request_id,
     )?);
@@ -2612,7 +2612,7 @@ async fn large_file_import_streams_exact_bounded_assembly_and_commits() -> Resul
         assert_eq!(
             begin.request(),
             &ClientRequest::BeginConversationImport {
-                format: ConversationImportFormat::CodexRolloutJsonlV2,
+                format: ConversationImportFormat::CodexRolloutJsonlV1,
                 declared_size_bytes: CanonicalU64::new(
                     u64::try_from(expected_source.len()).map_err(io::Error::other)?,
                 ),
@@ -2689,8 +2689,6 @@ async fn large_file_import_streams_exact_bounded_assembly_and_commits() -> Resul
             commit.request_id(),
             ServerMessage::ConversationImportInserted {
                 imported_conversation_id,
-                dropped_record_count: CanonicalU64::new(0),
-                first_dropped_record_position: None,
             },
         )
         .map_err(io::Error::other)?;
@@ -2703,20 +2701,14 @@ async fn large_file_import_streams_exact_bounded_assembly_and_commits() -> Resul
 
     let outcome = import_conversation_file(
         &mut client,
-        ConversationImportFormat::CodexRolloutJsonlV2,
+        ConversationImportFormat::CodexRolloutJsonlV1,
         source_file,
     )
     .await?;
 
     assert_eq!(
         outcome,
-        ConversationImportOutcome::Inserted(
-            imported_conversation_id,
-            crate::conversation_import::ConversationImportDropFacts {
-                dropped_record_count: CanonicalU64::new(0),
-                first_dropped_record_position: None,
-            },
-        )
+        ConversationImportOutcome::Inserted(imported_conversation_id)
     );
     server.await??;
     Ok(())
@@ -3470,8 +3462,6 @@ async fn imported_rejects_noncontiguous_positions_before_writing_rows() -> Resul
         response.extend_from_slice(
             &encode_server_line(&frame(ServerMessage::ImportedConversationStart {
                 imported_conversation_id,
-                dropped_record_count: CanonicalU64::new(0),
-                first_dropped_record_position: None,
             })?)
             .map_err(io::Error::other)?,
         );
@@ -3531,8 +3521,6 @@ async fn imported_rejects_an_empty_entry_inventory() -> Result<(), Box<dyn Error
         response.extend_from_slice(
             &encode_server_line(&frame(ServerMessage::ImportedConversationStart {
                 imported_conversation_id,
-                dropped_record_count: CanonicalU64::new(0),
-                first_dropped_record_position: None,
             })?)
             .map_err(io::Error::other)?,
         );
@@ -3607,8 +3595,6 @@ async fn continue_resolves_latest_to_a_concrete_wire_position() -> Result<(), Bo
         response.extend_from_slice(
             &encode_server_line(&frame(ServerMessage::ImportedConversationStart {
                 imported_conversation_id,
-                dropped_record_count: CanonicalU64::new(0),
-                first_dropped_record_position: None,
             })?)
             .map_err(io::Error::other)?,
         );

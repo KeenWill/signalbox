@@ -333,18 +333,12 @@ fn imported_names_its_entry_count_as_the_greatest_selectable_position() {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     Output::new(&mut stdout, &mut stderr, false)
-        .imported_conversation_entry_count(
-            2,
-            crate::conversation_import::ConversationImportDropFacts {
-                dropped_record_count: CanonicalU64::new(0),
-                first_dropped_record_position: None,
-            },
-        )
+        .imported_conversation_entry_count(2)
         .expect("in-memory output cannot fail");
 
     let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
     expect![[r#"
-        entry_count=2 dropped_record_count=0 first_dropped_record_position=none
+        entry_count=2
     "#]]
     .assert_eq(&rendered);
     assert!(stderr.is_empty());

@@ -505,8 +505,8 @@ impl error::Error for CanonicalValueError {
 
 ```rust
 pub enum ConversationImportFormat {
-    ClaudeCodeSessionJsonlV3,
-    CodexRolloutJsonlV2,
+    ClaudeCodeSessionJsonlV2,
+    CodexRolloutJsonlV1,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
@@ -520,7 +520,6 @@ pub enum ConversationImportRejectionClass {
     InvalidUtf8,
     InvalidJson,
     JsonDepthExceeded,
-    RawRecordTooLarge,
     TopLevelNotObject,
     InvalidRecordType,
     InvalidSourceMetadata,

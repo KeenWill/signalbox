@@ -802,33 +802,6 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// Import completion preserves the exact malformed-record summary.
-  func testConversationImportResultDecodesDropFacts() throws {
-    let importedConversationID = "33333333-3333-4333-8333-333333333333"
-    let encoded = Data(
-      """
-      {
-        "version":1,
-        "request_id":"10",
-        "message":{
-          "type":"conversation_import_inserted",
-          "imported_conversation_id":"\(importedConversationID)",
-          "dropped_record_count":"3",
-          "first_dropped_record_position":"2"
-        }
-      }
-      """.utf8
-    )
-
-    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
-    guard case .conversationImportInserted(let conversationID, let dropFacts) = frame.message else {
-      return XCTFail("expected an inserted import result")
-    }
-    XCTAssertEqual(conversationID.rawValue, importedConversationID)
-    XCTAssertEqual(dropFacts.droppedRecordCount.rawValue, 3)
-    XCTAssertEqual(dropFacts.firstDroppedRecordPosition?.rawValue, 2)
-  }
-
   /// admitted imported-entry members decode without weakening the closed shape.
   func testImportedConversationEntryDecodesItsAttestedTextPreview() throws {
     let importedEntryID = "33333333-3333-4333-8333-333333333333"
@@ -2937,7 +2910,6 @@ final class ProcessProtocolTests: XCTestCase {
       conversation.displayTitle,
       ProcessProtocolFixture.untitledImportedConversationLabel
     )
-    XCTAssertEqual(conversation.importedSourceFormat, .codexRolloutJSONLV2)
   }
 
   func testPublicFrameDecoderRejectsOversizedInputBeforeScanning() {
@@ -3626,7 +3598,7 @@ private enum ProcessProtocolFixture {
         "imported_conversation_id":"33333333-3333-4333-8333-333333333333",
         "title":null,
         "entry_count":"1",
-        "source_format":"codex_rollout_jsonl_v2"
+        "source_format":"codex_rollout_jsonl_v1"
       }
       """.utf8
     )

@@ -19,7 +19,7 @@ use std::{
 
 use signalbox_application::{
     CreateSessionFromImportedFrontierOutcome, ImportedConversationConverter,
-    ImportedConversationDropFacts, ImportedConversationStore,
+    ImportedConversationStore,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -174,10 +174,9 @@ async fn first_imported_frontier_creation_commits_exact_seed_atomically()
             "{\"type\":\"summary\",\"value\":null}"
         ),
     );
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
 
@@ -229,10 +228,9 @@ async fn first_imported_frontier_creation_commits_exact_seed_atomically()
 async fn legacy_imported_creation_rejects_explicit_model_settings() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x13a, 0x23a, "{\"type\":\"summary\",\"value\":null}");
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let command = CreateSessionFromImportedFrontier::new(
@@ -308,10 +306,9 @@ async fn equal_replay_requires_its_placement_effect_without_generation()
             "{\"type\":\"summary\",\"value\":null}"
         ),
     );
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
 
@@ -391,10 +388,9 @@ async fn imported_creation_replay_rejects_a_lagging_placement_head() -> Result<(
         ARBITRARY_LAGGING_HEAD_IMPORTED_ENTRY_ID_SEED,
         "{\"type\":\"summary\",\"value\":null}",
     );
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let command = imported_command(
@@ -473,10 +469,9 @@ async fn command_load_reconstitutes_complete_checked_seed() -> Result<(), Box<dy
             "{\"type\":\"summary\",\"value\":null}"
         ),
     );
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
 
@@ -533,10 +528,9 @@ async fn current_session_load_reconstitutes_imported_ancestry() -> Result<(), Bo
             "{\"type\":\"summary\",\"value\":null}"
         ),
     );
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
 
@@ -588,10 +582,9 @@ async fn conflicting_reuse_is_typed_and_generation_free() -> Result<(), Box<dyn 
             "{\"type\":\"summary\",\"value\":null}"
         ),
     );
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
 
@@ -670,10 +663,9 @@ async fn missing_conversation_remains_unclaimed_and_generation_free() -> Result<
 async fn missing_frontier_remains_unclaimed_and_generation_free() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let stored = imported(0x110, 0x210, "{\"type\":\"summary\",\"value\":null}");
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         stored.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -716,10 +708,9 @@ async fn concurrent_equal_creation_has_one_identity_consuming_winner() -> Result
             "{\"type\":\"summary\",\"value\":null}"
         ),
     );
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let command = imported_command(0x315, &conversation, ImportedSessionRelationship::Fork);
@@ -801,10 +792,9 @@ async fn concurrent_equal_creation_has_one_identity_consuming_winner() -> Result
 async fn generated_session_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x116, 0x216, "{\"type\":\"summary\",\"value\":null}");
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let repository = ImportedSessionRepository::new(pool, test_session_credential_pin());
@@ -850,10 +840,9 @@ async fn generated_session_identity_collision_is_typed() -> Result<(), Box<dyn E
 async fn generated_semantic_entry_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x118, 0x218, "{\"type\":\"summary\",\"value\":null}");
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let repository = ImportedSessionRepository::new(pool, test_session_credential_pin());
@@ -899,10 +888,9 @@ async fn generated_semantic_entry_identity_collision_is_typed() -> Result<(), Bo
 async fn generated_seed_frontier_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x11a, 0x21a, "{\"type\":\"summary\",\"value\":null}");
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let repository = ImportedSessionRepository::new(pool, test_session_credential_pin());
@@ -948,10 +936,9 @@ async fn generated_seed_frontier_identity_collision_is_typed() -> Result<(), Box
 async fn command_load_rejects_stored_sentinel_command_identity() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x11c, 0x21c, "{\"type\":\"summary\",\"value\":null}");
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -1001,10 +988,9 @@ async fn command_load_rejects_stored_sentinel_command_identity() -> Result<(), B
 async fn current_load_rejects_imported_template_provenance() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x11f, 0x21f, "{\"type\":\"summary\",\"value\":null}");
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -1052,10 +1038,9 @@ async fn current_load_rejects_imported_template_provenance() -> Result<(), Box<d
 async fn current_load_rejects_missing_imported_seed() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x120, 0x220, "{\"type\":\"summary\",\"value\":null}");
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -1101,10 +1086,9 @@ async fn current_load_rejects_missing_imported_seed() -> Result<(), Box<dyn Erro
 async fn current_load_rejects_cross_wired_seed_header_count() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x121, 0x221, "{\"type\":\"summary\",\"value\":null}");
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -1157,10 +1141,9 @@ async fn imported_creation_runner_placement_is_retained_and_compared_on_replay()
         Uuid::now_v7().as_u128(),
         "{\"type\":\"summary\",\"value\":null}",
     );
-    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+    ImportedConversationStore::resolve_or_insert(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),
-        ImportedConversationDropFacts::none(),
     )
     .await?;
     let repository = ImportedSessionRepository::new(pool, test_session_credential_pin());

@@ -323,14 +323,8 @@ const fn imported_source_format_label(
         signalbox_process_protocol::ImportedConversationSourceFormat::ClaudeCodeSessionJsonlV2 => {
             "claude-code-session-jsonl-v2"
         }
-        signalbox_process_protocol::ImportedConversationSourceFormat::ClaudeCodeSessionJsonlV3 => {
-            "claude-code-session-jsonl-v3"
-        }
         signalbox_process_protocol::ImportedConversationSourceFormat::CodexRolloutJsonlV1 => {
             "codex-rollout-jsonl-v1"
-        }
-        signalbox_process_protocol::ImportedConversationSourceFormat::CodexRolloutJsonlV2 => {
-            "codex-rollout-jsonl-v2"
         }
     }
 }

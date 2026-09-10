@@ -13,12 +13,8 @@ const formatLabel = (format: WebImportSummary['format']): string => {
       return 'Claude Code, converter 1'
     case 'claude_code_session_jsonl_v2':
       return 'Claude Code, converter 2'
-    case 'claude_code_session_jsonl_v3':
-      return 'Claude Code, converter 3'
     case 'codex_rollout_jsonl_v1':
       return 'Codex rollout, converter 1'
-    case 'codex_rollout_jsonl_v2':
-      return 'Codex rollout, converter 2'
   }
 }
 

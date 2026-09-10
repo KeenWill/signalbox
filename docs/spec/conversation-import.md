@@ -7,12 +7,12 @@ record, and a session can later be created from any of its entry boundaries.
 
 An imported conversation (`ImportedConversation`) is one snapshot of an external
 transcript. The daemon mints its identity; its content identity is a digest over
-the converter's format and the sequence of accepted raw source records. One
-header holds two sequences: the raw records and the normalized entries derived
-from them. A raw record is one accepted nonempty physical JSONL record of the
-source, preserved verbatim as a content-addressed blob. Each normalized entry
-references the raw record it came from, so every conversion decision is
-traceable to exact source bytes.
+the converter's format and the sequence of raw source records. One header holds
+two sequences: the raw records and the normalized entries derived from them. A
+raw record is one nonempty physical JSONL record of the source, preserved
+verbatim as a content-addressed blob. Each normalized entry references the raw
+record it came from, so every conversion decision is traceable to exact source
+bytes.
 
 Every source field on an entry is attested with a value, attested absent, or not
 attested; a JSON null is attested absence and an omitted member is not attested.
@@ -33,34 +33,33 @@ reach a model.
 bytes into a checked aggregate. A converter consumes the bytes, one
 caller-supplied conversation identity, and a total lazy callback that supplies
 entry identities; it declares a closed `ImportedConversationFormat` carrying
-both the source family and the Signalbox converter version. Strict Claude Code
-conversion uses version 2 and resilient ingestion uses version 3. Strict Codex
-rollout conversion uses version 1 and resilient ingestion uses version 2.
+both the source family and the Signalbox converter version. Two converters
+exist. `ClaudeCodeJsonlConverter` reads Claude Code session JSONL and produces
+converter version 2; stored version-1 snapshots keep the version-1
+interpretation. `CodexRolloutJsonlConverter` reads Codex rollout JSONL and
+produces converter version 1.
 
-`ImportConversationService` runs bounded in-frame conversion. Chunked conversion
-feeds one accepted or dropped record at a time to the append-only Postgres
-import store. The store keeps raw bytes in the blob store under their content
-hash ([blob-storage](blob-storage.md)) and the header, raw-record occurrences,
-and normalized entries in relational tables. Each header also records a display
-title derived once from the preserved records, so the unified conversation
-listing in [process-protocol](process-protocol.md) can show imported rows by
-name. When no preserved record yields a title, the header records the
-underivable state and carries none.
+`ImportConversationService` runs a converter and calls the append-only Postgres
+import store once, after complete conversion. The store keeps raw bytes in the
+blob store under their content hash ([blob-storage](blob-storage.md)) and the
+header, raw-record occurrences, and normalized entries in relational tables.
+Each header also records a display title derived once from the preserved
+records, so the unified conversation listing in
+[process-protocol](process-protocol.md) can show imported rows by name. When no
+preserved record yields a title, the header records the underivable state and
+carries none.
 
 Three surfaces reach the store. The user terminal imports one named file or
 every candidate file under a directory; a source that fits one frame is sent as
 a single request, and a larger one is assembled on the daemon through a chunked
-begin, append, and commit sequence. Chunked assembly streams into a private file
-spool and has no source-size ceiling. An inspection read lists the normalized
-entries of one import with their positions and reports the count and first
-physical position of any records dropped during conversion, so a user can choose
-the position a session continues from. Terminal inspection pages entries from
-Postgres while writing its file-backed response spool. A browser read model
-lists imports, returns a descriptor for one, and reads only the bounded entry
-window requested by a conversation tool. The terminal and inspection wire shapes
-are owned by [process-protocol](process-protocol.md). The browser DTOs are
-defined in the web-contract crate; the daemon's web adapter serves the routes
-that carry them.
+begin, append, and commit sequence. The one operator setting,
+`conversation_import.max_source_bytes`, bounds the assembled source and defaults
+to 256 MiB. An inspection read lists the normalized entries of one import with
+their positions, so a user can choose the position a session continues from. A
+browser read model lists imports, returns a descriptor for one, and windows its
+entries around a position. The terminal and inspection wire shapes are owned by
+[process-protocol](process-protocol.md). The browser DTOs are defined in the
+web-contract crate; the daemon's web adapter serves the routes that carry them.
 
 ## Design decisions
 
@@ -154,12 +153,9 @@ performs no session, scheduler, slot, turn, attempt, model-call, tool,
 durable-command, or outbox transition, and it neither creates nor mutates a
 session.
 
-Later session creation checks and inserts the selected normalized prefix one
-entry at a time without loading the complete prefix or raw audit records.
-
-Every accepted nonempty physical JSONL record is preserved verbatim before
-normalization. An accepted non-message record produces a typed source event
-rather than being recast as conversation text.
+Every nonempty physical JSONL record is preserved verbatim before normalization.
+A non-message record produces a typed source event rather than being dropped or
+recast as conversation text.
 
 Imported text retains the exact decoded scalar sequence, including empty text,
 whitespace, line endings, normalization distinctions, and U+0000. An absent
@@ -175,13 +171,11 @@ frontier.
 
 A converter invokes the entry-identity callback only after complete parsing and
 normalization, once per emitted entry; it neither preallocates identities nor
-invokes the callback for an entry it does not emit. A physical record that fails
-JSON or content-shape conversion is dropped without guessing; conversion
-continues, and the result records the dropped count and first dropped physical
-position. A source with no valid records is rejected. JSON normalization retains
-its bounded container depth. A behavior change that alters raw-record
-boundaries, entries, attestations, content, order, hashes, or frontiers requires
-a new converter version; an existing version is never reinterpreted.
+invokes the callback for an entry it does not emit. A malformed content shape
+fails the complete conversion rather than being dropped or guessed. A behavior
+change that alters raw-record boundaries, entries, attestations, content, order,
+hashes, or frontiers requires a new converter version; an existing version is
+never reinterpreted.
 
 Scan traverses the complete tree rooted at the named directory without following
 symbolic links, opening the root and each descendant through no-follow
@@ -190,13 +184,11 @@ unread subtree. A skipped outcome carries the exact client error and means the
 client received no definitive successful receipt, not that the request was
 uncommitted.
 
-The chunked assembly and its idle permit are per-connection state. Once commit
-starts its blocking conversion worker, that worker owns the permit until it
-exits, including after a request deadline or disconnect. An already-in-progress
-refusal leaves the existing assembly available for append, commit, or explicit
-abort. Appends write bounded request chunks directly to the private file spool,
-so retained assembly memory does not grow with source size. Commit checks the
-declared byte count and incrementally converts and stores the spooled source. A
+The chunked assembly and the import permit are per-connection state, released by
+commit, abort, a terminal size or conversion rejection, and disconnect. An
+already-in-progress refusal leaves the existing assembly available for append,
+commit, or explicit abort. Commit supplies the whole assembled source to the
+same converter and `ImportConversationService` call as the single-shot path. A
 database failure is reported as an ambiguous commit, so the operator may retry
 the exact format and source bytes.
 
@@ -208,18 +200,13 @@ fail-closed before presentation. The client resolves `latest` against this
 read's entry count before constructing the durable command, prints the resolved
 ordinal, and sends a concrete position.
 
-Ingestion publishes and verifies each raw blob with no database transaction
-open, then records its catalog evidence in a short transaction. Connection-local
-temporary tables stage normalized rows without a long-lived transaction. After
-conversion, one transaction resolves or inserts the complete aggregate. An
-accepted raw record cannot exceed `blob_storage.max_blob_bytes`; the complete
-source has no cumulative blob-byte ceiling. Conversion rejects an oversized
-physical record before buffering or parsing beyond that per-record ceiling. One
-admitted import awaits at most one raw blob publication or verification at a
-time while holding the process-wide bulk-ingest permit; it never fans out
-concurrently. Writers acquire shared raw hashes and globally unique entry
-identities in their respective sorted key order and store physical positions
-explicitly.
+One transaction resolves or inserts a complete aggregate. Ingestion publishes
+and verifies every raw blob before that transaction, then registers the blob and
+replica rows in the same transaction that first references them. One admitted
+import awaits at most one raw blob publication or verification at a time while
+holding the process-wide bulk-ingest permit; it never fans out concurrently.
+Writers acquire shared raw hashes and globally unique entry identities in their
+respective sorted key order and store physical positions explicitly.
 
 Once a header exists, any hash mismatch, missing member, gap, duplicate entry
 identity, unknown version, invalid value, or lineage mismatch is typed

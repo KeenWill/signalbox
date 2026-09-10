@@ -472,6 +472,11 @@ credential_pool = "anthropic-main"
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
 
+# Maximum exact bytes retained in memory while assembling one chunked
+# conversation import. Omit this table to use the 256 MiB default.
+[conversation_import]
+max_source_bytes = 268435456
+
 # Optional exact-origin restriction. Without this table, web_fetch admits every
 # origin permitted by its transport. An empty allowed_origins array denies all.
 # [web_fetch]

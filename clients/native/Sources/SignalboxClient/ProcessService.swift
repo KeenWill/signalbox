@@ -869,16 +869,14 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       var entryIDs: Set<SignalboxCanonicalUUID> = []
       var retainedPreviewBytes: UInt = 0
       var started = false
-      var dropFacts: SignalboxImportedConversationDropFacts?
       while let frame = try await nextFrame(from: exchange) {
         switch frame.message {
-        case .importedConversationStart(let conversationID, let observedDropFacts) where !started:
+        case .importedConversationStart(let conversationID) where !started:
           guard conversationID == imported.importedConversationID else {
             throw SignalboxProcessServiceError.invalidPage(
               "The imported transcript start named a different conversation."
             )
           }
-          dropFacts = observedDropFacts
           started = true
         case .importedConversationEntry(let entry) where started:
           guard spool.count < policy.maximumImportedEntries else {
@@ -920,15 +918,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
               "The imported transcript count did not match its sequence and summary."
             )
           }
-          guard let dropFacts else {
-            throw SignalboxProcessServiceError.invalidPage(
-              "The imported transcript start omitted its drop facts."
-            )
-          }
-          return try spool.finish(
-            importedConversationID: imported.importedConversationID,
-            dropFacts: dropFacts
-          )
+          return try spool.finish(importedConversationID: imported.importedConversationID)
         case .protocolError(let error):
           throw remote(error)
         case .unknown(let kind, _, let diagnostic):

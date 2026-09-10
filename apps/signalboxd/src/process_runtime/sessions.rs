@@ -1864,14 +1864,8 @@ pub(super) const fn wire_imported_source_format(
         ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
             WireImportedConversationSourceFormat::ClaudeCodeSessionJsonlV2
         }
-        ImportedConversationFormat::ClaudeCodeSessionJsonlV3 => {
-            WireImportedConversationSourceFormat::ClaudeCodeSessionJsonlV3
-        }
         ImportedConversationFormat::CodexRolloutJsonlV1 => {
             WireImportedConversationSourceFormat::CodexRolloutJsonlV1
-        }
-        ImportedConversationFormat::CodexRolloutJsonlV2 => {
-            WireImportedConversationSourceFormat::CodexRolloutJsonlV2
         }
     }
 }

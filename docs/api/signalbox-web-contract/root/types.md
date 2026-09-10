@@ -169,9 +169,7 @@ pub struct WebBlobDescriptor {
 pub enum WebImportFormat {
     ClaudeCodeSessionJsonlV1,
     ClaudeCodeSessionJsonlV2,
-    ClaudeCodeSessionJsonlV3,
     CodexRolloutJsonlV1,
-    CodexRolloutJsonlV2,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

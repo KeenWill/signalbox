@@ -181,6 +181,7 @@ pub(crate) fn delegation_rejection_matches(
         | RejectionDetail::ImportedFrontierPositionOutOfRange { .. }
         | RejectionDetail::ConversationImportAlreadyInProgress {}
         | RejectionDetail::ConversationImportNotInProgress {}
+        | RejectionDetail::ConversationImportSourceTooLarge { .. }
         | RejectionDetail::ConversationImportSourceSizeMismatch { .. }
         | RejectionDetail::ConversationImportConversionFailed { .. } => false,
         RejectionDetail::BulkIngestAlreadyInProgress { .. }

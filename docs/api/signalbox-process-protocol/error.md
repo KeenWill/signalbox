@@ -211,6 +211,11 @@ pub enum RejectionDetail {
     },
     ConversationImportAlreadyInProgress {},
     ConversationImportNotInProgress {},
+    ConversationImportSourceTooLarge {
+        limit_bytes: CanonicalU64,
+        declared_size_bytes: CanonicalU64,
+        actual_size_bytes: option::Option<CanonicalU64>,
+    },
     ConversationImportSourceSizeMismatch {
         declared_size_bytes: CanonicalU64,
         actual_size_bytes: CanonicalU64,

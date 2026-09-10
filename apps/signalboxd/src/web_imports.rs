@@ -1,6 +1,6 @@
 //! Production browser adapter for bounded imported-conversation discovery.
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -22,7 +22,10 @@ use signalbox_domain::{
     ModelSelectionRequest, SessionConfigurationDefaults,
 };
 use signalbox_persistence::{
-    conversation_import::{ImportedConversationRepositoryError, ImportedRawBlobStorageError},
+    conversation_import::{
+        ImportedConversationRepository, ImportedConversationRepositoryError,
+        ImportedRawBlobStorageError,
+    },
     conversation_import_discovery::{
         ImportedContinuationReference, ImportedConversationDescriptor,
         ImportedConversationDiscoveryError, ImportedConversationDiscoveryRepository,
@@ -48,7 +51,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    HubModelConfiguration,
+    BlobStoreRegistry, HubModelConfiguration,
+    imported_source_blobs::ImportedSourceBlobStorage,
     web_http::{
         application_error, decode_bounded_json, decode_bounded_utf8, transport_error,
         validate_json_mutation, validate_text_mutation,
@@ -64,12 +68,29 @@ const DEFAULT_IMPORT_WINDOW_RADIUS: u32 = 25;
 struct WebImportState {
     pool: PgPool,
     model_configuration: HubModelConfiguration,
+    imported_conversations: ImportedConversationRepository,
 }
 
-pub(crate) fn router(pool: PgPool, model_configuration: HubModelConfiguration) -> Router {
+pub(crate) fn router(
+    pool: PgPool,
+    model_configuration: HubModelConfiguration,
+    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+) -> Router {
+    // Continuations reconstitute the imported aggregate from immutable blob
+    // storage, so the browser adapter shares the daemon's publication adapter
+    // rather than reading raw bytes the database no longer holds.
+    let imported_conversations = ImportedConversationRepository::with_blob_storage(
+        pool.clone(),
+        Arc::new(ImportedSourceBlobStorage::new(
+            pool.clone(),
+            blob_store_registry,
+            model_configuration.conversation_import_max_source_bytes(),
+        )),
+    );
     let state = WebImportState {
         pool,
         model_configuration,
+        imported_conversations,
     };
     let mutation = Router::new()
         .route("/{conversation}/continuations", post(continue_import))
@@ -117,11 +138,13 @@ async fn search_imports(
         Some(_) => return invalid_request("imports search correlation is not a UUID"),
         None => return invalid_request("imports search correlation is required"),
     };
-    let source_session_id =
-        match decode_bounded_utf8(request, MAX_IMPORT_SOURCE_SESSION_BYTES).await {
-            Ok(source_session_id) => source_session_id,
-            Err(response) => return response,
-        };
+    let maximum_bytes = state
+        .model_configuration
+        .conversation_import_max_source_bytes();
+    let source_session_id = match decode_bounded_utf8(request, maximum_bytes).await {
+        Ok(source_session_id) => source_session_id,
+        Err(response) => return response,
+    };
     catalog_request.source_session_id = Some(source_session_id);
     execute_list_imports(state, catalog_request, search_correlation).await
 }
@@ -334,12 +357,14 @@ async fn execute_continuation(
     state: &WebImportState,
     request: CanonicalContinuationRequest,
 ) -> Response {
-    let repository = ImportedSessionRepository::new(
+    let repository = ImportedSessionRepository::with_imported_conversations(
         state.pool.clone(),
         state.model_configuration.session_credential_pin(),
+        state.imported_conversations.clone(),
     );
-    match repository.load_applied(request.command_id).await {
-        Ok(Some((command, applied_result))) => {
+    match repository.load(request.command_id).await {
+        Ok(Some(recorded)) => {
+            let command = recorded.command();
             if command.imported_conversation() != request.conversation
                 || command.imported_frontier().through_entry() != request.entry
                 || command.imported_frontier().through_position() != request.position
@@ -348,7 +373,7 @@ async fn execute_continuation(
             {
                 return conflicting_reuse();
             }
-            return continuation_response(request, applied_result.session().into_uuid());
+            return continuation_response(request, recorded.applied_result().session().into_uuid());
         }
         Ok(None) => {}
         Err(ImportedSessionRepositoryError::DifferentCommandKind { .. }) => {
@@ -559,11 +584,7 @@ fn domain_format(format: WebImportFormat) -> ImportedConversationFormat {
         WebImportFormat::ClaudeCodeSessionJsonlV2 => {
             ImportedConversationFormat::ClaudeCodeSessionJsonlV2
         }
-        WebImportFormat::ClaudeCodeSessionJsonlV3 => {
-            ImportedConversationFormat::ClaudeCodeSessionJsonlV3
-        }
         WebImportFormat::CodexRolloutJsonlV1 => ImportedConversationFormat::CodexRolloutJsonlV1,
-        WebImportFormat::CodexRolloutJsonlV2 => ImportedConversationFormat::CodexRolloutJsonlV2,
     }
 }
 
@@ -575,11 +596,7 @@ fn web_format(format: ImportedConversationFormat) -> WebImportFormat {
         ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
             WebImportFormat::ClaudeCodeSessionJsonlV2
         }
-        ImportedConversationFormat::ClaudeCodeSessionJsonlV3 => {
-            WebImportFormat::ClaudeCodeSessionJsonlV3
-        }
         ImportedConversationFormat::CodexRolloutJsonlV1 => WebImportFormat::CodexRolloutJsonlV1,
-        ImportedConversationFormat::CodexRolloutJsonlV2 => WebImportFormat::CodexRolloutJsonlV2,
     }
 }
 

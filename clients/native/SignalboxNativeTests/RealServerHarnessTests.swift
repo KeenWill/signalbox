@@ -144,7 +144,7 @@ final class RealServerHarnessTests: XCTestCase {
     let client = realServerClient(socketPath: socketPath)
     let importExchange = try await client.open(
       .importConversation(
-        format: .codexRolloutJSONLV2,
+        format: .codexRolloutJSONLV1,
         source: RealServerFixture.importedRollout
       )
     )
@@ -160,7 +160,6 @@ final class RealServerHarnessTests: XCTestCase {
     let inventory = try await service.readImportedConversation(conversation: conversation)
     let transcript = SignalboxImportedConversationTranscript(
       importedConversationID: inventory.importedConversationID,
-      dropFacts: inventory.dropFacts,
       entries: try inventory.entries(in: 0..<inventory.entryCount))
     let aliases = try await service.listModelAliases()
     let alias = try XCTUnwrap(aliases.first)
@@ -175,8 +174,6 @@ final class RealServerHarnessTests: XCTestCase {
     let sessions = try await service.listSessions(includeArchived: true)
 
     XCTAssertEqual(transcript.importedConversationID, importedConversationID)
-    XCTAssertEqual(transcript.dropFacts.droppedRecordCount.rawValue, 0)
-    XCTAssertNil(transcript.dropFacts.firstDroppedRecordPosition)
     XCTAssertEqual(transcript.entries.count, RealServerFixture.importedEntryCount)
     XCTAssertEqual(
       transcript.entries[1].textPreview?.preview,
@@ -295,8 +292,8 @@ private func requireImportedConversationID(
   _ message: SignalboxProcessServerMessage
 ) throws -> SignalboxCanonicalUUID {
   switch message {
-  case .conversationImportInserted(let importedConversationID, _),
-    .conversationImportAlreadyImported(let importedConversationID, _):
+  case .conversationImportInserted(let importedConversationID),
+    .conversationImportAlreadyImported(let importedConversationID):
     return importedConversationID
   default:
     throw RealServerFixtureError.unexpectedMessage

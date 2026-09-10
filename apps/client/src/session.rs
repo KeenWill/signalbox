@@ -237,7 +237,7 @@ pub(crate) async fn continue_imported(
         ThroughPositionArgument::Latest => {
             // The reader already rejects an empty inventory, so the resolved
             // count is a selectable position.
-            let (entry_count, _) =
+            let entry_count =
                 read_imported_conversation(client, imported_conversation_id, |_| Ok(())).await?;
             output.resolved_through_position(entry_count)?;
             CanonicalU64::new(entry_count)

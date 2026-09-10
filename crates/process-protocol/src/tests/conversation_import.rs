@@ -7,7 +7,7 @@ use crate::*;
 fn import_request_preserves_exact_bytes_and_format() -> Result<(), Box<dyn std::error::Error>> {
     let request_id = request(1)?;
     let request_value = ClientRequest::ImportConversation {
-        format: ConversationImportFormat::ClaudeCodeSessionJsonlV3,
+        format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
         source: ConversationImportSource::new(vec![0, 255]),
     };
 
@@ -16,7 +16,7 @@ fn import_request_preserves_exact_bytes_and_format() -> Result<(), Box<dyn std::
     assert_eq!(
         String::from_utf8(encoded.clone())?,
         "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"import_conversation\",\
-         \"format\":\"claude_code_session_jsonl_v3\",\"source\":\"AP8=\"}}\n"
+         \"format\":\"claude_code_session_jsonl_v2\",\"source\":\"AP8=\"}}\n"
     );
     assert_eq!(decode_client_line(&encoded)?, frame);
     Ok(())
@@ -30,7 +30,7 @@ fn chunked_import_requests_have_exact_closed_shapes() -> Result<(), Box<dyn std:
         ProtocolVersion::One,
         request(1)?,
         ClientRequest::BeginConversationImport {
-            format: ConversationImportFormat::CodexRolloutJsonlV2,
+            format: ConversationImportFormat::CodexRolloutJsonlV1,
             declared_size_bytes: CanonicalU64::new(5),
         },
     )?;
@@ -58,7 +58,7 @@ fn chunked_import_requests_have_exact_closed_shapes() -> Result<(), Box<dyn std:
     let encoded_abort = encode_client_line(&abort)?;
     assert_eq!(
         String::from_utf8(encoded_begin.clone())?,
-        "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"begin_conversation_import\",\"format\":\"codex_rollout_jsonl_v2\",\"declared_size_bytes\":\"5\"}}\n"
+        "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"begin_conversation_import\",\"format\":\"codex_rollout_jsonl_v1\",\"declared_size_bytes\":\"5\"}}\n"
     );
     assert_eq!(
         String::from_utf8(encoded_append.clone())?,

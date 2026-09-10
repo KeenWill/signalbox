@@ -449,9 +449,7 @@ async fn pinned_installation_preserves_seed(
     let (_container, pool) = migrated_postgres().await?;
     let seed = ContextFrontierId::from_uuid(Uuid::now_v7());
     let (store, predecessor, _, pin) = if imported {
-        use signalbox_application::{
-            ImportedConversationConverter, ImportedConversationDropFacts, ImportedConversationStore,
-        };
+        use signalbox_application::{ImportedConversationConverter, ImportedConversationStore};
         use signalbox_domain::{
             CreateSessionFromImportedFrontier, ImportedConversationId, ImportedSessionRelationship,
             ImportedTranscriptEntryId,
@@ -467,10 +465,9 @@ async fn pinned_installation_preserves_seed(
                 || ImportedTranscriptEntryId::from_uuid(Uuid::now_v7()),
             )
             .expect("the recovery fixture retains its required correlated fact");
-        ImportedConversationStore::resolve_or_insert_with_drop_facts(
+        ImportedConversationStore::resolve_or_insert(
             &mut ImportedConversationRepository::new(pool.clone()),
             conversation.clone(),
-            ImportedConversationDropFacts::none(),
         )
         .await?;
         let command = CreateSessionFromImportedFrontier::new(

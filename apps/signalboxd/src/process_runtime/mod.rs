@@ -4,8 +4,8 @@ use std::{
     error::Error,
     fmt,
     future::Future,
-    io::{self, BufReader, Cursor, SeekFrom},
-    num::{NonZeroU64, NonZeroUsize},
+    io::{self, SeekFrom},
+    num::NonZeroU64,
     sync::Arc,
     time::Duration,
 };
@@ -18,8 +18,8 @@ use signalbox_application::{
     CreateSessionError, CreateSessionFromImportedFrontierOutcome,
     CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
-    EligibilityNudge, ImportConversationOutcome, ImportedConversationDropFacts,
-    ImportedConversationIdGenerator, ImportedConversationStoreOutcome, InProcessEligibilityNudge,
+    EligibilityNudge, ImportConversationError, ImportConversationOutcome,
+    ImportConversationService, ImportedConversationConverter, InProcessEligibilityNudge,
     InProcessToolDispatchGate, ListConversationsService, ListSessionMetadataService,
     LoadSessionMetadataService, OperatorFailureClass, OverrideDeniedToolRequestService,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
@@ -27,8 +27,7 @@ use signalbox_application::{
     ReplaceSessionMetadataService, ReviewPassCompletionStatus, ReviewWorkflowCommand,
     ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
     ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
-    SessionMetadataListQuery, SessionTimelineEventKind,
-    StreamingResilientImportedConversationConverter, SubmitInputOutcome, SubmitInputRequest,
+    SessionMetadataListQuery, SessionTimelineEventKind, SubmitInputOutcome, SubmitInputRequest,
     SubmitInputService, SubmitInputTransaction, UpdateSessionPlacementOutcome,
     UpdateSessionPlacementRequest, UpdateSessionPlacementService,
     UuidV7CommissionedDispatchIdGenerator, UuidV7CreateSessionFromImportedFrontierIdGenerator,
@@ -37,12 +36,11 @@ use signalbox_application::{
 };
 use signalbox_blob_store::ExpectedBlob;
 use signalbox_conversation_import_claude_code::{
-    ClaudeCodeJsonlConversionError, ClaudeCodeJsonlConversionFailure,
-    ResilientClaudeCodeJsonlConverter,
+    ClaudeCodeJsonlConversionError, ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConverter,
 };
 use signalbox_conversation_import_codex::{
     CodexRolloutJsonlConversionError, CodexRolloutJsonlConversionFailure,
-    ResilientCodexRolloutJsonlConverter,
+    CodexRolloutJsonlConverter,
 };
 use signalbox_domain::{
     AcceptedInputId, Actor, BranchName, CancelledModelCallTurnIdentities, CommandPrincipal,
@@ -58,10 +56,10 @@ use signalbox_domain::{
     FrozenModelSelection, Goal, GoalBlockProvenance, GoalBlockedReasonKind,
     GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult, GoalEvent,
     GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
-    ImportedConversationFormat, ImportedConversationId,
+    ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
     ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
-    ImportedTranscriptPosition, ModelAlias, ModelCallId,
+    ImportedTranscriptEntryInput, ImportedTranscriptPosition, ModelAlias, ModelCallId,
     ModelChangeAdjustment as DomainModelChangeAdjustment, ModelSelectionOverride,
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
@@ -118,8 +116,7 @@ use signalbox_persistence::{
     },
     conversation_import::{
         ImportedConversationRepository, ImportedConversationRepositoryError,
-        ImportedRawBlobStorageError, StreamingImportedConversationError,
-        StreamingImportedConversationReport,
+        ImportedRawBlobStorageError,
     },
     conversation_listing::{ConversationListingRepository, ConversationListingRepositoryError},
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},

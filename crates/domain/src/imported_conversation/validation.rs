@@ -485,11 +485,7 @@ fn normalized_record_speaker(
     format: ImportedConversationFormat,
     normalized: &ImportedStructuredValue,
 ) -> Result<Option<ImportedSpeaker>, ()> {
-    if matches!(
-        format,
-        ImportedConversationFormat::CodexRolloutJsonlV1
-            | ImportedConversationFormat::CodexRolloutJsonlV2
-    ) {
+    if format == ImportedConversationFormat::CodexRolloutJsonlV1 {
         return normalized_codex_record_speaker(normalized);
     }
     match normalized_record_type(normalized)? {

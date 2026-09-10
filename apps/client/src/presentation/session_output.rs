@@ -1,6 +1,4 @@
 use super::*;
-use crate::conversation_import::ConversationImportDropFacts;
-use signalbox_process_protocol::CanonicalU64;
 
 impl<'a> Output<'a> {
     pub(crate) fn termination_receipt(
@@ -506,13 +504,10 @@ impl<'a> Output<'a> {
     pub(crate) fn conversation_import_inserted(
         &mut self,
         imported_conversation_id: CanonicalUuid,
-        dropped: ConversationImportDropFacts,
     ) -> io::Result<()> {
         writeln!(
             self.stdout,
-            "inserted imported_conversation_id={imported_conversation_id} dropped_record_count={} first_dropped_record_position={}",
-            dropped.dropped_record_count.value(),
-            optional_import_position(dropped.first_dropped_record_position),
+            "inserted imported_conversation_id={imported_conversation_id}"
         )
     }
 
@@ -535,13 +530,10 @@ impl<'a> Output<'a> {
     pub(crate) fn conversation_import_already_imported(
         &mut self,
         imported_conversation_id: CanonicalUuid,
-        dropped: ConversationImportDropFacts,
     ) -> io::Result<()> {
         writeln!(
             self.stdout,
-            "already_imported imported_conversation_id={imported_conversation_id} dropped_record_count={} first_dropped_record_position={}",
-            dropped.dropped_record_count.value(),
-            optional_import_position(dropped.first_dropped_record_position),
+            "already_imported imported_conversation_id={imported_conversation_id}"
         )
     }
 
@@ -549,14 +541,11 @@ impl<'a> Output<'a> {
         &mut self,
         path: &Path,
         imported_conversation_id: CanonicalUuid,
-        dropped: ConversationImportDropFacts,
     ) -> io::Result<()> {
         let path = self.render(&format!("{path:?}"));
         writeln!(
             self.stdout,
-            "imported path={path} imported_conversation_id={imported_conversation_id} dropped_record_count={} first_dropped_record_position={}",
-            dropped.dropped_record_count.value(),
-            optional_import_position(dropped.first_dropped_record_position),
+            "imported path={path} imported_conversation_id={imported_conversation_id}"
         )
     }
 
@@ -564,14 +553,11 @@ impl<'a> Output<'a> {
         &mut self,
         path: &Path,
         imported_conversation_id: CanonicalUuid,
-        dropped: ConversationImportDropFacts,
     ) -> io::Result<()> {
         let path = self.render(&format!("{path:?}"));
         writeln!(
             self.stdout,
-            "already_imported path={path} imported_conversation_id={imported_conversation_id} dropped_record_count={} first_dropped_record_position={}",
-            dropped.dropped_record_count.value(),
-            optional_import_position(dropped.first_dropped_record_position),
+            "already_imported path={path} imported_conversation_id={imported_conversation_id}"
         )
     }
 
@@ -629,17 +615,8 @@ impl<'a> Output<'a> {
 
     /// Prints the imported conversation's total entry count, which is also its
     /// greatest selectable position.
-    pub(crate) fn imported_conversation_entry_count(
-        &mut self,
-        entry_count: u64,
-        dropped: ConversationImportDropFacts,
-    ) -> io::Result<()> {
-        writeln!(
-            self.stdout,
-            "entry_count={entry_count} dropped_record_count={} first_dropped_record_position={}",
-            dropped.dropped_record_count.value(),
-            optional_import_position(dropped.first_dropped_record_position),
-        )
+    pub(crate) fn imported_conversation_entry_count(&mut self, entry_count: u64) -> io::Result<()> {
+        writeln!(self.stdout, "entry_count={entry_count}")
     }
 
     /// Prints the concrete position a `latest` selection resolved to, before
@@ -972,10 +949,4 @@ impl<'a> Output<'a> {
     ) -> io::Result<()> {
         self.text_fragment(fragment, final_fragment, content_ends_with_newline)
     }
-}
-fn optional_import_position(position: Option<CanonicalU64>) -> String {
-    position.map_or_else(
-        || String::from("none"),
-        |position| position.value().to_string(),
-    )
 }

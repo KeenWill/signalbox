@@ -260,16 +260,13 @@ public struct SignalboxConversationListPage: Equatable, Sendable {
 
 public struct SignalboxImportedConversationTranscript: Equatable, Sendable {
   public let importedConversationID: SignalboxCanonicalUUID
-  public let dropFacts: SignalboxImportedConversationDropFacts
   public let entries: [SignalboxImportedConversationEntry]
 
   public init(
     importedConversationID: SignalboxCanonicalUUID,
-    dropFacts: SignalboxImportedConversationDropFacts,
     entries: [SignalboxImportedConversationEntry]
   ) {
     self.importedConversationID = importedConversationID
-    self.dropFacts = dropFacts
     self.entries = entries
   }
 
