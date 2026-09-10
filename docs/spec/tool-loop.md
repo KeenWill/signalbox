@@ -512,15 +512,13 @@ A `web_fetch` request's canonical origin must satisfy any optional deployment
 restriction in [configuration-and-credentials](configuration-and-credentials.md)
 before dispatch, and the transport that carries an admitted request is stated in
 [web-egress-threat-model](web-egress-threat-model.md). Failure before request
-dispatch and transport or body loss return fixed sanitized known failures; a
-read-only `web_fetch` timeout, including DNS deadline expiry, returns a typed
-timeout failure and the turn continues. Commit ambiguity is reserved for
-non-idempotent effects. `web_fetch` declares `EffectFree`; `web_search` declares
-`ExternalEffect`. Both default to delegated approval under either session
-blanket. An explicit `human` tool posture parks for a person; `auto` still
-delegates web requests. The judge decides before either tool reaches its
-transport or credential boundary. A one-time migration reclassifies live fetch
-checkpoints and resumes active fetch recovery waits with a known failure.
+dispatch returns a fixed sanitized known failure. A `web_fetch` timeout,
+including DNS deadline expiry, returns a typed timeout failure and the turn
+continues. Other transport or body loss after dispatch remains ambiguous.
+`web_fetch` and `web_search` declare `ExternalEffect` and default to delegated
+approval under either session blanket. An explicit `human` tool posture parks
+for a person; `auto` still delegates web requests. The judge decides before
+either tool reaches its transport or credential boundary.
 
 The blob tools authorize only digests present in attachment stubs in the
 rendered frontier for the issuing turn. A visibility or budget closure resolves
