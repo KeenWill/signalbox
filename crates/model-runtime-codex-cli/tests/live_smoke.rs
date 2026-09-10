@@ -1,7 +1,7 @@
 //! Compatibility smoke against the real, pinned Codex CLI.
 //!
 //! Ignored by default: the adapter smoke and temporary app-server probe each
-//! spend one real model exchange. They need credentials the ordinary Rust
+//! spend one real model exchange. The capacity-only smoke spends none. They need credentials the ordinary Rust
 //! workflow never has. Their only automated caller is
 //! `.github/workflows/codex-smoke.yml`: its unprivileged gate rejects changed
 //! fork pull requests before the environment-backed smoke job can start.
@@ -2113,4 +2113,33 @@ mod app_server_probe {
             .find(|tag| value.as_str() == Some(tag) || value.get(tag).is_some())
             .unwrap_or("unknown")
     }
+}
+
+/// Uses only the explicitly supplied subscription home; the CLI opens its login.
+#[tokio::test]
+#[ignore = "requires the pinned CLI and an explicit CODEX_HOME subscription login"]
+async fn the_pinned_codex_cli_reads_capacity_without_a_model_exchange() {
+    let executable = absolute_executable(&executable_override_or_default());
+    let bound = Duration::from_secs(10);
+    signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version(&executable, bound)
+        .await
+        .expect("installed CLI matches the adapter pin");
+    let home = std::env::var_os("CODEX_HOME")
+        .expect("capacity smoke requires an explicit subscription home");
+    let directory = tempfile::tempdir().expect("private smoke working directory");
+    let reference = CredentialReference::new("capacity-smoke");
+    let runtime = CodexCliRuntime::new(
+        CodexCliConfig::new(executable, directory.path(), reference.clone(), None)
+            .with_credential_homes([(reference.clone(), std::path::PathBuf::from(home))]),
+    )
+    .expect("explicit subscription home admitted");
+    let snapshot = runtime
+        .read_credential_capacity(&reference, bound)
+        .await
+        .expect("account capacity read without a thread or turn");
+    assert!(!snapshot.windows.is_empty());
+    println!(
+        "capacity observed_at={:?} windows={:?}",
+        snapshot.observed_at, snapshot.windows
+    );
 }

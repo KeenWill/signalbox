@@ -18,6 +18,44 @@ fn the_example_catalog_parses_and_validates() {
         .expect("the checked-in example catalog is a valid version 1 document");
 }
 
+#[test]
+fn remaining_daemon_examples_parse_and_validate() {
+    let temporary = tempfile::tempdir().expect("fixture directory is available");
+    let executable = std::env::current_exe().expect("the test executable has a path");
+    let executable = executable.to_string_lossy();
+    let working_directory = temporary.path().to_string_lossy();
+    std::fs::write(temporary.path().join("credential-marker"), "synthetic")
+        .expect("fixture credential home is nonempty");
+    let approval_judge = include_str!("../../../../config/approval-judge-eval-codex.example.toml")
+        .replace("/opt/signalbox/bin/codex", &executable)
+        .replace("/var/lib/signalbox/codex-eval", &working_directory)
+        .replace("/var/lib/signalbox/codex-home", &working_directory);
+    HubModelConfiguration::parse(&approval_judge)
+        .expect("the approval-judge example is a valid daemon configuration");
+
+    let catalog =
+        std::fs::read_to_string(example_path()).expect("the checked-in daemon example is readable");
+    let rules = include_str!("../../../../config/repository-watch-rules.example.toml");
+    let repository_watch = format!(
+        r#"{catalog}
+
+[repository_watch]
+version = 1
+workflows_enabled = true
+signal_reviewers = []
+
+[[repository_watch.repositories]]
+repository = "KeenWill/signalbox"
+poll_interval_seconds = 60
+credential_file = "/run/credentials/repository-watch-token"
+
+{rules}"#
+    )
+    .replace(EXAMPLE_EXEC_SUPERVISOR, &executable);
+    HubModelConfiguration::parse(&repository_watch)
+        .expect("the repository-watch rules example is valid daemon configuration");
+}
+
 /// Whether one line is commented-out configuration rather than active TOML.
 fn is_inactive(line: &str) -> bool {
     line == "#" || line.starts_with("# ")

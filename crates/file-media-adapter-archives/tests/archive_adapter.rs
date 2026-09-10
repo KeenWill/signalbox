@@ -611,11 +611,11 @@ async fn duplicate_zip_central_directory_names_are_a_typed_malformed_inspection(
 }
 
 #[tokio::test]
-async fn zip_inside_zstd_skippable_frame_is_ambiguous() -> Result<(), Box<dyn Error>> {
+async fn zip_inside_zstd_skippable_frame_is_unknown() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::unknown(fixtures::zip_inside_zstd_skippable_frame()?)?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
-    assert_eq!(inspection.status(), FileInspectionStatus::Ambiguous);
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
     Ok(())
 }
 

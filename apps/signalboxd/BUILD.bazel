@@ -4,6 +4,8 @@ load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_COMPILE_DATA = [
+    "//:config/approval-judge-eval-codex.example.toml",
+    "//:config/repository-watch-rules.example.toml",
     "//:config/session-templates.example.toml",
     "//:config/signalboxd.example.toml",
     "//crates/convergence:examples/repository.toml",
@@ -168,6 +170,8 @@ rust_unit_test(
     crate_features = CRATE_FEATURES,
     data = [
         "Cargo.toml",
+        "//:config/approval-judge-eval-codex.example.toml",
+        "//:config/repository-watch-rules.example.toml",
         "//:config/session-templates.example.toml",
         "//:config/signalboxd.example.toml",
         "//crates/convergence:examples/repository.toml",
