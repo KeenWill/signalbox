@@ -501,6 +501,7 @@ impl ObjectSource {
                 },
                 self.format,
                 destination,
+                self.deadline,
             )?;
         }
         Ok(())

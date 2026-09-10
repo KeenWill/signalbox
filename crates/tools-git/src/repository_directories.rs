@@ -190,6 +190,9 @@ pub(super) fn require_branch_unoccupied(
     authority: &crate::pinning::PinnedRepository,
     reference: &str,
 ) -> Result<(), LocalGitFailure> {
+    let (requested_chain, _) =
+        crate::reference_read::resolve_pinned_reference_chain_from(authority, reference, None)?;
+    let requested = requested_chain.last().ok_or(LocalGitFailure::Operation)?;
     let current = file_identity(&authority.worktree_directory.metadata().map_err(rejected)?);
     let inspect = |directory: &File| -> Result<(), LocalGitFailure> {
         if file_identity(&directory.metadata().map_err(rejected)?) == current {
@@ -197,8 +200,14 @@ pub(super) fn require_branch_unoccupied(
         }
         let (head, _) = read_marker(directory, "HEAD")?;
         let head = head.strip_suffix(b"\n").unwrap_or(&head);
-        if head.strip_prefix(b"ref: ") == Some(reference.as_bytes()) {
-            return Err(LocalGitFailure::Operation);
+        if let Some(target) = head.strip_prefix(b"ref: ") {
+            let target = std::str::from_utf8(target).map_err(rejected)?;
+            let (chain, _) = crate::reference_read::resolve_pinned_reference_chain_from(
+                authority, target, None,
+            )?;
+            if chain.last() == Some(requested) {
+                return Err(LocalGitFailure::Operation);
+            }
         }
         Ok(())
     };
