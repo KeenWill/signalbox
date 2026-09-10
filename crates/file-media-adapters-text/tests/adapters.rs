@@ -325,20 +325,20 @@ async fn csv_probe_does_not_claim_structurally_valid_json() -> Result<(), Box<dy
 }
 
 #[tokio::test]
-async fn incomplete_json_does_not_suppress_complete_csv() -> Result<(), Box<dyn Error>> {
+async fn incomplete_json_and_complete_csv_probe_tie_is_unknown() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(b"[1,2\n,3".to_vec());
 
     let inspection = support::inspect(&source, "text/csv").await?;
-    support::assert_validated_media(inspection, "text/csv");
+    support::assert_unknown(inspection);
     Ok(())
 }
 
 #[tokio::test]
-async fn truncated_json_prefix_does_not_suppress_valid_csv() -> Result<(), Box<dyn Error>> {
+async fn stronger_truncated_json_probe_is_malformed_before_csv() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::csv_with_json_consistent_truncated_prefix());
 
     let inspection = support::inspect(&source, "text/csv").await?;
-    support::assert_validated_media(inspection, "text/csv");
+    support::assert_malformed_reason(inspection, "malformed_json");
     Ok(())
 }
 
@@ -367,17 +367,12 @@ async fn overlapping_truncated_prefix_still_detects_json() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
-async fn overlapping_truncated_prefix_still_detects_csv() -> Result<(), Box<dyn Error>> {
+async fn stronger_truncated_json_probe_is_malformed_before_declared_text()
+-> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::csv_with_json_consistent_truncated_prefix());
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_declared_mismatch(
-        inspection,
-        DeclaredMismatchExpectation {
-            declared: "text/plain",
-            detected: "text/csv",
-        },
-    );
+    support::assert_malformed_reason(inspection, "malformed_json");
     Ok(())
 }
 
@@ -496,11 +491,11 @@ async fn complete_json_array_followed_by_prose_uses_text_fallback() -> Result<()
 }
 
 #[tokio::test]
-async fn complete_json_prefix_without_eof_uses_text_fallback() -> Result<(), Box<dyn Error>> {
+async fn complete_json_prefix_without_eof_is_unknown() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::complete_json_prefix_followed_outside_probe());
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_validated_media(inspection, "text/plain");
+    support::assert_unknown(inspection);
     Ok(())
 }
 
@@ -523,15 +518,14 @@ async fn completed_json_prefix_followed_by_whitespace_is_structurally_detected()
 }
 
 #[tokio::test]
-async fn completed_json_prefix_with_split_utf8_suffix_uses_text_fallback()
--> Result<(), Box<dyn Error>> {
+async fn completed_json_prefix_with_split_utf8_suffix_is_unknown() -> Result<(), Box<dyn Error>> {
     let mut bytes = b"{}".to_vec();
     bytes.resize(4_095, b' ');
     bytes.extend_from_slice("é prose".as_bytes());
     let source = MemorySource::new(bytes);
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_validated_media(inspection, "text/plain");
+    support::assert_unknown(inspection);
     Ok(())
 }
 
@@ -812,12 +806,11 @@ async fn csv_probe_ignores_a_partial_trailing_record() -> Result<(), Box<dyn Err
 }
 
 #[tokio::test]
-async fn truncated_csv_probe_with_later_prose_resumes_text_fallback() -> Result<(), Box<dyn Error>>
-{
+async fn truncated_csv_probe_with_later_prose_is_unknown() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::csv_truncated_probe_with_trailing_prose());
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_validated_media(inspection, "text/plain");
+    support::assert_unknown(inspection);
     Ok(())
 }
 
@@ -846,11 +839,11 @@ async fn csv_probe_handles_a_utf8_scalar_split_at_its_boundary() -> Result<(), B
 }
 
 #[tokio::test]
-async fn csv_rejects_row_bomb_shape_at_declared_ceiling() -> Result<(), Box<dyn Error>> {
+async fn csv_row_bomb_probe_tie_is_unknown() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::row_bomb_csv());
 
     let inspection = support::inspect(&source, "text/csv").await?;
-    support::assert_malformed_reason(inspection, "row_limit_exceeded");
+    support::assert_unknown(inspection);
     Ok(())
 }
 

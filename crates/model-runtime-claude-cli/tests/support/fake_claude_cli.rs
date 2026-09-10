@@ -13,6 +13,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::io::stdin().read_to_string(&mut prompt)?;
     std::fs::write("fake-claude-prompt", &prompt)?;
     let scenario = scenario(&prompt)?;
+    if scenario == "piped_stdin_too_large" {
+        std::io::stderr().write_all(b"Error: piped stdin input exceeds a synthetic limit.\n")?;
+        std::process::exit(1);
+    }
     if scenario == "process_nonzero" {
         system_status(None)?;
         std::io::stderr().write_all(b"authentication failed for synthetic login\n")?;
@@ -69,6 +73,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     system_init(&arguments)?;
     match scenario.as_str() {
+        "native_prompt_too_large" => {
+            emit_json(&serde_json::json!({
+                "type": "result", "subtype": "success", "is_error": true,
+                "session_id": fixtures::SESSION_ID, "stop_reason": "stop_sequence",
+                "result": "Prompt is too long",
+                "usage": {"input_tokens": 0, "output_tokens": 0,
+                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+            }))?;
+        }
         "normal_completion" => {
             assistant_text(fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;
