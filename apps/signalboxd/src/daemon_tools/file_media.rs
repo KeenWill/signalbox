@@ -326,7 +326,11 @@ impl VerifiedBlobSource for CatalogFileSource {
     }
     fn read_range(&self, offset: u64, length: NonZeroU64) -> SourceReadFuture<'_> {
         Box::pin(async move {
-            if length.get() > signalbox_blob_store::MAX_BLOB_RANGE_BYTES {
+            if length.get() > signalbox_blob_store::MAX_BLOB_RANGE_BYTES
+                || offset
+                    .checked_add(length.get())
+                    .is_none_or(|end| end > self.length.get())
+            {
                 return Err(SourceReadError::RangeOutOfBounds);
             }
             read_blob_chunk(&self.stores, &self.entry, offset, length)
@@ -371,6 +375,108 @@ mod tests {
     use super::*;
     use signalbox_application::ToolCatalog;
 
+    async fn configured_blob_stores(
+        pool: &PgPool,
+    ) -> Result<(tempfile::TempDir, Arc<BlobStoreRegistry>), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let staging = root.path().join("staging");
+        let store = root.path().join("store");
+        std::fs::create_dir(&staging)?;
+        std::fs::create_dir(&store)?;
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700))?;
+        let configuration = format!(
+            r#"
+[blob_storage]
+version = 1
+staging_directory = {:?}
+max_blob_bytes = 21474836480
+[[blob_storage.stores]]
+name = "fixture"
+namespace_id = "00000000-0000-0000-0000-000000133001"
+kind = "filesystem"
+root_directory = {:?}
+[blob_storage.routes]
+user_attachment = "fixture"
+tool_artifact = "fixture"
+imported_source = "fixture"
+generated_artifact = "fixture"
+"#,
+            staging, store
+        );
+        let document: toml_edit::DocumentMut = configuration.parse()?;
+        let configuration =
+            crate::BlobStorageConfiguration::parse(document.get("blob_storage"), 1)?
+                .ok_or("fixture blob configuration")?;
+        let stores = Arc::new(
+            BlobStoreRegistry::initialize(Some(&configuration), pool.clone())
+                .await?
+                .ok_or("configured fixture stores")?,
+        );
+        Ok((root, stores))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn catalog_blob_source_rejects_nonexact_ranges_before_store_io()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use sha2::{Digest as _, Sha256};
+        use signalbox_blob_store::ExpectedBlob;
+        use signalbox_persistence::blob::{BlobReplicaRecord, BlobStoreBindingRecord};
+
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let (root, stores) = configured_blob_stores(&pool).await?;
+        let bytes = b"exact range";
+        let digest = BlobDigest::from_bytes(Sha256::digest(bytes).into());
+        let length = NonZeroU64::new(u64::try_from(bytes.len())?).expect("nonempty fixture");
+        let expected = ExpectedBlob::try_new(digest, length.get())?;
+        let (name, store) = stores.routed_store(crate::BlobStorageClass::UserAttachment);
+        let published = store
+            .put(expected, Box::new(std::io::Cursor::new(bytes.to_vec())))
+            .await?;
+        let entry = BlobCatalogRepository::new(pool.clone())
+            .register_verified_replica(
+                expected,
+                BlobStoreBindingRecord::new(name.clone(), stores.namespace_id(name)),
+                BlobReplicaRecord::new(name.clone(), published.key().clone()),
+            )
+            .await?;
+        let source = CatalogFileSource {
+            entry,
+            length,
+            stores,
+        };
+        let one = NonZeroU64::new(1).expect("one byte");
+        let two = NonZeroU64::new(2).expect("two bytes");
+        assert_eq!(source.read_range(0, length).await?, bytes);
+        assert_eq!(source.read_range(length.get() - 1, one).await?, b"e");
+        for (offset, requested) in [
+            (length.get() - 1, two),
+            (length.get(), one),
+            (length.get() + 1, one),
+            (u64::MAX, one),
+        ] {
+            assert_eq!(
+                source.read_range(offset, requested).await,
+                Err(SourceReadError::RangeOutOfBounds)
+            );
+        }
+        std::fs::remove_file(root.path().join("store").join(published.key().as_str()))?;
+        assert_eq!(
+            source.read_range(0, one).await,
+            Err(SourceReadError::Missing)
+        );
+        assert_eq!(
+            source.read_range(length.get(), one).await,
+            Err(SourceReadError::RangeOutOfBounds),
+            "range rejection precedes store access"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
     #[test]
     fn catalog_database_failures_keep_the_operator_path() {
         use signalbox_application::ClassifyOperatorFailure as _;
@@ -410,42 +516,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let (_database, pool, _) =
             signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
-        let root = tempfile::tempdir()?;
-        let staging = root.path().join("staging");
-        let store = root.path().join("store");
-        std::fs::create_dir(&staging)?;
-        std::fs::create_dir(&store)?;
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700))?;
-        let configuration = format!(
-            r#"
-[blob_storage]
-version = 1
-staging_directory = {:?}
-max_blob_bytes = 21474836480
-[[blob_storage.stores]]
-name = "fixture"
-namespace_id = "00000000-0000-0000-0000-000000133001"
-kind = "filesystem"
-root_directory = {:?}
-[blob_storage.routes]
-user_attachment = "fixture"
-tool_artifact = "fixture"
-imported_source = "fixture"
-generated_artifact = "fixture"
-"#,
-            staging, store
-        );
-        let document: toml_edit::DocumentMut = configuration.parse()?;
-        let configuration =
-            crate::BlobStorageConfiguration::parse(document.get("blob_storage"), 1)?
-                .expect("fixture blob configuration");
-        let stores = Arc::new(
-            BlobStoreRegistry::initialize(Some(&configuration), pool.clone())
-                .await?
-                .expect("configured fixture stores"),
-        );
+        let (_root, stores) = configured_blob_stores(&pool).await?;
         let worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_text_worker")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
