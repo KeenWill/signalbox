@@ -159,13 +159,21 @@ pub(super) fn verify_merge(
             ))
         })
         .collect::<Result<_, GitPushFailure>>()?;
-    let base_deletions: HashSet<_> = base_changes
+    let base_by_path: BTreeMap<_, _> = base_changes
         .deltas()
-        .filter(|delta| delta.status() == Delta::Deleted)
-        .map(|delta| delta.old_file().path().ok_or(GitPushFailure::Repository))
-        .collect::<Result<_, _>>()?;
+        .enumerate()
+        .map(|(index, delta)| {
+            Ok((
+                delta
+                    .old_file()
+                    .path()
+                    .or_else(|| delta.new_file().path())
+                    .ok_or(GitPushFailure::Repository)?,
+                index,
+            ))
+        })
+        .collect::<Result<_, GitPushFailure>>()?;
     let mut own_by_path = BTreeMap::new();
-    let mut retained_rename_results = BTreeMap::new();
     for (index, delta) in own.deltas().enumerate() {
         let path = delta
             .new_file()
@@ -177,9 +185,6 @@ pub(super) fn verify_merge(
         } else {
             path
         };
-        if delta.status() == Delta::Renamed && base_deletions.contains(source_path) {
-            retained_rename_results.insert(path, (delta.new_file().id(), delta.new_file().mode()));
-        }
         own_by_path.entry(source_path).or_insert(index);
     }
     for (index, delta) in carried.deltas().enumerate() {
@@ -188,12 +193,6 @@ pub(super) fn verify_merge(
             .path()
             .or_else(|| delta.old_file().path())
             .ok_or(GitPushFailure::Repository)?;
-        if delta.status() == Delta::Added
-            && retained_rename_results.get(path)
-                == Some(&(delta.new_file().id(), delta.new_file().mode()))
-        {
-            continue;
-        }
         let source_path = if delta.status() == Delta::Renamed {
             delta.old_file().path().ok_or(GitPushFailure::Repository)?
         } else {
@@ -204,8 +203,11 @@ pub(super) fn verify_merge(
             .copied()
             .unwrap_or(source_path);
         let own_index = own_by_path.get(source_path).copied();
+        let base_index = base_by_path.get(source_path).copied();
         // Capture compared paths only, in addition to the rename candidates.
-        for delta in std::iter::once(delta).chain(own_index.and_then(|index| own.get_delta(index)))
+        for delta in std::iter::once(delta)
+            .chain(own_index.and_then(|index| own.get_delta(index)))
+            .chain(base_index.and_then(|index| base_changes.get_delta(index)))
         {
             for file in [delta.old_file(), delta.new_file()] {
                 if !file.id().is_zero() && file.mode() != git2::FileMode::Commit {
@@ -219,12 +221,32 @@ pub(super) fn verify_merge(
             .map(|index| hunks(&own, index, None))
             .transpose()?
             .unwrap_or_default();
+        let base_hunks = base_index
+            .map(|index| hunks(&base_changes, index, None))
+            .transpose()?
+            .unwrap_or_default();
+        let carried_hunks = hunks(&carried, index, Some(source_path))?;
+        let base_lines: HashSet<_> = base_hunks
+            .iter()
+            .flat_map(Hunk::effects)
+            .filter_map(text_change)
+            .collect();
+        let carried_lines = line_changes(&carried_hunks);
         let mut permitted = BTreeMap::new();
-        for effect in branch_hunks.iter().flat_map(Hunk::effects) {
+        for effect in branch_hunks
+            .iter()
+            .flat_map(Hunk::effects)
+            .filter(|effect| text_change(effect).is_none())
+        {
             *permitted.entry(effect).or_insert(0usize) += 1;
         }
-        for hunk in hunks(&carried, index, Some(source_path))? {
+        for hunk in &carried_hunks {
             let carried = hunk.effects().all(|effect| {
+                if let Some((line, direction)) = text_change(effect) {
+                    let carried_change = carried_lines.get(line).copied().unwrap_or_default();
+                    return carried_change.signum() != direction
+                        || !base_lines.contains(&(line, -direction));
+                }
                 let Some(remaining) = permitted.get_mut(effect) else {
                     return false;
                 };
@@ -319,6 +341,22 @@ impl Hunk {
     }
 }
 
+fn text_change(effect: &[u8]) -> Option<(&[u8], isize)> {
+    match effect.split_first()? {
+        (b'+', line) => Some((line, 1)),
+        (b'-', line) => Some((line, -1)),
+        _ => None,
+    }
+}
+
+fn line_changes(hunks: &[Hunk]) -> BTreeMap<&[u8], isize> {
+    let mut changes = BTreeMap::new();
+    for (line, direction) in hunks.iter().flat_map(Hunk::effects).filter_map(text_change) {
+        *changes.entry(line).or_default() += direction;
+    }
+    changes
+}
+
 fn hunks(
     diff: &Diff<'_>,
     index: usize,
@@ -362,7 +400,9 @@ fn hunks(
                 let start = hunk.bytes.len();
                 hunk.bytes.push(line.origin() as u8);
                 hunk.bytes.extend_from_slice(line.content());
-                hunk.changes.push(start..hunk.bytes.len());
+                if matches!(line.origin(), '+' | '-') {
+                    hunk.changes.push(start..hunk.bytes.len());
+                }
             }
             hunks.push(hunk);
         }

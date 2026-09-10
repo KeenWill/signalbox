@@ -1109,6 +1109,117 @@ async fn push_accepts_conflict_resolution_preserving_both_sides() {
 }
 
 #[tokio::test]
+async fn push_accepts_reexpressed_branch_imports_preserving_main_lines() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(
+        &repository,
+        "use super::{\n    GitHubToolStartup, runtime_adapter_capabilities,\n};\n",
+        &[],
+    );
+    let branch = merge_test_commit(
+        &repository,
+        "use super::{\n    GitHubToolStartup, WebHttpConfiguration, ambient_database_environment,\n    runtime_adapter_capabilities,\n};\n",
+        &[ancestor],
+    );
+    let base = merge_test_commit(
+        &repository,
+        "use super::{\n    runtime_adapter_capabilities,\n};\n",
+        &[ancestor],
+    );
+    let merge = merge_test_commit(
+        &repository,
+        "use super::{\n    runtime_adapter_capabilities,\n};\nuse super::{\n    WebHttpConfiguration, ambient_database_environment,\n};\n",
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("main lines survive while branch imports are regrouped");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_refuses_resolutions_reversing_main_line_changes() {
+    for (case, resolution) in [
+        ("dropped main addition", "branch regrouped\n"),
+        ("altered main addition", "main altered\nbranch regrouped\n"),
+        (
+            "restored main removal",
+            "main added\nmain removed\nbranch regrouped\n",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository");
+        let ancestor = merge_test_commit(&repository, "main removed\n", &[]);
+        let branch = merge_test_commit(&repository, "branch\n", &[ancestor]);
+        let base = merge_test_commit(&repository, "main added\n", &[ancestor]);
+        let merge = merge_test_commit(&repository, resolution, &[branch, base]);
+        let transport = RecordingPushTransport::default();
+        let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+        let result = executor
+            .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+            .await;
+
+        assert!(
+            matches!(result, Err(GitPushFailure::MergeDroppedBaseChanges(_))),
+            "{case}: {result:?}"
+        );
+        assert!(!transport.has_request(), "{case}");
+    }
+}
+
+#[tokio::test]
+async fn push_accepts_moved_main_added_lines_verbatim() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(&repository, "shared\n", &[]);
+    let branch = merge_test_commit(&repository, "branch\nshared\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "shared\nmain added\n", &[ancestor]);
+    let merge = merge_test_commit(
+        &repository,
+        "main added\nbranch regrouped\nshared\n",
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("line offsets do not change verbatim preservation");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_refuses_dropping_a_line_main_moved() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(&repository, "moved\nshared\n", &[]);
+    let branch = merge_test_commit(&repository, "branch\nmoved\nshared\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "shared\nmoved\n", &[ancestor]);
+    let merge = merge_test_commit(&repository, "shared\nbranch\n", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert!(
+        matches!(result, Err(GitPushFailure::MergeDroppedBaseChanges(_))),
+        "{result:?}"
+    );
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
 async fn push_accepts_a_plain_commit() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
@@ -1917,7 +2028,7 @@ async fn push_accepts_the_remaining_branch_removal_after_a_base_replacement() {
 }
 
 #[tokio::test]
-async fn push_refuses_a_merge_that_repeats_a_branch_effect() {
+async fn push_accepts_repeated_branch_lines_preserving_main_changes() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
     let ancestor = merge_test_commit(&repository, "old\n", &[]);
@@ -1931,17 +2042,8 @@ async fn push_refuses_a_merge_that_repeats_a_branch_effect() {
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
         .await;
 
-    assert_eq!(
-        result,
-        Err(GitPushFailure::MergeDroppedBaseChanges(vec![
-            DroppedBaseChanges {
-                file: "shared.txt".to_owned(),
-                first_dropped_hunk: "+branch\n+branch\n".to_owned(),
-                truncated: false,
-            }
-        ]))
-    );
-    assert!(!transport.has_request());
+    result.expect("main changes survive repeated branch lines");
+    assert_eq!(transport.request().commit(), merge.to_string());
 }
 
 #[tokio::test]
@@ -2179,7 +2281,7 @@ async fn push_accepts_nested_paths_within_the_merge_path_byte_budget() {
 }
 
 #[tokio::test]
-async fn push_accepts_a_renamed_branch_result_after_the_base_deletes_its_source() {
+async fn push_refuses_a_renamed_branch_result_restoring_main_deleted_lines() {
     for (case, branch_content) in [
         ("unchanged rename", "one\ntwo\nthree\nfour\nfive\nsix\n"),
         (
@@ -2209,8 +2311,11 @@ async fn push_accepts_a_renamed_branch_result_after_the_base_deletes_its_source(
             .execute_push(GitPushArguments::for_test(FIX_BRANCH))
             .await;
 
-        assert!(result.is_ok(), "{case}: {result:?}");
-        assert_eq!(transport.request().commit(), merge.to_string(), "{case}");
+        assert!(
+            matches!(result, Err(GitPushFailure::MergeDroppedBaseChanges(_))),
+            "{case}: {result:?}"
+        );
+        assert!(!transport.has_request(), "{case}");
     }
 }
 
