@@ -384,7 +384,6 @@ fn inspect(
 #[derive(Clone, Copy)]
 enum SelectionProbe {
     Strong,
-    ProvisionalStructural,
     Structural,
     Malformed,
     NoMatch,
@@ -426,11 +425,6 @@ impl FileMediaProcessor for SelectionProcessor {
                 SelectionProbe::Strong => ProcessorProbeOutput::Candidate {
                     media_type: String::from(SYNTHETIC_MEDIA_TYPE),
                     strength: ProbeStrength::Strong,
-                    evidence_bytes: SELECTION_PROBE_EVIDENCE_BYTES,
-                },
-                SelectionProbe::ProvisionalStructural => ProcessorProbeOutput::Candidate {
-                    media_type: String::from(SYNTHETIC_MEDIA_TYPE),
-                    strength: ProbeStrength::ProvisionalStructuralCandidate,
                     evidence_bytes: SELECTION_PROBE_EVIDENCE_BYTES,
                 },
                 SelectionProbe::Structural => ProcessorProbeOutput::Candidate {
@@ -528,21 +522,11 @@ impl FileMediaProcessor for CollisionProcessor {
     fn validate<'a>(
         &'a self,
         _reader: &'a ReaderIdentity,
-        request: FileMediaProviderValidationRequest,
+        _request: FileMediaProviderValidationRequest,
         _source: &'a dyn VerifiedBlobSource,
         _cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
-        Box::pin(async move {
-            if self.0 == ProbeStrength::StructuralCandidate {
-                Ok(ProcessorValidationOutput::Validated {
-                    media_type: request.media_type.as_str().to_owned(),
-                    evidence: request.evidence,
-                    metadata_json: String::from(r#"{"synthetic":true}"#),
-                })
-            } else {
-                Ok(ProcessorValidationOutput::NoMatch)
-            }
-        })
+        Box::pin(async { Ok(ProcessorValidationOutput::NoMatch) })
     }
 
     fn read<'a>(
@@ -721,9 +705,10 @@ fn probe_evidence_outside_the_reader_validation_envelope_cannot_validate() {
         validation: SelectionValidation::Validated,
     };
 
-    let outcome = inspect(&registry, &processor, &source, "unknown");
+    let outcome = inspect(&registry, &processor, &source, "unknown")
+        .expect("an unverifiable candidate is an ordinary inspection outcome");
 
-    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+    assert!(matches!(outcome, FileInspection::Unknown { .. }));
 }
 
 #[test]
@@ -751,7 +736,7 @@ fn probe_evidence_outside_validation_envelope_preserves_typed_malformed_result()
 }
 
 #[test]
-fn strong_candidate_outside_validation_envelope_fails_before_fallbacks() {
+fn strong_candidate_outside_validation_envelope_is_unknown_without_fallback() {
     let registry = selection_registry_with_media_types(
         &[SYNTHETIC_MEDIA_TYPE, "text/plain"],
         StreamingTextFallback::Enabled,
@@ -763,8 +748,9 @@ fn strong_candidate_outside_validation_envelope_fails_before_fallbacks() {
         validation: SelectionValidation::Validated,
     };
     for declared in [SYNTHETIC_MEDIA_TYPE, "unknown"] {
-        let outcome = inspect(&registry, &processor, &MemorySource::synthetic(), declared);
-        assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+        let outcome = inspect(&registry, &processor, &MemorySource::synthetic(), declared)
+            .expect("an unverifiable strong candidate is not an error");
+        assert!(matches!(outcome, FileInspection::Unknown { .. }));
     }
 }
 
@@ -934,113 +920,7 @@ fn validation_encrypted_is_terminal_for_strong_evidence() {
 }
 
 #[test]
-fn strong_validation_no_match_is_processor_failure() {
-    let outcome = selection_inspection(
-        SelectionProbe::Strong,
-        SelectionValidation::NoMatch,
-        SYNTHETIC_MEDIA_TYPE,
-        SYNTHETIC_MEDIA_TYPE,
-        StreamingTextFallback::Disabled,
-    );
-
-    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
-}
-
-#[test]
-fn structural_validation_no_match_is_processor_failure() {
-    let outcome = selection_inspection(
-        SelectionProbe::Structural,
-        SelectionValidation::NoMatch,
-        SYNTHETIC_MEDIA_TYPE,
-        SYNTHETIC_MEDIA_TYPE,
-        StreamingTextFallback::Disabled,
-    );
-
-    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
-}
-
-#[test]
-fn provisional_structural_validation_no_match_resumes_fallback() {
-    let outcome = selection_inspection(
-        SelectionProbe::ProvisionalStructural,
-        SelectionValidation::NoMatch,
-        SYNTHETIC_MEDIA_TYPE,
-        SYNTHETIC_MEDIA_TYPE,
-        StreamingTextFallback::Disabled,
-    )
-    .expect("provisional structural validation miss resumes fallback");
-
-    let FileInspection::Unknown { .. } = outcome else {
-        panic!("provisional structural validation miss must become unknown");
-    };
-}
-
-#[test]
-fn strong_claims_remain_ambiguous_above_the_validation_ceiling() {
-    let source = MemorySource::synthetic();
-    let mut ceilings = FileMediaCeilings::version_one();
-    ceilings.validation_source_bytes = 2;
-    let registry = FileMediaRegistry::try_new(
-        vec![
-            provider_declaration("first", SYNTHETIC_MEDIA_TYPE),
-            provider_declaration("second", OTHER_SYNTHETIC_MEDIA_TYPE),
-        ],
-        ceilings,
-        ProcessorIsolation::Available,
-    )
-    .expect("distinct strong claims are registrable");
-    let outcome = inspect(
-        &registry,
-        &CollisionProcessor(ProbeStrength::Strong),
-        &source,
-        "unknown",
-    )
-    .expect("claims arbitrate before validation");
-    assert!(
-        matches!(outcome, FileInspection::Ambiguous { media_types, .. } if media_types.len() == 2)
-    );
-}
-
-#[test]
-fn structural_collision_stays_ambiguous_when_one_validation_envelope_is_too_small() {
-    let source = MemorySource::synthetic();
-    for shortened in ["first", "second"] {
-        for reverse in [false, true] {
-            let mut providers = [
-                ("first", SYNTHETIC_MEDIA_TYPE),
-                ("second", OTHER_SYNTHETIC_MEDIA_TYPE),
-            ]
-            .into_iter()
-            .map(|(name, media_type)| {
-                let limit = if name == shortened { 3 } else { 4 };
-                provider_declaration_with_validation(name, media_type, limit)
-            })
-            .collect::<Vec<_>>();
-            if reverse {
-                providers.reverse();
-            }
-            let registry = FileMediaRegistry::try_new(
-                providers,
-                FileMediaCeilings::version_one(),
-                ProcessorIsolation::Available,
-            )
-            .expect("distinct structural claims are registrable");
-            let outcome = inspect(
-                &registry,
-                &CollisionProcessor(ProbeStrength::StructuralCandidate),
-                &source,
-                "unknown",
-            )
-            .expect("the envelope cannot settle a collision");
-            assert!(
-                matches!(outcome, FileInspection::Ambiguous { media_types, .. } if media_types.len() == 2)
-            );
-        }
-    }
-}
-
-#[test]
-fn all_provisional_collision_misses_resume_fallback() {
+fn tied_probes_and_validation_failures_are_unknown_without_error() {
     let source = MemorySource::synthetic();
     let registry = FileMediaRegistry::try_new(
         vec![
@@ -1050,19 +930,25 @@ fn all_provisional_collision_misses_resume_fallback() {
         FileMediaCeilings::version_one(),
         ProcessorIsolation::Available,
     )
-    .expect("distinct provisional claims are registrable");
-
-    let outcome = inspect(
+    .expect("distinct strong claims are registrable");
+    let tied = inspect(
         &registry,
-        &CollisionProcessor(ProbeStrength::ProvisionalStructuralCandidate),
+        &CollisionProcessor(ProbeStrength::Strong),
         &source,
         "unknown",
     )
-    .expect("all provisional collision misses resume fallback");
+    .expect("a probe tie is not an error");
+    let validation_failure = selection_inspection(
+        SelectionProbe::Strong,
+        SelectionValidation::NoMatch,
+        SYNTHETIC_MEDIA_TYPE,
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+    )
+    .expect("a validation failure is not an error");
 
-    let FileInspection::Unknown { .. } = outcome else {
-        panic!("all provisional collision misses must become unknown");
-    };
+    assert!(matches!(tied, FileInspection::Unknown { .. }));
+    assert!(matches!(validation_failure, FileInspection::Unknown { .. }));
 }
 
 #[test]
