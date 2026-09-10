@@ -668,7 +668,7 @@ impl ConfigurationReload {
     }
 }
 
-fn validate_catalogs(catalogs: &ConfigurationCatalogs) -> Result<(), ReloadResult> {
+pub(crate) fn validate_catalogs(catalogs: &ConfigurationCatalogs) -> Result<(), ReloadResult> {
     let models = &catalogs.models;
     let templates = &catalogs.templates;
     if let Some(watch) = models.repository_watch() {
