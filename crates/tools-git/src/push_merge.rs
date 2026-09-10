@@ -419,6 +419,16 @@ fn detect_renames<'a>(
     database: &Odb<'_>,
     deadline: Instant,
 ) -> Result<Changes<'a>, GitPushFailure> {
+    detect_renames_with_signatures(diff, deadline, |oid| {
+        rename_signature(source, database, oid, deadline)
+    })
+}
+
+fn detect_renames_with_signatures<'a>(
+    diff: &'a Diff<'a>,
+    deadline: Instant,
+    mut signature: impl FnMut(Oid) -> Result<RenameSignature, GitPushFailure>,
+) -> Result<Changes<'a>, GitPushFailure> {
     let side = |file: git2::DiffFile<'a>| Side {
         oid: file.id(),
         mode: file.mode(),
@@ -433,6 +443,7 @@ fn detect_renames<'a>(
         })
         .collect();
     let mut paired = HashSet::new();
+    let mut signatures = BTreeMap::new();
     for target in 0..changes.len() {
         streamed::check(deadline)?;
         if changes[target].status != Delta::Added {
@@ -440,7 +451,6 @@ fn detect_renames<'a>(
         }
         let new = changes[target].new;
         let mut best = None;
-        let mut target_signature = None;
         let mut inspected = 0;
         for (candidate, change) in changes.iter().enumerate() {
             streamed::check(deadline)?;
@@ -458,15 +468,16 @@ fn detect_renames<'a>(
                     continue;
                 }
                 inspected += 1;
-                if target_signature.is_none() {
-                    target_signature = Some(rename_signature(source, database, new.oid, deadline)?);
+                for oid in [new.oid, old.oid] {
+                    if let std::collections::btree_map::Entry::Vacant(entry) = signatures.entry(oid)
+                    {
+                        entry.insert(signature(oid)?);
+                    }
                 }
-                let signature = rename_signature(source, database, old.oid, deadline)?;
-                signature.similarity(
-                    target_signature
-                        .as_ref()
-                        .ok_or(GitPushFailure::Repository)?,
-                )
+                signatures
+                    .get(&old.oid)
+                    .ok_or(GitPushFailure::Repository)?
+                    .similarity(signatures.get(&new.oid).ok_or(GitPushFailure::Repository)?)
             };
             // Git's default rename similarity threshold; repository config does not select it.
             if similarity >= 50 && best.is_none_or(|(_, score)| similarity > score) {
@@ -591,4 +602,89 @@ fn rename_signature(
     hashes.extend(high.into_iter().map(|Reverse(hash)| hash));
     hashes.sort_unstable();
     Ok(RenameSignature { hashes })
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn compare_generated_candidates(blob_bytes: usize) {
+        let root = tempfile::tempdir().expect("rename repository");
+        let repository = git2::Repository::init(root.path()).expect("repository");
+        let database = repository.odb().expect("object database");
+        let mut before = repository.treebuilder(None).expect("before tree");
+        let mut after = repository.treebuilder(None).expect("after tree");
+        // Every addition compares with every deleted candidate: none shares a line signature.
+        for index in 0..2 * MAX_MERGE_RENAME_SOURCES {
+            let line = format!("{index:016x}\n");
+            let page: Vec<_> = line.bytes().cycle().take(64 * 1024).collect();
+            let mut writer = database
+                .writer(blob_bytes, ObjectType::Blob)
+                .expect("blob writer");
+            let mut remaining = blob_bytes;
+            while remaining != 0 {
+                let count = remaining.min(page.len());
+                writer.write_all(&page[..count]).expect("blob page");
+                remaining -= count;
+            }
+            let oid = writer.finalize().expect("blob");
+            let tree = if index < MAX_MERGE_RENAME_SOURCES {
+                &mut before
+            } else {
+                &mut after
+            };
+            tree.insert(format!("candidate-{index:03}"), oid, 0o100644)
+                .expect("tree entry");
+        }
+        let before = repository
+            .find_tree(before.write().expect("before tree writes"))
+            .expect("before tree");
+        let after = repository
+            .find_tree(after.write().expect("after tree writes"))
+            .expect("after tree");
+        let diff = repository
+            .diff_tree_to_tree(Some(&before), Some(&after), None)
+            .expect("candidate diff");
+        let (_, executor) = crate::LocalGitTools::try_new(
+            signalbox_tools_workspace::LocalWorkspaceFileSystem,
+            root.path(),
+            crate::GitIdentity::try_new("Rename fixture", "rename@example.test").expect("identity"),
+        )
+        .expect("local tools")
+        .into_parts();
+        let deadline = Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT;
+        let mut source = ObjectSource::open(&executor.repository_authority, Some(deadline))
+            .expect("pinned objects");
+        let database = Odb::new_ext(executor.repository_authority.object_format)
+            .expect("private object database");
+        let mut scans = BTreeMap::new();
+        let changes = detect_renames_with_signatures(&diff, deadline, |oid| {
+            *scans.entry(oid).or_insert(0usize) += 1;
+            rename_signature(&mut source, &database, oid, deadline)
+        })
+        .expect("rename comparison");
+        assert_eq!(changes.deltas().count(), 2 * MAX_MERGE_RENAME_SOURCES);
+        assert!(
+            changes
+                .deltas()
+                .all(|change| matches!(change.status, Delta::Added | Delta::Deleted))
+        );
+        assert_eq!(scans.len(), 2 * MAX_MERGE_RENAME_SOURCES);
+        assert!(
+            scans.values().all(|count| *count == 1),
+            "each candidate blob streams once"
+        );
+    }
+
+    #[test]
+    fn rename_candidates_are_hashed_once_across_two_hundred_additions() {
+        compare_generated_candidates(4096);
+    }
+
+    #[test]
+    #[ignore = "generates and streams one gigabyte across 400 rename candidates"]
+    fn rename_comparison_streams_a_generated_gigabyte_once() {
+        compare_generated_candidates(2_500_000);
+    }
 }
