@@ -2311,6 +2311,7 @@ pub(crate) mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
         let repository = ImportedConversationRepository::new(pool);
+        let import_permit = Arc::new(Semaphore::new(1)).acquire_owned().await?;
         let mut source = tempfile::tempfile()?;
         source.write_all(b"fixture")?;
         source.rewind()?;
@@ -2319,6 +2320,7 @@ pub(crate) mod tests {
             ThreadReportingRejectConverter(thread_sender),
             ConversationImportSource::Spooled(source),
             repository,
+            import_permit,
         )
         .await;
         let conversion_worker = thread_receiver.recv_timeout(Duration::from_secs(1))?;
@@ -2342,11 +2344,13 @@ pub(crate) mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
         let repository = ImportedConversationRepository::new(pool);
+        let import_permit = Arc::new(Semaphore::new(1)).acquire_owned().await?;
 
         let outcome = execute_import(
             PanickingConverter,
             ConversationImportSource::Inline(Vec::new()),
             repository,
+            import_permit,
         )
         .await;
 
@@ -2356,6 +2360,42 @@ pub(crate) mod tests {
                 InternalDiagnostic::ConversationImportWorkerTerminated,
             )),
         );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_import_wait_retains_the_permit_until_the_worker_exits()
+    -> Result<(), Box<dyn Error>> {
+        let budget = Arc::new(Semaphore::new(1));
+        let import_permit = Arc::clone(&budget).acquire_owned().await?;
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+        let repository = ImportedConversationRepository::new(pool);
+        let (started_sender, started_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let import = tokio::spawn(execute_import(
+            BlockingRejectConverter {
+                started: started_sender,
+                release: Some(release_receiver),
+            },
+            ConversationImportSource::Inline(Vec::new()),
+            repository,
+            import_permit,
+        ));
+        started_receiver.recv_timeout(Duration::from_secs(1))?;
+
+        import.abort();
+        let _ = import.await;
+        assert!(
+            timeout(Duration::from_millis(20), Arc::clone(&budget).acquire_owned())
+                .await
+                .is_err(),
+            "dropping the join wait must not release the worker-owned permit"
+        );
+
+        release_sender.send(())?;
+        let permit = timeout(Duration::from_secs(1), Arc::clone(&budget).acquire_owned()).await??;
+        drop(permit);
         Ok(())
     }
 
@@ -2579,6 +2619,82 @@ pub(crate) mod tests {
     }
 
     struct ThreadReportingRejectConverter(mpsc::SyncSender<thread::ThreadId>);
+
+    struct BlockingRejectConverter {
+        started: mpsc::SyncSender<()>,
+        release: Option<mpsc::Receiver<()>>,
+    }
+
+    impl ImportedConversationConverter for BlockingRejectConverter {
+        type Error = io::Error;
+
+        fn format(&self) -> ImportedConversationFormat {
+            ImportedConversationFormat::CodexRolloutJsonlV1
+        }
+
+        fn convert<NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            _source: &[u8],
+            _next_entry_id: NextEntryId,
+        ) -> Result<ImportedConversation, Self::Error>
+        where
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            panic!("the fixture uses only streamed conversion")
+        }
+    }
+
+    impl ResilientImportedConversationConverter for BlockingRejectConverter {
+        type RecordFailure = SyntheticRecordFailure;
+
+        fn convert_resilient<NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            _source: &[u8],
+            _next_entry_id: NextEntryId,
+        ) -> Result<ImportedConversationConversionReport<Self::RecordFailure>, Self::Error>
+        where
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            panic!("the fixture uses only streamed conversion")
+        }
+    }
+
+    impl StreamingResilientImportedConversationConverter for BlockingRejectConverter {
+        fn convert_resilient_from_reader<Reader, NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            _source: Reader,
+            _maximum_record_bytes: u64,
+            _next_entry_id: NextEntryId,
+        ) -> impl Iterator<
+            Item = Result<
+                ImportedConversationStreamItem<Self::RecordFailure>,
+                StreamConversionError<Self::Error>,
+            >,
+        > + Send
+        where
+            Reader: std::io::BufRead + Send,
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
+        {
+            let started = self.started.clone();
+            let release = self.release.take().expect("the fixture converts once");
+            std::iter::once_with(move || {
+                started
+                    .send(())
+                    .map_err(|_| io::Error::other("the started receiver closed"))
+                    .map_err(StreamConversionError::Conversion)?;
+                release
+                    .recv()
+                    .map_err(|_| io::Error::other("the release sender closed"))
+                    .map_err(StreamConversionError::Conversion)?;
+                Ok(ImportedConversationStreamItem::Skipped(
+                    ImportedConversationSkippedRecord::new(1, SyntheticRecordFailure),
+                ))
+            })
+        }
+    }
 
     impl ImportedConversationConverter for ThreadReportingRejectConverter {
         type Error = io::Error;

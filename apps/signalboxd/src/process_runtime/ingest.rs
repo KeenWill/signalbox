@@ -830,13 +830,24 @@ where
 {
     let outcome = match format {
         ConversationImportFormat::ClaudeCodeSessionJsonlV3 => {
-            execute_import(ResilientClaudeCodeJsonlConverter, source, repository).await
+            execute_import(
+                ResilientClaudeCodeJsonlConverter,
+                source,
+                repository,
+                import_permit,
+            )
+            .await
         }
         ConversationImportFormat::CodexRolloutJsonlV2 => {
-            execute_import(ResilientCodexRolloutJsonlConverter, source, repository).await
+            execute_import(
+                ResilientCodexRolloutJsonlConverter,
+                source,
+                repository,
+                import_permit,
+            )
+            .await
         }
     };
-    drop(import_permit);
     match outcome {
         Ok(CompletedImport {
             outcome: ImportConversationOutcome::Inserted { conversation },
@@ -1188,6 +1199,7 @@ pub(super) async fn execute_import<Converter>(
     mut converter: Converter,
     source: ConversationImportSource,
     repository: ImportedConversationRepository,
+    import_permit: OwnedSemaphorePermit,
 ) -> Result<CompletedImport, OperationalImportError>
 where
     Converter: StreamingResilientImportedConversationConverter + Send + 'static,
@@ -1196,6 +1208,7 @@ where
 {
     let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
+        let _import_permit = import_permit;
         runtime.block_on(async move {
             match source {
                 ConversationImportSource::Inline(source) => {
@@ -1713,48 +1726,6 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let conversation_id = ImportedConversationId::from_uuid(imported_conversation_id.into_uuid());
-    let load =
-        signalbox_persistence::conversation_import::load_normalized_entries(pool, conversation_id)
-            .await;
-    let entries = match load {
-        Ok(Some(entries)) => entries,
-        Ok(None) => {
-            drop(snapshot_permit);
-            return write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::imported_conversation_absent(),
-            )
-            .await;
-        }
-        Err(ImportedConversationRepositoryError::Database(_)) => {
-            drop(snapshot_permit);
-            return write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::without_detail(ErrorCode::Unavailable),
-            )
-            .await;
-        }
-        Err(
-            error @ (ImportedConversationRepositoryError::IdentityCollision(_)
-            | ImportedConversationRepositoryError::BlobStorage(_)
-            | ImportedConversationRepositoryError::BlobCatalog(_)
-            | ImportedConversationRepositoryError::Corruption(_)),
-        ) => {
-            let diagnostic = imported_conversation_internal_diagnostic(&error);
-            drop(snapshot_permit);
-            return write_error(
-                writer,
-                version,
-                request_id,
-                internal_protocol_error(None, diagnostic),
-            )
-            .await;
-        }
-    };
     let dropped_records = match signalbox_persistence::conversation_import::load_import_drop_facts(
         pool,
         conversation_id,
@@ -1768,7 +1739,7 @@ where
                 writer,
                 version,
                 request_id,
-                internal_protocol_error(None, InternalDiagnostic::ConversationImportContractDefect),
+                ProtocolError::imported_conversation_absent(),
             )
             .await;
         }
@@ -1795,7 +1766,8 @@ where
         }
     };
     let spool_result = spool_imported_conversation(
-        &entries,
+        pool,
+        conversation_id,
         imported_conversation_id,
         dropped_records,
         version,
@@ -1803,24 +1775,64 @@ where
         configured_usize(model_configuration, "max_imported_text_preview_utf8_bytes"),
     )
     .await;
-    drop(entries);
     drop(snapshot_permit);
     let mut spool = match spool_result {
         Ok(spool) => spool,
-        Err(error) => return write_snapshot_spool_error(writer, version, request_id, error).await,
+        Err(ImportedConversationSpoolError::Missing) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(None, InternalDiagnostic::ConversationImportContractDefect),
+            )
+            .await;
+        }
+        Err(ImportedConversationSpoolError::Read(
+            ImportedConversationRepositoryError::Database(_),
+        )) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await;
+        }
+        Err(ImportedConversationSpoolError::Read(error)) => {
+            let diagnostic = imported_conversation_internal_diagnostic(&error);
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(None, diagnostic),
+            )
+            .await;
+        }
+        Err(ImportedConversationSpoolError::Spool(error)) => {
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
+        }
     };
     write_spooled_file(writer, &mut spool).await
 }
 
-pub(super) async fn spool_imported_conversation(
-    entries: &[ImportedTranscriptEntryInput],
+enum ImportedConversationSpoolError {
+    Missing,
+    Read(ImportedConversationRepositoryError),
+    Spool(SnapshotSpoolError),
+}
+
+async fn spool_imported_conversation(
+    pool: &PgPool,
+    conversation_id: ImportedConversationId,
     imported_conversation_id: CanonicalUuid,
     dropped_records: ImportedConversationDropFacts,
     version: ProtocolVersion,
     request_id: RequestId,
     max_text_preview_utf8_bytes: Option<usize>,
-) -> Result<tokio::fs::File, SnapshotSpoolError> {
-    let standard_file = tempfile::tempfile().map_err(SnapshotSpoolError::Io)?;
+) -> Result<tokio::fs::File, ImportedConversationSpoolError> {
+    let standard_file = tempfile::tempfile()
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(ImportedConversationSpoolError::Spool)?;
     let mut file = tokio::fs::File::from_std(standard_file);
     write_spool_message(
         &mut file,
@@ -1834,27 +1846,48 @@ pub(super) async fn spool_imported_conversation(
                 .map(CanonicalU64::new),
         },
     )
-    .await?;
+    .await
+    .map_err(ImportedConversationSpoolError::Spool)?;
     let mut entry_count = 0_u64;
-    for entry in entries {
-        write_spool_message(
-            &mut file,
-            version,
-            request_id,
-            ServerMessage::ImportedConversationEntry {
-                position: CanonicalU64::new(entry.position().as_u64()),
-                imported_entry_id: wire_uuid(entry.identity().into_uuid()),
-                source_speaker: wire_imported_speaker_attestation(entry.source_speaker()),
-                content_kind: wire_imported_content_kind(process_imported_content_kind(
-                    entry.content(),
-                )),
-                text_preview: imported_text_preview(entry.content(), max_text_preview_utf8_bytes),
-            },
+    let page_limit = NonZeroUsize::new(128).expect("inspection page size is positive");
+    loop {
+        let page = signalbox_persistence::conversation_import::load_normalized_entry_page(
+            pool,
+            conversation_id,
+            entry_count,
+            page_limit,
         )
-        .await?;
-        entry_count = entry_count
-            .checked_add(1)
-            .ok_or(SnapshotSpoolError::EncodeInvariant)?;
+        .await
+        .map_err(ImportedConversationSpoolError::Read)?
+        .ok_or(ImportedConversationSpoolError::Missing)?;
+        for entry in page.entries() {
+            write_spool_message(
+                &mut file,
+                version,
+                request_id,
+                ServerMessage::ImportedConversationEntry {
+                    position: CanonicalU64::new(entry.position().as_u64()),
+                    imported_entry_id: wire_uuid(entry.identity().into_uuid()),
+                    source_speaker: wire_imported_speaker_attestation(entry.source_speaker()),
+                    content_kind: wire_imported_content_kind(process_imported_content_kind(
+                        entry.content(),
+                    )),
+                    text_preview: imported_text_preview(
+                        entry.content(),
+                        max_text_preview_utf8_bytes,
+                    ),
+                },
+            )
+            .await
+            .map_err(ImportedConversationSpoolError::Spool)?;
+            entry_count = entry_count
+                .checked_add(1)
+                .ok_or(SnapshotSpoolError::EncodeInvariant)
+                .map_err(ImportedConversationSpoolError::Spool)?;
+        }
+        if !page.has_more() {
+            break;
+        }
     }
     write_spool_message(
         &mut file,
@@ -1865,11 +1898,16 @@ pub(super) async fn spool_imported_conversation(
             entry_count: CanonicalU64::new(entry_count),
         },
     )
-    .await?;
-    file.flush().await.map_err(SnapshotSpoolError::Io)?;
+    .await
+    .map_err(ImportedConversationSpoolError::Spool)?;
+    file.flush()
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(ImportedConversationSpoolError::Spool)?;
     file.seek(SeekFrom::Start(0))
         .await
-        .map_err(SnapshotSpoolError::Io)?;
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(ImportedConversationSpoolError::Spool)?;
     Ok(file)
 }
 

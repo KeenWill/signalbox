@@ -303,6 +303,65 @@ async fn inline_record_above_blob_maximum_is_a_raw_record_rejection() -> Result<
     runtime.stop().await
 }
 
+/// terminal inspection advances through more than one bounded PostgreSQL entry page.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inspection_streams_across_database_pages() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let source = (1..=129)
+        .map(|position| {
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"entry-{position}\"}}}}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes();
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            1,
+            ClientRequest::ImportConversation {
+                format: ConversationImportFormat::ClaudeCodeSessionJsonlV3,
+                source: ConversationImportSource::new(source),
+            },
+        )
+        .await?;
+    let conversation = require_inserted_import_receipt(&mut connection).await?;
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            2,
+            ClientRequest::ReadImportedConversation {
+                imported_conversation_id: conversation,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::ImportedConversationStart { .. }
+    ));
+    for position in 1..=129 {
+        assert!(matches!(
+            response_within(&mut connection).await?.message(),
+            ServerMessage::ImportedConversationEntry { position: observed, .. }
+                if *observed == CanonicalU64::new(position)
+        ));
+    }
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::ImportedConversationEnd {
+            imported_conversation_id: conversation,
+            entry_count: CanonicalU64::new(129),
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// disconnect discards per-connection partial import state.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]

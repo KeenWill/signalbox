@@ -54,11 +54,13 @@ begin, append, and commit sequence. Chunked assembly streams into a private file
 spool and has no source-size ceiling. An inspection read lists the normalized
 entries of one import with their positions and reports the count and first
 physical position of any records dropped during conversion, so a user can choose
-the position a session continues from. A browser read model lists imports,
-returns a descriptor for one, and windows its entries around a position. The
-terminal and inspection wire shapes are owned by
-[process-protocol](process-protocol.md). The browser DTOs are defined in the
-web-contract crate; the daemon's web adapter serves the routes that carry them.
+the position a session continues from. Terminal inspection pages entries from
+Postgres while writing its file-backed response spool. A browser read model
+lists imports, returns a descriptor for one, and reads only the bounded entry
+window requested by a conversation tool. The terminal and inspection wire shapes
+are owned by [process-protocol](process-protocol.md). The browser DTOs are
+defined in the web-contract crate; the daemon's web adapter serves the routes
+that carry them.
 
 ## Design decisions
 
@@ -188,8 +190,9 @@ unread subtree. A skipped outcome carries the exact client error and means the
 client received no definitive successful receipt, not that the request was
 uncommitted.
 
-The chunked assembly and the import permit are per-connection state, released by
-commit, abort, a conversion rejection, and disconnect. An already-in-progress
+The chunked assembly and its idle permit are per-connection state. Once commit
+starts its blocking conversion worker, that worker owns the permit until it
+exits, including after a request deadline or disconnect. An already-in-progress
 refusal leaves the existing assembly available for append, commit, or explicit
 abort. Appends write bounded request chunks directly to the private file spool,
 so retained assembly memory does not grow with source size. Commit checks the
@@ -205,16 +208,18 @@ fail-closed before presentation. The client resolves `latest` against this
 read's entry count before constructing the durable command, prints the resolved
 ordinal, and sends a concrete position.
 
-One transaction resolves or inserts a complete aggregate. Ingestion publishes
-and verifies every raw blob before that transaction, then registers the blob and
-replica rows in the same transaction that first references them. An accepted raw
-record cannot exceed `blob_storage.max_blob_bytes`; the complete source has no
-cumulative blob-byte ceiling. Conversion rejects an oversized physical record
-before buffering or parsing beyond that per-record ceiling. One admitted import
-awaits at most one raw blob publication or verification at a time while holding
-the process-wide bulk-ingest permit; it never fans out concurrently. Writers
-acquire shared raw hashes and globally unique entry identities in their
-respective sorted key order and store physical positions explicitly.
+Ingestion publishes and verifies each raw blob with no database transaction
+open, then records its catalog evidence in a short transaction. Connection-local
+temporary tables stage normalized rows without a long-lived transaction. After
+conversion, one transaction resolves or inserts the complete aggregate. An
+accepted raw record cannot exceed `blob_storage.max_blob_bytes`; the complete
+source has no cumulative blob-byte ceiling. Conversion rejects an oversized
+physical record before buffering or parsing beyond that per-record ceiling. One
+admitted import awaits at most one raw blob publication or verification at a
+time while holding the process-wide bulk-ingest permit; it never fans out
+concurrently. Writers acquire shared raw hashes and globally unique entry
+identities in their respective sorted key order and store physical positions
+explicitly.
 
 Once a header exists, any hash mismatch, missing member, gap, duplicate entry
 identity, unknown version, invalid value, or lineage mismatch is typed

@@ -341,14 +341,27 @@ pub async fn load_import_drop_facts(
 >;
 ```
 
-## load_normalized_entries
+## ImportedConversationEntryPage
 
 ```rust
-pub async fn load_normalized_entries(
+pub struct ImportedConversationEntryPage {/* private */}
+// derives: fmt::Debug
+impl conversation_import::ImportedConversationEntryPage {
+    pub const fn entries(&self) -> &[signalbox_domain::ImportedTranscriptEntryInput];
+    pub const fn has_more(&self) -> bool;
+}
+```
+
+## load_normalized_entry_page
+
+```rust
+pub async fn load_normalized_entry_page(
     pool: &sqlx_postgres::PgPool,
     conversation: signalbox_domain::ImportedConversationId,
+    after_position: u64,
+    limit: nonzero::NonZeroUsize,
 ) -> result::Result<
-    option::Option<boxed::Box<[signalbox_domain::ImportedTranscriptEntryInput]>>,
+    option::Option<conversation_import::ImportedConversationEntryPage>,
     conversation_import::ImportedConversationRepositoryError,
 >;
 ```

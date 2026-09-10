@@ -5,7 +5,7 @@ use std::{
     fmt,
     future::Future,
     io::{self, BufReader, Cursor, SeekFrom},
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
@@ -61,7 +61,7 @@ use signalbox_domain::{
     ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
     ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
-    ImportedTranscriptEntryInput, ImportedTranscriptPosition, ModelAlias, ModelCallId,
+    ImportedTranscriptPosition, ModelAlias, ModelCallId,
     ModelChangeAdjustment as DomainModelChangeAdjustment, ModelSelectionOverride,
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,

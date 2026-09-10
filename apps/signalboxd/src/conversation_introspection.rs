@@ -1,6 +1,10 @@
 //! Daemon adapter from application conversation reads to model-facing tools.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::{
+    error::Error,
+    fmt,
+    num::{NonZeroU64, NonZeroUsize},
+};
 
 use signalbox_application::{
     ClassifyOperatorFailure, ConversationListCursor as ApplicationCursor,
@@ -13,7 +17,8 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     conversation_import::{
-        ImportedConversationRepositoryError, ImportedRawBlobStorageError, load_normalized_entries,
+        ImportedConversationRepositoryError, ImportedRawBlobStorageError,
+        load_normalized_entry_page,
     },
     conversation_listing::{ConversationListingRepository, ConversationListingRepositoryError},
     process_read::{
@@ -212,23 +217,23 @@ impl ConversationIntrospectionPort for PostgresConversationIntrospection {
         &mut self,
         request: ImportedTranscriptRequest,
     ) -> Result<Option<TranscriptPage>, Self::Error> {
-        let Some(entries) = load_normalized_entries(&self.pool, request.conversation())
-            .await
-            .map_err(ConversationIntrospectionError::from_import)?
+        let limit = NonZeroUsize::new(request.max_entries())
+            .ok_or_else(ConversationIntrospectionError::caller_bug)?;
+        let after = request.after_position().map_or(0, NonZeroU64::get);
+        let Some(page) =
+            load_normalized_entry_page(&self.pool, request.conversation(), after, limit)
+                .await
+                .map_err(ConversationIntrospectionError::from_import)?
         else {
             return Ok(None);
         };
-        let after = request.after_position().map_or(0, NonZeroU64::get);
         let mut builder = TranscriptPageBuilder::new(request.max_entries(), request.max_bytes());
-        for entry in &entries {
-            if entry.position().as_u64() <= after {
-                continue;
-            }
+        for entry in page.entries() {
             if !builder.push(visible_imported_entry(entry)?) {
                 return Ok(Some(builder.finish(true)));
             }
         }
-        Ok(Some(builder.finish(false)))
+        Ok(Some(builder.finish(page.has_more())))
     }
 }
 

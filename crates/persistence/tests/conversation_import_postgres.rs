@@ -12,9 +12,10 @@ use std::{
     error::Error,
     fs,
     io::{BufReader, Cursor},
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use rust_decimal::Decimal;
@@ -41,6 +42,7 @@ use signalbox_persistence::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
         StreamingImportedConversationReport, corrupt_integration_imported_blob,
+        load_normalized_entry_page,
     },
     conversation_import_discovery::{
         ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
@@ -972,6 +974,32 @@ async fn exact_reingestion_resolves_the_immutable_winner() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// normalized inspection reads advance through bounded database pages.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn normalized_entry_pages_bound_and_advance_the_imported_transcript()
+-> Result<(), Box<dyn Error>> {
+    let fixture = import_round_trip_fixture().await?;
+    let limit = NonZeroUsize::new(1).expect("the fixture page limit is positive");
+
+    let first = load_normalized_entry_page(&fixture.pool, fixture.winner, 0, limit)
+        .await?
+        .expect("the imported conversation exists");
+    assert_eq!(first.entries().len(), 1);
+    assert_eq!(first.entries()[0].position().as_u64(), 1);
+    assert!(first.has_more());
+
+    let second = load_normalized_entry_page(&fixture.pool, fixture.winner, 1, limit)
+        .await?
+        .expect("the imported conversation exists");
+    assert_eq!(second.entries().len(), 1);
+    assert_eq!(second.entries()[0].position().as_u64(), 2);
+    assert!(!second.has_more());
+
+    fixture.finish().await;
+    Ok(())
+}
+
 /// imported raw bytes deduplicate by content identity while every ordered occurrence and semantic
 /// frontier reconstitutes.
 #[tokio::test(flavor = "multi_thread")]
@@ -1680,6 +1708,56 @@ async fn concurrent_streamed_duplicates_return_inserted_and_already_imported()
     }
     assert_eq!(inserted, already_imported);
     assert!(inserted.is_some());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// streamed staging needs no second connection and leaves no transaction open across publication.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn streamed_import_stages_without_a_long_lived_transaction() -> Result<(), Box<dyn Error>> {
+    let (container, migration_pool, database_url) = migrated_postgres().await?;
+    migration_pool.close().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?;
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let candidate = ImportedConversationId::from_uuid(Uuid::from_u128(0x8a0));
+    let source = concat!(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"one\"}}\n",
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"two\"}}"
+    );
+    let mut converter = ResilientClaudeCodeJsonlConverter;
+    let format = converter.format();
+    let mut next_entry = 0x8a1_u128;
+    let records = converter.convert_resilient_from_reader(
+        candidate,
+        BufReader::new(Cursor::new(source.as_bytes())),
+        u64::MAX,
+        move || {
+            let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(next_entry));
+            next_entry += 1;
+            identity
+        },
+    );
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(5),
+        repository.resolve_or_insert_stream(candidate, format, records),
+    )
+    .await
+    .expect("streamed import must not wait for another pool connection")
+    .expect("streamed import succeeds");
+    assert!(matches!(
+        report,
+        StreamingImportedConversationReport::Imported {
+            outcome: ImportedConversationStoreOutcome::Inserted { conversation, .. },
+            ..
+        } if conversation == candidate
+    ));
 
     pool.close().await;
     drop(container);
