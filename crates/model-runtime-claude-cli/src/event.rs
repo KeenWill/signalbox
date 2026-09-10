@@ -45,6 +45,7 @@ pub(crate) struct EventDecoder<C> {
     message_id: Option<ProviderMessageId>,
     native_message_id: Option<String>,
     acknowledgement_message_id: Option<String>,
+    acknowledgement_text_seen: bool,
     content: Vec<AssistantPart>,
     /// Sticky: the CLI announced at least one `tool_use` block. Set before the
     /// block is validated, so a call this adapter rejects — an empty or
@@ -98,6 +99,7 @@ impl<C: Clone> EventDecoder<C> {
             message_id: None,
             native_message_id: None,
             acknowledgement_message_id: None,
+            acknowledgement_text_seen: false,
             content: Vec::new(),
             opened_tool_calls: false,
             current_event_examined: false,
@@ -366,16 +368,22 @@ impl<C: Clone> EventDecoder<C> {
                 .as_ref()
                 .is_some_and(|id| id != &message.id)
             || message.content.is_empty()
-            || !message
-                .content
-                .iter()
-                .all(|block| matches!(block, AssistantContent::Text { .. }))
+            || !message.content.iter().all(|block| {
+                matches!(
+                    block,
+                    AssistantContent::Text { .. } | AssistantContent::Thinking { .. }
+                )
+            })
         {
             return Err(DecodeFailure::stream_protocol(
                 "Claude assistant message contradicts the original response or its tool acknowledgement",
             ));
         }
         self.acknowledgement_message_id = Some(message.id.clone());
+        self.acknowledgement_text_seen |= message
+            .content
+            .iter()
+            .any(|block| matches!(block, AssistantContent::Text { .. }));
         if let Some(usage) = message.usage {
             self.usage.absorb(message_usage(usage));
         }
@@ -597,6 +605,12 @@ impl<C: Clone> EventDecoder<C> {
             CliTerminal::Success { stop_reason } => stop_reason,
         };
         let stop_reason = if self.acknowledgement_message_id.is_some() {
+            if !self.acknowledgement_text_seen {
+                self.report_usage(sink);
+                return self.loss(LossCause::StreamProtocolViolation {
+                    detail: "Claude acknowledgement lacks a text block".to_string(),
+                });
+            }
             if stop_reason != "end_turn" {
                 self.report_usage(sink);
                 return self.loss(LossCause::StreamProtocolViolation {
