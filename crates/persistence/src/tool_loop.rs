@@ -1384,7 +1384,59 @@ impl PostgresToolLoopRepository {
         turn: TurnId,
         producing_call: signalbox_domain::ModelCallId,
         identities: ToolContinuationIdentities,
+        next_steering: NextSteering,
+    ) -> Result<PrepareToolContinuationOutcome, ToolLoopRepositoryError>
+    where
+        NextSteering: FnMut(
+            signalbox_domain::AcceptedInputId,
+        ) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
+    {
+        self.prepare_continuation_with_failure(
+            session,
+            turn,
+            producing_call,
+            identities,
+            next_steering,
+            None,
+        )
+        .await
+    }
+
+    /// Closes the exact active compaction checkpoint after a preparation failure.
+    /// A changed checkpoint or an already prepared command retains its own recovery.
+    pub async fn fail_compaction_checkpoint<NextSteering>(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        producing_call: signalbox_domain::ModelCallId,
+        checkpoint: signalbox_domain::ContextFrontierId,
+        identities: ToolContinuationIdentities,
+        next_steering: NextSteering,
+    ) -> Result<PrepareToolContinuationOutcome, ToolLoopRepositoryError>
+    where
+        NextSteering: FnMut(
+            signalbox_domain::AcceptedInputId,
+        ) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
+    {
+        self.prepare_continuation_with_failure(
+            session,
+            turn,
+            producing_call,
+            identities,
+            next_steering,
+            Some(checkpoint),
+        )
+        .await
+    }
+
+    async fn prepare_continuation_with_failure<NextSteering>(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        producing_call: signalbox_domain::ModelCallId,
+        identities: ToolContinuationIdentities,
         mut next_steering: NextSteering,
+        failed_checkpoint: Option<signalbox_domain::ContextFrontierId>,
     ) -> Result<PrepareToolContinuationOutcome, ToolLoopRepositoryError>
     where
         NextSteering: FnMut(
@@ -1438,7 +1490,23 @@ impl PostgresToolLoopRepository {
                         .fetch_optional(&mut *transaction).await?,
                     None => None,
                 };
-                let compaction_failed = checkpoint.is_some() && sqlx::query_scalar::<_, bool>(
+                if let Some(expected) = failed_checkpoint {
+                    if checkpoint != Some(expected.into_uuid()) || compacted.is_some() {
+                        return Ok(PrepareToolContinuationOutcome::NoWork);
+                    }
+                    let prepared: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM compact_session_command AS command
+                          JOIN context_compaction_model_call AS call
+                            ON call.model_call_id = command.model_call_id
+                          WHERE command.session_id = $1 AND command.automatic_for_turn_id = $2
+                            AND call.source_frontier_id = $3)",
+                    ).bind(session.into_uuid()).bind(turn.into_uuid()).bind(expected.into_uuid())
+                        .fetch_one(&mut *transaction).await?;
+                    if prepared {
+                        return Ok(PrepareToolContinuationOutcome::NoWork);
+                    }
+                }
+                let compaction_failed = failed_checkpoint.is_some() || checkpoint.is_some() && sqlx::query_scalar::<_, bool>(
                     "SELECT EXISTS (SELECT 1 FROM compact_session_command
                       WHERE session_id = $1 AND automatic_for_turn_id = $2 AND result_kind = 'failed')",
                 ).bind(session.into_uuid()).bind(turn.into_uuid())

@@ -897,6 +897,66 @@ async fn failed_or_refused_compaction_closes_the_active_checkpoint() -> Result<(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn pre_prepare_failure_closes_the_checkpoint_without_a_compaction_call()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let (session, turn) =
+        exhausted_continuation(&runtime, ContinuationSession::Interactive).await?;
+    // The valid prompt alone exceeds this fixture's complete model window.
+    const WINDOW: usize = 1024;
+    let configuration = support::parse_model_configuration(
+        &MODEL_CONFIGURATION
+            .replace(
+                "context_window_tokens = 200000",
+                &format!("context_window_tokens = {WINDOW}"),
+            )
+            .replace(
+                "Summarize the prior conversation faithfully for continuation.",
+                &"x".repeat(WINDOW * 2),
+            ),
+    )?;
+    let summary = ScriptedModel::following([]);
+    let probe = summary.clone();
+    let compaction = continuation_compaction_with_configuration(&runtime, summary, configuration)?;
+    let error = compaction
+        .compact_if_needed(session, None)
+        .await
+        .expect_err("the prompt leaves no input allowance");
+    assert_eq!(
+        signalbox_application::ClassifyOperatorFailure::operator_failure_cause_code(&error),
+        "context_compaction_configuration",
+        "{error:?}",
+    );
+    let lifecycle: (String, Option<Uuid>, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, compaction_frontier_id, terminal_cause_kind
+           FROM turn_lifecycle WHERE turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        lifecycle,
+        (
+            String::from("terminal"),
+            None,
+            Some(String::from("context_compaction_failed"))
+        )
+    );
+    let commands: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM compact_session_command WHERE automatic_for_turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(commands, 0);
+    assert!(probe.received_operations().is_empty());
+    compaction.compact_if_needed(session, None).await?;
+    assert!(probe.received_operations().is_empty());
+    runtime.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn post_compaction_headroom_includes_pending_steering() -> Result<(), Box<dyn Error>> {
     assert_post_compaction_headroom(false).await
 }
