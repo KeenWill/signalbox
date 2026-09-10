@@ -48,6 +48,10 @@ impl ConversationMessage {
 /// One part of a conversation message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessagePart {
+    /// Caller-authenticated durable image reference awaiting bounded materialization.
+    ImageReference(crate::ImageReference),
+    /// Materialized image bytes, encoded without local format interpretation.
+    Image(crate::ImageInput),
     /// Plain text.
     Text(String),
     /// A tool call the assistant proposed in an earlier response, replayed

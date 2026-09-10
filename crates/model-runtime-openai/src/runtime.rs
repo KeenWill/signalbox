@@ -18,7 +18,7 @@ use signalbox_model_runtime::{
     PreparationFailure, PreparationOutcome, ProviderErrorEvidence, ProviderErrorKind,
     ProviderRequestId, ResponsePrefixBudget as PrefixBudget, SseFraming, StreamInterruption,
     TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause,
-    boundary_loss_evidence as exchange_loss, emit_provider_observation as emit, parse_retry_after,
+    emit_provider_observation as emit, parse_retry_after,
     pre_exchange_loss_evidence as pre_exchange_loss, proven_unsent_evidence as proven_unsent,
     provider_response_body_too_large as response_body_too_large,
     provider_response_prefix_len as streamed_response_prefix_len,
@@ -434,6 +434,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             // evidence rather than a silent second send; see `new` for the
             // rationale.
             TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: false,
                 cause: LossCause::UnexpectedHttpStatus,
                 exchange,
                 reported_model: None,
@@ -455,9 +456,18 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         cancellation: &mut CancellationSignal,
     ) -> TerminalEvidence {
         let body = match collect_response_body(response, cancellation).await {
-            None => return exchange_loss(LossCause::CancellationRequested, exchange),
-            Some(Err(cause)) => return exchange_loss(cause, exchange),
-            Some(Ok(bytes)) => bytes,
+            Err(failure) => {
+                return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    response_content_observed: failure.received_bytes > 0,
+                    cause: failure.cause,
+                    exchange,
+                    reported_model: None,
+                    finish_reported: None,
+                    tool_calls: ToolCallsAtLoss::Unobserved,
+                    usage: TokenUsage::unreported(),
+                });
+            }
+            Ok(bytes) => bytes,
         };
         decode_buffered_response(&body, exchange, correlation, sink)
     }
@@ -661,6 +671,7 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
         }
         TerminalEvidence::Refused(refusal) => {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: refusal.exchange,
                 reported_model: refusal.reported_model,
                 kind: ProviderErrorKind::Unrecognized,
@@ -686,9 +697,14 @@ async fn finish_error(
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
     let body = match collect_response_body(response, cancellation).await {
-        None => return exchange_loss(LossCause::CancellationRequested, exchange),
-        Some(Err(cause)) => return exchange_loss(cause, exchange),
-        Some(Ok(bytes)) => bytes,
+        Err(BufferedBodyLoss {
+            cause: LossCause::CancellationRequested,
+            ..
+        }) => Vec::new(),
+        Err(BufferedBodyLoss { cause, .. }) => {
+            return fallback_provider_error(exchange, status, format!("{cause:?}").as_bytes());
+        }
+        Ok(bytes) => bytes,
     };
     if validate_provider_json_nesting(&body).is_ok()
         && let Ok(ErrorEnvelope { error: Some(error) }) = serde_json::from_slice(&body)
@@ -700,6 +716,7 @@ async fn finish_error(
             error.error_type.as_deref(),
         );
         return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            credential_recovery: None,
             exchange,
             // The Responses error envelope reports no model identity.
             reported_model: None,
@@ -718,6 +735,7 @@ fn fallback_provider_error(exchange: ExchangeFacts, status: u16, body: &[u8]) ->
     // first can make valid JSON unparseable and hide a reversible credential
     // representation from JSON-aware redaction.
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        credential_recovery: None,
         exchange,
         reported_model: None,
         kind: classify_error(status, None),
@@ -731,28 +749,36 @@ fn fallback_provider_error(exchange: ExchangeFacts, status: u16, body: &[u8]) ->
     })
 }
 
+struct BufferedBodyLoss {
+    cause: LossCause,
+    received_bytes: usize,
+}
+
 async fn collect_response_body(
     response: reqwest::Response,
     cancellation: &mut CancellationSignal,
-) -> Option<Result<Vec<u8>, LossCause>> {
+) -> Result<Vec<u8>, BufferedBodyLoss> {
     let mut body = response.bytes_stream();
     let mut collected = Vec::new();
-    loop {
+    let mut received_bytes = 0usize;
+    let cause = loop {
         match cancellation.run_until_cancelled(body.next()).await {
-            None => return None,
-            Some(None) => return Some(Ok(collected)),
-            Some(Some(Err(error))) => return Some(Err(classify_body_error(&error))),
+            None => break LossCause::CancellationRequested,
+            Some(None) => return Ok(collected),
+            Some(Some(Err(error))) => break classify_body_error(&error),
             Some(Some(Ok(chunk))) => {
-                let Some(next_len) = collected.len().checked_add(chunk.len()) else {
-                    return Some(Err(response_body_too_large()));
-                };
-                if next_len > MAX_BUFFERED_RESPONSE_BYTES {
-                    return Some(Err(response_body_too_large()));
+                received_bytes = received_bytes.saturating_add(chunk.len());
+                if received_bytes > MAX_BUFFERED_RESPONSE_BYTES {
+                    break response_body_too_large();
                 }
                 collected.extend_from_slice(&chunk);
             }
         }
-    }
+    };
+    Err(BufferedBodyLoss {
+        cause,
+        received_bytes,
+    })
 }
 
 /// Classifies a send-phase transport failure per the runtime-substrate
@@ -774,9 +800,7 @@ fn classify_send_error(error: &reqwest::Error) -> TerminalEvidence {
 }
 
 /// Classifies a body-phase read failure: a caller-configured deadline keeps
-/// its typed timeout cause; anything else is a lost response body. Either
-/// way the exchange lacks a definitive response (the ambiguous branch in
-/// `docs/spec/model-call-execution.md`).
+/// its typed timeout cause; anything else is a lost response body.
 fn classify_body_error(error: &reqwest::Error) -> LossCause {
     if error.is_timeout() {
         LossCause::TimedOut(transport_facts(error))
@@ -827,6 +851,62 @@ mod tests {
         without_unproven_refusal,
     };
     use crate::stream::StreamDecoder;
+
+    #[tokio::test]
+    async fn cancellation_during_error_body_read_preserves_received_status() {
+        use signalbox_model_runtime::ProviderErrorKind;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        for (status, kind) in [
+            (401, ProviderErrorKind::CredentialRejected),
+            (429, ProviderErrorKind::RateLimited),
+            (503, ProviderErrorKind::Overloaded),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("loopback socket binds");
+            let address = listener.local_addr().expect("bound address");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("fixture request");
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.expect("request header byte"));
+                }
+                // One advertised byte keeps the body pending after headers arrive.
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 {status} Fixture\r\nContent-Length: 1\r\n\r\n")
+                            .as_bytes(),
+                    )
+                    .await
+                    .expect("error headers sent");
+                let mut byte = [0];
+                assert_eq!(socket.read(&mut byte).await.expect("client closes"), 0);
+            });
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("fixture HTTP client")
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .expect("error headers received");
+            let exchange = ExchangeFacts {
+                http_status: Some(response.status().as_u16()),
+                ..ExchangeFacts::default()
+            };
+            let mut cancellation = CancellationSignal::when(async {});
+            let evidence = super::finish_error(response, exchange, status, &mut cancellation).await;
+            let TerminalEvidence::ProviderError(error) = evidence else {
+                panic!("HTTP {status} remains definitive when the body read is cancelled");
+            };
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.exchange.http_status, Some(status));
+            assert!(!error.non_acceptance_proven);
+            server.await.expect("fixture completed");
+        }
+    }
 
     #[test]
     fn refusal_without_reported_usage_remains_an_unproven_provider_error() {

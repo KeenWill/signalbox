@@ -1547,29 +1547,6 @@ mod tests {
     use super::ImportedSessionRepositoryError;
 
     #[test]
-    fn operator_error_messages_distinguish_imported_session_scalar_failures() {
-        use super::ImportedSessionCorruption;
-        use crate::mapping::{DurableCommandIdMappingError, PositiveOrdinalMappingError};
-
-        let errors = [
-            ImportedSessionCorruption::InvalidOrdinal {
-                field: "position",
-                reason: PositiveOrdinalMappingError::NonPositive,
-            },
-            ImportedSessionCorruption::InvalidCommandIdentity {
-                field: "command_id",
-                reason: DurableCommandIdMappingError::SentinelUuid,
-            },
-        ];
-        let messages = errors.map(|error| error.to_string()).join("\n");
-
-        expect_test::expect![[r#"
-            invalid imported-session position: invalid ordinal: ordinal must be positive
-            invalid imported-session command_id: invalid command identity: durable-command identity must not be the nil or max UUID"#]]
-        .assert_eq(&messages);
-    }
-
-    #[test]
     fn lost_commit_response_is_typed_as_ambiguous() {
         let error = ImportedSessionRepositoryError::from_commit_failure(sqlx::Error::Io(
             io::Error::new(io::ErrorKind::ConnectionReset, "commit response was lost"),

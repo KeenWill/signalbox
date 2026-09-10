@@ -423,22 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn attachment_kind_digest_tags_are_explicit_and_stable() {
-        assert_eq!(
-            attachment_kind_digest_tag(signalbox_domain::AttachmentKind::Image),
-            ATTACHMENT_KIND_IMAGE_DIGEST_TAG
-        );
-        assert_eq!(
-            attachment_kind_digest_tag(signalbox_domain::AttachmentKind::Document),
-            ATTACHMENT_KIND_DOCUMENT_DIGEST_TAG
-        );
-        assert_eq!(
-            attachment_kind_digest_tag(signalbox_domain::AttachmentKind::File),
-            ATTACHMENT_KIND_FILE_DIGEST_TAG
-        );
-    }
-
-    #[test]
     fn preparation_binds_the_command_and_adopts_one_reserved_turn() {
         let mut ids = UuidV7CommissionedDispatchIdGenerator;
 

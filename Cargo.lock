@@ -4407,6 +4407,7 @@ version = "0.0.0"
 dependencies = [
  "crc32fast",
  "image",
+ "serde",
  "serde_json",
  "signalbox-file-media-processor-runtime",
  "signalbox-file-media-runtime",
@@ -4461,6 +4462,7 @@ dependencies = [
  "serde_json",
  "signalbox-domain",
  "signalbox-file-media-runtime",
+ "signalbox-model-runtime",
  "signalbox-tools-file-media",
  "tokio",
 ]
@@ -4475,6 +4477,7 @@ dependencies = [
  "mime",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "signalbox-derive",
  "tokio",
 ]
@@ -4555,6 +4558,7 @@ dependencies = [
 name = "signalbox-model-runtime-claude-cli"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
  "rustix 1.1.4",
  "semver",
  "serde",
@@ -4569,6 +4573,7 @@ dependencies = [
 name = "signalbox-model-runtime-codex-cli"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
  "hex",
  "rustix 1.1.4",
  "schemars 1.2.2",
@@ -5008,6 +5013,7 @@ dependencies = [
  "signalbox-conversation-import-codex",
  "signalbox-derive",
  "signalbox-domain",
+ "signalbox-file-media-adapters-image",
  "signalbox-file-media-adapters-text",
  "signalbox-file-media-processor-runtime",
  "signalbox-file-media-provider-runtime",

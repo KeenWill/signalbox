@@ -869,6 +869,7 @@ async fn model_call_history_count(
 
 fn provider_error_script() -> Script {
     Script::delivering(TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        credential_recovery: None,
         exchange: ExchangeFacts::default(),
         reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
         kind: ProviderErrorKind::ProviderInternal,
@@ -3265,6 +3266,62 @@ async fn headless_web_fetch(posture: DangerousToolAutoApproval) -> Result<(), Bo
         vec![
             expected_tool_call(request, WEB_FETCH_NAME, &arguments),
             expected_successful_tool_result(request, expected_result),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn web_fetch_timeout_returns_a_typed_failure_and_continues_the_turn()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let web = OfflineWebTransport {
+        response: Err(WebFetchTransportFailure::Timeout),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let (catalog, executor) = offline_daemon_tools(
+        web.clone(),
+        UnusedSessionStatusWriter,
+        UnusedCodeHostTransport,
+        WebFetchEgressPolicy::default(),
+    )?
+    .into_parts();
+    assert_eq!(
+        catalog
+            .definition(
+                &ToolName::try_new(WEB_FETCH_NAME.to_owned()).expect("declared web tool name")
+            )
+            .unwrap()
+            .effect_class(),
+        ToolEffectClass::ExternalEffect,
+    );
+    let arguments = r#"{"url":"https://example.com/timeout"}"#;
+    let (execution, runtime, _) = fixture.execution_with_judge(
+        [
+            tool_use_script(&[(WEB_FETCH_NAME, arguments)]),
+            completion_script("continued after timeout"),
+        ],
+        approval_judge_script("approve", "Read public documentation."),
+        catalog,
+        executor,
+    );
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+    assert_eq!(web.requests().len(), 1);
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, WEB_FETCH_NAME, arguments),
+            expected_failed_tool_result(
+                request,
+                serde_json::json!({"error": {
+                    "kind": "execution_failed", "detail": "web fetch request timed out"
+                }})
+                .to_string()
+            ),
         ]
     );
     Ok(())
