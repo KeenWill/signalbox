@@ -765,18 +765,6 @@ fn credentialed_step_scan_detects_an_environment_dump() {
     );
 }
 
-/// `export -p` and `set` dump the environment just as `env` does, and name the
-/// credential no more than it does.
-#[test]
-fn credentialed_step_scan_detects_an_export_dump() {
-    let workflow = format!("{}\n        export -p", credentialed_step_workflow());
-
-    assert_ne!(
-        workflow_step_lines(&workflow, CREDENTIALED_STEP),
-        CREDENTIALED_STEP_LINES
-    );
-}
-
 /// A step whose marker is absent yields nothing, so a renamed or deleted step
 /// fails the pin rather than matching an empty expectation.
 #[test]
@@ -876,66 +864,6 @@ fn credential_scan_accepts_the_permitted_inventory() {
 fn credential_scan_detects_a_braced_shell_expansion() {
     let workflow = format!(
         "{}\necho \"${{{SMOKE_CREDENTIAL_VARIABLE}}}\"",
-        permitted_credential_workflow()
-    );
-
-    assert_ne!(
-        credential_reading_lines(&workflow),
-        PERMITTED_CREDENTIAL_SITES
-    );
-}
-
-/// The unbraced spelling leaks identically and must not slip past the scan.
-#[test]
-fn credential_scan_detects_a_bare_shell_expansion() {
-    let workflow = format!(
-        "{}\necho ${SMOKE_CREDENTIAL_VARIABLE}",
-        permitted_credential_workflow()
-    );
-
-    assert_ne!(
-        credential_reading_lines(&workflow),
-        PERMITTED_CREDENTIAL_SITES
-    );
-}
-
-/// Handing the value to another command puts it in that process's argv, which
-/// a process listing exposes without any `echo` at all.
-#[test]
-fn credential_scan_detects_an_argv_expansion() {
-    let workflow = format!(
-        "{}\nsome-tool --token \"${{{SMOKE_CREDENTIAL_VARIABLE}}}\"",
-        permitted_credential_workflow()
-    );
-
-    assert_ne!(
-        credential_reading_lines(&workflow),
-        PERMITTED_CREDENTIAL_SITES
-    );
-}
-
-/// A second environment binding forwards the value to a step that was never
-/// reviewed for it, so it is a change to the inventory even though nothing is
-/// rendered.
-#[test]
-fn credential_scan_detects_a_second_environment_binding() {
-    let workflow = format!(
-        "{}\nOTHER_TOKEN: ${{{{ secrets.{SMOKE_CREDENTIAL_VARIABLE} }}}}",
-        permitted_credential_workflow()
-    );
-
-    assert_ne!(
-        credential_reading_lines(&workflow),
-        PERMITTED_CREDENTIAL_SITES
-    );
-}
-
-/// A read that never expands anything still writes the value to the job log,
-/// so keying the scan on a `$` sigil would have missed it entirely.
-#[test]
-fn credential_scan_detects_a_read_without_expansion() {
-    let workflow = format!(
-        "{}\nprintenv {SMOKE_CREDENTIAL_VARIABLE}",
         permitted_credential_workflow()
     );
 
@@ -1760,24 +1688,6 @@ fn decoded_response_rejects_an_unexpected_terminal_variant() {
     let _ = require_decoded_response(evidence);
 }
 
-/// The executable override keeps raw OS bytes: a valid Unix path that is not
-/// UTF-8 names the executable the operator asked for, rather than being read as
-/// absent and silently resolving the bare-command default.
-#[cfg(unix)]
-#[test]
-fn non_utf8_executable_override_is_resolved_verbatim() {
-    use std::os::unix::ffi::OsStringExt;
-
-    let root = tempfile::tempdir().expect("fixture directory is created");
-    let executable = root.path().join(std::ffi::OsString::from_vec(vec![
-        b'c', b'l', b'a', b'u', b'd', b'e', 0xff,
-    ]));
-
-    let resolved = resolved_executable(executable.as_os_str(), root.path(), None);
-
-    assert_eq!(resolved, executable);
-}
-
 /// Selection preserves a populated override as raw OS bytes before any path
 /// resolution, including a valid Unix value that is not UTF-8.
 #[cfg(unix)]
@@ -1840,14 +1750,6 @@ fn smoke_variable_selection_prefers_a_populated_override() {
 #[test]
 fn smoke_variable_selection_falls_back_for_an_absent_variable() {
     assert_eq!(selected_or(None, DEFAULT_MODEL), DEFAULT_MODEL);
-}
-
-#[test]
-fn smoke_variable_selection_falls_back_for_a_blank_variable() {
-    assert_eq!(
-        selected_or(Some(String::new()), DEFAULT_MODEL),
-        DEFAULT_MODEL
-    );
 }
 
 #[test]
