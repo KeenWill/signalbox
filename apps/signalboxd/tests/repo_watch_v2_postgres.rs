@@ -3888,9 +3888,9 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     let push_credential = files.path().join("push-token");
     write_private_credential(&push_credential, b"")?;
     let replacement_source = runtime_configuration_source(&hook)?.replace(
-        "credential_file =",
+        "\ncredential_file =",
         &format!(
-            "push_credential_file = \"{}\"\ncredential_file =",
+            "\npush_credential_file = \"{}\"\ncredential_file =",
             push_credential.display()
         ),
     );
