@@ -25,7 +25,7 @@ pub(crate) struct BlobMetadata {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BlobReadError {
     NotFound,
-    RangeOutOfBounds { blob_length: u64 },
+    RangeOutOfBounds,
     Missing,
     Corrupt,
     Unavailable,
@@ -64,14 +64,9 @@ pub(crate) async fn read_blob_chunk(
 ) -> Result<Vec<u8>, BlobReadError> {
     debug_assert!(length.get() <= MAX_BLOB_RANGE_BYTES);
     let expected = entry.expected();
-    if offset
-        .checked_add(length.get())
-        .is_none_or(|end| end > expected.byte_length())
-    {
-        return Err(BlobReadError::RangeOutOfBounds {
-            blob_length: expected.byte_length(),
-        });
-    }
+    let actual_length = length
+        .get()
+        .min(expected.byte_length().saturating_sub(offset));
     let mut saw_missing = false;
     let mut saw_corrupt = false;
     let mut saw_unavailable = false;
@@ -79,20 +74,31 @@ pub(crate) async fn read_blob_chunk(
         let Some(store) = registry.recorded_store(replica.store()) else {
             return Err(BlobReadError::Integrity);
         };
-        match store
-            .open_range(expected, replica.object_key(), offset, length)
-            .await
-        {
+        let opened = if actual_length == 0 {
+            store.open(replica.object_key()).await
+        } else {
+            store
+                .open_range(expected, replica.object_key(), offset, length)
+                .await
+        };
+        match opened {
             Ok(opened) => {
-                if opened.byte_length() != length.get() {
+                if actual_length == 0 {
+                    if opened.byte_length() == expected.byte_length() {
+                        return Ok(Vec::new());
+                    }
+                    saw_corrupt = true;
+                    continue;
+                }
+                if opened.byte_length() != actual_length {
                     return Err(BlobReadError::Integrity);
                 }
                 let capacity =
-                    usize::try_from(length.get()).map_err(|_| BlobReadError::Integrity)?;
+                    usize::try_from(actual_length).map_err(|_| BlobReadError::Integrity)?;
                 let mut bytes = Vec::with_capacity(capacity);
                 let mut reader = opened.into_reader();
                 if (&mut reader)
-                    .take(length.get())
+                    .take(actual_length)
                     .read_to_end(&mut bytes)
                     .await
                     .is_err()
@@ -133,7 +139,7 @@ pub(crate) async fn read_blob_chunk(
     }
 }
 
-/// Opens one bounded HTTP range after the store verifies the complete object.
+/// Opens one bounded HTTP range from a recorded replica.
 pub(crate) async fn open_recorded_blob_range(
     registry: &BlobStoreRegistry,
     entry: &BlobCatalogEntry,
@@ -146,12 +152,72 @@ pub(crate) async fn open_recorded_blob_range(
             .checked_add(length.get())
             .is_none_or(|end| end > expected.byte_length())
     {
-        return Err(BlobReadError::RangeOutOfBounds {
-            blob_length: expected.byte_length(),
-        });
+        return Err(BlobReadError::RangeOutOfBounds);
     }
     let bytes = read_blob_chunk(registry, entry, offset, length).await?;
     Ok(Box::new(Cursor::new(bytes)))
+}
+
+/// Verifies an explicit operator read before retaining its requested page.
+pub(crate) async fn read_blob_chunk_verified(
+    registry: &BlobStoreRegistry,
+    entry: &BlobCatalogEntry,
+    offset: u64,
+    length: NonZeroU64,
+) -> Result<Vec<u8>, BlobReadError> {
+    let actual_length = length
+        .get()
+        .min(entry.expected().byte_length().saturating_sub(offset));
+    let mut saw_missing = false;
+    let mut saw_corrupt = false;
+    let mut saw_unavailable = false;
+    for replica in entry.replicas() {
+        let Some(store) = registry.recorded_store(replica.store()) else {
+            return Err(BlobReadError::Integrity);
+        };
+        match store
+            .open_verified(entry.expected(), replica.object_key())
+            .await
+        {
+            Ok(opened) if opened.byte_length() == entry.expected().byte_length() => {
+                if actual_length == 0 {
+                    return Ok(Vec::new());
+                }
+                let mut reader = opened.into_reader();
+                if tokio::io::copy(&mut (&mut reader).take(offset), &mut tokio::io::sink())
+                    .await
+                    .is_err()
+                {
+                    saw_unavailable = true;
+                    continue;
+                }
+                let mut bytes =
+                    vec![0; usize::try_from(actual_length).map_err(|_| BlobReadError::Integrity)?];
+                if reader.read_exact(&mut bytes).await.is_err() {
+                    saw_unavailable = true;
+                    continue;
+                }
+                return Ok(bytes);
+            }
+            Ok(_) => saw_corrupt = true,
+            Err(error) => match error.kind() {
+                BlobStoreFailureKind::NotFound => saw_missing = true,
+                BlobStoreFailureKind::VerificationFailed => saw_corrupt = true,
+                BlobStoreFailureKind::PublicationAmbiguous | BlobStoreFailureKind::Unavailable => {
+                    saw_unavailable = true;
+                }
+            },
+        }
+    }
+    if saw_unavailable {
+        Err(BlobReadError::Unavailable)
+    } else if saw_corrupt {
+        Err(BlobReadError::Corrupt)
+    } else if saw_missing {
+        Err(BlobReadError::Missing)
+    } else {
+        Err(BlobReadError::Integrity)
+    }
 }
 
 /// Opens one generation-pinned stream after a single complete-object verification pass.
