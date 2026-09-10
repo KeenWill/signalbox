@@ -4,6 +4,71 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn completed_attempt_payload_loads_from_the_durable_row() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, database_url) = migrated_postgres().await?;
+    // Supplies distinct identities for the completed tool-round fixture.
+    const FIXTURE_SEED: u128 = 0x473_0000;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, FIXTURE_SEED, "current_time", "{}").await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    let result = ToolResultContent::Text(
+        ToolResultText::try_new("retained tool result".to_owned()).unwrap(),
+    );
+    repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: result.clone(),
+                }),
+        )
+        .await?;
+    // The selection view does not expose the payload column under its current name.
+    sqlx::raw_sql("ALTER VIEW runner_current_tool_attempt RENAME COLUMN result_text TO view_text")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    let repository = PostgresToolLoopRepository::new(pool);
+    let batch = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("completed attempt remains in its active batch");
+    let Some(signalbox_domain::ReconstitutedToolAttempt::Ended(ended)) = batch.attempt(request)
+    else {
+        panic!("the committed attempt reloads as ended");
+    };
+    assert_eq!(ended.end(), &ToolAttemptEnd::Completed { result });
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn failure_context_migration_preserves_populated_attempts() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _) = migrated_postgres().await?;
     // Supplies distinct identities for the pre-migration tool attempt.
