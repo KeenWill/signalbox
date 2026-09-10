@@ -599,13 +599,56 @@ async fn observation_leases_leave_connections_available_for_frontier_work()
     let fixture = Fixture::new().await?;
     let store = &fixture.effects.store;
     let other = RepositorySlug::try_new("example/other".into())?;
-    let first = store.lock_observation(fixture.input().repository()).await?;
-    let second = store.lock_observation(&other).await?;
+    let first = store
+        .lock_observation(fixture.input().repository(), Uuid::now_v7())
+        .await?;
+    let second = store.lock_observation(&other, Uuid::now_v7()).await?;
     // Both module pool slots would be occupied if leases borrowed frontier connections.
     let baseline =
         tokio::time::timeout(Duration::from_secs(5), store.ingest_baseline(&other)).await??;
     assert_eq!(baseline.generation, 0);
     first.rollback().await?;
     second.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn acknowledged_observations_replay_after_later_observations_without_provider_reads()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new().await?;
+    let original = fixture.input();
+    let expected = fixture.run(&original).await?;
+    let later = fixture.input();
+    fixture.run(&later).await?;
+    fixture.effects.observer.io.pages.clear();
+    fixture
+        .effects
+        .observer
+        .io
+        .requests
+        .lock()
+        .expect("request log")
+        .clear();
+
+    assert_eq!(fixture.run(&original).await?, expected);
+    let mut changed: serde_json::Value = serde_json::from_slice(&original.encode()?)?;
+    changed["producer"] = serde_json::Value::String("webhook".into());
+    let changed = ObserveInput::decode(&serde_json::to_vec(&changed)?)?;
+    assert!(
+        observe::adopt(&fixture.effects.store, &changed)
+            .await
+            .is_err()
+    );
+    assert!(
+        fixture
+            .effects
+            .observer
+            .io
+            .requests
+            .lock()
+            .expect("request log")
+            .is_empty()
+    );
     Ok(())
 }

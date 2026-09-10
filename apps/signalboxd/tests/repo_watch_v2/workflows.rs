@@ -242,8 +242,8 @@ async fn fixture(
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires disposable PostgreSQL"]
-async fn workflow_evaluations_adopt_lost_answers_after_configuration_removal()
--> Result<(), Box<dyn Error>> {
+async fn workflow_evaluations_recover_after_another_run_acknowledges() -> Result<(), Box<dyn Error>>
+{
     for case in [Case::Dispatch, Case::Suppression, Case::Nonmatch] {
         let (_database, core, module, mut effects, repository, rule) = fixture(case).await?;
         let journal = ProgramJournalRepository::new(core.clone());
@@ -349,8 +349,31 @@ async fn workflow_evaluations_adopt_lost_answers_after_configuration_removal()
                 .as_bytes(),
             receipt.result
         );
+        effects
+            .acknowledge_receipt(&journal, successor, &receipt)
+            .await?;
+        assert!(effects.store.evaluation_receipts().await?.is_empty());
         host.execute_registered(run, &mut NoPrimitives, &mut effects)
             .await?;
+        assert_eq!(
+            journal
+                .load(run)
+                .await?
+                .expect("original journal")
+                .result()
+                .expect("original result")
+                .as_bytes(),
+            receipt.result,
+            "another run recovers the exact result after acknowledgement"
+        );
+        assert!(
+            effects
+                .store
+                .submission_receipt(receipt.effect, &receipt.input)
+                .await
+                .is_err(),
+            "acknowledgement preserves method conflicts"
+        );
         assert_eq!(
             effects.factory.next_command, minted,
             "adoption does not mint commands"
@@ -389,8 +412,8 @@ async fn workflow_evaluations_adopt_lost_answers_after_configuration_removal()
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires disposable PostgreSQL"]
-async fn workflow_submission_adopts_its_receipt_and_preserves_conflict_rejection()
--> Result<(), Box<dyn Error>> {
+async fn workflow_submission_recovers_after_another_run_acknowledges() -> Result<(), Box<dyn Error>>
+{
     let (_database, core, module, mut effects, repository, rule) = fixture(Case::Dispatch).await?;
     let context = effects
         .store
@@ -531,6 +554,46 @@ async fn workflow_submission_adopts_its_receipt_and_preserves_conflict_rejection
         )
         .await?;
     assert!(effects.store.submission_receipts().await?.is_empty());
+    let recovered = host
+        .execute_registered(successor, &mut NoPrimitives, &mut effects)
+        .await?;
+    let signalbox_workflow_runtime::ProgramExecutionOutcome::Completed(payload) = recovered else {
+        panic!("completed submission remains recoverable after acknowledgement");
+    };
+    assert_eq!(payload.as_bytes(), b"submitted");
+    let fresh = start(
+        &core,
+        &request,
+        ProgramGrants::new([ProgramCapability::RepoWatch]),
+    )
+    .await?;
+    assert_eq!(
+        host.execute_registered(fresh, &mut NoPrimitives, &mut effects)
+            .await?,
+        signalbox_workflow_runtime::ProgramExecutionOutcome::Completed(payload)
+    );
+    assert_eq!(
+        effects.sink.calls, 2,
+        "recovery after acknowledgement never resubmits commands"
+    );
+    assert!(
+        effects
+            .store
+            .adopt_evaluation(completed.effect, request.payload().as_bytes())
+            .await
+            .is_err(),
+        "acknowledgement preserves method conflicts"
+    );
+    let mut changed = request.payload().as_bytes().to_vec();
+    changed.push(b' ');
+    assert!(
+        effects
+            .store
+            .submission_receipt(completed.effect, &changed)
+            .await
+            .is_err(),
+        "acknowledgement preserves exact-input conflicts"
+    );
     module.close().await;
     core.close().await;
     Ok(())
@@ -695,6 +758,75 @@ mod native_recovery {
             "successor adoption permits the next event"
         );
         assert_eq!(effects.ids.calls, 1, "successor does not repeat dispatch");
+        let next_context = effects
+            .store
+            .next_rule_context(&repository, &rule)
+            .await?
+            .expect("next event");
+        let next_request = RepoWatchRequest::CommitEvaluation {
+            effect: Uuid::now_v7(),
+            plan: next_context.plan(),
+            context: Box::new(next_context),
+        }
+        .encode()?;
+        let next_run = start(
+            &core,
+            &next_request,
+            ProgramGrants::new([ProgramCapability::RepoWatch]),
+        )
+        .await?;
+        replacement
+            .execute_registered(next_run, &mut NoPrimitives, &mut effects)
+            .await?;
+        let next_receipt = effects
+            .store
+            .evaluation_receipts()
+            .await?
+            .pop()
+            .expect("next pending receipt");
+        assert_ne!(next_receipt.effect, receipt.effect);
+        effects
+            .store
+            .reconcile_rules(&[], OffsetDateTime::now_utc())
+            .await?;
+        effects.rules.clear();
+        let minted = effects.ids.calls;
+        let late_successor = start(
+            &core,
+            &request,
+            ProgramGrants::new([ProgramCapability::RepoWatch]),
+        )
+        .await?;
+        let result = replacement
+            .execute_registered(late_successor, &mut NoPrimitives, &mut effects)
+            .await?;
+        assert_eq!(
+            result,
+            signalbox_workflow_runtime::ProgramExecutionOutcome::Completed(
+                InlineFramePayload::new(receipt.result.clone())
+            ),
+            "fresh equal requests keep the completed result after the cursor changes"
+        );
+        assert_eq!(
+            effects.ids.calls, minted,
+            "completed bindings never repeat planning"
+        );
+        assert_eq!(
+            effects
+                .store
+                .adopt_evaluation(receipt.effect, &receipt.input)
+                .await?,
+            Some(receipt.result.clone()),
+            "lost-answer adoption keeps the completed binding after cursor advancement"
+        );
+        effects
+            .acknowledge_receipt(&journal, late_successor, &receipt)
+            .await?;
+        assert_eq!(
+            effects.store.evaluation_receipts().await?,
+            vec![next_receipt],
+            "late acknowledgement cannot release another effect's pending slot"
+        );
         module.close().await;
         core.close().await;
         Ok(())

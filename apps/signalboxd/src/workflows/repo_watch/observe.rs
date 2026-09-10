@@ -167,7 +167,9 @@ pub(crate) async fn adopt_checked(
     store: &RepoWatchStore,
     input: &ObserveInput,
 ) -> Result<Option<InlineFramePayload>, RepoWatchEffectFailure> {
-    let _lease = store.lock_observation(&input.repository).await?;
+    let _lease = store
+        .lock_observation(&input.repository, input.effect)
+        .await?;
     adopt_locked(store, input).await
 }
 
@@ -176,9 +178,8 @@ async fn adopt_locked(
     input: &ObserveInput,
 ) -> Result<Option<InlineFramePayload>, RepoWatchEffectFailure> {
     let receipt = store
-        .observation_receipt_by_effect(input.effect)
-        .await
-        .map_err(failure)?;
+        .observation_receipt_by_effect(input.effect, &input.bytes)
+        .await?;
     let receipt = match receipt {
         Some(receipt) => Some(receipt),
         None => store
@@ -213,7 +214,7 @@ pub(crate) async fn execute_checked(
     observer: &mut impl RepositoryObserver,
 ) -> Result<InlineFramePayload, RepoWatchEffectFailure> {
     let _lease = store
-        .lock_observation(&input.repository)
+        .lock_observation(&input.repository, input.effect)
         .await
         .map_err(failure)?;
     if let Some(result) = adopt_locked(store, input).await? {

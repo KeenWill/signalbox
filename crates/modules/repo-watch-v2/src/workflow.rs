@@ -167,10 +167,13 @@ impl RepoWatchStore {
         evaluation_receipt(&mut tx, effect, input).await
     }
 
-    /// Releases only the exact receipt whose delivery the daemon has verified durable.
+    /// Retains the verified result while releasing its pending evaluation slot.
     pub async fn release_evaluation(&self, receipt: &EffectReceipt) -> Result<(), StoreError> {
-        sqlx::query("UPDATE rule_evaluation_cursor SET effect_id = NULL, effect_input = NULL, effect_result = NULL WHERE effect_id = $1 AND effect_input = $2 AND effect_result = $3")
-            .bind(receipt.effect).bind(&receipt.input).bind(&receipt.result).execute(&self.pool).await?;
+        let mut tx = self.pool.begin().await?;
+        receipt_lock(&mut tx, receipt.effect).await?;
+        sqlx::query("WITH released AS (UPDATE rule_evaluation_cursor SET effect_id = NULL, effect_input = NULL, effect_result = NULL WHERE effect_id = $1 AND effect_input = $2 AND effect_result = $3 RETURNING $1::uuid AS effect_id, $2::bytea AS effect_input, $3::bytea AS effect_result) INSERT INTO workflow_effect_result(effect_id, method, effect_input, effect_result) SELECT effect_id, 'repo.commitEvaluation', effect_input, effect_result FROM released")
+            .bind(receipt.effect).bind(&receipt.input).bind(&receipt.result).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -262,7 +265,37 @@ impl RepoWatchStore {
     }
 }
 
-async fn receipt_lock(tx: &mut Transaction<'_, Postgres>, effect: Uuid) -> Result<(), StoreError> {
+pub(crate) async fn completed_receipt(
+    tx: &mut Transaction<'_, Postgres>,
+    effect: Uuid,
+    method: &str,
+    input: &[u8],
+) -> Result<Option<Vec<u8>>, StoreError> {
+    let conflicting: bool = sqlx::query_scalar("SELECT CASE WHEN $2 = 'repo.observe' THEN EXISTS (SELECT 1 FROM rule_evaluation_cursor WHERE effect_id=$1) OR EXISTS (SELECT 1 FROM dispatch_ledger WHERE effect_id=$1) ELSE EXISTS (SELECT 1 FROM repository_state WHERE observation_effect_id=$1) END")
+        .bind(effect).bind(method).fetch_one(&mut **tx).await?;
+    if conflicting {
+        return Err(StoreError::WorkflowInputRejected);
+    }
+    let row: Option<(String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT method, effect_input, effect_result FROM workflow_effect_result WHERE effect_id = $1",
+    )
+    .bind(effect)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.map(|(retained_method, retained_input, result)| {
+        if retained_method == method && retained_input == input {
+            Ok(result)
+        } else {
+            Err(StoreError::WorkflowInputRejected)
+        }
+    })
+    .transpose()
+}
+
+pub(crate) async fn receipt_lock(
+    tx: &mut Transaction<'_, Postgres>,
+    effect: Uuid,
+) -> Result<(), StoreError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('repo-effect:' || $1::text, 0))")
         .bind(effect)
         .execute(&mut **tx)
@@ -291,6 +324,9 @@ async fn evaluation_receipt(
     effect: Uuid,
     input: &[u8],
 ) -> Result<Option<Vec<u8>>, StoreError> {
+    if let Some(result) = completed_receipt(tx, effect, "repo.commitEvaluation", input).await? {
+        return Ok(Some(result));
+    }
     let submission: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM dispatch_ledger WHERE effect_id = $1)")
             .bind(effect)
@@ -343,6 +379,12 @@ impl RepoWatchStore {
         receipt_lock(&mut tx, effect)
             .await
             .map_err(SubmissionError::Store)?;
+        if let Some(result) = completed_receipt(&mut tx, effect, "repo.submitPending", input)
+            .await
+            .map_err(SubmissionError::Store)?
+        {
+            return Ok(result);
+        }
         let evaluation: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM rule_evaluation_cursor WHERE effect_id = $1)",
         )
@@ -388,6 +430,15 @@ impl RepoWatchStore {
     ) -> Result<Option<SubmissionReceipt>, StoreError> {
         let mut tx = self.pool.begin().await?;
         receipt_lock(&mut tx, effect).await?;
+        if let Some(result) =
+            completed_receipt(&mut tx, effect, "repo.submitPending", input).await?
+        {
+            return Ok(Some(SubmissionReceipt {
+                effect,
+                input: input.to_vec(),
+                result: Some(result),
+            }));
+        }
         let conflicting: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM rule_evaluation_cursor WHERE effect_id = $1)",
         )
@@ -451,10 +502,13 @@ impl RepoWatchStore {
             })
             .collect())
     }
-    /// Releases a completed submission after the daemon verifies its durable answer.
+    /// Retains the verified result while releasing its pending submission slot.
     pub async fn release_submission(&self, receipt: &EffectReceipt) -> Result<(), StoreError> {
-        sqlx::query("UPDATE dispatch_ledger SET effect_id = NULL, effect_input = NULL, effect_result = NULL WHERE effect_id = $1 AND effect_input = $2 AND effect_result = $3")
-            .bind(receipt.effect).bind(&receipt.input).bind(&receipt.result).execute(&self.pool).await?;
+        let mut tx = self.pool.begin().await?;
+        receipt_lock(&mut tx, receipt.effect).await?;
+        sqlx::query("WITH released AS (UPDATE dispatch_ledger SET effect_id = NULL, effect_input = NULL, effect_result = NULL WHERE effect_id = $1 AND effect_input = $2 AND effect_result = $3 RETURNING $1::uuid AS effect_id, $2::bytea AS effect_input, $3::bytea AS effect_result) INSERT INTO workflow_effect_result(effect_id, method, effect_input, effect_result) SELECT effect_id, 'repo.submitPending', effect_input, effect_result FROM released")
+            .bind(receipt.effect).bind(&receipt.input).bind(&receipt.result).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 }

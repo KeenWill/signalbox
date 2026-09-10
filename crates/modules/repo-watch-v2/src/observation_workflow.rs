@@ -94,6 +94,7 @@ impl RepoWatchStore {
     pub async fn lock_observation(
         &self,
         repository: &RepositorySlug,
+        effect: Uuid,
     ) -> Result<Transaction<'static, Postgres>, StoreError> {
         // Waiting observations must not occupy connections needed by frontier commits.
         let locks = self
@@ -108,6 +109,7 @@ impl RepoWatchStore {
             .bind(repository.as_str())
             .execute(&mut *transaction)
             .await?;
+        crate::workflow::receipt_lock(&mut transaction, effect).await?;
         Ok(transaction)
     }
 
@@ -135,15 +137,30 @@ impl RepoWatchStore {
     pub async fn observation_receipt_by_effect(
         &self,
         effect: Uuid,
+        input: &[u8],
     ) -> Result<Option<EffectReceipt>, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        if let Some(result) =
+            crate::workflow::completed_receipt(&mut transaction, effect, "repo.observe", input)
+                .await?
+        {
+            return Ok(Some(EffectReceipt {
+                effect,
+                input: input.to_vec(),
+                result,
+            }));
+        }
         sqlx::query_as::<_, ReceiptRow>("SELECT observation_effect_id AS effect, observation_effect_input AS input, observation_effect_result AS result FROM repository_state WHERE observation_effect_id=$1")
-            .bind(effect).fetch_optional(&self.pool).await?.map(ReceiptRow::checked).transpose()
+            .bind(effect).fetch_optional(&mut *transaction).await?.map(ReceiptRow::checked).transpose()
     }
 
-    /// Releases only the receipt whose exact answer has reached a durable journal.
+    /// Retains the verified result while releasing its pending observation slot.
     pub async fn release_observation(&self, receipt: &EffectReceipt) -> Result<(), StoreError> {
-        sqlx::query("UPDATE repository_state SET observation_effect_id=NULL, observation_effect_input=NULL, observation_effect_result=NULL WHERE observation_effect_id=$1 AND observation_effect_input=$2 AND observation_effect_result=$3")
-            .bind(receipt.effect).bind(&receipt.input).bind(&receipt.result).execute(&self.pool).await?;
+        let mut transaction = self.pool.begin().await?;
+        crate::workflow::receipt_lock(&mut transaction, receipt.effect).await?;
+        sqlx::query("WITH released AS (UPDATE repository_state SET observation_effect_id=NULL, observation_effect_input=NULL, observation_effect_result=NULL WHERE observation_effect_id=$1 AND observation_effect_input=$2 AND observation_effect_result=$3 RETURNING $1::uuid AS effect_id, $2::bytea AS effect_input, $3::bytea AS effect_result) INSERT INTO workflow_effect_result(effect_id, method, effect_input, effect_result) SELECT effect_id, 'repo.observe', effect_input, effect_result FROM released")
+            .bind(receipt.effect).bind(&receipt.input).bind(&receipt.result).execute(&mut *transaction).await?;
+        transaction.commit().await?;
         Ok(())
     }
 

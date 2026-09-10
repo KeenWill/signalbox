@@ -9,5 +9,10 @@ ALTER TABLE repository_state
         (observation_effect_id IS NULL AND observation_effect_input IS NULL AND observation_effect_result IS NULL)
         OR (observation_effect_id IS NOT NULL AND observation_effect_input IS NOT NULL AND observation_effect_result IS NOT NULL));
 
+ALTER TABLE workflow_effect_result
+    DROP CONSTRAINT workflow_effect_result_method_check,
+    ADD CONSTRAINT workflow_effect_result_method_check
+        CHECK (method IN ('repo.commitEvaluation', 'repo.submitPending', 'repo.observe'));
+
 RESET search_path;
 RESET ROLE;

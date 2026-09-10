@@ -330,16 +330,18 @@ The daemon's checked workflow adapters expose rule-event reads, evaluation
 commit and pending submission over the module store. The module revalidates the
 revision, next event, matcher plan and singleton context, then atomically
 commits commands, cursor and a nonmatch, suppression or dispatch receipt.
-Evaluation receipts live on the cursor; submission bindings and results live on
-the dispatch ledger. Both bind stable effect identities to exact method/input
-bytes independently of runs; equal recovery adopts before configuration lookup
-and changed input conflicts. Receipts remain discoverable for successor runs
-until durable journal adoption; an unadopted evaluation prevents selecting the
-next event for that revision through either the workflow reader or the existing
-evaluator. Submission uses the retained commands and existing sink, including
-checkout and pending follow-ups, before recording completion. Recovery adopts a
-completed submission or resumes its binding; an unanswered submission without a
-binding is ambiguous.
+Pending evaluation receipts live on the cursor; pending submission bindings and
+results live on the dispatch ledger. Acknowledgement atomically moves the
+completed binding to `workflow_effect_result` and releases the pending slot.
+Both bind stable effect identities to exact method/input bytes independently of
+runs; equal recovery adopts before configuration lookup and changed input
+conflicts, including after acknowledgement and later cursor advancement. Pending
+receipts remain discoverable for successor runs until durable journal adoption;
+an unadopted evaluation prevents selecting the next event for that revision
+through either the workflow reader or the existing evaluator. Submission uses
+the retained commands and existing sink, including checkout and pending
+follow-ups, before recording completion. Recovery adopts a completed submission
+or resumes its binding; an unanswered submission without a binding is ambiguous.
 
 `repo.observe` uses the same provider paging, conditional caches, reviewer
 invalidation and request ceilings. Each completed frontier stage atomically
@@ -349,9 +351,11 @@ completed stages and records the attempt's success, partial or failure outcome;
 interruption between stages retains a partial result. Observation execution and
 adoption serialize per repository. A successor adopts the receipt before
 provider configuration or another fetch, and exact durable journal delivery
-releases it before the next observation in either mode. An unanswered effect
-without a receipt is ambiguous. Shutdown cancels admitted observation runs and
-drains their provider work.
+moves its binding to `workflow_effect_result` before releasing the pending slot
+for the next observation in either mode. Completed observation bindings remain
+recoverable after later observations; changed input conflicts. An unanswered
+effect without a receipt is ambiguous. Shutdown cancels admitted observation
+runs and drains their provider work.
 
 The v2 crate depends on the session ownership crate as its only Signalbox
 dependency. It consumes the seam's lifecycle events and emits only the seam's
