@@ -10,6 +10,13 @@ use signalbox_tools_git::{
 
 use crate::repo_watch_credentials::RepositoryWatchClientLoader;
 
+const SANDBOX_SSH_AGENT_SOCKET: &str = "/run/signalbox-ssh-agent.sock";
+
+struct SshAccount {
+    home: PathBuf,
+    passwd: tempfile::NamedTempFile,
+}
+
 pub(super) struct ProcessGitPushTransport<Runner> {
     pub(super) runner: Runner,
     pub(super) credential_file: Option<PathBuf>,
@@ -190,10 +197,11 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
             .await
     }
 
-    async fn account_home(
+    async fn account(
         &mut self,
         request: &GitPushRequest,
-    ) -> Result<PathBuf, GitPushTransportFailure> {
+    ) -> Result<SshAccount, GitPushTransportFailure> {
+        use std::io::Write;
         use std::os::unix::ffi::OsStrExt;
         let failure = || GitPushTransportFailure::PreDispatchInfrastructure;
         let mut environment = BTreeMap::new();
@@ -221,17 +229,31 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
         {
             return Err(failure());
         }
-        let home = result
+        let record = result
             .stdout
             .bytes
-            .split(|byte| *byte == b':')
-            .nth(5)
-            .ok_or_else(failure)?;
-        let home = PathBuf::from(std::ffi::OsStr::from_bytes(home));
+            .strip_suffix(b"\n")
+            .unwrap_or(&result.stdout.bytes);
+        let fields: Vec<_> = record.split(|byte| *byte == b':').collect();
+        if fields.len() != 7
+            || record.contains(&b'\n')
+            || record.contains(&b'\r')
+            || fields[2] != rustix::process::getuid().as_raw().to_string().as_bytes()
+        {
+            return Err(failure());
+        }
+        let home = PathBuf::from(std::ffi::OsStr::from_bytes(fields[5]));
         if !home.is_absolute() {
             return Err(failure());
         }
-        Ok(home)
+        let mut passwd = tempfile::NamedTempFile::new().map_err(|_| failure())?;
+        // Retain only the resolved account, without its password or descriptive fields.
+        for field in [fields[0], b"x", fields[2], fields[3], b"", fields[5]] {
+            passwd.write_all(field).map_err(|_| failure())?;
+            passwd.write_all(b":").map_err(|_| failure())?;
+        }
+        passwd.write_all(b"/bin/sh\n").map_err(|_| failure())?;
+        Ok(SshAccount { home, passwd })
     }
 
     async fn run_agent_sandbox(
@@ -240,16 +262,26 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
         environment: &BTreeMap<OsString, OsString>,
         arguments: &[&str],
     ) -> Result<ProcessRunResult, GitPushTransportFailure> {
-        use signalbox_tools_exec::{ExecArguments, SandboxNetwork, SandboxedCommandRunner};
+        use signalbox_tools_exec::{
+            ExecArguments, SandboxNetwork, SandboxReadOnlyMount, SandboxedCommandRunner,
+        };
         let failure = || GitPushTransportFailure::PreDispatchInfrastructure;
         let socket = self.ssh_agent_socket.clone().ok_or_else(failure)?;
-        let account_home = self.account_home(request).await?;
+        let account = self.account(request).await?;
         let mut configuration = self.sandbox.clone();
         configuration.network = SandboxNetwork::Host;
-        configuration.read_only_binds.push(PathBuf::from(socket));
+        configuration.read_only_mounts.extend([
+            SandboxReadOnlyMount {
+                source: PathBuf::from(socket),
+                destination: PathBuf::from(SANDBOX_SSH_AGENT_SOCKET),
+            },
+            SandboxReadOnlyMount {
+                source: account.passwd.path().to_owned(),
+                destination: PathBuf::from("/etc/passwd"),
+            },
+        ]);
         // OpenSSH resolves the invoking account and the host's known-host trust stores.
         for path in [
-            "/etc/passwd",
             "/etc/group",
             "/etc/ssh/ssh_known_hosts",
             "/etc/ssh/ssh_known_hosts2",
@@ -260,7 +292,7 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
             }
         }
         for name in ["known_hosts", "known_hosts2"] {
-            let known_hosts = account_home.join(".ssh").join(name);
+            let known_hosts = account.home.join(".ssh").join(name);
             if known_hosts.is_file() {
                 configuration.read_only_binds.push(known_hosts);
             }
@@ -278,6 +310,7 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
                 "PATH" => continue,
                 "GIT_DIR" => ".",
                 "GIT_OBJECT_DIRECTORY" => "./objects",
+                "SSH_AUTH_SOCK" => SANDBOX_SSH_AGENT_SOCKET,
                 _ => value.to_str().ok_or_else(failure)?,
             };
             command.push(format!("{name}={value}"));

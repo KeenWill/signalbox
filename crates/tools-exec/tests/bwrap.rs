@@ -378,6 +378,7 @@ async fn configured_host_runtime_validates_inside_real_bwrap()
             node_profile.to_owned(),
         ],
         path_prepend: vec![bin.clone(), toolchain.join("bin"), node_bin.to_owned()],
+        read_only_mounts: Vec::new(),
         rustup_home: Some(rustup_home),
         rustup_toolchain: Some(toolchain_name.to_owned()),
     };

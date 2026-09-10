@@ -341,6 +341,7 @@ pub(super) fn parse_daemon_tool_settings(
         sandbox: SandboxConfiguration {
             network,
             read_only_binds,
+            read_only_mounts: Vec::new(),
             path_prepend,
             rustup_home,
             rustup_toolchain,

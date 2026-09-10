@@ -844,12 +844,23 @@ pub struct SandboxConfiguration {
     pub network: SandboxNetwork,
     /// Host paths mounted read-only at the same absolute paths.
     pub read_only_binds: Vec<PathBuf>,
+    /// Host inputs mounted read-only at explicit sandbox destinations.
+    pub read_only_mounts: Vec<SandboxReadOnlyMount>,
     /// Absolute executable directories placed before the runtime search path.
     pub path_prepend: Vec<PathBuf>,
     /// Explicit rustup installation home.
     pub rustup_home: Option<PathBuf>,
     /// Installed rustup toolchain selected without automatic installation.
     pub rustup_toolchain: Option<String>,
+}
+
+/// One host input exposed at a distinct sandbox path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SandboxReadOnlyMount {
+    /// Absolute host source path, retained in its operating-system encoding.
+    pub source: PathBuf,
+    /// Absolute destination path inside the sandbox.
+    pub destination: PathBuf,
 }
 
 /// Sandboxed command service reusable by higher-level tools.
@@ -2084,6 +2095,13 @@ fn bwrap_request(
             OsString::from("--ro-bind"),
             path.as_os_str().to_owned(),
             path.as_os_str().to_owned(),
+        ]);
+    }
+    for mount in &context.configuration.read_only_mounts {
+        bwrap_arguments.extend([
+            OsString::from("--ro-bind"),
+            mount.source.as_os_str().to_owned(),
+            mount.destination.as_os_str().to_owned(),
         ]);
     }
     #[cfg(target_os = "linux")]

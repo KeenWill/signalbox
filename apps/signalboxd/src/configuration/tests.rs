@@ -6166,6 +6166,7 @@ sandbox_rustup_toolchain = "stable"
         &signalbox_tools_exec::SandboxConfiguration {
             network: signalbox_tools_exec::SandboxNetwork::Host,
             read_only_binds: vec![runtime.path().to_owned()],
+            read_only_mounts: Vec::new(),
             path_prepend: vec![runtime.path().to_owned()],
             rustup_home: Some(runtime.path().to_owned()),
             rustup_toolchain: Some(String::from("stable")),
@@ -6254,9 +6255,15 @@ fn checked_in_example_parses_unbounded_git_object_content() {
 
 #[test]
 fn repository_ssh_push_requires_a_key_or_available_agent_and_redacts_the_destination() {
+    use std::os::unix::ffi::OsStrExt;
     let directory = tempfile::tempdir().expect("agent fixture");
     let socket = directory.path().join("agent.sock");
     let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("available agent");
+    let non_utf8 = directory
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"agent-\xff.sock"));
+    let _non_utf8_listener =
+        std::os::unix::net::UnixListener::bind(&non_utf8).expect("byte-path agent");
     let relative_socket = std::env::current_dir()
         .expect("daemon working directory")
         .components()
@@ -6293,6 +6300,7 @@ fn repository_ssh_push_requires_a_key_or_available_agent_and_redacts_the_destina
             let repository = &parsed.repository_watch().expect("watch").repositories()[0];
             assert!(repository.git_push_enabled_with_agent(Some(&socket)));
             assert!(repository.git_push_enabled_with_agent(Some(&relative_socket)));
+            assert!(repository.git_push_enabled_with_agent(Some(&non_utf8)));
             for absent in [None, Some(unavailable.as_path()), Some(regular.as_path())] {
                 assert_eq!(
                     repository.git_push_enabled_with_agent(absent),

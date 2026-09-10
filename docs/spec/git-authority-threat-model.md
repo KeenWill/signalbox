@@ -92,7 +92,9 @@ trust files are `known_hosts` and `known_hosts2` under the account home returned
 by the host account database; the `HOME` environment variable does not select
 them. Agent-backed push authority requires a socket that accepts a connection
 when authority is derived. Relative agent socket paths resolve to absolute paths
-before probing and retention.
+before probing and retention. The socket is mounted at a fixed UTF-8 sandbox
+path, preserving arbitrary host pathname bytes. The sandbox receives a minimal
+passwd entry from the host account lookup, including the resolved UID and home.
 
 Workspace roots are globally unique by canonical spelling, and the key carries
 no runner or location dimension. Why: the single-runner rule means no two

@@ -1,4 +1,4 @@
-use super::ProcessGitPushTransport;
+use super::{ProcessGitPushTransport, SANDBOX_SSH_AGENT_SOCKET};
 use signalbox_application::{
     FixtureToolExecutionTransaction, FixtureTransactionFailures, InProcessToolDispatchGate,
     PreparedAttemptApproval, PreparedAttemptIdentities, PreparedAttemptProposal,
@@ -14,7 +14,7 @@ use signalbox_tools_git::{ConfiguredGitRemote, GIT_PUSH_CONFIGURED_NAME, GitPush
 use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::{ffi::OsStringExt, fs::PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -191,7 +191,12 @@ async fn exercise_ssh_push(use_key: bool, scp_style: bool, blob_bytes: u64) {
     fs::create_dir(&bin).expect("shim directory");
     let shim = bin.join("ssh");
     let log = fixture.path().join("ssh.log");
-    let agent = fixture.path().join("agent.sock");
+    let agent_name = if use_key {
+        std::ffi::OsString::from("agent.sock")
+    } else {
+        std::ffi::OsString::from_vec(b"agent-\xff.sock".to_vec())
+    };
+    let agent = fixture.path().join(agent_name);
     let outside = fixture.path().join("outside-sandbox");
     fs::write(&outside, b"host-only fixture sentinel").expect("outside sentinel");
     let account_home = fixture.path().join("account-home");
@@ -216,6 +221,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import pwd
 import sys
 import threading
 
@@ -230,6 +236,9 @@ for index, argument in enumerate(arguments):
 assert has_key or agent
 if agent:
     assert os.getcwd() == '/workspace'
+    account = pwd.getpwuid(os.getuid())
+    assert account.pw_name == 'fixture'
+    assert account.pw_dir == str(Path(FIRST_TRUST_FILE).parent.parent)
     assert not Path(FIXTURE_OUTSIDE).exists()
     assert Path(FIRST_TRUST_FILE).read_text() == 'fixture primary trust\n'
     assert Path(SECOND_TRUST_FILE).read_text() == 'fixture fallback trust\n'
@@ -254,7 +263,7 @@ while True:
     sys.stdout.buffer.flush()
 "###
         .replace("FIXTURE_OUTSIDE", &serde_json::to_string(&outside).expect("outside path literal"))
-        .replace("FIXTURE_SOCKET", &serde_json::to_string(&agent).expect("socket path literal"));
+        .replace("FIXTURE_SOCKET", &serde_json::to_string(&agent.to_str()).expect("socket path literal"));
     let script = script
         .replace(
             "FIRST_TRUST_FILE",
@@ -392,7 +401,7 @@ while True:
     if use_key {
         assert!(observed.contains("IdentitiesOnly=yes"));
     } else {
-        assert!(observed.contains(&format!("agent={}", agent.display())));
+        assert!(observed.contains(&format!("agent={SANDBOX_SSH_AGENT_SOCKET}")));
         assert!(observed.contains("confined=true"));
     }
 }
