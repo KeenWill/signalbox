@@ -3286,6 +3286,15 @@ async fn web_fetch_timeout_returns_a_typed_failure_and_continues_the_turn()
         WebFetchEgressPolicy::default(),
     )?
     .into_parts();
+    assert_eq!(
+        catalog
+            .definition(
+                &ToolName::try_new(WEB_FETCH_NAME.to_owned()).expect("declared web tool name")
+            )
+            .unwrap()
+            .effect_class(),
+        ToolEffectClass::ExternalEffect,
+    );
     let arguments = r#"{"url":"https://example.com/timeout"}"#;
     let (execution, runtime, _) = fixture.execution_with_judge(
         [

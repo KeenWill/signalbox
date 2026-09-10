@@ -151,7 +151,8 @@ pub enum WebFetchToolConstructionError {
 
 /// Compiled catalog entry and matching executor for `web_fetch`.
 ///
-/// Effect posture: `EffectFree`: read-only GET is safe to repeat after crash loss.
+/// Effect posture: `ExternalEffect`. Although the method is GET, the remote
+/// server can observe the request, so a crash-lost dispatch is not effect-free.
 #[derive(Clone, Debug)]
 pub struct WebFetchTool<Transport> {
     catalog: CompiledToolCatalog,
@@ -259,7 +260,7 @@ impl<Transport> WebFetchTool<Transport> {
             .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
         let definition = compile_contract_definition::<Self>(
             ToolPermissionDefault::Confirm,
-            ToolEffectClass::EffectFree,
+            ToolEffectClass::ExternalEffect,
         )
         .map_err(|error| match error {
             ToolContractCompileError::Name => WebFetchToolConstructionError::Name,
@@ -461,7 +462,9 @@ fn classify_send_failure(error: reqwest::Error) -> WebFetchTransportFailure {
 
 /// Daemon-local bounded web executor.
 ///
-/// Effect posture: `EffectFree`: read-only GET is safe to repeat after crash loss.
+/// Effect posture: `ExternalEffect`. Although the method is GET, the remote
+/// server can observe the request; the registry therefore never describes a
+/// crash-lost dispatch as effect-free.
 #[derive(Clone, Debug)]
 pub struct WebFetchExecutor<Transport> {
     transport: Transport,
@@ -480,6 +483,9 @@ pub enum WebFetchExecutorError {
     #[error("web_fetch result encoding failed")]
     /// Compact result encoding unexpectedly failed.
     ResultEncoding,
+    #[error("web_fetch dispatch outcome is unknown")]
+    /// Physical dispatch began without a complete bounded acknowledgement.
+    DispatchUnknown,
 }
 
 impl ClassifyOperatorFailure for WebFetchExecutorError {
@@ -488,6 +494,9 @@ impl ClassifyOperatorFailure for WebFetchExecutorError {
             Self::ArgumentValidationDrift | Self::ResultEncoding => {
                 OperatorFailureClass::CallerOrHubBug
             }
+            Self::DispatchUnknown => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
         }
     }
 }
@@ -507,11 +516,12 @@ where
                 .map_err(|_| WebFetchExecutorError::ArgumentValidationDrift)?;
         let evidence = match self.transport.fetch(request.clone()).await {
             Ok(response) => web_fetch_success_evidence(&request, response)?,
-            Err(
-                WebFetchTransportFailure::RequestFailed | WebFetchTransportFailure::DispatchUnknown,
-            ) => ToolExecutorEvidence::KnownFailed {
+            Err(WebFetchTransportFailure::RequestFailed) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.request_failed_detail.clone()),
             },
+            Err(WebFetchTransportFailure::DispatchUnknown) => {
+                return Err(WebFetchExecutorError::DispatchUnknown);
+            }
             Err(WebFetchTransportFailure::Timeout) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.timeout_detail.clone()),
             },
@@ -618,7 +628,7 @@ mod tests {
             definition.permission_default(),
             ToolPermissionDefault::Confirm
         );
-        assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
+        assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
     }
 
     /// Confirmation does not replace the exact deployment allowlist: an absent
@@ -854,6 +864,18 @@ mod tests {
                 "stage {body_bytes:?}"
             );
         }
+    }
+
+    /// Loss after physical dispatch is classified as commit-ambiguous
+    /// infrastructure failure.
+    #[test]
+    fn web_fetch_dispatch_unknown_is_commit_ambiguous() {
+        assert_eq!(
+            WebFetchExecutorError::DispatchUnknown.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
     }
 
     /// Hostname resolution rejects a destination set containing only loopback
