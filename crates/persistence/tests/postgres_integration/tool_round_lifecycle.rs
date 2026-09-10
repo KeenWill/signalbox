@@ -2,6 +2,186 @@
 
 use crate::*;
 
+/// Builds a retained external-effect checkpoint for the one-time catalog migration.
+async fn external_effect_checkpoint_for_migration(
+    pool: &PgPool,
+    tool_name: &str,
+) -> Result<(RestartModelCallFixture, ToolRequestId, ToolAttemptId), Box<dyn Error>> {
+    let identity_seed = Uuid::now_v7().as_u128();
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(pool, identity_seed, tool_name, "{}").await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    Ok((fixture, request, attempt))
+}
+
+async fn migrate_web_fetch_effects(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/202609090471_web_fetch_effect_free.sql"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn web_fetch_effect_migration_reclassifies_live_checkpoints() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let (prepared, prepared_request, prepared_attempt) =
+        external_effect_checkpoint_for_migration(&pool, "web_fetch").await?;
+    let (in_flight, in_flight_request, in_flight_attempt) =
+        external_effect_checkpoint_for_migration(&pool, "web_fetch").await?;
+    repository
+        .authorize_attempt(in_flight.session, in_flight.turn, in_flight_attempt)
+        .await?;
+
+    migrate_web_fetch_effects(&pool).await?;
+
+    for (fixture, request, attempt, state) in [
+        (
+            prepared,
+            prepared_request,
+            prepared_attempt,
+            CurrentToolAttemptState::Prepared,
+        ),
+        (
+            in_flight,
+            in_flight_request,
+            in_flight_attempt,
+            CurrentToolAttemptState::InFlight,
+        ),
+    ] {
+        let batch = repository
+            .load_active_batch(fixture.session, fixture.turn)
+            .await?
+            .unwrap();
+        let Some(signalbox_domain::ReconstitutedToolAttempt::Current(retained)) =
+            batch.attempt(request)
+        else {
+            panic!("migration retains the live checkpoint");
+        };
+        assert_eq!(retained.attempt(), attempt);
+        assert_eq!(retained.state(), state);
+        assert_eq!(retained.effect_class(), ToolEffectClass::EffectFree);
+        assert!(matches!(
+            retained.clone().classify_crash_loss(),
+            ToolAttemptCrashOutcome::KnownFailed(_)
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn web_fetch_effect_migration_resumes_only_fetch_recovery() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let (fetch, fetch_request, fetch_attempt) =
+        external_effect_checkpoint_for_migration(&pool, "web_fetch").await?;
+    let (search, search_request, search_attempt) =
+        external_effect_checkpoint_for_migration(&pool, "web_search").await?;
+    for (fixture, attempt) in [(&fetch, fetch_attempt), (&search, search_attempt)] {
+        let authorized = repository
+            .authorize_attempt(fixture.session, fixture.turn, attempt)
+            .await?;
+        repository
+            .commit_observation(
+                authorized
+                    .executor_fence()
+                    .bind(ToolAttemptObservation::Ambiguous),
+            )
+            .await?;
+    }
+
+    let reconciliation = PostgresAutomaticReconciliationRepository::new(pool.clone());
+    let claimed = reconciliation.claim_due().await?;
+    assert_eq!(claimed.claimed().len(), 1);
+    assert_eq!(claimed.claimed()[0].turn(), fetch.turn);
+
+    migrate_web_fetch_effects(&pool).await?;
+
+    let recovery_state: Option<String> =
+        sqlx::query_scalar("SELECT state_kind FROM automatic_reconciliation WHERE turn_id = $1")
+            .bind(fetch.turn.into_uuid())
+            .fetch_optional(&pool)
+            .await?;
+    assert_eq!(recovery_state, None);
+    let attempt_outcome: Option<String> = sqlx::query_scalar(
+        "SELECT outcome_kind FROM automatic_reconciliation_attempt WHERE turn_id = $1",
+    )
+    .bind(fetch.turn.into_uuid())
+    .fetch_optional(&pool)
+    .await?;
+    assert_eq!(attempt_outcome, None);
+
+    let batch = repository
+        .load_active_batch(fetch.session, fetch.turn)
+        .await?
+        .unwrap();
+    assert!(matches!(
+        batch.phase(),
+        signalbox_domain::ToolBatchPhase::Executing { .. }
+    ));
+    let Some(signalbox_domain::ReconstitutedToolAttempt::Ended(ended)) =
+        batch.attempt(fetch_request)
+    else {
+        panic!("migration retains the settled fetch");
+    };
+    assert_eq!(ended.attempt(), fetch_attempt);
+    assert_eq!(ended.effect_class(), ToolEffectClass::EffectFree);
+    assert!(matches!(ended.end(), ToolAttemptEnd::KnownFailed { error }
+        if error.kind() == ToolExecutionErrorKind::ExecutionFailed
+            && error.detail().map(ToolExecutionErrorDetail::as_str) == Some("web fetch request failed")));
+    let projection = batch
+        .prepare_result_projection(
+            vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+            ContextFrontierId::from_uuid(Uuid::now_v7()),
+        )
+        .expect("migrated failure is ready for a model continuation");
+    assert_eq!(projection.entries().len(), 1);
+    let mut startup_ids = FixedStartupScanIds::new([], []);
+    assert!(
+        matches!(PostgresStartupScanRepository::new(pool.clone()).recover(
+        fetch.session,
+        signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+            SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+            ContextFrontierId::from_uuid(Uuid::now_v7()),
+        ),
+        &mut startup_ids,
+    ).await?, StartupScanSessionOutcome::ResumableToolBatch { turn } if turn == fetch.turn)
+    );
+    let search_batch = repository
+        .load_active_batch(search.session, search.turn)
+        .await?
+        .unwrap();
+    assert!(
+        matches!(search_batch.attempt(search_request), Some(signalbox_domain::ReconstitutedToolAttempt::Ended(attempt))
+        if attempt.attempt() == search_attempt && attempt.end() == &ToolAttemptEnd::Ambiguous)
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn failure_context_migration_preserves_populated_attempts() -> Result<(), Box<dyn Error>> {

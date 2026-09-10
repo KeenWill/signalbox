@@ -18,9 +18,9 @@ use signalbox_tool_contract::{
 };
 
 use signalbox_egress_transport::{
-    ReqwestWebFetchConstructionError, WebFetchTransportFailure, build_web_fetch_client,
-    has_more_response_bytes, is_public_destination_address, parse_url_host_ip,
-    public_destination_client,
+    PublicDestinationClientError, ReqwestWebFetchConstructionError, WebFetchTransportFailure,
+    build_web_fetch_client, has_more_response_bytes, is_public_destination_address,
+    parse_url_host_ip, public_destination_client,
 };
 
 pub const WEB_FETCH_NAME: &str = "web_fetch";
@@ -394,7 +394,13 @@ impl WebFetchTransport for ReqwestWebFetchTransport {
     ) -> Result<WebFetchResponse, WebFetchTransportFailure> {
         let client = public_destination_client(request.url(), Some(self.exchange_timeout))
             .await
-            .map_err(|_| WebFetchTransportFailure::RequestFailed)?;
+            .map_err(|error| match error {
+                PublicDestinationClientError::Timeout => WebFetchTransportFailure::Timeout,
+                PublicDestinationClientError::DestinationRejected
+                | PublicDestinationClientError::Infrastructure => {
+                    WebFetchTransportFailure::RequestFailed
+                }
+            })?;
         fetch_with_client(client, request).await
     }
 }
@@ -566,7 +572,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use signalbox_egress_transport::{PublicDestinationClientError, ResolvedPublicDestination};
+    use signalbox_egress_transport::ResolvedPublicDestination;
 
     const FIXTURE_ORIGIN: &str = "https://example.com";
     const REDIRECT_STATUS: u16 = 302;
@@ -784,6 +790,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_fetch_exhausted_resolution_budget_returns_timeout_before_dispatch() {
+        let mut transport = ReqwestWebFetchTransport {
+            exchange_timeout: Duration::ZERO,
+        };
+        let request = WebFetchRequest {
+            url: Url::parse("https://93.184.216.34/").unwrap(),
+        };
+        assert_eq!(
+            transport.fetch(request).await,
+            Err(WebFetchTransportFailure::Timeout)
+        );
+    }
+
+    #[tokio::test]
     async fn web_fetch_timeouts_preserve_the_typed_deadline_at_every_read_stage() {
         // Cover waiting for headers, a partial body, and EOF after the exact cap.
         for body_bytes in [None, Some(1), Some(MAX_WEB_FETCH_BODY_BYTES)] {
@@ -799,6 +819,7 @@ mod tests {
             let request = WebFetchRequest {
                 url: Url::parse(&format!("http://example.test:{}/", address.port())).unwrap(),
             };
+            let (stage_sent, stage_received) = tokio::sync::oneshot::channel();
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut input = [0; 1024];
@@ -811,11 +832,22 @@ mod tests {
                         .unwrap();
                     socket.write_all(&vec![b'x'; bytes]).await.unwrap();
                 }
+                stage_sent.send(body_bytes).unwrap();
                 std::future::pending::<()>().await;
             });
             let result = fetch_with_client(client, request).await;
             server.abort();
-            let _ = server.await;
+            let server_end = server.await.expect_err("the fixture waits until cancelled");
+            assert!(
+                server_end.is_cancelled(),
+                "fixture server failed: {server_end}"
+            );
+            assert_eq!(
+                stage_received
+                    .await
+                    .expect("server reached the requested stage"),
+                body_bytes
+            );
             assert_eq!(
                 result,
                 Err(WebFetchTransportFailure::Timeout),
