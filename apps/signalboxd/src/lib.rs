@@ -596,6 +596,7 @@ impl FatalRecoveryReporter {
         let result = write().await;
         if result.is_ok() {
             self.fatal_signal.send_modify(|state| {
+                state.pending.remove(&session);
                 state.suspended.remove(&session);
             });
             nudge.nudge_waiting_for_capacity(session).await;
@@ -613,14 +614,7 @@ impl FatalRecoveryReporter {
             signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(pool);
         let mut changed = self.fatal_signal.subscribe();
         loop {
-            let mut pending = std::collections::HashMap::new();
-            self.fatal_signal.send_if_modified(|state| {
-                if state.pending.is_empty() {
-                    return false;
-                }
-                pending = std::mem::take(&mut state.pending);
-                true
-            });
+            let pending = changed.borrow_and_update().pending.clone();
             for (session, failure) in pending {
                 let result = self
                     .record_session_failure(session, &nudge, || {
@@ -4718,6 +4712,45 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supervision_retains_failed_requests_until_the_write_succeeds() {
+        let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
+        let reporter = execution.recovery_reporter();
+        let session = SessionId::from_uuid(Uuid::from_u128(144));
+        reporter.report_session_recovery_required(session);
+        let (nudge, _source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://fixture:fixture@localhost/fixture")
+            .unwrap();
+        pool.close().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            reporter.park_failed_sessions(pool, nudge.clone()),
+        )
+        .await
+        .expect_err("the supervisor waits for further work after a failed write");
+        assert!(
+            reporter
+                .fatal_signal
+                .borrow()
+                .pending
+                .contains_key(&session)
+        );
+        assert!(execution.session_is_suspended(session));
+        reporter
+            .record_session_failure(session, &nudge, || ready(Ok(())))
+            .await
+            .unwrap();
+        assert!(
+            !reporter
+                .fatal_signal
+                .borrow()
+                .pending
+                .contains_key(&session)
+        );
+        assert!(!execution.session_is_suspended(session));
     }
 
     #[tokio::test]

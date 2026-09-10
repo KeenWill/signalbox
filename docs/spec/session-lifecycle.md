@@ -165,9 +165,9 @@ park authority leaves an operator park when supervision is pending; only an
 operator resume reconciles that evidence. An ambiguous park commit is checked
 against its exact durable supervision identity without replaying the park. An
 acknowledged park releases local suspension and requeues eligibility so a
-concurrent durable resume is honored. A failed write retains the local
-suspension and reports its cause. A corrupt terminal session retains its
-terminal outcome and receives a pending supervision item instead of a park.
+concurrent durable resume is honored. A failed write retains the pending request
+and local suspension and reports its cause. A corrupt terminal session retains
+its terminal outcome and receives a pending supervision item instead of a park.
 Successful startup reconstitution clears a terminal item's pending flag while
 retaining its cause and terminal outcome. Operator status lists every pending
 supervision item with its session, terminal flag, failure classification, and

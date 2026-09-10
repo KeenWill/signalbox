@@ -411,6 +411,7 @@ enum SanitizedStartupCause<'a> {
     TelemetryConfiguration(&'a TelemetryConfigurationError),
     Database(&'a FencedHubDatabaseError),
     Migration(&'a sqlx::migrate::MigrateError),
+    Reload(&'a signalbox_persistence::reload_configuration::ReloadRepositoryError),
     BlobStorage(&'a signalboxd::BlobStoreRegistryError),
     Tools(&'a DaemonToolsConstructionError),
     Socket(&'a LocalSocketError),
@@ -428,6 +429,7 @@ impl fmt::Display for SanitizedStartupCause<'_> {
             Self::TelemetryConfiguration(error) => error.fmt(formatter),
             Self::Database(error) => error.fmt(formatter),
             Self::Migration(_) => formatter.write_str("database migration failed"),
+            Self::Reload(_) => formatter.write_str("configuration reload recovery failed"),
             Self::BlobStorage(error) => error.fmt(formatter),
             Self::Tools(error) => error.fmt(formatter),
             Self::Socket(error) => error.fmt(formatter),
@@ -481,6 +483,29 @@ fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) ->
             sqlx::migrate::MigrateError::Execute(_)
                 | sqlx::migrate::MigrateError::ExecuteMigration(_, _)
         );
+    }
+    if let SanitizedStartupCause::Reload(failure) = &cause {
+        use signalbox_persistence::reload_configuration::ReloadRepositoryError;
+        (error.failure_class, error.database_failure) = match failure {
+            ReloadRepositoryError::Database(_) => (
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+                true,
+            ),
+            ReloadRepositoryError::CommitAmbiguous(_) => (
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                },
+                true,
+            ),
+            ReloadRepositoryError::Corruption(_) => {
+                (OperatorFailureClass::FailClosedCorruption, false)
+            }
+            ReloadRepositoryError::InvalidCommandId => {
+                (OperatorFailureClass::CallerOrHubBug, false)
+            }
+        };
     }
     tracing::error!(
         ?phase,
@@ -1238,9 +1263,7 @@ async fn initialize_prometheus(
 async fn run_hub(
     telemetry_configuration: &TelemetryConfiguration,
 ) -> Result<ShutdownOutcome, HubRuntimeError> {
-    use signalboxd::guard_recovery::{
-        GuardRecoveryPolicy, GuardRecoveryStop, run_guarded_incarnations,
-    };
+    use signalboxd::guard_recovery::GuardRecoveryPolicy;
     let configuration = HubConfiguration::from_environment().map_err(|error| {
         erase_startup_cause(
             RuntimePhase::Configuration,
@@ -1276,8 +1299,7 @@ async fn run_hub(
                 SanitizedStartupCause::Static("invalid_guard_recovery_backoff"),
             )
         })?;
-    let mut recovery_signals = TerminationSignals::new();
-    match run_guarded_incarnations(
+    run_hub_recovery(
         policy,
         |observer| async move {
             recovery_incarnation_outcome(
@@ -1285,16 +1307,40 @@ async fn run_hub(
                 observer.is_recovering(),
             )
         },
-        async {
-            if shutdown_requested(&mut recovery_signals).await {
-                tracing::error!("termination signal listener failed during guard recovery");
-            }
-        },
+        TerminationSignals::new(),
     )
+    .await
+}
+
+async fn run_hub_recovery<Run, Incarnation>(
+    policy: signalboxd::guard_recovery::GuardRecoveryPolicy,
+    run: Run,
+    mut recovery_signals: std::io::Result<TerminationSignals>,
+) -> Result<ShutdownOutcome, HubRuntimeError>
+where
+    Run: FnMut(signalboxd::guard_recovery::GuardRecoveryObserver) -> Incarnation,
+    Incarnation: std::future::Future<
+            Output = signalboxd::guard_recovery::GuardedIncarnationOutcome<
+                Result<ShutdownOutcome, HubRuntimeError>,
+            >,
+        >,
+{
+    use signalboxd::guard_recovery::{GuardRecoveryStop, run_guarded_incarnations};
+    let mut listener_failed = false;
+    match run_guarded_incarnations(policy, run, async {
+        listener_failed = shutdown_requested(&mut recovery_signals).await;
+        if listener_failed {
+            tracing::error!("termination signal listener failed during guard recovery");
+        }
+    })
     .await
     {
         Ok(result) => result,
-        Err(GuardRecoveryStop::ShutdownRequested) => Ok(ShutdownOutcome::Clean),
+        Err(GuardRecoveryStop::ShutdownRequested) => Ok(if listener_failed {
+            ShutdownOutcome::SignalListenerFailed
+        } else {
+            ShutdownOutcome::Clean
+        }),
         Err(reason @ GuardRecoveryStop::ElapsedBoundExhausted) => {
             tracing::error!(?reason, "database guard recovery bound exhausted");
             Ok(ShutdownOutcome::GuardRecoveryExhausted)
@@ -1327,28 +1373,10 @@ fn recovery_incarnation_outcome(
 fn reload_recovery_failure(
     failure: &signalbox_persistence::reload_configuration::ReloadRepositoryError,
 ) -> HubRuntimeError {
-    use signalbox_persistence::reload_configuration::ReloadRepositoryError;
-    let mut error = erase_startup_cause(
+    erase_startup_cause(
         RuntimePhase::StartupScan,
-        SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
-    );
-    (error.failure_class, error.database_failure) = match failure {
-        ReloadRepositoryError::Database(_) => (
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false,
-            },
-            true,
-        ),
-        ReloadRepositoryError::CommitAmbiguous(_) => (
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: true,
-            },
-            true,
-        ),
-        ReloadRepositoryError::Corruption(_) => (OperatorFailureClass::FailClosedCorruption, false),
-        ReloadRepositoryError::InvalidCommandId => (OperatorFailureClass::CallerOrHubBug, false),
-    };
-    error
+        SanitizedStartupCause::Reload(failure),
+    )
 }
 
 fn startup_goal_resumption_result(
@@ -1659,11 +1687,8 @@ async fn run_hub_incarnation(
         .await
         {
             Ok(pending) => pending,
-            Err(_) => {
-                let failure = erase_startup_database_cause(
-                    RuntimePhase::StartupScan,
-                    SanitizedStartupCause::Static("configuration_reload_intent_read_failed"),
-                );
+            Err(error) => {
+                let failure = reload_recovery_failure(&error);
                 let _ = database.close().await;
                 return Err(failure);
             }
@@ -3586,6 +3611,24 @@ mod tests {
                 Duration::from_secs(9)
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guard_recovery_reports_a_failed_termination_listener() {
+        use signalboxd::guard_recovery::{GuardRecoveryPolicy, GuardedIncarnationOutcome};
+        let result = super::run_hub_recovery(
+            GuardRecoveryPolicy::new(Duration::from_secs(1), Duration::from_secs(10), None)
+                .unwrap(),
+            |observer| async move {
+                observer.guard_lost();
+                pending::<GuardedIncarnationOutcome<Result<ShutdownOutcome, HubRuntimeError>>>()
+                    .await
+            },
+            Err(std::io::Error::from(std::io::ErrorKind::Other)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, ShutdownOutcome::SignalListenerFailed);
     }
 
     #[test]

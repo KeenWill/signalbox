@@ -299,19 +299,20 @@ whose requests are all resolved with no current tool attempt is returned as
 resumable work for a scheduler pass. In the two failing branches only, one
 failure entry is appended, preceded in the tool branch by one correlated result
 entry per request in proposal order. Identity collisions are retried with fresh
-candidates. The startup inventory covers every session. A session that fails
-reconstitution receives a durable operator item and is skipped; non-terminal
-sessions with valid lifecycle projections are parked, while terminal sessions
-retain their outcome. Missing or undecodable lifecycle projections retain
-independent operator evidence and remain suspended without automatic repair.
-Operator status exposes both kinds of pending supervision item. Successful
-startup reconstitution settles repaired terminal items without resuming them.
-Other sessions continue. Infrastructure failures stop initial startup visibly.
-During guard recovery, database failures throughout incarnation reconstruction,
-including repository-watch startup, continue reacquisition with the same capped
-backoff and elapsed bound, after closing the failed incarnation’s fenced pool.
-Migration validation and reload corruption failures stop recovery visibly.
-Recovery is idempotent, and a stale observation rolls back.
+candidates. The startup inventory covers every session. A non-retriable,
+session-scoped reconstitution failure receives a durable operator item and its
+session is skipped; non-terminal sessions with valid lifecycle projections are
+parked, while terminal sessions retain their outcome. Missing or undecodable
+lifecycle projections retain independent operator evidence and remain suspended
+without automatic repair. Operator status exposes both kinds of pending
+supervision item. Successful startup reconstitution settles repaired terminal
+items without resuming them. Other sessions continue. Infrastructure failures
+stop initial startup visibly. During guard recovery, database failures
+throughout incarnation reconstruction, including repository-watch startup,
+continue reacquisition with the same capped backoff and elapsed bound, after
+closing the failed incarnation’s fenced pool. Migration validation and reload
+corruption failures stop recovery visibly. Recovery is idempotent, and a stale
+observation rolls back.
 
 Every terminal transition of a source turn, whether by interrupt, model-call
 outcome, startup recovery, or the watchdog, reclassifies its pending steering
