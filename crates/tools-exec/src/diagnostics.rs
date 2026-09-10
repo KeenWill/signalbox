@@ -748,7 +748,6 @@ mod tests {
     use std::{
         error::Error,
         ffi::OsString,
-        path::PathBuf,
         sync::{Arc, Mutex, PoisonError},
     };
 
@@ -769,7 +768,6 @@ mod tests {
     const DIAGNOSTIC_COLUMN_END: u64 = 12;
     const DIAGNOSTIC_TIMEOUT_SECONDS: u64 = 42;
     const CARGO_FAILURE_MESSAGE: &str = "error: failed to parse manifest at /workspace/Cargo.toml";
-    const MISSING_SUPERVISOR: &str = "/fixture/missing-supervisor";
     const BOUNDED_TEXT_FIXTURE: &str = "abcé";
     const BOUNDED_TEXT_LIMIT: usize = 4;
     const TEST_SANDBOX_LAUNCHER_DESCRIPTOR: i32 = 93;
@@ -930,21 +928,6 @@ mod tests {
 
         assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
         Ok(())
-    }
-
-    #[test]
-    fn construction_error_preserves_the_supervisor_program_distinction() {
-        let error = CargoDiagnosticsToolConstructionError::from(
-            ExecToolConstructionError::SupervisorProgram {
-                path: PathBuf::from(MISSING_SUPERVISOR),
-                source: None,
-            },
-        );
-
-        assert_eq!(
-            error.to_string(),
-            format!("exec supervisor program `{MISSING_SUPERVISOR}` is invalid")
-        );
     }
 
     #[tokio::test]

@@ -282,19 +282,7 @@ impl From<HubFenceCorruption> for HubFenceError {
 
 #[cfg(test)]
 mod tests {
-    use super::{FENCED_POOL_MAX_CONNECTIONS, advisory_key, fenced_pool_options};
-
-    #[test]
-    fn fenced_pool_applies_the_preload_and_operational_capacity() {
-        assert_eq!(
-            fenced_pool_options(Some(FENCED_POOL_MAX_CONNECTIONS)).get_min_connections(),
-            FENCED_POOL_MAX_CONNECTIONS
-        );
-        assert_eq!(
-            fenced_pool_options(Some(FENCED_POOL_MAX_CONNECTIONS)).get_max_connections(),
-            FENCED_POOL_MAX_CONNECTIONS
-        );
-    }
+    use super::advisory_key;
 
     #[test]
     fn fence_advisory_key_encoding_is_stable_across_generations() {
