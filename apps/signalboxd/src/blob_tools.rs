@@ -395,6 +395,7 @@ mod tests {
     /// Unwraps completed text evidence so a test body needs no match arm.
     fn completed_text(evidence: ToolExecutorEvidence) -> Result<String, Box<dyn Error>> {
         match evidence {
+            ToolExecutorEvidence::CompletedMedia { .. } => panic!("expected a text result"),
             ToolExecutorEvidence::CompletedText(result) => Ok(result),
             ToolExecutorEvidence::KnownFailed { .. } | ToolExecutorEvidence::Ambiguous => Err(
                 Box::<dyn Error>::from(String::from("the result helper emits completed text")),

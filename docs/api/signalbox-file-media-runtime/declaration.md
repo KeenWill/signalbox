@@ -131,6 +131,16 @@ impl ReadViewBounds {
 }
 ```
 
+## ImageViewKind
+
+```rust
+pub enum ImageViewKind {
+    Direct,
+    Generated,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## ReadViewDeclaration
 
 ```rust
@@ -149,6 +159,13 @@ impl ReadViewDeclaration {
         access: ReadAccessPattern,
         bounds: ReadViewBounds,
     ) -> result::Result<Self, RegistryDeclarationError>;
+    pub fn with_image_output(
+        self,
+        kind: ImageViewKind,
+        types: vec::Vec<CanonicalMediaType>,
+    ) -> Self;
+    pub const fn image_kind(&self) -> option::Option<ImageViewKind>;
+    pub fn output_media_types(&self) -> &[CanonicalMediaType];
     pub const fn access(&self) -> ReadAccessPattern;
     pub const fn bounds(&self) -> ReadViewBounds;
     pub const fn output_kind(&self) -> ReadOutputKind;

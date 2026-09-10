@@ -8,6 +8,7 @@
 | cli_process | 6 | 1 | 2 | [cli_process](cli_process.md) |
 | credential | 4 | 1 | 0 | [credential](credential.md) |
 | evidence | 24 | 0 | 1 | [evidence](evidence.md) |
+| image | 3 | 0 | 1 | [image](image.md) |
 | input_count | 2 | 1 | 0 | [input_count](input_count.md) |
 | message | 5 | 0 | 0 | [message](message.md) |
 | observation | 2 | 1 | 0 | [observation](observation.md) |

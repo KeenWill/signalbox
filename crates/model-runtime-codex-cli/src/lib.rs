@@ -12,6 +12,8 @@
 
 mod app_server;
 mod config;
+mod image;
+pub use image::image_presentation_capability;
 mod event;
 mod executable_pin;
 mod oauth;

@@ -40,6 +40,7 @@ mod capability;
 mod cli_process;
 mod credential;
 mod evidence;
+mod image;
 mod input_count;
 mod message;
 mod observation;
@@ -78,6 +79,9 @@ pub use evidence::{
     RateLimitSnapshot, RateLimitWindow, RefusalEvidence, RefusalReason,
     ResponseEnvelopeRejectionStage, StreamInterruption, TerminalEvidence, TerminalReport,
     ToolCallsAtLoss, TransportFacts, UnsentCause, parse_retry_after,
+};
+pub use image::{
+    ImageInput, ImagePresentationCapability, ImageReference, image_request_byte_limit,
 };
 pub use input_count::{InputTokenCountFailure, InputTokenCountOutcome, ModelInputTokenCounter};
 pub use message::{

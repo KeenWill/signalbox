@@ -63,29 +63,38 @@ async fn gif_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-#[tokio::test]
-async fn truncated_images_are_reported_as_malformed() -> Result<(), Box<dyn Error>> {
-    let png = MemorySource::new(fixtures::truncated(FixtureFormat::Png)?);
-    let jpeg = MemorySource::new(fixtures::truncated(FixtureFormat::Jpeg)?);
-    let webp = MemorySource::new(fixtures::truncated(FixtureFormat::WebP)?);
-    let gif = MemorySource::new(fixtures::truncated(FixtureFormat::Gif)?);
-
-    support::assert_malformed_reason(
-        support::inspect(&png, "image/png").await?,
-        "malformed_image",
-    );
-    support::assert_malformed_reason(
-        support::inspect(&jpeg, "image/jpeg").await?,
-        "malformed_image",
-    );
-    support::assert_malformed_reason(
-        support::inspect(&webp, "image/webp").await?,
-        "malformed_image",
-    );
-    support::assert_malformed_reason(
-        support::inspect(&gif, "image/gif").await?,
-        "malformed_image",
-    );
+#[tokio::test(flavor = "multi_thread")]
+async fn truncated_rasters_cannot_produce_direct_references() -> Result<(), Box<dyn Error>> {
+    use signalbox_file_media_runtime::*;
+    for format in [FixtureFormat::Png, FixtureFormat::Jpeg, FixtureFormat::WebP] {
+        let source = MemorySource::new(fixtures::truncated(format)?);
+        let registry = FileMediaRegistry::try_new(
+            vec![
+                signalbox_file_media_adapters_image::image_family_declaration()
+                    .map_err(|e| e.to_string())?,
+            ],
+            FileMediaCeilings::version_one(),
+            ProcessorIsolation::Available,
+        )?;
+        let result = registry
+            .read(
+                &DirectProcessor::provider(),
+                FileReadRequest {
+                    inspection: InspectionRequest {
+                        source: source.file_use(format.media_type())?,
+                        visible_part: None,
+                    },
+                    view: ReadViewName::try_new("image")?,
+                    input: FileReadInput::Initial {
+                        options: serde_json::json!({}),
+                    },
+                },
+                &source,
+                &NeverCancelled,
+            )
+            .await;
+        assert!(result.is_err());
+    }
     Ok(())
 }
 
@@ -116,28 +125,20 @@ async fn malformed_images_are_reported_as_malformed() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
-async fn oversized_images_are_reported_as_source_too_large() -> Result<(), Box<dyn Error>> {
-    let png = MemorySource::new(fixtures::oversized(FixtureFormat::Png)?);
-    let jpeg = MemorySource::new(fixtures::oversized(FixtureFormat::Jpeg)?);
-    let webp = MemorySource::new(fixtures::oversized(FixtureFormat::WebP)?);
-    let gif = MemorySource::new(fixtures::oversized(FixtureFormat::Gif)?);
-
-    support::assert_malformed_reason(
-        support::inspect(&png, "image/png").await?,
-        "source_too_large",
-    );
-    support::assert_malformed_reason(
-        support::inspect(&jpeg, "image/jpeg").await?,
-        "source_too_large",
-    );
-    support::assert_malformed_reason(
-        support::inspect(&webp, "image/webp").await?,
-        "source_too_large",
-    );
-    support::assert_malformed_reason(
-        support::inspect(&gif, "image/gif").await?,
-        "source_too_large",
-    );
+async fn inspection_uses_a_prefix_when_the_source_exceeds_the_probe_bound()
+-> Result<(), Box<dyn Error>> {
+    for format in [
+        FixtureFormat::Png,
+        FixtureFormat::Jpeg,
+        FixtureFormat::WebP,
+        FixtureFormat::Gif,
+    ] {
+        let source = MemorySource::new(fixtures::oversized(format)?);
+        support::assert_validated_media(
+            support::inspect(&source, format.media_type()).await?,
+            format.media_type(),
+        );
+    }
     Ok(())
 }
 
@@ -223,7 +224,7 @@ async fn lowered_decoded_pixels_are_enforced_during_metadata_validation()
 }
 
 #[tokio::test]
-async fn lowered_validation_source_bytes_return_source_too_large() -> Result<(), Box<dyn Error>> {
+async fn insufficient_validation_prefix_rejects_incomplete_headers() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::Png;
     let source = MemorySource::new(fixtures::valid(format)?);
     let ceilings = FileMediaCeilings {
@@ -232,7 +233,7 @@ async fn lowered_validation_source_bytes_return_source_too_large() -> Result<(),
     };
 
     let inspection = support::inspect_with_ceilings(&source, format.media_type(), ceilings).await?;
-    support::assert_malformed_reason(inspection, "source_too_large");
+    support::assert_malformed_reason(inspection, "malformed_image");
     Ok(())
 }
 

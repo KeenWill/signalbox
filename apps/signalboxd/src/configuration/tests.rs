@@ -129,6 +129,8 @@ version = 1
 
 [numeric_bounds]
 max_git_object_bytes = "none"
+max_image_presentation_bytes = "none"
+max_image_request_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
 repository_watch_webhook_retention = "604800s"
@@ -6336,4 +6338,40 @@ fn human_approval_wait_rejects_zero_and_invalid_durations() {
             "{value}"
         );
     }
+}
+
+#[test]
+fn file_image_configuration_lowers_adapter_capabilities_and_none_retains_them() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let configuration = configuration_with_api_metered_codex_model(&executable, root.path());
+    let unbounded = HubModelConfiguration::parse(&configuration).unwrap();
+    let bounded = HubModelConfiguration::parse(
+        &configuration
+            .replace(
+                "max_image_presentation_bytes = \"none\"",
+                "max_image_presentation_bytes = 1234",
+            )
+            .replace(
+                "max_image_request_bytes = \"none\"",
+                "max_image_request_bytes = 2345",
+            ),
+    )
+    .unwrap();
+    let mut images = 0;
+    for definition in bounded.runtime_model_capability_catalog().iter() {
+        if let Some(image) = definition.capabilities().image_presentation() {
+            images += 1;
+            assert_eq!(image.maximum_image_bytes(), 1234);
+            assert_eq!(image.maximum_request_bytes(), 2345);
+            let catalog = unbounded.runtime_model_capability_catalog();
+            let original = catalog
+                .resolve(definition.target())
+                .unwrap()
+                .image_presentation()
+                .unwrap();
+            assert!(original.maximum_image_bytes() > image.maximum_image_bytes());
+        }
+    }
+    assert!(images > 0);
 }

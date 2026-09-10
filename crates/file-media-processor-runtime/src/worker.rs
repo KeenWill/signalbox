@@ -196,7 +196,30 @@ pub async fn serve_one(catalog: &WorkerCatalog) -> Result<(), WorkerServiceError
     let invocation = *invocation;
     let source_wire = *invocation.source();
     let source = BrokeredWorkerSource::new(source_wire, input, output)?;
-    let frame = dispatch(catalog, invocation, &source).await?;
+    let mut frame = dispatch(catalog, invocation, &source).await?;
+    if let WorkerFrame::ReadResult {
+        output:
+            signalbox_file_media_runtime::ProcessorReadOutput::GeneratedImage {
+                bytes, byte_length, ..
+            },
+    } = &mut frame
+    {
+        if bytes.len() as u64 != *byte_length
+            || *byte_length > signalbox_file_media_runtime::MAX_PRESENTED_IMAGE_BYTES
+        {
+            return Err(WorkerServiceError::Protocol);
+        }
+        let mut binary = tokio::io::stderr();
+        binary
+            .write_all(bytes)
+            .await
+            .map_err(|_| WorkerServiceError::Protocol)?;
+        binary
+            .shutdown()
+            .await
+            .map_err(|_| WorkerServiceError::Protocol)?;
+        bytes.clear();
+    }
     let mut transport = source.transport.lock().await;
     write_frame(&mut transport.output, &frame)
         .await

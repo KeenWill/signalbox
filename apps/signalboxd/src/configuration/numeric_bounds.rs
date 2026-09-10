@@ -23,6 +23,8 @@ pub struct NumericBoundsConfiguration {
 
 const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
     ("max_git_object_bytes", NumericBoundKind::Integer),
+    ("max_image_presentation_bytes", NumericBoundKind::Integer),
+    ("max_image_request_bytes", NumericBoundKind::Integer),
     ("client_frame_deadline", NumericBoundKind::Duration),
     ("client_write_progress_deadline", NumericBoundKind::Duration),
     (
