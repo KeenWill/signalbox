@@ -1,13 +1,16 @@
 //! Descriptor-bound object capture for a push range; see git-authority-threat-model.md.
 
-use crate::streamed_object::ObjectContent;
+use crate::streamed_object::{IO_BYTES, ObjectContent};
 use crate::{
     descriptor::{
         FileIdentity, FileSnapshotIdentity, descriptor_path, file_identity, file_snapshot_identity,
     },
     failure::LocalGitFailure,
     layout::parse_full_object_id,
-    limits::{MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_REPOSITORY_INSPECTIONS, MAX_SHALLOW_ENTRIES},
+    limits::{
+        MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_METADATA_OBJECT_BYTES, MAX_REPOSITORY_INSPECTIONS,
+        MAX_SHALLOW_ENTRIES,
+    },
     pinning::{PinnedRepository, RepositoryShell},
 };
 use flate2::read::ZlibDecoder;
@@ -16,11 +19,15 @@ use rustix::fs::{Mode, OFlags, openat};
 use std::{
     collections::{BTreeSet, HashSet},
     fs::{self, File},
-    io::{Read, Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom},
     os::fd::AsFd,
     path::{Path, PathBuf},
     time::Instant,
 };
+
+// A full-size metadata object can be slightly larger after zlib framing and
+// stored-block overhead, but compressed metadata must still have its own bound.
+const MAX_COMPRESSED_METADATA_BYTES: u64 = (2 * MAX_METADATA_OBJECT_BYTES) as u64;
 
 pub(super) struct PushObjectSnapshot {
     pub(super) repository: RepositoryShell,
@@ -215,7 +222,6 @@ fn retain_boundary(
 struct SourceFile {
     directory: usize,
     name: PathBuf,
-    file: Option<File>,
     identity: FileSnapshotIdentity,
 }
 
@@ -244,6 +250,7 @@ pub(super) struct ObjectSource {
     format: ObjectFormat,
     max_object_bytes: Option<usize>,
     pub(super) directory: tempfile::TempDir,
+    private_directory: File,
     deadline: Option<Instant>,
 }
 
@@ -304,6 +311,8 @@ impl ObjectSource {
             .map_err(rejected)?,
         );
         let pack_path = descriptor_path(&pack_directory);
+        let directory = tempfile::tempdir().map_err(rejected)?;
+        let private_directory = File::open(directory.path()).map_err(rejected)?;
         let mut source = Self {
             objects,
             directories: vec![SourceDirectory {
@@ -315,7 +324,8 @@ impl ObjectSource {
             packs: Vec::new(),
             format: authority.object_format,
             max_object_bytes: authority.max_object_bytes,
-            directory: tempfile::tempdir().map_err(rejected)?,
+            directory,
+            private_directory,
             deadline,
         };
         let mut scanned = 0usize;
@@ -441,13 +451,29 @@ impl ObjectSource {
         self.files.push(SourceFile {
             directory,
             name: PathBuf::from(path.file_name().ok_or(LocalGitFailure::Repository)?),
-            file: Some(file),
             identity,
         });
         if self.files.len() > MAX_REPOSITORY_INSPECTIONS {
             return Err(LocalGitFailure::Repository);
         }
         Ok(index)
+    }
+
+    fn reopen_file(&self, source: usize) -> Result<File, LocalGitFailure> {
+        let entry = &self.files[source];
+        let file = File::from(
+            openat(
+                &self.directories[entry.directory].directory,
+                &entry.name,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(rejected)?,
+        );
+        if file_snapshot_identity(&file.metadata().map_err(rejected)?) != entry.identity {
+            return Err(LocalGitFailure::Repository);
+        }
+        Ok(file)
     }
 
     fn read(
@@ -458,12 +484,7 @@ impl ObjectSource {
     ) -> Result<Vec<u8>, LocalGitFailure> {
         self.check_deadline()?;
         let entry = &self.files[source];
-        let mut file = entry
-            .file
-            .as_ref()
-            .ok_or(LocalGitFailure::Repository)?
-            .try_clone()
-            .map_err(rejected)?;
+        let mut file = self.reopen_file(source)?;
         file.seek(SeekFrom::Start(offset as u64))
             .map_err(rejected)?;
         let mut bytes = vec![0; length];
@@ -536,8 +557,7 @@ impl ObjectSource {
         // libgit2 deduplicates disk backends by directory identity.
         database
             .add_disk_alternate(
-                self.directory
-                    .path()
+                descriptor_path(&self.private_directory)
                     .to_str()
                     .ok_or(LocalGitFailure::Repository)?,
             )
@@ -568,7 +588,11 @@ impl ObjectSource {
 
     fn decode_loose(&self, file: File) -> Result<ObjectContent, LocalGitFailure> {
         let compressed_size = file.metadata().map_err(rejected)?.len();
-        let mut decoder = ZlibDecoder::new(std::io::BufReader::new(file));
+        // The loose header reveals the object kind. Keep the compressed-input
+        // bound for metadata, and lift it only after identifying a blob.
+        let mut decoder = compressed_decoder(file, Some(MAX_COMPRESSED_METADATA_BYTES), || {
+            self.check_deadline()
+        });
         let mut header = Vec::new();
         loop {
             let byte = byte(&mut decoder)?;
@@ -592,6 +616,9 @@ impl ObjectSource {
                 )
             })
             .ok_or(LocalGitFailure::Repository)?;
+        if kind == ObjectType::Blob {
+            decoder.get_mut().remaining = None;
+        }
         let declared = size;
         let size = size.parse::<usize>().map_err(rejected)?;
         if size.to_string() != declared
@@ -620,18 +647,11 @@ impl ObjectSource {
         let path = PathBuf::from(&hex[..2]).join(&hex[2..]);
         if open_child(&self.objects, &path)?.is_some() {
             let source = self.open_file(&path)?;
-            let file = self.files[source]
-                .file
-                .as_ref()
-                .ok_or(LocalGitFailure::Repository)?
-                .try_clone()
-                .map_err(rejected)?;
+            let file = self.reopen_file(source)?;
             let mut content = self.decode_loose(file)?;
             if self.store(database, &mut content)? != oid {
                 return Err(LocalGitFailure::Repository);
             }
-            // Keep the source identity while releasing verified loose-object descriptors.
-            self.files[source].file = None;
             return Ok(());
         }
         self.capture_pack(database, oid)
@@ -688,9 +708,10 @@ impl ObjectSource {
             }
         }
         let (pack_index, mut offset) = location.ok_or(LocalGitFailure::Repository)?;
+        let pack_file = self.reopen_file(self.packs[pack_index].source)?;
         let mut selected = HashSet::new();
         let mut entries = Vec::new();
-        loop {
+        let mut content = loop {
             self.check_deadline()?;
             if !selected.insert(offset) || selected.len() > MAX_REPOSITORY_INSPECTIONS {
                 return Err(LocalGitFailure::Repository);
@@ -699,12 +720,7 @@ impl ObjectSource {
             if offset < 12 || offset >= pack.end {
                 return Err(LocalGitFailure::Repository);
             }
-            let mut file = self.files[pack.source]
-                .file
-                .as_ref()
-                .ok_or(LocalGitFailure::Repository)?
-                .try_clone()
-                .map_err(rejected)?;
+            let mut file = pack_file.try_clone().map_err(rejected)?;
             file.seek(SeekFrom::Start(offset as u64))
                 .map_err(rejected)?;
             let mut remaining = file.take((pack.end - offset) as u64);
@@ -760,28 +776,39 @@ impl ObjectSource {
                 }
                 _ => return Err(LocalGitFailure::Repository),
             };
-            let mut decoder = ZlibDecoder::new(std::io::BufReader::new(remaining));
-            let content =
-                ObjectContent::decode(&mut decoder, size, ObjectType::Blob, self.deadline)?;
-            entries.push((kind, content));
-            match base {
-                Some(base) => offset = base,
-                None => break,
+            if let Some(base) = base {
+                entries.push((pack.end as u64 - remaining.limit(), size));
+                offset = base;
+            } else {
+                let mut decoder =
+                    compressed_decoder(remaining, compressed_metadata_limit(object_kind), || {
+                        self.check_deadline()
+                    });
+                break ObjectContent::decode(&mut decoder, size, object_kind, self.deadline)?;
             }
-        }
-        let (kind, mut content) = entries.pop().ok_or(LocalGitFailure::Repository)?;
-        content.kind = match kind {
-            1 => ObjectType::Commit,
-            2 => ObjectType::Tree,
-            3 => ObjectType::Blob,
-            4 => ObjectType::Tag,
-            _ => return Err(LocalGitFailure::Repository),
         };
-        while let Some((_, delta)) = entries.pop() {
+        let pack = &self.packs[pack_index];
+        while let Some((offset, size)) = entries.pop() {
+            self.check_deadline()?;
             let limit = crate::limits::object_byte_limit(self.max_object_bytes, content.kind);
+            if size > limit {
+                return Err(LocalGitFailure::Repository);
+            }
+            let mut file = pack_file.try_clone().map_err(rejected)?;
+            file.seek(SeekFrom::Start(offset)).map_err(rejected)?;
+            let mut decoder = compressed_decoder(
+                file.take(pack.end as u64 - offset),
+                compressed_metadata_limit(content.kind),
+                || self.check_deadline(),
+            );
+            let delta = ObjectContent::decode(&mut decoder, size, ObjectType::Blob, self.deadline)?;
+            drop(decoder);
             content = content.apply_delta(delta.file, Some(limit), self.deadline)?;
         }
-        if self.store(database, &mut content)? != oid {
+        if file_snapshot_identity(&pack_file.metadata().map_err(rejected)?)
+            != self.files[pack.source].identity
+            || self.store(database, &mut content)? != oid
+        {
             return Err(LocalGitFailure::Repository);
         }
         Ok(())
@@ -834,13 +861,58 @@ impl ObjectSource {
             if file_snapshot_identity(&current.metadata().map_err(rejected)?) != entry.identity {
                 return Err(LocalGitFailure::Repository);
             }
-            if let Some(file) = &entry.file
-                && file_snapshot_identity(&file.metadata().map_err(rejected)?) != entry.identity
-            {
-                return Err(LocalGitFailure::Repository);
-            }
         }
         Ok(())
+    }
+}
+
+// zlib can consume arbitrarily many empty blocks before returning one decoded
+// byte, so deadlines and metadata input bounds belong beneath its input buffer.
+fn compressed_metadata_limit(kind: ObjectType) -> Option<u64> {
+    (kind != ObjectType::Blob).then_some(MAX_COMPRESSED_METADATA_BYTES)
+}
+
+fn compressed_decoder<R, C>(
+    reader: R,
+    remaining: Option<u64>,
+    check: C,
+) -> ZlibDecoder<CompressedInput<R, C>>
+where
+    R: Read,
+    C: FnMut() -> Result<(), LocalGitFailure>,
+{
+    ZlibDecoder::new(CompressedInput {
+        reader,
+        remaining,
+        check,
+    })
+}
+
+struct CompressedInput<R, C> {
+    reader: R,
+    remaining: Option<u64>,
+    check: C,
+}
+
+impl<R: Read, C: FnMut() -> Result<(), LocalGitFailure>> Read for CompressedInput<R, C> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        (self.check)().map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let mut count = buffer.len().min(IO_BYTES);
+        if let Some(remaining) = self.remaining {
+            if remaining == 0 {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            count = count.min(remaining as usize);
+        }
+        let count = self.reader.read(&mut buffer[..count])?;
+        if let Some(remaining) = &mut self.remaining {
+            *remaining -= count as u64;
+        }
+        (self.check)().map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
+        Ok(count)
     }
 }
 
@@ -864,4 +936,134 @@ fn variable_size(reader: &mut impl Read) -> Result<usize, LocalGitFailure> {
         }
     }
     Err(LocalGitFailure::Repository)
+}
+
+#[cfg(test)]
+mod compressed_deadline_tests {
+    use super::*;
+    use std::{cell::Cell, io::Cursor};
+
+    // RFC 1950/1951 stored blocks: a valid zlib stream with a long run of
+    // non-final, empty blocks between the prefix and suffix output.
+    fn empty_blocks_between_count(prefix: &[u8], suffix: &[u8], empty_blocks: usize) -> Vec<u8> {
+        let mut compressed = vec![0x78, 0x01];
+        let mut block = |bytes: &[u8], final_block: bool| {
+            let length = u16::try_from(bytes.len()).expect("stored-block size");
+            compressed.push(u8::from(final_block));
+            compressed.extend_from_slice(&length.to_le_bytes());
+            compressed.extend_from_slice(&(!length).to_le_bytes());
+            compressed.extend_from_slice(bytes);
+        };
+        for page in prefix.chunks(u16::MAX as usize) {
+            block(page, false);
+        }
+        for _ in 0..empty_blocks {
+            block(&[], false);
+        }
+        block(suffix, true);
+        let (mut a, mut b) = (1u32, 0u32);
+        for &byte in prefix.iter().chain(suffix) {
+            a = (a + u32::from(byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        compressed.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        compressed
+    }
+
+    fn empty_blocks_between(prefix: &[u8], suffix: &[u8]) -> Vec<u8> {
+        empty_blocks_between_count(prefix, suffix, IO_BYTES)
+    }
+
+    struct CountedInput<'a> {
+        reader: Cursor<Vec<u8>>,
+        consumed: &'a Cell<usize>,
+    }
+    impl Read for CountedInput<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.reader.read(buffer)?;
+            self.consumed.set(self.consumed.get() + count);
+            Ok(count)
+        }
+    }
+
+    fn assert_empty_blocks_stop_at_deadline(prefix: &[u8], suffix: &[u8]) {
+        let compressed = empty_blocks_between(prefix, suffix);
+        let mut decoded = Vec::new();
+        ZlibDecoder::new(compressed.as_slice())
+            .read_to_end(&mut decoded)
+            .expect("valid stream, not corrupt data");
+        assert_eq!(decoded, [prefix, suffix].concat());
+
+        let consumed = Cell::new(0);
+        let expires_after = Cell::new(usize::MAX);
+        let reader = CountedInput {
+            reader: Cursor::new(compressed),
+            consumed: &consumed,
+        };
+        let mut decoder = compressed_decoder(reader, None, || {
+            if consumed.get() >= expires_after.get() {
+                Err(LocalGitFailure::Repository)
+            } else {
+                Ok(())
+            }
+        });
+        let mut decoded_prefix = vec![0; prefix.len()];
+        decoder
+            .read_exact(&mut decoded_prefix)
+            .expect("prefix before deadline");
+        assert_eq!(decoded_prefix, prefix);
+        // Expire while one decoder read consumes empty blocks, without sleeps
+        // or dependence on the speed of the host's decompressor.
+        expires_after.set(consumed.get() + IO_BYTES);
+        let mut output = [0];
+        let failure = decoder
+            .read(&mut output)
+            .expect_err("deadline inside compressed input");
+        assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+        assert!(consumed.get() <= expires_after.get());
+        assert_eq!(output, [0], "no suffix output reached the caller");
+    }
+
+    #[test]
+    fn loose_header_read_stops_inside_empty_deflate_blocks() {
+        assert_empty_blocks_stop_at_deadline(&[], b"blob 1\0x");
+    }
+
+    #[test]
+    fn packed_output_read_stops_inside_empty_deflate_blocks_between_pages() {
+        let prefix = vec![b'x'; IO_BYTES];
+        assert_empty_blocks_stop_at_deadline(&prefix, b"base tail");
+    }
+
+    #[test]
+    fn compressed_metadata_has_an_independent_input_bound() {
+        // Each empty stored block occupies five compressed bytes. Put the
+        // suffix beyond the metadata budget without increasing decoded size.
+        let empty_blocks = MAX_COMPRESSED_METADATA_BYTES as usize / 5 + 1;
+        let compressed = empty_blocks_between_count(&[], b"x", empty_blocks);
+        let consumed = Cell::new(0);
+        let reader = CountedInput {
+            reader: Cursor::new(compressed.clone()),
+            consumed: &consumed,
+        };
+        let mut metadata =
+            compressed_decoder(reader, compressed_metadata_limit(ObjectType::Tree), || {
+                Ok(())
+            });
+        let failure = metadata
+            .read_to_end(&mut Vec::new())
+            .expect_err("compressed metadata bound");
+        assert_eq!(failure.kind(), io::ErrorKind::InvalidData);
+        assert!(consumed.get() <= MAX_COMPRESSED_METADATA_BYTES as usize);
+
+        let mut blob = compressed_decoder(
+            compressed.as_slice(),
+            compressed_metadata_limit(ObjectType::Blob),
+            || Ok(()),
+        );
+        let mut decoded = Vec::new();
+        blob.read_to_end(&mut decoded)
+            .expect("blob compressed input remains unbounded");
+        assert_eq!(decoded, b"x");
+    }
 }

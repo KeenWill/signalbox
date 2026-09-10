@@ -130,7 +130,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
     }
 
     /// Sets the decoded byte limit for each object read, including delta dependencies.
-    /// `None` leaves object content unbounded, which is the default.
+    /// `None` leaves blob content unbounded, which is the default.
+    /// Commits, trees, and tags retain their structural byte limit.
     pub fn with_max_object_bytes(mut self, max_bytes: Option<usize>) -> Self {
         self.executor.repository_authority.max_object_bytes = max_bytes;
         self

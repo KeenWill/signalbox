@@ -152,3 +152,71 @@ fn git_reads_capture_selected_objects_from_a_pack_larger_than_the_snapshot_budge
     assert_eq!(diff["patch"], "");
     assert_eq!(log["commits"][0]["commit"], fixture.initial.to_string());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hundreds_of_publication_packs_read_under_a_small_descriptor_limit() {
+    const CHILD: &str = "SIGNALBOX_TEST_MANY_PACKS_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new("sh")
+            .args(["-c", "ulimit -n 128 && exec \"$@\"", "many-packs-child"])
+            .arg(std::env::current_exe().expect("test executable"))
+            .args(["--exact", "tests::object_database::hundreds_of_publication_packs_read_under_a_small_descriptor_limit", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .expect("descriptor-limited child starts");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut objects = Vec::new();
+    // 512 independently published pairs exceed the child's 128-descriptor limit.
+    for batch in 0..512_u32 {
+        let bytes = batch.to_be_bytes();
+        let mut content = crate::streamed_object::ObjectContent::decode(
+            &mut bytes.as_slice(),
+            bytes.len(),
+            git2::ObjectType::Blob,
+            None,
+        )
+        .expect("batch content");
+        let oid = content
+            .oid(git2::ObjectFormat::Sha1)
+            .expect("batch object id");
+        let mut content = Some(content);
+        crate::streamed_object::write_pack(
+            &[oid],
+            |_| Ok(content.take().expect("single-object batch")),
+            git2::ObjectFormat::Sha1,
+            &fixture.root().join(".git/objects/pack"),
+            None,
+        )
+        .expect("batch pack publishes");
+        objects.push((oid, bytes));
+    }
+    let executor = fixture.executor();
+    let authority = &executor.repository_authority;
+    let repository = authority.open_repository_shell().expect("private shell");
+    repository
+        .capture_objects_on_read(authority)
+        .expect("many packs bind");
+    for (oid, bytes) in objects {
+        assert_eq!(
+            repository
+                .object_content(oid)
+                .expect("selected pack reads")
+                .prefix(bytes.len())
+                .expect("content bytes"),
+            bytes
+        );
+    }
+    repository
+        .validate_selected_objects(authority)
+        .expect("all pack identities remain bound");
+    execute(&executor, LocalOperation::Status);
+}

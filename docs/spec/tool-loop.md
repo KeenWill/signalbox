@@ -194,7 +194,9 @@ retains only the first dropped hunk per file. Merge comparison streams content
 into file-backed line indexes, diff scratch data, and effect counts; retained
 hunk previews remain bounded. Rename similarity uses fixed-size signatures of
 streamed content. Comparison checks the push-preparation deadline between I/O
-pages and matching steps. Non-merge pushes are unaffected.
+pages and matching steps. Fixed spans use streamed literal comparison; candidate
+comparisons share a bounded work budget, and an unproven span refuses the push.
+Non-merge pushes are unaffected.
 
 Before constructing merge diffs, verification counts tree-entry occurrences
 across the four compared trees against `MAX_REPOSITORY_INSPECTIONS`, including

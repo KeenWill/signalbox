@@ -23,8 +23,11 @@ configuration, references, lock state, and object data into private snapshots;
 the typed Git library, `git2`, works only on those snapshots. All operations
 capture objects on demand into a private database and revalidate their source
 bindings before returning; unrelated historical object contents are not copied.
-Blob decoding, delta reconstruction, worktree reads, checkout, and object
-publication use temporary files and fixed-size I/O buffers.
+Packed delta traversal retains layer offsets and decodes one layer at a time;
+open descriptors do not grow with delta depth. Pack and index files open on
+demand against captured identities; idle pairs retain no descriptors. Blob
+decoding, delta reconstruction, worktree reads, checkout, and object publication
+use temporary files and fixed-size I/O buffers.
 
 Pushing is a separate surface with its own authority. A push names a branch; its
 destination is a remote the deployment configured, never one the caller chose. A
@@ -114,27 +117,34 @@ complete blob's SHA-256.
 Scans and result text remain bounded; worktree, staging, and object-database
 content have no aggregate byte ceiling. Commits, trees, and tags retain a 1 MiB
 decoded metadata bound before libgit2 parsing; blob content streams without that
-structural bound. Patches preview bounded content prefixes with truncation
-markers, and status identifies renames by exact object identity. Worktree
-streams pin one descriptor and revalidate its identity around each page; object
+structural bound. Mode-only revision and worktree changes with identical object
+IDs do not imply omitted content. Patches preview bounded content prefixes with
+truncation markers, including missing skip-worktree files served by index
+objects. Status identifies renames by exact object identity. Worktree streams
+pin one descriptor and revalidate its identity around each page; object
 publication streams each batch into one pack and index pair. Skipping an
 already-present object requires decoding and hashing its live content; a loose
 pathname or pack-index hit alone is insufficient. Checkout retains the clean
 path identity and revalidates the opened file and path before truncating or
-removing it; removal quarantines and revalidates the full file snapshot, and new
-files are created exclusively. Copied files retain descriptor ownership and pass
-pathname, identity, and target-blob hash checks; captured checkout content must
-match the target before index publication. Merge verification retains bounded
-previews and uses file-backed comparison scratch data with linear-space
-divide-and-conquer line matching; disjoint replacements use a linear scan.
-Private-pack writes and merge comparison check preparation deadlines between
-fixed-size pages; rename similarity streams fixed-size signatures cached by
-object ID for each comparison pass. Unsupported layouts and formats, exhausted
-bounds, allocation failure, and host I/O failure are rejected, and the tool does
-not repair a corrupt repository. The configured `max_git_object_bytes` limit
-(`"none"` for unbounded) applies to the objects an operation reads, including
-packed delta bases, intermediate results, and delta instructions, not to
-unrelated objects retained in its history.
+removing it; removal quarantines and revalidates the full file snapshot and
+streamed content digest, and new files are created exclusively. Copied files
+retain descriptor ownership and pass pathname, identity, and target-blob hash
+checks; captured checkout content must match the target before index
+publication. Merge verification retains bounded previews and uses file-backed
+comparison scratch data with linear-space divide-and-conquer line matching;
+disjoint replacements use a linear scan. Fixed budgets bound line-index records,
+frontier visits, and matching line comparisons across each streamed file diff;
+exhaustion compares the whole-object transition instead of line effects.
+Loose-object, packed-base, and packed-delta decompression check preparation
+deadlines on each bounded compressed-input read, including blocks that produce
+no output. Private-pack writes and merge comparison check preparation deadlines
+between fixed-size pages; rename similarity streams fixed-size signatures cached
+by object ID for each comparison pass. Unsupported layouts and formats,
+exhausted bounds, allocation failure, and host I/O failure are rejected, and the
+tool does not repair a corrupt repository. The configured `max_git_object_bytes`
+limit (`"none"` for unbounded) applies to the objects an operation reads,
+including packed delta bases, intermediate results, and delta instructions, not
+to unrelated objects retained in its history.
 
 Repository semantics outside the direct main-worktree subset are unsupported,
 not partially trusted. Linked worktrees, discovery, alternate object databases,
