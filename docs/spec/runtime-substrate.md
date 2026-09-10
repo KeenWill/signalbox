@@ -393,10 +393,10 @@ deltas. Every observed item must fit the terminal output. An incompatible event
 ends the stream with incomplete-stream evidence, retaining observed facts
 without announcing completion or refusal. Output-ceiling terminals retain
 completed and incomplete item content, including incomplete function arguments.
-Reasoning replay retains exact item-done bytes; supplied terminal ciphertext
-must agree. Reported model and recognized terminal finish are retained before
-usage decoding. A terminal response supplies completion content and its response
-id becomes the provider message id. A bare `error` event or an HTTP-200 response
+Reasoning replay retains exact item-done bytes even when terminal ciphertext
+differs. Reported model and recognized terminal finish are retained before usage
+decoding. A terminal response supplies completion content and its response id
+becomes the provider message id. A bare `error` event or an HTTP-200 response
 with `status: failed` supplies definitive provider-error evidence without
 non-acceptance proof. Failed status and error are classified before ancillary
 response fields. Claude Code CLI events stay bound to the initialized exchange:

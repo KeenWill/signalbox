@@ -1292,12 +1292,13 @@ async fn streamed_reasoning_replays_exact_completed_bytes_between_two_tool_calls
     };
     // Whitespace, field order, escaped text, and an unknown field make reserialization observable.
     let complete = r#"{ "type":"reasoning", "id":"rs_continuation", "status":"completed", "encrypted_content":"complete\u002dopaque", "summary":[], "provider_extension": {"b":2,"a":1} }"#;
+    let terminal_reasoning = r#"{"type":"reasoning","id":"rs_continuation","status":"completed","encrypted_content":"terminal-opaque","summary":[]}"#;
     let first_call = r#"{"type":"function_call","id":"fc_first","status":"completed","call_id":"call_first","name":"lookup","arguments":"{}"}"#;
     let second_call = r#"{"type":"function_call","id":"fc_second","status":"completed","call_id":"call_second","name":"lookup","arguments":"{}"}"#;
     let stream = format!(
         "data: {{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{{\"type\":\"reasoning\",\"id\":\"rs_continuation\",\"status\":\"in_progress\",\"encrypted_content\":\"truncated\",\"summary\":[]}}}}\n\n\
          data: {{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{complete}}}\n\n\
-         data: {{\"type\":\"response.completed\",\"response\":{{\"object\":\"response\",\"id\":\"resp_first\",\"model\":\"model-exact-1\",\"status\":\"completed\",\"output\":[{first_call},{complete},{second_call}],\"usage\":{{\"input_tokens\":4,\"output_tokens\":8}}}}}}\n\n"
+         data: {{\"type\":\"response.completed\",\"response\":{{\"object\":\"response\",\"id\":\"resp_first\",\"model\":\"model-exact-1\",\"status\":\"completed\",\"output\":[{first_call},{terminal_reasoning},{second_call}],\"usage\":{{\"input_tokens\":4,\"output_tokens\":8}}}}}}\n\n"
     );
     let final_body = br#"{"object":"response","id":"resp_second","model":"model-exact-1","status":"completed","output":[{"type":"message","id":"msg_final","status":"completed","role":"assistant","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":12,"output_tokens":2}}"#;
     let server = CannedServer::serving(vec![
