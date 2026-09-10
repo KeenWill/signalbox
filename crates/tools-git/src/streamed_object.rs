@@ -452,7 +452,7 @@ pub(super) fn checkout_paths(
     expected: Option<&CheckoutIdentities>,
     mut updated: impl FnMut(&std::path::Path) -> Result<(), LocalGitFailure>,
 ) -> Result<(), LocalGitFailure> {
-    use rustix::fs::{AtFlags, Mode, OFlags, mkdirat, openat};
+    use rustix::fs::{Mode, OFlags, mkdirat, openat};
     use std::{
         ffi::OsStr,
         os::unix::fs::PermissionsExt,
@@ -479,12 +479,7 @@ pub(super) fn checkout_paths(
             }
             if let Some(identity) = identity {
                 let (parent, leaf) = crate::rollback::open_worktree_parent(&root, path)?;
-                crate::descriptor::remove_entry_if_identity(
-                    &parent,
-                    &leaf,
-                    identity.file,
-                    AtFlags::empty(),
-                )?;
+                crate::descriptor::remove_file_if_snapshot_identity(&parent, &leaf, identity)?;
                 updated(path)?;
             }
         }
