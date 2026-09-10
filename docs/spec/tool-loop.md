@@ -188,9 +188,6 @@ similarity uses fixed-size signatures of streamed content. Comparison checks the
 push-preparation deadline between I/O pages and matching steps. Non-merge pushes
 are unaffected.
 
-A rename/delete resolution may retain the branch's rename destination with its
-exact branch blob and mode while leaving the base-deleted source absent.
-
 Before constructing merge diffs, verification counts tree-entry occurrences
 across the four compared trees against `MAX_REPOSITORY_INSPECTIONS`, including
 reused subtrees. Cumulative expanded path bytes, including every directory
