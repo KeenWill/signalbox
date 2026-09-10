@@ -726,11 +726,11 @@ export function ImportsWorkspace({
                         <dd>{byteLabel(descriptor.sizes.raw_source_bytes)}</dd>
                       </div>
                       <div>
-                        <dt>Processed record size</dt>
+                        <dt>Processed records total</dt>
                         <dd>{byteLabel(descriptor.sizes.normalized_source_record_bytes)}</dd>
                       </div>
                       <div>
-                        <dt>Processed entry size</dt>
+                        <dt>Processed entries total</dt>
                         <dd>{byteLabel(descriptor.sizes.normalized_entry_bytes)}</dd>
                       </div>
                       <div>
