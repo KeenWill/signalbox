@@ -241,8 +241,33 @@ impl RepoWatchStore {
         let retained_ordinal = ordinal
             .to_u64()
             .ok_or(StoreError::InvalidEventEvaluationPosition)?;
-        let retained_event = crate::event_decode::event(RepoWatchEventId::from_uuid(id), &bytes)
-            .ok_or(StoreError::InvalidRetainedEvent)?;
+        let retained_event =
+            match crate::event_decode::event(RepoWatchEventId::from_uuid(id), &bytes) {
+                Some(event) => event,
+                None => {
+                    let error = StoreError::InvalidRetainedEvent.to_string();
+                    let marked = sqlx::query(
+                        "UPDATE gh_event SET decode_error = $2
+                         WHERE event_id = $1 AND decode_error IS NULL",
+                    )
+                    .bind(id)
+                    .bind(&error)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+                        == 1;
+                    tx.commit().await?;
+                    if marked {
+                        tracing::warn!(
+                            repository = event.repository().as_str(),
+                            event_id = %id,
+                            %error,
+                            "repository-watch event quarantined"
+                        );
+                    }
+                    return Err(StoreError::InvalidRetainedEvent);
+                }
+            };
         if retained_ordinal != context.ordinal || &retained_event != event || context.plan() != plan
         {
             return Err(StoreError::WorkflowInputRejected);

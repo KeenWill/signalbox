@@ -14,7 +14,7 @@ use signalbox_domain::{
 };
 use signalbox_module_repo_watch_v2::{
     dispatch::{CommandSubmission, SessionCommandSink},
-    workflow::{EvaluationOutcome, RuleContext},
+    workflow::{EvaluationInvocation, EvaluationOutcome, RuleContext},
 };
 use signalbox_persistence::{
     program_journal::ProgramJournalRepository, program_registration::ProgramRegistrationRepository,
@@ -332,6 +332,86 @@ async fn workflow_evaluation_quarantines_undecodable_event_and_advances()
         decode_error.as_deref(),
         Some("repository-watch retained event is invalid")
     );
+    module.close().await;
+    core.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires disposable PostgreSQL"]
+async fn workflow_commit_quarantines_event_corrupted_after_context_read()
+-> Result<(), Box<dyn Error>> {
+    let (_database, core, module, mut effects, repository, rule) = fixture(Case::Dispatch).await?;
+    let context = effects
+        .store
+        .next_rule_context(&repository, &rule)
+        .await?
+        .expect("first eligible context");
+    sqlx::query("UPDATE gh_event SET normalized_payload = $2 WHERE event_id = $1")
+        .bind(context.event.id().into_uuid())
+        .bind(b"not json".as_slice())
+        .execute(&module)
+        .await?;
+    let now = OffsetDateTime::now_utc();
+    effects
+        .store
+        .ingest_observation(
+            &effects.store.ingest_baseline(&repository).await?,
+            &dispatch_observation(&repository, 3, now),
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let effect = Uuid::now_v7();
+    let input = b"commit-time quarantine";
+    let plan = context.plan();
+    let result = effects
+        .store
+        .commit_evaluation(
+            EvaluationInvocation {
+                effect,
+                input,
+                context: &context,
+                plan: &plan,
+                now,
+            },
+            &mut effects.ids,
+            &mut effects.factory,
+            &mut effects.codec,
+        )
+        .await;
+    assert!(matches!(result, Err(StoreError::InvalidRetainedEvent)));
+    let decode_error: Option<String> =
+        sqlx::query_scalar("SELECT decode_error FROM gh_event WHERE event_id = $1")
+            .bind(context.event.id().into_uuid())
+            .fetch_one(&module)
+            .await?;
+    assert_eq!(
+        decode_error.as_deref(),
+        Some("repository-watch retained event is invalid")
+    );
+    let retry = effects
+        .store
+        .commit_evaluation(
+            EvaluationInvocation {
+                effect,
+                input,
+                context: &context,
+                plan: &plan,
+                now,
+            },
+            &mut effects.ids,
+            &mut effects.factory,
+            &mut effects.codec,
+        )
+        .await;
+    assert!(matches!(retry, Err(StoreError::WorkflowInputRejected)));
+    let successor = effects
+        .store
+        .next_rule_context(&repository, &rule)
+        .await?
+        .expect("successor context");
+    assert!(successor.ordinal > context.ordinal);
     module.close().await;
     core.close().await;
     Ok(())
