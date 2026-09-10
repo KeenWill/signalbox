@@ -87,7 +87,7 @@ where
         repository: &crate::WatchedRepositoryConfiguration,
         branch: signalbox_domain::BranchName,
         commit: signalbox_domain::CommitSha,
-        runner: ExecRunner,
+        transport: super::git_push::ProcessGitPushTransport<ExecRunner>,
         filesystem: &FileSystem,
         max_git_object_bytes: Option<usize>,
     ) -> Result<
@@ -105,11 +105,6 @@ where
         );
         let remote = signalbox_tools_git::ConfiguredGitRemote::try_new("origin", destination)
             .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
-        let transport = super::git_push::ProcessGitPushTransport {
-            runner,
-            credential_file: repository.push_credential_file().map(Path::to_owned),
-            ssh_agent_socket: std::env::var_os("SSH_AUTH_SOCK"),
-        };
         let (_, executor) =
             signalbox_tools_git::GitPushTools::try_new(filesystem, root, remote, transport)
                 .map_err(|_| DaemonToolsConstructionError::LocalGit)?

@@ -14,6 +14,7 @@ pub(super) struct ProcessGitPushTransport<Runner> {
     pub(super) runner: Runner,
     pub(super) credential_file: Option<PathBuf>,
     pub(super) ssh_agent_socket: Option<OsString>,
+    pub(super) sandbox: signalbox_tools_exec::SandboxConfiguration,
 }
 
 impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner> {
@@ -81,13 +82,12 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
                 command.push_str(&path.replace('\'', "'\\''"));
                 command.push('\'');
             } else {
-                if self.ssh_agent_socket.is_none() {
-                    return Err(GitPushTransportFailure::PreDispatchInfrastructure);
-                }
-                command.push_str(" -o IdentityFile=none");
-            }
-            if let Some(socket) = &self.ssh_agent_socket {
+                let socket = self
+                    .ssh_agent_socket
+                    .as_ref()
+                    .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?;
                 environment.insert("SSH_AUTH_SOCK".into(), socket.clone());
+                command.push_str(" -o IdentityFile=none");
             }
             environment.insert("GIT_SSH_COMMAND".into(), command.into());
             environment.insert("GIT_SSH_VARIANT".into(), "ssh".into());
@@ -157,6 +157,24 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
         environment: &BTreeMap<OsString, OsString>,
         arguments: &[&str],
     ) -> ProcessRunResult {
+        if !request.remote().url().starts_with("https://") && self.credential_file.is_none() {
+            return self
+                .run_agent_sandbox(request, environment, arguments)
+                .await
+                .unwrap_or_else(|_| ProcessRunResult {
+                    outcome: ProcessOutcome::SpawnFailed {
+                        reason: signalbox_tools_exec::ProcessSpawnFailure::SandboxSetup,
+                    },
+                    stdout: signalbox_tools_exec::ProcessOutput {
+                        bytes: Vec::new(),
+                        completeness: CaptureCompleteness::Complete,
+                    },
+                    stderr: signalbox_tools_exec::ProcessOutput {
+                        bytes: Vec::new(),
+                        completeness: CaptureCompleteness::Complete,
+                    },
+                });
+        }
         self.runner
             .run(ProcessRequest {
                 program: "git".into(),
@@ -170,6 +188,72 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
                 status_protocol: ProcessStatusProtocol::Direct,
             })
             .await
+    }
+
+    async fn run_agent_sandbox(
+        &mut self,
+        request: &GitPushRequest,
+        environment: &BTreeMap<OsString, OsString>,
+        arguments: &[&str],
+    ) -> Result<ProcessRunResult, GitPushTransportFailure> {
+        use signalbox_tools_exec::{ExecArguments, SandboxNetwork, SandboxedCommandRunner};
+        let failure = || GitPushTransportFailure::PreDispatchInfrastructure;
+        let socket = self.ssh_agent_socket.as_ref().ok_or_else(failure)?;
+        let mut configuration = self.sandbox.clone();
+        configuration.network = SandboxNetwork::Host;
+        configuration.read_only_binds.push(PathBuf::from(socket));
+        // OpenSSH resolves the invoking account and the host's known-host trust stores.
+        for path in ["/etc/passwd", "/etc/group", "/etc/ssh/ssh_known_hosts"] {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                configuration.read_only_binds.push(path);
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            let known_hosts = PathBuf::from(home).join(".ssh/known_hosts");
+            if known_hosts.is_file() {
+                configuration.read_only_binds.push(known_hosts);
+            }
+        }
+        let mut runner =
+            SandboxedCommandRunner::try_new(self.runner.clone(), request.git_directory())
+                .map_err(|_| failure())?
+                .with_sandbox_configuration(configuration);
+        let mut command = Vec::new();
+        for (name, value) in environment {
+            let name = name.to_str().ok_or_else(failure)?;
+            // The sandbox runner supplies its admitted runtime PATH and mounts the
+            // private push snapshot as the current workspace.
+            let value = match name {
+                "PATH" => continue,
+                "GIT_DIR" => ".",
+                "GIT_OBJECT_DIRECTORY" => "./objects",
+                _ => value.to_str().ok_or_else(failure)?,
+            };
+            command.push(format!("{name}={value}"));
+        }
+        command.push("git".to_owned());
+        command.extend(arguments.iter().map(|argument| (*argument).to_owned()));
+        let result = runner
+            .try_run(ExecArguments {
+                program: "env".to_owned(),
+                arguments: command,
+                working_directory: ".".to_owned(),
+                timeout_seconds: 300,
+            })
+            .await
+            .map_err(|_| failure())?;
+        Ok(ProcessRunResult {
+            outcome: result.outcome,
+            stdout: signalbox_tools_exec::ProcessOutput {
+                bytes: result.stdout.text.into_bytes(),
+                completeness: result.stdout.completeness,
+            },
+            stderr: signalbox_tools_exec::ProcessOutput {
+                bytes: result.stderr.text.into_bytes(),
+                completeness: result.stderr.completeness,
+            },
+        })
     }
 }
 

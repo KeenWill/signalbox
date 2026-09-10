@@ -22,20 +22,31 @@ use std::{
 #[derive(Clone)]
 struct LocalSshRunner {
     bin: PathBuf,
+    launcher_path: PathBuf,
+    launcher: std::sync::Arc<fs::File>,
 }
 
 impl ProcessRunner for LocalSshRunner {
     fn sandbox_launcher_program(&self) -> &Path {
-        panic!("SSH fixture executes direct Git requests")
+        &self.launcher_path
     }
     fn sandbox_launcher_descriptor(&self) -> Option<i32> {
-        None
+        use std::os::fd::AsRawFd;
+        Some(self.launcher.as_raw_fd())
     }
     async fn bwrap_availability(
         &mut self,
-        _request: ProcessRequest,
+        request: ProcessRequest,
     ) -> signalbox_tools_exec::BwrapAvailability {
-        panic!("SSH fixture does not probe bubblewrap")
+        let result = self.run(request).await;
+        if matches!(
+            result.outcome,
+            signalbox_tools_exec::ProcessOutcome::Exited { code: Some(0) }
+        ) {
+            signalbox_tools_exec::BwrapAvailability::Available
+        } else {
+            signalbox_tools_exec::BwrapAvailability::Unusable
+        }
     }
 
     async fn run(&mut self, mut request: ProcessRequest) -> ProcessRunResult {
@@ -124,14 +135,21 @@ fn git(root: &Path, arguments: &[&str]) -> String {
 }
 
 #[tokio::test]
-async fn ssh_push_uses_configured_key_or_agent_with_both_destination_forms() {
-    for use_key in [false, true] {
-        for scp_style in [false, true] {
-            exercise_ssh_push(use_key, scp_style, 1024).await;
-        }
+async fn ssh_push_uses_configured_key_with_both_destination_forms() {
+    for scp_style in [false, true] {
+        exercise_ssh_push(true, scp_style, 1024).await;
     }
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn ssh_push_uses_agent_inside_sandbox_with_both_destination_forms() {
+    for scp_style in [false, true] {
+        exercise_ssh_push(false, scp_style, 1024).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "generates and pushes a 1 GB blob through the local SSH transport"]
 async fn ssh_push_streams_a_generated_gigabyte_blob() {
@@ -173,30 +191,52 @@ async fn exercise_ssh_push(use_key: bool, scp_style: bool, blob_bytes: u64) {
     fs::create_dir(&bin).expect("shim directory");
     let shim = bin.join("ssh");
     let log = fixture.path().join("ssh.log");
-    let script = format!(
-        r#"#!/bin/sh
-printf '%s\n' "$@" "agent=$SSH_AUTH_SOCK" >> '{}'
-key_next=no
-has_key=no
-for last do
-    if [ "$key_next" = yes ]; then
-        test -s "$last" || exit 91
-        IFS= read -r header < "$last"
-        [ "$header" = '-----BEGIN OPENSSH PRIVATE KEY-----' ] || exit 92
-        has_key=yes
-    fi
-    key_next=no
-    [ "$last" != -i ] || key_next=yes
-done
-[ "$has_key" = yes ] || [ -n "$SSH_AUTH_SOCK" ] || exit 93
-unset GIT_DIR GIT_WORK_TREE GIT_OBJECT_DIRECTORY
-case "$last" in
-    'git-receive-pack '*|'git-upload-pack '*) exec /bin/sh -c "$last" ;;
-    *) exit 90 ;;
-esac
-"#,
-        log.display()
-    );
+    let agent = fixture.path().join("agent.sock");
+    let outside = fixture.path().join("outside-sandbox");
+    fs::write(&outside, b"host-only fixture sentinel").expect("outside sentinel");
+    let server = start_ssh_proxy(&agent, remote.clone(), log.clone());
+    let script = r###"#!/usr/bin/python3
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+import threading
+
+arguments = sys.argv[1:]
+agent = os.environ.get('SSH_AUTH_SOCK')
+has_key = False
+for index, argument in enumerate(arguments):
+    if argument == '-i':
+        with open(arguments[index + 1]) as key:
+            assert key.readline().strip() == '-----BEGIN OPENSSH PRIVATE KEY-----'
+        has_key = True
+assert has_key or agent
+if agent:
+    assert os.getcwd() == '/workspace'
+    assert not Path(FIXTURE_OUTSIDE).exists()
+connection = socket.socket(socket.AF_UNIX)
+connection.connect(agent or FIXTURE_SOCKET)
+connection.sendall((json.dumps({'arguments': arguments, 'agent': agent, 'confined': bool(agent)}) + '\n').encode())
+
+def forward_input():
+    while True:
+        chunk = os.read(0, 65536)
+        if not chunk:
+            connection.shutdown(socket.SHUT_WR)
+            return
+        connection.sendall(chunk)
+
+threading.Thread(target=forward_input, daemon=True).start()
+while True:
+    chunk = connection.recv(65536)
+    if not chunk:
+        break
+    sys.stdout.buffer.write(chunk)
+    sys.stdout.buffer.flush()
+"###
+        .replace("FIXTURE_OUTSIDE", &serde_json::to_string(&outside).expect("outside path literal"))
+        .replace("FIXTURE_SOCKET", &serde_json::to_string(&agent).expect("socket path literal"));
     fs::write(&shim, script).expect("SSH shim");
     fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).expect("executable shim");
     let key = fixture.path().join("key");
@@ -215,12 +255,28 @@ esac
             .expect("fixture key generation");
         assert!(status.success());
     }
-    let agent = fixture.path().join("agent.sock");
-    let runner = LocalSshRunner { bin };
+    let launcher_path = bin.join("dispatch");
+    // Test implementation of the exec dispatch marker protocol; bubblewrap itself is real.
+    fs::write(&launcher_path, b"#!/bin/sh\n[ \"$1\" = --dispatch ] || exit 91\nshift\nprintf 'signalbox-exec:dispatched\\n' >&2\nexec \"$@\"\n").expect("fixture dispatcher");
+    fs::set_permissions(&launcher_path, fs::Permissions::from_mode(0o700))
+        .expect("dispatcher executable");
+    let launcher = fs::File::open(&launcher_path).expect("dispatcher descriptor");
+    rustix::io::fcntl_setfd(&launcher, rustix::io::FdFlags::empty()).expect("inherited dispatcher");
+    let sandbox = signalbox_tools_exec::SandboxConfiguration {
+        read_only_binds: vec![bin.clone()],
+        path_prepend: vec![bin.clone()],
+        ..Default::default()
+    };
+    let runner = LocalSshRunner {
+        bin,
+        launcher_path,
+        launcher: std::sync::Arc::new(launcher),
+    };
     let transport = ProcessGitPushTransport {
         runner,
         credential_file: use_key.then_some(key),
-        ssh_agent_socket: (!use_key).then(|| agent.as_os_str().to_owned()),
+        ssh_agent_socket: Some(agent.as_os_str().to_owned()),
+        sandbox,
     };
     let url = if scp_style {
         format!("git@fixture:{}", remote.display())
@@ -284,6 +340,7 @@ esac
         Some(ToolExecutorEvidence::CompletedText(_))
     ));
     assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), target);
+    server.join().expect("SSH fixture server completes");
     let observed = fs::read_to_string(log).expect("SSH invocation log");
     assert!(observed.contains("BatchMode=yes"));
     assert!(observed.contains("git-receive-pack"));
@@ -292,5 +349,89 @@ esac
         assert!(observed.contains("IdentitiesOnly=yes"));
     } else {
         assert!(observed.contains(&format!("agent={}", agent.display())));
+        assert!(observed.contains("confined=true"));
     }
+}
+
+fn start_ssh_proxy(socket: &Path, remote: PathBuf, log: PathBuf) -> std::thread::JoinHandle<()> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::process::Stdio;
+    let listener = UnixListener::bind(socket).expect("SSH fixture socket");
+    std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut connection, _) = listener.accept().expect("SSH fixture connection");
+            let mut header = Vec::new();
+            loop {
+                let mut byte = [0];
+                connection
+                    .read_exact(&mut byte)
+                    .expect("SSH command header");
+                if byte[0] == b'\n' {
+                    break;
+                }
+                assert!(header.len() < 16 * 1024, "bounded SSH fixture header");
+                header.push(byte[0]);
+            }
+            let request: serde_json::Value = serde_json::from_slice(&header).expect("SSH request");
+            let arguments = request["arguments"].as_array().expect("SSH arguments");
+            let command = arguments
+                .last()
+                .expect("server command")
+                .as_str()
+                .expect("command text");
+            assert!(command.contains(remote.to_str().expect("remote path")));
+            let service = if command.starts_with("git-receive-pack ") {
+                "receive-pack"
+            } else {
+                assert!(command.starts_with("git-upload-pack "));
+                "upload-pack"
+            };
+            let mut observed = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .expect("SSH log");
+            for argument in arguments {
+                writeln!(observed, "{}", argument.as_str().expect("argument text"))
+                    .expect("log argument");
+            }
+            writeln!(
+                observed,
+                "agent={}",
+                request["agent"].as_str().unwrap_or("")
+            )
+            .expect("log agent");
+            writeln!(observed, "confined={}", request["confined"]).expect("log confinement");
+            let mut child = Command::new("git")
+                .args([
+                    "-c",
+                    "core.bigFileThreshold=1",
+                    "-c",
+                    "core.packedGitLimit=8m",
+                    service,
+                ])
+                .arg(&remote)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_OBJECT_DIRECTORY")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("fixture Git server");
+            let mut input = child.stdin.take().expect("server stdin");
+            let mut output = child.stdout.take().expect("server stdout");
+            let mut incoming = connection.try_clone().expect("server connection");
+            let forward = std::thread::spawn(move || std::io::copy(&mut incoming, &mut input));
+            std::io::copy(&mut output, &mut connection).expect("server response");
+            connection
+                .shutdown(std::net::Shutdown::Write)
+                .expect("server response ends");
+            assert!(child.wait().expect("server exit").success());
+            forward
+                .join()
+                .expect("input forwarding thread")
+                .expect("server input");
+        }
+    })
 }

@@ -85,7 +85,9 @@ mint and the configured remote use the same destination type. SSH uses a
 configured private key file or the host SSH agent exposed to the sandbox. Push
 approval, branch and commit fences, captured object authority, non-forced
 updates, and remote confirmation apply to both transports. SSH runs in batch
-mode with user SSH configuration disabled.
+mode with user SSH configuration disabled. Agent-backed pushes run through the
+execution sandbox with the private captured repository as its workspace, host
+networking, and read-only binds for the agent socket and host trust stores.
 
 Workspace roots are globally unique by canonical spelling, and the key carries
 no runner or location dimension. Why: the single-runner rule means no two

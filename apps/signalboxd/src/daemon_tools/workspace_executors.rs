@@ -536,7 +536,14 @@ where
                 &repository,
                 branch,
                 commit,
-                self.exec_runner.clone(),
+                super::git_push::ProcessGitPushTransport {
+                    runner: self.exec_runner.clone(),
+                    credential_file: repository
+                        .push_credential_file()
+                        .map(std::path::Path::to_owned),
+                    ssh_agent_socket: std::env::var_os("SSH_AUTH_SOCK"),
+                    sandbox: self.sandbox.clone(),
+                },
                 &filesystem,
                 self.max_git_object_bytes,
             )
