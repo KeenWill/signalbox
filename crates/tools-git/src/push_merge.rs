@@ -204,6 +204,12 @@ pub(super) fn verify_merge(
             .copied()
             .unwrap_or(source_path);
         let own_index = own_by_path.get(source_path).copied();
+        if own_index
+            .and_then(|index| own.get_delta(index))
+            .is_some_and(|branch_change| branch_change == delta)
+        {
+            continue;
+        }
         // Capture compared paths only, in addition to the rename candidates.
         for delta in std::iter::once(delta).chain(own_index.and_then(|index| own.get_delta(index)))
         {
@@ -369,7 +375,7 @@ fn object_hunk(delta: Change<'_>, hunks: &mut Hunks) -> Result<(), GitPushFailur
     )
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 struct Side<'a> {
     oid: Oid,
     mode: git2::FileMode,
@@ -386,7 +392,7 @@ impl<'a> Side<'a> {
         self.path
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 struct Change<'a> {
     status: Delta,
     old: Side<'a>,
