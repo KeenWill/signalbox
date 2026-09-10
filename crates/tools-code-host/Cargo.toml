@@ -32,6 +32,7 @@ tokio = { version = "1.53.0", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+tokio = { version = "1.53.0", default-features = false, features = ["test-util"] }
 expect-test = "1.5.1"
 
 [lints]

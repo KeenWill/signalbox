@@ -515,7 +515,7 @@ fn blob_failure(error: BlobReadError) -> EvalFailure {
         | BlobReadError::Integrity
         | BlobReadError::Missing
         | BlobReadError::Corrupt => infrastructure_failure(message),
-        BlobReadError::NotFound | BlobReadError::RangeOutOfBounds { .. } => failure(message),
+        BlobReadError::NotFound | BlobReadError::RangeOutOfBounds => failure(message),
     }
 }
 
