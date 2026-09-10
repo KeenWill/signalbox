@@ -752,10 +752,11 @@ resolves its fixed reference and builds its scrubber inside execution. Every
 provider-controlled text leaving such an adapter, and every checked string in a
 successful code-host result, is scrubbed of that value and its JSON-escaped form
 before it crosses into evidence. CI job-log downloads also retain the scrubber
-for the App token used by the redirect response. Truncated logs scrub trailing
-prefixes of either credential spelling before applying the final text bound. An
-`ambient` or `codex_home` profile gives the daemon no value; its output follows
-the [runtime substrate](runtime-substrate.md).
+for the App token used by the redirect response. Truncated logs and repository
+file selections scrub trailing prefixes of either response-credential spelling
+before applying the final text bound. An `ambient` or `codex_home` profile gives
+the daemon no value; its output follows the
+[runtime substrate](runtime-substrate.md).
 
 The GitHub and code-host adapters share `github-primary`, which needs API access
 to read pull requests, publish reviews and comments, reply to and resolve review

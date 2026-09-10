@@ -627,11 +627,7 @@ impl GitHubCodeHostTransport {
         if let Some(scrubber) = scrubber
             && let RepositoryFileBodyKind::Text(selection) = &mut body.kind
         {
-            let mut value = serde_json::Value::String(std::mem::take(&mut selection.content));
-            scrubber.redact_value(&mut value);
-            if let serde_json::Value::String(text) = value {
-                selection.content = text;
-            }
+            selection.redact(&scrubber);
         }
         Ok(body)
     }
@@ -1866,6 +1862,15 @@ struct RepositoryFileSelection {
     returned_lines: u32,
     last_line_complete: bool,
     completeness: CodeHostResultCompleteness,
+}
+
+impl RepositoryFileSelection {
+    fn redact(&mut self, scrubber: &super::CredentialScrubber) {
+        scrubber.redact_text(&mut self.content);
+        if self.completeness == CodeHostResultCompleteness::Truncated {
+            scrubber.redact_trailing_prefix(&mut self.content);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6732,5 +6737,50 @@ mod tests {
             selection.completeness,
             CodeHostResultCompleteness::Truncated
         );
+    }
+
+    #[tokio::test]
+    async fn repository_content_scrubs_response_tokens_split_at_the_retained_limit() {
+        const RESPONSE_TOKEN: &str = "refreshed\"installation\\token";
+        let scrubber =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new(RESPONSE_TOKEN))
+                .unwrap();
+        // Retain twelve credential bytes, including the escaped quote when present.
+        let retained_limit = Some("output\n".len() + 12);
+        for token_text in [RESPONSE_TOKEN, r#"refreshed\"installation\\token"#] {
+            let body = format!("output\n{token_text}\nfinished\n");
+            let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(body)]);
+            let body = select_repository_file_content(stream, None, retained_limit)
+                .await
+                .unwrap();
+            let RepositoryFileBodyKind::Text(mut selection) = body.kind else {
+                panic!("fixture is text")
+            };
+            selection.redact(&scrubber);
+            assert_eq!(selection.content, "output\n[redacted]");
+            assert_eq!(
+                selection.completeness,
+                CodeHostResultCompleteness::Truncated
+            );
+            assert_eq!(selection.returned_lines, 2);
+            assert!(!selection.last_line_complete);
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_repository_content_retains_a_credential_prefix() {
+        let scrubber =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new("installation-token"))
+                .unwrap();
+        let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(b"installation")]);
+        let body = select_repository_file_content(stream, None, None)
+            .await
+            .unwrap();
+        let RepositoryFileBodyKind::Text(mut selection) = body.kind else {
+            panic!("fixture is text")
+        };
+        selection.redact(&scrubber);
+        assert_eq!(selection.content, "installation");
+        assert_eq!(selection.completeness, CodeHostResultCompleteness::Complete);
     }
 }
