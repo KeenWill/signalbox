@@ -53,7 +53,7 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
             unsandboxed_exec: self.unsandboxed_exec.clone(),
             cargo_diagnostics: self.cargo_diagnostics.clone(),
             git_object_format: self.git_object_format,
-            workspace_identity: self.workspace_identity,
+            workspace_identity: self.workspace_identity.clone(),
         }
     }
 }
@@ -150,8 +150,11 @@ where
             None
         };
         let git_object_format = local_git.as_ref().map(LocalGitTools::object_format);
-        let workspace_identity = local_git.as_ref().map_or(opening_identity, |git| {
-            ComposedWorkspaceIdentity::from_pinned(git.pinned_directories())
+        let workspace_identity = local_git.as_ref().map_or(opening_identity.clone(), |git| {
+            ComposedWorkspaceIdentity::from_pinned(
+                git.pinned_directories(),
+                opening_identity.administration_ancestors.clone(),
+            )
         });
         let sandboxed_exec = match cargo_registry_cache {
             Some(cache) => SandboxedExecTool::try_new_with_cargo_registry(

@@ -70,19 +70,28 @@ fn workspace_binding_reads_only_a_dispatch_marker_in_the_bound_directories() {
     let marker = administration.join(crate::repo_watch_checkout::DISPATCH_MARKER);
     let dispatch = signalbox_domain::RepoWatchDispatchId::from_uuid(uuid::Uuid::now_v7());
     let encoded = dispatch.into_uuid().to_string();
-    assert_eq!(read_dispatch_marker(workspace.path(), identity), None);
+    assert_eq!(
+        read_dispatch_marker(workspace.path(), identity.clone()),
+        None
+    );
     fs::write(&marker, &encoded).expect("dispatch marker is written");
     assert_eq!(
-        read_dispatch_marker(workspace.path(), identity),
+        read_dispatch_marker(workspace.path(), identity.clone()),
         Some(dispatch)
     );
     fs::write(&marker, encoded.repeat(2)).expect("oversized marker is written");
-    assert_eq!(read_dispatch_marker(workspace.path(), identity), None);
+    assert_eq!(
+        read_dispatch_marker(workspace.path(), identity.clone()),
+        None
+    );
     fs::remove_file(&marker).expect("oversized marker is removed");
     let outside = tempfile::NamedTempFile::new().expect("outside marker exists");
     fs::write(outside.path(), &encoded).expect("outside marker is written");
     std::os::unix::fs::symlink(outside.path(), &marker).expect("marker symlink exists");
-    assert_eq!(read_dispatch_marker(workspace.path(), identity), None);
+    assert_eq!(
+        read_dispatch_marker(workspace.path(), identity.clone()),
+        None
+    );
     fs::remove_file(&marker).expect("symlink is removed");
     let replacement = tempfile::tempdir().expect("replacement administration exists");
     fs::write(
@@ -95,7 +104,10 @@ fn workspace_binding_reads_only_a_dispatch_marker_in_the_bound_directories() {
     fs::remove_dir(&administration).expect("original administration is removed");
     std::os::unix::fs::symlink(replacement.path(), &administration)
         .expect("administration symlink exists");
-    assert_eq!(read_dispatch_marker(workspace.path(), identity), None);
+    assert_eq!(
+        read_dispatch_marker(workspace.path(), identity.clone()),
+        None
+    );
 }
 
 fn git_identity() -> GitIdentity {
@@ -5375,20 +5387,29 @@ fn composed_execution_tools_keep_their_declared_permission_defaults() {
 
 /// A workspace identity a recorded binding pinned. Every member only needs
 /// to be some value a real `stat` could report.
+const FIXTURE_BOUND_ROOT: ComposedRootIdentity = ComposedRootIdentity {
+    device: 0x10,
+    inode: 0x20,
+};
+const FIXTURE_BOUND_ADMINISTRATION: ComposedRootIdentity = ComposedRootIdentity {
+    device: 0x10,
+    inode: 0x21,
+};
+const FIXTURE_STANDING_ADMINISTRATION: ComposedRootIdentity = ComposedRootIdentity {
+    device: 0x10,
+    inode: 0x70,
+};
+
 const FIXTURE_BOUND_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdentity {
+    administration_ancestors: Vec::new(),
     common_administration: None,
-    root: ComposedRootIdentity {
-        device: 0x10,
-        inode: 0x20,
-    },
-    administration: Some(ComposedRootIdentity {
-        device: 0x10,
-        inode: 0x21,
-    }),
+    root: FIXTURE_BOUND_ROOT,
+    administration: Some(FIXTURE_BOUND_ADMINISTRATION),
 };
 
 /// A workspace sharing neither directory with [`FIXTURE_BOUND_IDENTITY`].
 const FIXTURE_OTHER_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdentity {
+    administration_ancestors: Vec::new(),
     common_administration: None,
     root: ComposedRootIdentity {
         device: 0x10,
@@ -5404,12 +5425,13 @@ const FIXTURE_OTHER_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdent
 /// administers, which is what two bind mounts over one repository produce.
 const FIXTURE_SHARED_ADMINISTRATION_IDENTITY: ComposedWorkspaceIdentity =
     ComposedWorkspaceIdentity {
+        administration_ancestors: Vec::new(),
         common_administration: None,
         root: ComposedRootIdentity {
             device: 0x10,
             inode: 0x40,
         },
-        administration: FIXTURE_BOUND_IDENTITY.administration,
+        administration: Some(FIXTURE_BOUND_ADMINISTRATION),
     };
 
 /// A workspace whose worktree root is the directory
@@ -5417,10 +5439,9 @@ const FIXTURE_SHARED_ADMINISTRATION_IDENTITY: ComposedWorkspaceIdentity =
 /// repository reached through a bind mount produces.
 const FIXTURE_WORKTREE_OVER_BOUND_ADMINISTRATION_IDENTITY: ComposedWorkspaceIdentity =
     ComposedWorkspaceIdentity {
+        administration_ancestors: Vec::new(),
         common_administration: None,
-        root: FIXTURE_BOUND_IDENTITY
-            .administration
-            .expect("fixture has Git administration"),
+        root: FIXTURE_BOUND_ADMINISTRATION,
         administration: Some(ComposedRootIdentity {
             device: 0x10,
             inode: 0x50,
@@ -5431,35 +5452,35 @@ const FIXTURE_WORKTREE_OVER_BOUND_ADMINISTRATION_IDENTITY: ComposedWorkspaceIden
 /// as its worktree root, the other way a nested repository collides.
 const FIXTURE_ADMINISTRATION_OVER_BOUND_WORKTREE_IDENTITY: ComposedWorkspaceIdentity =
     ComposedWorkspaceIdentity {
+        administration_ancestors: Vec::new(),
         common_administration: None,
         root: ComposedRootIdentity {
             device: 0x10,
             inode: 0x60,
         },
-        administration: Some(FIXTURE_BOUND_IDENTITY.root),
+        administration: Some(FIXTURE_BOUND_ROOT),
     };
 
 /// The pair the configured pathname names after its `.git` was renamed and
 /// recreated, which leaves its worktree root alone.
 const FIXTURE_CONFIGURED_STANDING_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdentity {
+    administration_ancestors: Vec::new(),
     common_administration: None,
-    root: FIXTURE_BOUND_IDENTITY.root,
-    administration: Some(ComposedRootIdentity {
-        device: 0x10,
-        inode: 0x70,
-    }),
+    root: FIXTURE_BOUND_ROOT,
+    administration: Some(FIXTURE_STANDING_ADMINISTRATION),
 };
 
 /// A derived workspace exposing the `.git` directory the configured
 /// pathname names now, sharing nothing with the pair it pinned at startup.
 const FIXTURE_SHARES_CONFIGURED_STANDING_IDENTITY: ComposedWorkspaceIdentity =
     ComposedWorkspaceIdentity {
+        administration_ancestors: Vec::new(),
         common_administration: None,
         root: ComposedRootIdentity {
             device: 0x10,
             inode: 0x80,
         },
-        administration: FIXTURE_CONFIGURED_STANDING_IDENTITY.administration,
+        administration: Some(FIXTURE_STANDING_ADMINISTRATION),
     };
 
 /// The directory a derived root's pathname is reached through. Distinct
@@ -6398,6 +6419,7 @@ fn a_parent_beside_the_configured_root_is_admitted() {
 #[test]
 fn a_composition_standing_on_its_own_parent_is_refused() {
     let composed = ComposedWorkspaceIdentity {
+        administration_ancestors: Vec::new(),
         common_administration: None,
         root: FIXTURE_PARENT_IDENTITY,
         administration: Some(ComposedRootIdentity {
@@ -6418,6 +6440,7 @@ fn a_composition_standing_on_its_own_parent_is_refused() {
 #[test]
 fn a_composition_administering_its_own_parent_is_refused() {
     let composed = ComposedWorkspaceIdentity {
+        administration_ancestors: Vec::new(),
         common_administration: None,
         root: ComposedRootIdentity {
             device: 0x10,
@@ -6911,7 +6934,10 @@ fn linked_worktrees_sharing_common_administration_cannot_bind_separate_sessions(
     .expect("linked tools")
     .pinned_directories();
     assert_eq!(
-        ComposedWorkspaceIdentity::from_pinned(pinned),
+        ComposedWorkspaceIdentity::from_pinned(
+            pinned,
+            first_identity.administration_ancestors.clone()
+        ),
         first_identity
     );
     let first_session = session(FIRST_SESSION_IDENTITY);
@@ -6919,7 +6945,7 @@ fn linked_worktrees_sharing_common_administration_cannot_bind_separate_sessions(
     let bindings = BTreeMap::from([(
         first_session,
         RecordedSessionBinding::DerivedRoot {
-            identity: first_identity,
+            identity: first_identity.clone(),
             parent: FIXTURE_PARENT_IDENTITY,
         },
     )]);
@@ -6947,4 +6973,81 @@ async fn a_plain_configured_root_serves_a_repository_bound_session() {
     let (catalog, executor) = offline_daemon_composition(&configured);
     let evidence = daemon_evidence(catalog, executor, first, read_marker_proposal()).await;
     assert_eq!(read_content(evidence), FIRST_SESSION_MARKER);
+}
+
+#[tokio::test]
+async fn administration_nested_under_configured_or_other_session_roots_is_refused() {
+    for common_marker in [false, true] {
+        for other_session in [false, true] {
+            for administration_binds_first in [false, true] {
+                if !other_session && administration_binds_first {
+                    continue;
+                }
+                let fixture = tempfile::tempdir().expect("nested administration fixture");
+                let configured = configured_workspace(fixture.path());
+                let first = session(FIRST_SESSION_IDENTITY);
+                let second = session(SECOND_SESSION_IDENTITY);
+                provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+                provisioned_session_workspace(&configured, second, SECOND_SESSION_MARKER);
+                let derived = derivation(&configured).derived_path(first);
+                let container = if other_session {
+                    derivation(&configured).derived_path(second)
+                } else {
+                    configured.clone()
+                };
+                let nested = container.join("editable").join("administration");
+                fs::create_dir_all(nested.parent().expect("nested parent")).expect("nested parent");
+                fs::rename(derived.join(".git"), &nested).expect("relocated administration");
+                let gitdir = if common_marker {
+                    let administration = fixture.path().join("external-administration");
+                    fs::create_dir(&administration).expect("external administration");
+                    fs::copy(nested.join("HEAD"), administration.join("HEAD"))
+                        .expect("worktree HEAD");
+                    fs::write(
+                        administration.join("commondir"),
+                        format!("{}\n", nested.display()),
+                    )
+                    .expect("common marker");
+                    fs::write(
+                        administration.join("gitdir"),
+                        format!("{}\n", derived.join(".git").display()),
+                    )
+                    .expect("backlink");
+                    administration
+                } else {
+                    nested
+                };
+                fs::write(
+                    derived.join(".git"),
+                    format!("gitdir: {}\n", gitdir.display()),
+                )
+                .expect("gitdir marker");
+                signalbox_tools_git::LocalGitTools::try_new(
+                    LocalWorkspaceFileSystem,
+                    &derived,
+                    git_identity(),
+                )
+                .expect("the Git marker layout itself is valid");
+                let resolver = offline_workspace_instruction_root_resolver(&configured);
+                if administration_binds_first {
+                    resolver
+                        .resolve(first)
+                        .await
+                        .expect("the containing session is not bound yet");
+                    assert_eq!(
+                        resolver.resolve(second).await,
+                        Err(WorkspaceInstructionRootResolutionError)
+                    );
+                } else {
+                    if other_session {
+                        resolver.resolve(second).await.expect("other session binds");
+                    }
+                    assert_eq!(
+                        resolver.resolve(first).await,
+                        Err(WorkspaceInstructionRootResolutionError)
+                    );
+                }
+            }
+        }
+    }
 }

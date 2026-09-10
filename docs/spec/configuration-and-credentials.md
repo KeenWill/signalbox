@@ -637,7 +637,9 @@ converge on one root. Isolation is checked against directory identities rather
 than pathnames: a composed root sharing its worktree, worktree administration,
 or common administration directory with the configured root or with another
 bound session is refused. Linked worktrees sharing common references and objects
-cannot bind separate session serialization domains. Failure to compose or bind a
+cannot bind separate session serialization domains. Administration directories
+nested under another bound workspace are refused by comparing their captured
+directory ancestry with workspace identities. Failure to compose or bind a
 derived root closes that tool request as a known failure whose sanitized detail
 names the closed reason, and it never falls back to another root.
 

@@ -234,7 +234,7 @@ where
                 WorkspaceRootBinding::Derived {
                     dispatch_marker: read_dispatch_marker(
                         &self.roots.derived_path(session),
-                        *identity,
+                        identity.clone(),
                     ),
                 }
             }
@@ -266,20 +266,20 @@ where
         // deployment has already removed or replaced.
         let probed = self.roots.resolve(session);
         let mut state = self.state.lock().await;
-        let recorded = state.bindings.get(&session).copied();
+        let recorded = state.bindings.get(&session).cloned();
         // The probe above was taken before the lock, so a concurrent first
         // request for this session may have bound a derived root in between.
         // Retaking it under the lock is what distinguishes that from the
         // directory having been removed, which reads identically and must still
         // fail closed.
-        let derived = if probe_is_stale(recorded, &probed) {
+        let derived = if probe_is_stale(recorded.clone(), &probed) {
             self.roots.resolve(session)
         } else {
             probed
         };
         // The pathname to compose against, and the directory the derivation
         // walked through to reach it.
-        let (path, parent) = match decide_session_root(recorded, &derived) {
+        let (path, parent) = match decide_session_root(recorded.clone(), &derived) {
             SessionRootDecision::ConfiguredRoot => {
                 // Admission is not a durable answer for this branch either.
                 // The configured composition is never re-resolved, so what its
@@ -296,8 +296,8 @@ where
                     if a_derived_binding_shares_the_configured_root(
                         &state.bindings,
                         session,
-                        self.configured.workspace_identity,
-                        standing_configured,
+                        self.configured.workspace_identity.clone(),
+                        standing_configured.clone(),
                     ) {
                         return Err(SessionWorkspaceFailure::SharedRootIdentity);
                     }
@@ -333,7 +333,10 @@ where
                 // is provisioning that replaces only a workspace's `.git`. A
                 // pathname whose pair can no longer be captured at all — a
                 // removed `.git`, say — fails for the same reason.
-                if let Some(bound) = recorded.and_then(RecordedSessionBinding::derived_identity) {
+                if let Some(bound) = recorded
+                    .as_ref()
+                    .and_then(RecordedSessionBinding::derived_identity)
+                {
                     let standing = ComposedWorkspaceIdentity::capture(path)
                         .map_err(|_| SessionWorkspaceFailure::ReplacedRootIdentity)?;
                     if standing != bound {
@@ -345,7 +348,11 @@ where
                     // replacement, leaves both bound directories intact at the
                     // same pathname. The component the classification accepted
                     // is therefore revalidated beside the pair it leads to.
-                    if recorded.and_then(RecordedSessionBinding::derived_parent) != Some(*parent) {
+                    if recorded
+                        .as_ref()
+                        .and_then(RecordedSessionBinding::derived_parent)
+                        != Some(*parent)
+                    {
                         return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
                     }
                     // The pair above was captured by walking the pathname
@@ -371,9 +378,9 @@ where
                     // set is consulted and before a recomposition begins.
                     let standing_configured = self.standing_configured_identity()?;
                     if shares_a_directory_with_the_configured_root(
-                        bound,
-                        self.configured.workspace_identity,
-                        standing_configured,
+                        bound.clone(),
+                        self.configured.workspace_identity.clone(),
+                        standing_configured.clone(),
                     ) {
                         return Err(SessionWorkspaceFailure::SharedRootIdentity);
                     }
@@ -383,8 +390,8 @@ where
                     // root.
                     if parent_aliases_the_configured_root(
                         *parent,
-                        self.configured.workspace_identity,
-                        standing_configured,
+                        self.configured.workspace_identity.clone(),
+                        standing_configured.clone(),
                     ) {
                         return Err(SessionWorkspaceFailure::SharedRootIdentity);
                     }
@@ -430,7 +437,7 @@ where
         {
             return Err(SessionWorkspaceFailure::ObjectFormatDisagreement);
         }
-        let composed = families.executors.workspace_identity;
+        let composed = families.executors.workspace_identity.clone();
         // Two pathnames can name one workspace — a bind mount, a derived path
         // exposing the configured root, or two roots over one repository — and
         // each would pass composition on its own. The isolation this derivation
@@ -438,9 +445,9 @@ where
         // pathname, so it is checked against what every other binding pinned.
         let standing_configured = self.standing_configured_identity()?;
         if shares_a_directory_with_the_configured_root(
-            composed,
-            self.configured.workspace_identity,
-            standing_configured,
+            composed.clone(),
+            self.configured.workspace_identity.clone(),
+            standing_configured.clone(),
         ) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
@@ -450,8 +457,8 @@ where
         // this workspace inside the tree the derivation exists to leave.
         if parent_aliases_the_configured_root(
             parent,
-            self.configured.workspace_identity,
-            standing_configured,
+            self.configured.workspace_identity.clone(),
+            standing_configured.clone(),
         ) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
@@ -460,7 +467,7 @@ where
         // was reached through — a session identifier directory bind-mounted
         // onto `<name>.sessions` itself — which makes this workspace the one
         // holding every sibling session's root.
-        if composition_aliases_its_own_parent(composed, parent) {
+        if composition_aliases_its_own_parent(composed.clone(), parent) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
         let mut state = self.state.lock().await;
@@ -469,14 +476,14 @@ where
         // fails that session closed rather than being reachable beside this
         // one; the pairs recorded here are the ones those sessions can still
         // use.
-        if another_session_bound(&state.bindings, session, composed) {
+        if another_session_bound(&state.bindings, session, composed.clone()) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
-        match *state
+        match state
             .bindings
             .entry(session)
             .or_insert(RecordedSessionBinding::DerivedRoot {
-                identity: composed,
+                identity: composed.clone(),
                 parent,
             }) {
             // A concurrent first request bound the configured root; its record
@@ -488,7 +495,7 @@ where
             RecordedSessionBinding::DerivedRoot {
                 identity,
                 parent: bound_parent,
-            } if identity != composed || bound_parent != parent => {
+            } if identity != &composed || *bound_parent != parent => {
                 return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
             }
             RecordedSessionBinding::DerivedRoot { .. } => {}
