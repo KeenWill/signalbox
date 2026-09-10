@@ -30,6 +30,11 @@ impl EvalManifest {
             .map_err(|error| NativeProgramError::new(error.to_string()))?;
         uuid::Uuid::parse_str(&self.binding.target)
             .map_err(|error| NativeProgramError::new(error.to_string()))?;
+        if self.cases.is_empty() {
+            return Err(NativeProgramError::new(
+                "evaluation requires at least one selected case",
+            ));
+        }
         if self.repeats == 0 || (self.format == CorpusFormat::Offline && self.repeats != 1) {
             return Err(NativeProgramError::new(
                 "offline scoring requires one repeat; live repeats must be positive",

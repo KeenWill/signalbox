@@ -777,6 +777,38 @@ if (now.value !== "9007199254740993" || random.value !== "18446744073709551615" 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn evaluation_manifest_rejects_empty_selections_before_program_body() {
+    for format in ["offline", "live"] {
+        let manifest = serde_json::json!({
+            "corpus": format!("sha256:{}", "a".repeat(64)),
+            "format": format, "cases": [], "repeats": 1,
+            "binding": {
+                "selection": "12345678-1234-1234-1234-123456789abc",
+                "target": "12345678-1234-1234-1234-123456789abc",
+                "credential_reference": "recorded-fixture", "provider_model": "recorded-model",
+                "contract_digest": "synthetic-contract", "cache_accounting": "input_excludes_cache"
+            },
+            "postures": {}, "speculative_tools": []
+        });
+        let (result, requests) = sdk_script(
+            &format!(
+                "const program = sdk.defineProgram({{ input: sdk.evaluation.manifest, output: sdk.evaluation.manifest, run: () => {{ throw new Error('empty selection reached program body'); }} }}); await program(new Uint8Array({:?}));",
+                serde_json::to_vec(&manifest).unwrap(),
+            ),
+            [],
+        ).await;
+        assert!(
+            result
+                .expect_err(format)
+                .to_string()
+                .contains("invalid evaluation trial plan"),
+            "{format}"
+        );
+        assert!(requests.is_empty(), "{format}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn evaluation_codec_refuses_invalid_trial_identity_before_request() {
     let (result, requests) = sdk_script("await sdk.evaluation.judge({ trial: -1 });", []).await;
     assert!(result.is_err());

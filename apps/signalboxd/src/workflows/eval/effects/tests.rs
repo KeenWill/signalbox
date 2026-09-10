@@ -178,6 +178,18 @@ async fn selected_case_order_controls_trial_mapping_and_scoring() {
 }
 
 #[tokio::test]
+async fn manifest_codec_rejects_empty_case_selections() {
+    let mut fixture = Fixture::lazy();
+    fixture.manifest.cases.clear();
+    for format in [CorpusFormat::Offline, CorpusFormat::Live] {
+        fixture.manifest.format = format;
+        assert!(fixture.manifest.encode().is_err(), "{format:?} encode");
+        let bytes = serde_json::to_vec(&fixture.manifest).unwrap();
+        assert!(EvalManifest::decode(&bytes).is_err(), "{format:?} decode");
+    }
+}
+
+#[tokio::test]
 async fn manifest_refuses_repeats_that_exceed_the_paid_call_ceiling() {
     let mut fixture = Fixture::lazy();
     fixture.manifest.format = CorpusFormat::Live;
