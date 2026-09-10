@@ -22,6 +22,7 @@ const SANDBOX_SSH_KNOWN_HOSTS2: &str = "/run/signalbox-ssh-known-hosts2";
 struct SshAccount {
     home: PathBuf,
     passwd: tempfile::NamedTempFile,
+    nsswitch: tempfile::NamedTempFile,
 }
 
 pub(super) struct ProcessGitPushTransport<Runner> {
@@ -293,7 +294,15 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
             passwd.write_all(b":").map_err(|_| failure())?;
         }
         passwd.write_all(b"/bin/sh\n").map_err(|_| failure())?;
-        Ok(SshAccount { home, passwd })
+        let mut nsswitch = tempfile::NamedTempFile::new().map_err(|_| failure())?;
+        nsswitch
+            .write_all(b"passwd: files\ngroup: files\nhosts: files dns\n")
+            .map_err(|_| failure())?;
+        Ok(SshAccount {
+            home,
+            passwd,
+            nsswitch,
+        })
     }
 
     async fn run_agent_sandbox(
@@ -318,6 +327,10 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
             SandboxReadOnlyMount {
                 source: account.passwd.path().to_owned(),
                 destination: PathBuf::from("/etc/passwd"),
+            },
+            SandboxReadOnlyMount {
+                source: account.nsswitch.path().to_owned(),
+                destination: PathBuf::from("/etc/nsswitch.conf"),
             },
         ]);
         // OpenSSH resolves the invoking account and the host's known-host trust stores.

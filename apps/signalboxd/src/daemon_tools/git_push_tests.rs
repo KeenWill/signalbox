@@ -175,6 +175,12 @@ async fn ssh_push_keeps_account_trust_visible_under_workspace() {
     }
     // Give the fixture a host account home under /workspace without changing the host.
     let home = tempfile::tempdir().expect("outer account home");
+    let nsswitch = tempfile::NamedTempFile::new().expect("outer NSS configuration");
+    fs::write(
+        nsswitch.path(),
+        b"passwd: sss\ngroup: files\nhosts: files dns\n",
+    )
+    .expect("host passwd lookup omits local files");
     let mut command = Command::new("bwrap");
     command.args(["--die-with-parent", "--tmpfs", "/"]);
     for entry in fs::read_dir("/").expect("host root entries") {
@@ -191,6 +197,7 @@ async fn ssh_push_keeps_account_trust_visible_under_workspace() {
         }
     }
     let output = command
+        .arg("--ro-bind").arg(nsswitch.path()).arg("/etc/nsswitch.conf")
         .args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind"])
         .arg(home.path()).arg("/workspace")
         .args(["--setenv", "TMPDIR", "/tmp", "--setenv", CHILD_ENVIRONMENT, "1"])

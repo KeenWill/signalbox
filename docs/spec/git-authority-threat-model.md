@@ -101,6 +101,8 @@ authority is derived. Relative agent socket paths resolve to absolute paths
 before probing and retention. The socket is mounted at a fixed UTF-8 sandbox
 path, preserving arbitrary host pathname bytes. The sandbox receives a minimal
 passwd entry from the host account lookup, including the resolved UID and home.
+Its NSS configuration resolves passwd and group entries from mounted files and
+hostnames through hosts files and DNS.
 
 Workspace roots are globally unique by canonical spelling, and the key carries
 no runner or location dimension. Why: the single-runner rule means no two
