@@ -467,7 +467,7 @@ test('restores focus after a failed bounded catalog replacement', async ({ page 
   await page.getByRole('textbox', { name: 'Search titles' }).fill('Release')
   await page.getByRole('button', { name: 'Apply' }).click()
 
-  await expect(page.getByRole('heading', { name: "Couldn't load sessions" })).toBeFocused()
+  await expect(page.getByRole('heading', { name: 'Sessions failed to load' })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -756,7 +756,7 @@ test('classifies a catalog connection failure as transport unavailability', asyn
   await useCatalogFixture(page)
   await page.route('**/api/sessions?**', (route) => route.abort())
   await page.goto('/sessions')
-  await expect(page.getByRole('heading', { name: "Couldn't load sessions" })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Sessions failed to load' })).toBeVisible()
   await expect(page.getByRole('alert')).not.toContainText('generated web contract')
   await expect(page.getByRole('alert')).toContainText("Can't reach the Signalbox server.")
 })

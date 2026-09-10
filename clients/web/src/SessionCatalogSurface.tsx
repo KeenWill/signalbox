@@ -221,14 +221,14 @@ export function SessionCatalogSurface({
         <section className="surface-empty" role="alert">
           <div>
             <h2 ref={errorHeading} tabIndex={-1}>
-              Couldn't load sessions
+              Sessions failed to load
             </h2>
             <p>
               {sessions.error instanceof ProductRequestError
                 ? `${sessions.error.response.error.code}: ${sessions.error.message}`
                 : sessions.error instanceof ProductTransportError
                   ? sessions.error.message
-                  : 'The server sent an unexpected response.'}
+                  : 'Unexpected daemon response.'}
             </p>
             <button
               type="button"
