@@ -1,6 +1,6 @@
 //! Descriptor-bound object capture for a push range; see git-authority-threat-model.md.
 
-use crate::streamed_object::ObjectContent;
+use crate::streamed_object::{IO_BYTES, ObjectContent};
 use crate::{
     descriptor::{
         FileIdentity, FileSnapshotIdentity, descriptor_path, file_identity, file_snapshot_identity,
@@ -16,7 +16,7 @@ use rustix::fs::{Mode, OFlags, openat};
 use std::{
     collections::{BTreeSet, HashSet},
     fs::{self, File},
-    io::{Read, Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom},
     os::fd::AsFd,
     path::{Path, PathBuf},
     time::Instant,
@@ -578,7 +578,7 @@ impl ObjectSource {
 
     fn decode_loose(&self, file: File) -> Result<ObjectContent, LocalGitFailure> {
         let compressed_size = file.metadata().map_err(rejected)?.len();
-        let mut decoder = ZlibDecoder::new(std::io::BufReader::new(file));
+        let mut decoder = compressed_decoder(file, || self.check_deadline());
         let mut header = Vec::new();
         loop {
             let byte = byte(&mut decoder)?;
@@ -763,7 +763,7 @@ impl ObjectSource {
                 entries.push((pack.end as u64 - remaining.limit(), size));
                 offset = base;
             } else {
-                let mut decoder = ZlibDecoder::new(std::io::BufReader::new(remaining));
+                let mut decoder = compressed_decoder(remaining, || self.check_deadline());
                 break ObjectContent::decode(&mut decoder, size, object_kind, self.deadline)?;
             }
         };
@@ -772,8 +772,9 @@ impl ObjectSource {
             self.check_deadline()?;
             let mut file = pack_file.try_clone().map_err(rejected)?;
             file.seek(SeekFrom::Start(offset)).map_err(rejected)?;
-            let mut decoder =
-                ZlibDecoder::new(std::io::BufReader::new(file.take(pack.end as u64 - offset)));
+            let mut decoder = compressed_decoder(file.take(pack.end as u64 - offset), || {
+                self.check_deadline()
+            });
             let delta = ObjectContent::decode(&mut decoder, size, ObjectType::Blob, self.deadline)?;
             drop(decoder);
             let limit = crate::limits::object_byte_limit(self.max_object_bytes, content.kind);
@@ -840,6 +841,30 @@ impl ObjectSource {
     }
 }
 
+// zlib can consume arbitrarily many empty blocks before returning one decoded
+// byte, so the preparation deadline belongs beneath its compressed-input buffer.
+fn compressed_decoder(
+    reader: impl Read,
+    check: impl FnMut() -> Result<(), LocalGitFailure>,
+) -> ZlibDecoder<impl Read> {
+    ZlibDecoder::new(CompressedInput { reader, check })
+}
+
+struct CompressedInput<R, C> {
+    reader: R,
+    check: C,
+}
+
+impl<R: Read, C: FnMut() -> Result<(), LocalGitFailure>> Read for CompressedInput<R, C> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        (self.check)().map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
+        let count = buffer.len().min(IO_BYTES);
+        let count = self.reader.read(&mut buffer[..count])?;
+        (self.check)().map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
+        Ok(count)
+    }
+}
+
 fn byte(reader: &mut impl Read) -> Result<u8, LocalGitFailure> {
     let mut byte = [0];
     reader.read_exact(&mut byte).map_err(rejected)?;
@@ -860,4 +885,98 @@ fn variable_size(reader: &mut impl Read) -> Result<usize, LocalGitFailure> {
         }
     }
     Err(LocalGitFailure::Repository)
+}
+
+#[cfg(test)]
+mod compressed_deadline_tests {
+    use super::*;
+    use std::{cell::Cell, io::Cursor};
+
+    // RFC 1950/1951 stored blocks: a valid zlib stream with a long run of
+    // non-final, empty blocks between the prefix and suffix output.
+    fn empty_blocks_between(prefix: &[u8], suffix: &[u8]) -> Vec<u8> {
+        let mut compressed = vec![0x78, 0x01];
+        let mut block = |bytes: &[u8], final_block: bool| {
+            let length = u16::try_from(bytes.len()).expect("stored-block size");
+            compressed.push(u8::from(final_block));
+            compressed.extend_from_slice(&length.to_le_bytes());
+            compressed.extend_from_slice(&(!length).to_le_bytes());
+            compressed.extend_from_slice(bytes);
+        };
+        for page in prefix.chunks(u16::MAX as usize) {
+            block(page, false);
+        }
+        for _ in 0..IO_BYTES {
+            block(&[], false);
+        }
+        block(suffix, true);
+        let (mut a, mut b) = (1u32, 0u32);
+        for &byte in prefix.iter().chain(suffix) {
+            a = (a + u32::from(byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        compressed.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        compressed
+    }
+
+    struct CountedInput<'a> {
+        reader: Cursor<Vec<u8>>,
+        consumed: &'a Cell<usize>,
+    }
+    impl Read for CountedInput<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.reader.read(buffer)?;
+            self.consumed.set(self.consumed.get() + count);
+            Ok(count)
+        }
+    }
+
+    fn assert_empty_blocks_stop_at_deadline(prefix: &[u8], suffix: &[u8]) {
+        let compressed = empty_blocks_between(prefix, suffix);
+        let mut decoded = Vec::new();
+        ZlibDecoder::new(compressed.as_slice())
+            .read_to_end(&mut decoded)
+            .expect("valid stream, not corrupt data");
+        assert_eq!(decoded, [prefix, suffix].concat());
+
+        let consumed = Cell::new(0);
+        let expires_after = Cell::new(usize::MAX);
+        let reader = CountedInput {
+            reader: Cursor::new(compressed),
+            consumed: &consumed,
+        };
+        let mut decoder = compressed_decoder(reader, || {
+            if consumed.get() >= expires_after.get() {
+                Err(LocalGitFailure::Repository)
+            } else {
+                Ok(())
+            }
+        });
+        let mut decoded_prefix = vec![0; prefix.len()];
+        decoder
+            .read_exact(&mut decoded_prefix)
+            .expect("prefix before deadline");
+        assert_eq!(decoded_prefix, prefix);
+        // Expire while one decoder read consumes empty blocks, without sleeps
+        // or dependence on the speed of the host's decompressor.
+        expires_after.set(consumed.get() + IO_BYTES);
+        let mut output = [0];
+        let failure = decoder
+            .read(&mut output)
+            .expect_err("deadline inside compressed input");
+        assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+        assert!(consumed.get() <= expires_after.get());
+        assert_eq!(output, [0], "no suffix output reached the caller");
+    }
+
+    #[test]
+    fn loose_header_read_stops_inside_empty_deflate_blocks() {
+        assert_empty_blocks_stop_at_deadline(&[], b"blob 1\0x");
+    }
+
+    #[test]
+    fn packed_output_read_stops_inside_empty_deflate_blocks_between_pages() {
+        let prefix = vec![b'x'; IO_BYTES];
+        assert_empty_blocks_stop_at_deadline(&prefix, b"base tail");
+    }
 }
