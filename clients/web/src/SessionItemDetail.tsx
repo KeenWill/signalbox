@@ -302,7 +302,7 @@ const detailContent = (body: DetailBody): ReactNode => {
       return <Facts facts={[['Ownership', enumLabel(body.transition)]]} />
     case 'event_fact':
       return body.kind === 'automatic_reconciliation_exhausted' ? (
-        <p>Automatic reconciliation exhausted. Waiting for an operator decision.</p>
+        <p>Automatic reconciliation exhausted.</p>
       ) : (
         <p>Turn retired before it started.</p>
       )
@@ -587,9 +587,9 @@ export function SessionItemDetail({
     record && record.kind === item.kind && isCompatibleDetailBody(record.kind, record.body)
   const continuation = compatible ? detail.data?.continuation : null
   let content: ReactNode
-  if (detail.isError) content = <p role="alert">Details couldn't be loaded.</p>
+  if (detail.isError) content = <p role="alert">Details failed to load.</p>
   else if (!detail.data) content = <p role="status">Loading…</p>
-  else if (!compatible) content = <p role="alert">Details didn't match this event.</p>
+  else if (!compatible) content = <p role="alert">Details do not match this event.</p>
   else content = detailContent(record.body)
   return (
     <article aria-label={`${enumLabel(item.kind)} detail`}>

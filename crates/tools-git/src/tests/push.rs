@@ -1174,7 +1174,7 @@ async fn push_accepts_conflict_resolution_preserving_both_sides() {
 }
 
 #[tokio::test]
-async fn push_accepts_reexpressed_branch_imports_preserving_main_lines() {
+async fn push_accepts_reexpressed_branch_imports_preserving_base_lines() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
     let ancestor = merge_test_commit(
@@ -1203,7 +1203,7 @@ async fn push_accepts_reexpressed_branch_imports_preserving_main_lines() {
     executor
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
         .await
-        .expect("main lines survive while branch imports are regrouped");
+        .expect("base lines survive while branch imports are regrouped");
 
     assert_eq!(transport.request().commit(), merge.to_string());
 }
@@ -1217,47 +1217,47 @@ async fn push_refuses_rewriting_branch_text_outside_conflicts() {
             vec![(b"shared.txt".as_slice(), "branch\n")],
             vec![
                 (b"shared.txt".as_slice(), "original\n"),
-                (b"main.txt".as_slice(), "main\n"),
+                (b"base.txt".as_slice(), "base\n"),
             ],
             vec![
                 (b"shared.txt".as_slice(), "arbitrary\n"),
-                (b"main.txt".as_slice(), "main\n"),
+                (b"base.txt".as_slice(), "base\n"),
             ],
         ),
         (
             "base lacks the branch-added file",
             vec![],
             vec![(b"branch.txt".as_slice(), "branch\n")],
-            vec![(b"main.txt".as_slice(), "main\n")],
+            vec![(b"base.txt".as_slice(), "base\n")],
             vec![
                 (b"branch.txt".as_slice(), "arbitrary\n"),
-                (b"main.txt".as_slice(), "main\n"),
+                (b"base.txt".as_slice(), "base\n"),
             ],
         ),
         (
             "the result omits the branch-added path entirely",
             vec![],
             vec![(b"branch.txt".as_slice(), "branch\n")],
-            vec![(b"main.txt".as_slice(), "main\n")],
-            vec![(b"main.txt".as_slice(), "main\n")],
+            vec![(b"base.txt".as_slice(), "base\n")],
+            vec![(b"base.txt".as_slice(), "base\n")],
         ),
         (
             "parents touch separate hunks in one path",
             vec![(
                 b"shared.txt".as_slice(),
-                "old main\nanchor one\nanchor two\nold branch\n",
+                "old base\nanchor one\nanchor two\nold branch\n",
             )],
             vec![(
                 b"shared.txt".as_slice(),
-                "old main\nanchor one\nanchor two\nbranch\n",
+                "old base\nanchor one\nanchor two\nbranch\n",
             )],
             vec![(
                 b"shared.txt".as_slice(),
-                "main\nanchor one\nanchor two\nold branch\n",
+                "base\nanchor one\nanchor two\nold branch\n",
             )],
             vec![(
                 b"shared.txt".as_slice(),
-                "main\nanchor one\nanchor two\narbitrary\n",
+                "base\nanchor one\nanchor two\narbitrary\n",
             )],
         ),
         (
@@ -1272,11 +1272,11 @@ async fn push_refuses_rewriting_branch_text_outside_conflicts() {
             )],
             vec![(
                 b"shared.txt".as_slice(),
-                "main conflict\nanchor one\nanchor two\nold branch\n",
+                "base conflict\nanchor one\nanchor two\nold branch\n",
             )],
             vec![(
                 b"shared.txt".as_slice(),
-                "main conflict\nresolved conflict\nanchor one\nanchor two\narbitrary\n",
+                "base conflict\nresolved conflict\nanchor one\nanchor two\narbitrary\n",
             )],
         ),
     ] {
@@ -1302,20 +1302,20 @@ async fn push_refuses_rewriting_branch_text_outside_conflicts() {
 }
 
 #[tokio::test]
-async fn push_refuses_resolutions_reversing_main_line_changes() {
+async fn push_refuses_resolutions_reversing_base_line_changes() {
     for (case, resolution) in [
-        ("dropped main addition", "branch regrouped\n"),
-        ("altered main addition", "main altered\nbranch regrouped\n"),
+        ("dropped base addition", "branch regrouped\n"),
+        ("altered base addition", "base altered\nbranch regrouped\n"),
         (
-            "restored main removal",
-            "main added\nmain removed\nbranch regrouped\n",
+            "restored base removal",
+            "base added\nbase removed\nbranch regrouped\n",
         ),
     ] {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("repository");
-        let ancestor = merge_test_commit(&repository, "main removed\n", &[]);
+        let ancestor = merge_test_commit(&repository, "base removed\n", &[]);
         let branch = merge_test_commit(&repository, "branch\n", &[ancestor]);
-        let base = merge_test_commit(&repository, "main added\n", &[ancestor]);
+        let base = merge_test_commit(&repository, "base added\n", &[ancestor]);
         let merge = merge_test_commit(&repository, resolution, &[branch, base]);
         let transport = RecordingPushTransport::default();
         let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
@@ -1333,15 +1333,15 @@ async fn push_refuses_resolutions_reversing_main_line_changes() {
 }
 
 #[tokio::test]
-async fn push_accepts_moved_main_added_lines_verbatim() {
+async fn push_accepts_moved_base_added_lines_verbatim() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
     let ancestor = merge_test_commit(&repository, "shared\n", &[]);
     let branch = merge_test_commit(&repository, "branch\nshared\n", &[ancestor]);
-    let base = merge_test_commit(&repository, "main added\nshared\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "base added\nshared\n", &[ancestor]);
     let merge = merge_test_commit(
         &repository,
-        "branch regrouped\nmain added\nshared\n",
+        "branch regrouped\nbase added\nshared\n",
         &[branch, base],
     );
     let transport = RecordingPushTransport::default();
@@ -1356,7 +1356,7 @@ async fn push_accepts_moved_main_added_lines_verbatim() {
 }
 
 #[tokio::test]
-async fn push_refuses_dropping_a_line_main_moved() {
+async fn push_refuses_dropping_a_line_the_base_moved() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
     let ancestor = merge_test_commit(&repository, "moved\nshared\n", &[]);
@@ -1378,27 +1378,27 @@ async fn push_refuses_dropping_a_line_main_moved() {
 }
 
 #[tokio::test]
-async fn push_accepts_independent_branch_additions_matching_main_removed_text() {
+async fn push_accepts_independent_branch_additions_matching_base_removed_text() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
     let ancestor = merge_test_commit(
         &repository,
-        "main old\nanchor one\nanchor two\nanchor three\n",
+        "base old\nanchor one\nanchor two\nanchor three\n",
         &[],
     );
     let branch = merge_test_commit(
         &repository,
-        "main old\nanchor one\nanchor two\nanchor three\nmain old\nbranch\n",
+        "base old\nanchor one\nanchor two\nanchor three\nbase old\nbranch\n",
         &[ancestor],
     );
     let base = merge_test_commit(
         &repository,
-        "main new\nanchor one\nanchor two\nanchor three\n",
+        "base new\nanchor one\nanchor two\nanchor three\n",
         &[ancestor],
     );
     let merge = merge_test_commit(
         &repository,
-        "main new\nanchor one\nanchor two\nanchor three\nmain old\nbranch\n",
+        "base new\nanchor one\nanchor two\nanchor three\nbase old\nbranch\n",
         &[branch, base],
     );
     let transport = RecordingPushTransport::default();
@@ -1407,7 +1407,7 @@ async fn push_accepts_independent_branch_additions_matching_main_removed_text() 
     executor
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
         .await
-        .expect("main replacement and the independent branch addition survive");
+        .expect("base replacement and the independent branch addition survive");
 
     assert_eq!(transport.request().commit(), merge.to_string());
 }
@@ -2221,7 +2221,7 @@ async fn push_accepts_the_remaining_branch_removal_after_a_base_replacement() {
 }
 
 #[tokio::test]
-async fn push_accepts_repeated_branch_lines_preserving_main_changes() {
+async fn push_accepts_repeated_branch_lines_preserving_base_changes() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
     let ancestor = merge_test_commit(&repository, "old\n", &[]);
@@ -2235,7 +2235,7 @@ async fn push_accepts_repeated_branch_lines_preserving_main_changes() {
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
         .await;
 
-    result.expect("main changes survive repeated branch lines");
+    result.expect("base changes survive repeated branch lines");
     assert_eq!(transport.request().commit(), merge.to_string());
 }
 
@@ -2474,7 +2474,7 @@ async fn push_accepts_nested_paths_within_the_merge_path_byte_budget() {
 }
 
 #[tokio::test]
-async fn push_refuses_a_renamed_branch_result_restoring_main_deleted_lines() {
+async fn push_refuses_a_renamed_branch_result_restoring_base_deleted_lines() {
     for (case, branch_content) in [
         ("unchanged rename", "one\ntwo\nthree\nfour\nfive\nsix\n"),
         (
@@ -2513,7 +2513,7 @@ async fn push_refuses_a_renamed_branch_result_restoring_main_deleted_lines() {
 }
 
 #[tokio::test]
-async fn push_checks_main_removals_at_a_low_similarity_branch_rename() {
+async fn push_checks_base_removals_at_a_low_similarity_branch_rename() {
     for (case, branch_content) in [
         ("unchanged rename", "one\ntwo\nthree\nfour\nfive\nsix\n"),
         (
@@ -2544,15 +2544,15 @@ async fn push_checks_main_removals_at_a_low_similarity_branch_rename() {
             .await;
 
         let Err(GitPushFailure::MergeDroppedBaseChanges(dropped)) = result else {
-            panic!("{case}: expected the main-side refusal, got {result:?}");
+            panic!("{case}: expected the base-side refusal, got {result:?}");
         };
         let destination = dropped
             .iter()
             .find(|dropped| dropped.file == "new.txt")
-            .expect("the renamed destination retains the source's main-side check");
+            .expect("the renamed destination retains the source's base-side check");
         assert_eq!(
             destination.first_dropped_hunk, "-two\n-three\n-four\n-five\n-six\n",
-            "{case}: main removes these five fixture lines",
+            "{case}: base removes these five fixture lines",
         );
         assert!(!transport.has_request(), "{case}");
     }

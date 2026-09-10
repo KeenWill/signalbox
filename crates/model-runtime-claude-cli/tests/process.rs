@@ -570,6 +570,17 @@ async fn success_rejects_every_contradictory_error_field_shape() {
 }
 
 #[tokio::test]
+async fn native_stdin_size_rejection_preserves_request_too_large() {
+    let result = execute_scenario("piped_stdin_too_large", OperationShape::Text).await;
+    let TerminalEvidence::ProviderError(failure) = result.evidence else {
+        panic!("native stdin rejection must be a typed provider failure");
+    };
+    assert_eq!(failure.kind, ProviderErrorKind::RequestTooLarge);
+    assert_eq!(failure.usage, TokenUsage::unreported());
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn nonzero_exit_is_a_typed_provider_failure() {
     let result = execute_scenario("process_nonzero", OperationShape::Text).await;
     let failure = provider_error(&result.evidence);
