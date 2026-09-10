@@ -1556,10 +1556,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &streamed_paths,
                     &descriptor_path(&self.repository_authority.root),
                     Some(&checkout_identities),
-                    |path| {
+                    |path, identity| {
                         updated_paths.borrow_mut().insert(path.to_owned());
-                        let identity =
-                            capture_rollback_identity(&self.repository_authority.root, path)?;
                         updated_identities
                             .borrow_mut()
                             .insert(path.to_owned(), identity);
@@ -1671,7 +1669,20 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 return Err(failure);
             }
         };
-        if checkout_identities != before_checkout_capture {
+        let target_directories = tracked_directories(&next_index);
+        let content_matches_target = checkout_state.iter().all(|(path, observed)| {
+            let entry = next_index.get_path(path, 0);
+            match observed {
+                WorktreeRollbackEntry::File { hashes, mode } => entry.is_some_and(|entry| {
+                    hashes.contains(&entry.id) && mode & 0o111 == entry.mode & 0o111
+                }),
+                WorktreeRollbackEntry::Directory => target_directories.contains(path),
+                WorktreeRollbackEntry::Missing => {
+                    entry.is_none() && !target_directories.contains(path)
+                }
+            }
+        });
+        if checkout_identities != before_checkout_capture || !content_matches_target {
             rollback_checkout_atomically(
                 repository,
                 current_tree.as_ref(),
