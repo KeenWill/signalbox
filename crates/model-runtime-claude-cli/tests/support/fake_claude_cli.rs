@@ -38,6 +38,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         return Ok(());
     }
+    if scenario.starts_with("native_compaction") {
+        system_init(&arguments)?;
+        let session = if scenario == "native_compaction_wrong_session" {
+            fixtures::OTHER_SESSION_ID
+        } else {
+            fixtures::SESSION_ID
+        };
+        // The SDK reports the input occupancy before its native compaction.
+        const PRE_COMPACTION_TOKENS: u64 = 170_000;
+        emit_json(&serde_json::json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "session_id": session,
+            "compact_metadata": { "trigger": "auto", "pre_tokens": PRE_COMPACTION_TOKENS }
+        }))?;
+        assistant_text(fixtures::ANSWER)?;
+        success("end_turn", Some(fixtures::ANSWER))?;
+        return Ok(());
+    }
+
     if scenario == "nonterminal_system_events" {
         system_event("hook_started")?;
         system_status(None)?;
