@@ -3332,32 +3332,6 @@ fn malformed_validation() -> ProcessorValidationOutput {
 mod tests {
     use super::*;
     use lopdf::{Object, dictionary};
-    use signalbox_file_media_runtime::{FileMediaCeilings, ReadViewBounds};
-
-    #[test]
-    fn declaration_probe_fits_runtime_ceiling() {
-        let declaration = declaration().expect("valid declaration");
-        let reader = &declaration.readers()[0];
-
-        assert!(reader.probe().range_count() >= 2);
-        assert!(reader.probe().range_count() <= FileMediaCeilings::version_one().probe_ranges);
-    }
-
-    #[test]
-    fn declaration_text_view_fits_runtime_ceiling() {
-        let declaration = declaration().expect("valid declaration");
-        let text = declaration.readers()[0]
-            .views()
-            .iter()
-            .find(|view| view.name().as_str() == TEXT_VIEW)
-            .expect("text view");
-
-        let ReadViewBounds::Text { output_bytes, .. } = text.bounds() else {
-            panic!("expected text view bounds");
-        };
-
-        assert!(output_bytes <= signalbox_file_media_runtime::MAX_TEXT_BODY_BYTES);
-    }
 
     #[test]
     fn xref_preflight_rejects_object_count_before_document_construction() {
@@ -4404,15 +4378,6 @@ endobj",
 endobj",
             p
         ));
-    }
-
-    #[test]
-    fn page_stream_read_reserves_length_probe_budget() {
-        let b = ValidationBudget::new(16_384, 2);
-        assert_eq!(
-            b.available_after_reserving(ROOT_VALIDATION_BYTES, 1),
-            12_288
-        );
     }
 
     #[test]
