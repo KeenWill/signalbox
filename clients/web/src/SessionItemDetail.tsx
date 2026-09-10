@@ -418,8 +418,13 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Model call', body.producing_model_call_id],
               ['State', enumLabel(body.state.type)],
               [
-                body.state.type === 'recovery_required' ? 'Recovery attempt' : 'Frontier ID',
                 body.state.type === 'recovery_required'
+                  ? 'Recovery attempt'
+                  : body.state.type === 'child_wait_resumed'
+                    ? 'Awaited attempt'
+                    : 'Frontier ID',
+                body.state.type === 'recovery_required' ||
+                body.state.type === 'child_wait_resumed'
                   ? body.state.tool_attempt_id
                   : body.state.frontier_id,
               ],

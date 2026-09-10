@@ -58,6 +58,7 @@ const labels = new Map<string, string>(
     child_result_unavailable: 'Child result unavailable',
     child_spawned: 'Child session created',
     child_stopped: 'Child stopped',
+    child_wait_resumed: 'Child wait resumed',
     child_waiting: 'Waiting for child result',
     claude_code_session_jsonl_v1: 'Claude Code, converter 1',
     claude_code_session_jsonl_v2: 'Claude Code, converter 2',
