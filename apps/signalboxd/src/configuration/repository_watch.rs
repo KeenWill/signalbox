@@ -159,10 +159,11 @@ impl WatchedRepositoryConfiguration {
     pub(super) fn git_push_enabled_with_agent(&self, socket: Option<&Path>) -> bool {
         self.push_credential_file.is_some()
             || (self.credential.authentication().is_some()
-                && self
-                    .push_remote_url
-                    .as_ref()
-                    .is_none_or(|remote| remote.as_str().starts_with("https://github.com/")))
+                && self.push_remote_url.as_ref().is_none_or(|remote| {
+                    url::Url::parse(remote.as_str()).is_ok_and(|url| {
+                        url.scheme() == "https" && url.host_str() == Some("github.com")
+                    })
+                }))
             || (self
                 .push_remote_url
                 .as_ref()

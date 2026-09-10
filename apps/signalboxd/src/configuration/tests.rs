@@ -6357,9 +6357,13 @@ fn repository_watch_and_tools_share_the_configured_app_cache() {
     let watch = configuration.repository_watch().expect("repository watch");
     let repository = &watch.repositories()[0];
     assert!(repository.admits_push());
-    for destination in [
-        "ssh://git@github.com/fixture/project.git",
-        "https://git.example.test/fixture/project.git",
+    for (destination, enabled) in [
+        ("https://github.com/fixture/project.git", true),
+        ("https://github.com:443/fixture/project.git", true),
+        ("https://GitHub.com/fixture/project.git", true),
+        ("https://GitHub.com:443/fixture/project.git", true),
+        ("ssh://git@github.com/fixture/project.git", false),
+        ("https://git.example.test/fixture/project.git", false),
     ] {
         let mut alternate = source
             .parse::<toml_edit::DocumentMut>()
@@ -6371,9 +6375,11 @@ fn repository_watch_and_tools_share_the_configured_app_cache() {
             .expect("watched repository")["push_remote_url"] = toml_edit::value(destination);
         let alternate = HubModelConfiguration::parse(&alternate.to_string())
             .expect("explicit push destination");
-        assert!(
-            !alternate.repository_watch().expect("watch").repositories()[0]
-                .git_push_enabled_with_agent(None)
+        assert_eq!(
+            alternate.repository_watch().expect("watch").repositories()[0]
+                .git_push_enabled_with_agent(None),
+            enabled,
+            "{destination}"
         );
     }
     assert!(repository.credential_file().is_none());

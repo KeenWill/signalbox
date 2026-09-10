@@ -784,6 +784,8 @@ push authority is derived only when that socket accepts a connection. Each
 configured credential file is reread through `FileCredentialAccess` on every
 push; HTTPS passes an authenticated URL rewrite in the child environment, and
 SSH retains a private temporary key file through push and remote confirmation.
+GitHub HTTPS destination matching uses the parsed, normalized hostname.
+
 Push credential files participate in the repository-watch credential isolation
 checks, including symlink and hard-link aliases of polling, push, and webhook
 credentials. The push family is registered from the configuration installed by
