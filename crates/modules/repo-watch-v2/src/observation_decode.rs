@@ -9,8 +9,8 @@ use signalbox_session_ownership::{
     RepoWatchCheckSuiteObservation, RepoWatchObservation, RepoWatchPullRequestLifecycle,
     RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
-    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
-    RepoWatchWorkflowRunObservation, RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    RepoWatchThreadObservation, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
+    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
 };
 
 pub(crate) fn observation(value: &Value) -> Option<RepoWatchObservation> {
@@ -95,16 +95,7 @@ fn pull_request(v: &Value) -> Option<RepoWatchPullRequestState> {
                 CommitSha::try_new(text(&v["commit"])?).ok()?,
             ))
         })?,
-        threads: array(&v["threads"], |v| {
-            Some(RepoWatchThreadObservation::new(
-                ReviewThreadId::try_new(text(&v["thread"])?).ok()?,
-                match v["state"].as_str()? {
-                    "open" => RepoWatchThreadState::Open,
-                    "resolved" => RepoWatchThreadState::Resolved,
-                    _ => return None,
-                },
-            ))
-        })?,
+        threads: array(&v["threads"], thread)?,
         reactions: array(&v["reactions"], |v| {
             Some(RepoWatchReactionObservation::new(
                 reaction_subject(&v["subject"])?,
@@ -114,6 +105,20 @@ fn pull_request(v: &Value) -> Option<RepoWatchPullRequestState> {
         })?,
     })
     .ok()
+}
+
+fn thread(v: &Value) -> Option<RepoWatchThreadObservation> {
+    let id = ReviewThreadId::try_new(text(&v["thread"])?).ok()?;
+    let author = RepoWatchAuthorLogin::try_new(text(&v["author"])?).ok()?;
+    match v["state"].as_str()? {
+        "open" if v["resolver"].is_null() => Some(RepoWatchThreadObservation::open(id, author)),
+        "resolved" => Some(RepoWatchThreadObservation::resolved(
+            id,
+            author,
+            RepoWatchAuthorLogin::try_new(text(&v["resolver"])?).ok()?,
+        )),
+        _ => None,
+    }
 }
 
 pub(crate) fn reaction_subject(v: &Value) -> Option<ReactionSubject> {
@@ -222,16 +227,7 @@ pub(crate) fn merged_baselines(
                     ))
                 })?,
                 review_ids: array(&v["review_ids"], object_id)?,
-                threads: array(&v["threads"], |v| {
-                    Some(RepoWatchThreadObservation::new(
-                        ReviewThreadId::try_new(text(&v["thread"])?).ok()?,
-                        match v["state"].as_str()? {
-                            "open" => RepoWatchThreadState::Open,
-                            "resolved" => RepoWatchThreadState::Resolved,
-                            _ => return None,
-                        },
-                    ))
-                })?,
+                threads: array(&v["threads"], thread)?,
                 reactions: array(&v["reactions"], |v| {
                     Some(RepoWatchReactionObservation::new(
                         reaction_subject(&v["subject"])?,

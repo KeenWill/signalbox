@@ -41,11 +41,10 @@ use signalbox_session_ownership::{
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
     RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchRule,
     RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
-    RepoWatchWorkflowRunObservation, RepositorySlug, ReviewState, ReviewThreadId, SessionCommand,
-    SessionCommandPayload, SessionCreated, SessionId, SessionLifecycleCommand,
-    SessionLifecycleOperation, SessionOwnership, SessionTemplateName, StartGate, StopStickiness,
-    WorkflowName,
+    RepoWatchThreadObservation, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
+    RepositorySlug, ReviewState, ReviewThreadId, SessionCommand, SessionCommandPayload,
+    SessionCreated, SessionId, SessionLifecycleCommand, SessionLifecycleOperation,
+    SessionOwnership, SessionTemplateName, StartGate, StopStickiness, WorkflowName,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -388,9 +387,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 Some(ReviewState::Approved),
                 default_head.clone(),
             )],
-            threads: vec![RepoWatchThreadObservation::new(
+            threads: vec![RepoWatchThreadObservation::resolved(
                 ReviewThreadId::try_new(String::from("thread-1"))?,
-                RepoWatchThreadState::Resolved,
+                author.clone(),
+                author.clone(),
             )],
             reactions: vec![RepoWatchReactionObservation::new(
                 ReactionSubject::ReviewComment {
@@ -784,7 +784,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             "completed_check_suites":[{"completion_generation":"suite-1"}],
             "completed_check_runs":[{"completion_generation":"run-1"}],
             "reviews":[{"reviewer":"octocat","state":"approved"}],
-            "threads":[{"thread":"thread-1","state":"resolved"}],
+            "threads":[{"thread":"thread-1","state":"resolved","author":"octocat","resolver":"octocat"}],
             "reactions":[{"reactor":"octocat","content":"+1"}]
           }],
           "workflow_runs":[{"workflow":"ci","attempt":2}],
@@ -5579,7 +5579,11 @@ async fn coalesced_unseen_pull_snapshot_dispatches_its_label_and_retains_all_fac
         .settle_webhook(1, opened, WebhookDisposition::Applied, now)
         .await?;
     let mut io = ConditionalPollFixture::new();
-    io.thread_nodes = vec![serde_json::json!({"id":"fixture-thread", "isResolved":true})];
+    io.thread_nodes = vec![serde_json::json!({
+        "id":"fixture-thread", "isResolved":true,
+        "resolvedBy":{"login":"resolver"},
+        "comments":{"nodes":[{"author":{"login":"reviewer"}}]}
+    })];
     let rule = RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(String::from("label-dispatch"))?,
         RepoWatchRuleVersion::V1,
@@ -5768,7 +5772,11 @@ async fn reopening_a_closed_pull_does_not_repeat_its_initial_snapshot_facts()
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
     let mut io = ConditionalPollFixture::new();
     io.changed = true;
-    io.thread_nodes = vec![serde_json::json!({"id":"fixture-thread", "isResolved":true})];
+    io.thread_nodes = vec![serde_json::json!({
+        "id":"fixture-thread", "isResolved":true,
+        "resolvedBy":{"login":"resolver"},
+        "comments":{"nodes":[{"author":{"login":"reviewer"}}]}
+    })];
     io.pages
         .get_mut("/repos/example/project/pulls/1")
         .expect("pull detail")

@@ -46,9 +46,11 @@ pub(crate) fn event(id: RepoWatchEventId, bytes: &[u8]) -> Option<RepoWatchEvent
         },
         "thread_opened" => RepoWatchEventKindV1::ThreadOpened {
             thread: ReviewThreadId::try_new(text(&k["thread"])?).ok()?,
+            author: RepoWatchAuthorLogin::try_new(text(&k["author"])?).ok()?,
         },
         "thread_resolved" => RepoWatchEventKindV1::ThreadResolved {
             thread: ReviewThreadId::try_new(text(&k["thread"])?).ok()?,
+            author: RepoWatchAuthorLogin::try_new(text(&k["author"])?).ok()?,
         },
         "labeled" => RepoWatchEventKindV1::Labeled {
             label: LabelName::try_new(text(&k["label"])?).ok()?,
