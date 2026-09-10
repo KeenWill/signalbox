@@ -2535,6 +2535,7 @@ async fn run_hub_incarnation(
     let pass_nudge = eligibility_nudge.clone();
     let pass_invocation_processes = invocation_processes.clone();
     let pass_blobs = blob_store_registry.clone();
+    let eval_runtime_factory = runtime_factory.clone();
     let compose_pass = move |model_configuration: &HubModelConfiguration| {
         let runtime_models = model_configuration.runtime_model_catalog();
         let runtime = runtime_factory
@@ -2681,6 +2682,32 @@ async fn run_hub_incarnation(
     let (workflow_shutdown, workflow_shutdown_receiver) = oneshot::channel();
     let workflows =
         signalboxd::workflows::WorkflowRuntime::new(pool.clone()).map(|(service, runtime)| {
+            let runtime = if let Some(stores) = &blob_store_registry {
+                let eval_pool = pool.clone();
+                let eval_stores = stores.clone();
+                let eval_reload = configuration_reload.clone();
+                runtime.with_eval(move || {
+                    let configuration = eval_reload.catalogs().models;
+                    let model = eval_runtime_factory
+                        .build(&configuration)
+                        .map_err(|error| {
+                            signalbox_workflow_runtime::LiveDeliveryFailure::new(error.to_string())
+                        })?;
+                    Ok(signalboxd::workflows::eval::EvalServices::new(
+                        eval_pool.clone(),
+                        eval_stores.clone(),
+                        Arc::new(RuntimeApprovalJudgeModel::new(
+                            model,
+                            configuration.runtime_model_catalog(),
+                        )),
+                        signalboxd::workflows::eval::configured_binding(&configuration)
+                            .unwrap_or_else(|_| signalboxd::workflows::eval::recorded_binding()),
+                        configuration,
+                    ))
+                })
+            } else {
+                runtime
+            };
             (
                 service,
                 runtime.with_repository_watch(workflow_repository_watch),

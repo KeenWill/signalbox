@@ -174,6 +174,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ProgramRegistered { .. }
         | ServerMessage::ProgramRunStarted { .. }
         | ServerMessage::ProgramRunRead { .. }
+        | ServerMessage::EvaluationScorecardRead { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }

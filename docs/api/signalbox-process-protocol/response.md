@@ -103,6 +103,12 @@ pub enum ServerMessage {
         run_id: CanonicalUuid,
         run: ProgramRun,
     },
+    EvaluationScorecardRead {
+        run_id: CanonicalUuid,
+        offset: u64,
+        bytes: vec::Vec<u8>,
+        total_bytes: u64,
+    },
     ProgramRunCancellationReceipt {
         command_id: CommandId,
         run_id: CanonicalUuid,

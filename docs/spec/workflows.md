@@ -148,11 +148,13 @@ big-endian u64 Unix time in seconds. The runner resolves admitted JavaScript
 artifacts from their registrations without requiring a native catalog. Empty
 `Now` requests receive the SDK's typed Unix-millisecond answer. Registration
 effects and durable primitives are composed. The compiled catalog also contains
-`approval-judge-eval` revision `1`; `WorkflowRuntime::with_eval` supplies its
-Corpus, Judge, Blob and EvalRecord adapters under [evaluation](eval-system.md).
-`eval-record.seal` atomically records the calling run’s complete evaluation
-snapshot and adopts equal retries before the program returns its scorecard. The
-process protocol and CLI expose registration, start, read and cancellation.
+`approval-judge-eval` revision `1`; the daemon supplies its Corpus, Judge, Blob
+and EvalRecord adapters under [evaluation](eval-system.md). Operator evaluation
+launch resolves provider selection and pins corpus and recorded-response input
+before generic workflow admission. `eval-record.seal` atomically records the
+calling run’s complete evaluation snapshot and adopts equal retries before the
+program returns its scorecard. The process protocol and CLI expose registration,
+start, read and cancellation.
 `program register REGISTRATION_ID REGISTRATION_JSON` reads a registration
 description; `program start RUN_ID REGISTRATION_ID --input FILE` admits the
 program codec's exact input bytes. `program read RUN_ID` prints retained input,

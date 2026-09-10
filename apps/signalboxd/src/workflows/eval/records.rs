@@ -19,6 +19,15 @@ pub struct EvalManifest {
     pub binding: JudgeBinding,
     pub postures: BTreeMap<String, String>,
     pub speculative_tools: Vec<String>,
+    pub recorded_responses: Option<Vec<RecordedResponse>>,
+}
+
+/// A synthetic provider answer pinned to a selected trial.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RecordedResponse {
+    pub disposition: ApprovalDisposition,
+    pub rationale: String,
 }
 
 impl EvalManifest {
@@ -40,7 +49,14 @@ impl EvalManifest {
                 "offline scoring requires one repeat; live repeats must be positive",
             ));
         }
-        self.trial_count()?;
+        let trials = self.trial_count()?;
+        if let Some(responses) = &self.recorded_responses
+            && responses.len() != trials as usize
+        {
+            return Err(NativeProgramError::new(
+                "recorded response count differs from trial count",
+            ));
+        }
         Ok(())
     }
 

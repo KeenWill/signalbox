@@ -60,6 +60,7 @@ impl Fixture {
             binding: binding.clone(),
             postures: Default::default(),
             speculative_tools: Vec::new(),
+            recorded_responses: None,
         };
         Self {
             services: EvalServices {
@@ -139,6 +140,22 @@ fn duplicate_live_names(fixture: &mut Fixture) {
 }
 
 #[tokio::test]
+async fn live_corpus_decodes_only_selected_positions() {
+    let mut fixture = Fixture::lazy();
+    let bytes = b"invalid unselected row\n{\"name\":\"synthetic-read\",\"category\":\"workspace_benign\",\"tool\":\"current_time\",\"arguments\":\"{}\",\"expected\":\"approve\"}\n";
+    fixture.manifest.format = CorpusFormat::Live;
+    fixture.manifest.cases = vec![1];
+    fixture.manifest.corpus = BlobDigest::digest(bytes).to_string();
+    fixture.services.blobs = Arc::new(MemoryBlobs(bytes.to_vec()));
+    let corpus = fixture.services.corpus(&fixture.manifest).await.unwrap();
+    assert!(matches!(&corpus.cases[..], [Case::Live(case)] if case.name == "synthetic-read"));
+    fixture.manifest.cases = vec![0];
+    assert!(fixture.services.corpus(&fixture.manifest).await.is_err());
+    fixture.manifest.cases = vec![2];
+    assert!(fixture.services.corpus(&fixture.manifest).await.is_err());
+}
+
+#[tokio::test]
 async fn duplicate_selected_live_names_fail_before_provider_work() {
     let mut fixture = Fixture::lazy();
     duplicate_live_names(&mut fixture);
@@ -190,6 +207,17 @@ async fn manifest_codec_rejects_empty_case_selections() {
         let bytes = serde_json::to_vec(&fixture.manifest).unwrap();
         assert!(EvalManifest::decode(&bytes).is_err(), "{format:?} decode");
     }
+}
+
+#[tokio::test]
+async fn manifest_rejects_recorded_responses_that_leave_a_trial_unanswered() {
+    let mut fixture = Fixture::lazy();
+    fixture.manifest.recorded_responses = Some(vec![RecordedResponse {
+        disposition: signalbox_approval_judge_eval::ApprovalDisposition::Approve,
+        rationale: RATIONALE.into(),
+    }]);
+    assert!(fixture.manifest.encode().is_err());
+    assert!(fixture.provider.received_operations().is_empty());
 }
 
 #[tokio::test]
@@ -419,6 +447,35 @@ mod postgres {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
+    async fn pinned_responses_execute_and_replay_without_a_provider() {
+        let mut run = RunFixture::configured(|fixture| {
+            fixture.manifest.binding = recorded_binding();
+            fixture.manifest.recorded_responses = Some(vec![
+                RecordedResponse {
+                    disposition: signalbox_approval_judge_eval::ApprovalDisposition::Approve,
+                    rationale: RATIONALE.into(),
+                },
+                RecordedResponse {
+                    disposition: signalbox_approval_judge_eval::ApprovalDisposition::Deny,
+                    rationale: RATIONALE.into(),
+                },
+            ]);
+            fixture.services.model = Arc::new(NoProvider);
+        })
+        .await;
+        let result = run.execute().await;
+        let ProgramExecutionOutcome::Completed(bytes) = &result else {
+            panic!("recorded responses produce a scorecard: {result:?}");
+        };
+        let score: serde_json::Value = decode(bytes.as_bytes()).unwrap();
+        assert_eq!(score["accuracy"]["numerator"], 2);
+        assert!(run.fixture.provider.received_operations().is_empty());
+        run.fixture.services.blobs = Arc::new(MemoryBlobs(Vec::new()));
+        assert_eq!(run.execute().await, result);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
     async fn eval_workflow_restart_consumes_recorded_trials_before_new_provider_work() {
         let run = RunFixture::new().await;
         run.record(
@@ -582,7 +639,8 @@ mod postgres {
                 .await,
             Err(crate::workflows::WorkflowRuntimeError::NativeUnavailable),
         ));
-        let runner = runner.with_eval(run.fixture.services.clone());
+        let services = run.fixture.services.clone();
+        let runner = runner.with_eval(move || Ok(services.clone()));
         assert!(service.eval_executable().is_some());
         service
             .register_native(registration.id, request)
@@ -620,11 +678,75 @@ mod postgres {
         assert_eq!(run.fixture.provider.received_operations().len(), 2);
     }
 
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn daemon_eval_attempt_uses_the_installed_judge_binding() {
+        let run = RunFixture::new().await;
+        let registration = run
+            .fixture
+            .services
+            .registrations
+            .for_run(run.run)
+            .await
+            .unwrap()
+            .unwrap();
+        let installed = Arc::new(Mutex::new(run.fixture.services.clone()));
+        let composition = installed.clone();
+        let (service, runner) = crate::workflows::WorkflowRuntime::new(run.pool.clone()).unwrap();
+        let runner = runner.with_eval(move || Ok(composition.lock().unwrap().clone()));
+        let mut replacement = Fixture::new(run.pool.clone());
+        replacement.services.binding.credential_reference = "replacement-fixture".into();
+        replacement.manifest.binding = replacement.services.binding.clone();
+        let replacement_run = ProgramRunId::from_uuid(uuid::Uuid::now_v7());
+        let mut scorecards = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            runner.run(async {
+                for identity in [run.run, replacement_run] {
+                    if identity == replacement_run {
+                        *installed.lock().unwrap() = replacement.services.clone();
+                        service
+                            .start(
+                                identity,
+                                registration.id,
+                                &replacement.manifest.encode().unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    loop {
+                        let journal = run.journal.load(identity).await.unwrap().unwrap();
+                        if journal.terminal_delivery().is_some() {
+                            let score: serde_json::Value =
+                                decode(journal.result().unwrap().as_bytes()).unwrap();
+                            scorecards.push(score);
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(scorecards.len(), 2);
+        assert!(
+            scorecards
+                .iter()
+                .all(|score| score["accuracy"]["numerator"] == 2)
+        );
+        assert_eq!(run.fixture.provider.received_operations().len(), 2);
+        assert_eq!(replacement.provider.received_operations().len(), 2);
+    }
+
     async fn infrastructure_failure_keeps_run_recoverable(run: RunFixture, services: EvalServices) {
         let (_, runner) = crate::workflows::WorkflowRuntime::new(run.pool.clone()).unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            runner.with_eval(services).run(std::future::pending()),
+            runner
+                .with_eval(move || Ok(services.clone()))
+                .run(std::future::pending()),
         )
         .await
         .unwrap();
@@ -813,7 +935,9 @@ mod postgres {
         let (_, runner) = crate::workflows::WorkflowRuntime::new(run.pool.clone()).unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            runner.with_eval(services).run(std::future::pending()),
+            runner
+                .with_eval(move || Ok(services.clone()))
+                .run(std::future::pending()),
         )
         .await
         .unwrap();
