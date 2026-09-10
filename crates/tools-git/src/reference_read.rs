@@ -1,3 +1,5 @@
+pub(super) const MAX_SYMBOLIC_REFERENCE_DEPTH: usize = 16;
+
 use std::{
     ffi::OsStr,
     fs,
@@ -290,7 +292,6 @@ fn resolve_pinned_reference_chain_from_with_hook<AfterFirstRead: FnOnce()>(
     locks: Option<&[ReferenceLock]>,
     after_first_read: AfterFirstRead,
 ) -> Result<(Vec<String>, Option<git2::Oid>), LocalGitFailure> {
-    const MAX_SYMBOLIC_REFERENCE_DEPTH: usize = 16;
     let operation_guard = locks
         .is_none()
         .then(|| authority.operation_guard())

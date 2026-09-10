@@ -6928,3 +6928,17 @@ fn linked_worktrees_sharing_common_administration_cannot_bind_separate_sessions(
         first_identity
     ));
 }
+
+#[tokio::test]
+async fn a_plain_configured_root_serves_a_repository_bound_session() {
+    let parent = tempfile::tempdir().expect("fixture parent");
+    let configured = parent.path().join("plain");
+    fs::create_dir(&configured).expect("plain configured root");
+    fs::write(configured.join(SESSION_MARKER_PATH), CONFIGURED_ROOT_MARKER)
+        .expect("configured marker");
+    let first = session(FIRST_SESSION_IDENTITY);
+    provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+    let (catalog, executor) = offline_daemon_composition(&configured);
+    let evidence = daemon_evidence(catalog, executor, first, read_marker_proposal()).await;
+    assert_eq!(read_content(evidence), FIRST_SESSION_MARKER);
+}

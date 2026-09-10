@@ -239,6 +239,16 @@ where
     reject_administrative_symlinks_for_format_with_observer(&git_directory, object_format, observer)
 }
 
+#[cfg(test)]
+thread_local! {
+    static ADMINISTRATION_INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_administration_inspections() -> usize {
+    ADMINISTRATION_INSPECTIONS.with(|count| count.replace(0))
+}
+
 fn reject_administrative_symlinks_for_format_with_observer<Observer>(
     git_directory: &fs::File,
     object_format: ObjectFormat,
@@ -263,6 +273,8 @@ where
                     continue;
                 }
                 inspected = inspected.saturating_add(1);
+                #[cfg(test)]
+                ADMINISTRATION_INSPECTIONS.with(|count| count.set(count.get() + 1));
                 if inspected > MAX_REPOSITORY_INSPECTIONS {
                     return Err(LocalGitToolsConstructionError::Repository);
                 }

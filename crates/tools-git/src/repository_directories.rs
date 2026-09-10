@@ -186,28 +186,119 @@ pub fn open_repository_administration(
     }))
 }
 
+pub(super) fn reference_is_worktree_local(path: &str) -> bool {
+    let reference = path.strip_prefix("logs/").unwrap_or(path);
+    !reference.starts_with("refs/")
+        || ["refs/bisect/", "refs/worktree/", "refs/rewritten/"]
+            .iter()
+            .any(|prefix| reference.starts_with(prefix))
+}
+
+fn resolved_reference_name(
+    common: &File,
+    worktree: &File,
+    reference: &str,
+    format: git2::ObjectFormat,
+) -> Result<String, LocalGitFailure> {
+    let mut names = Vec::new();
+    let mut current = reference.to_owned();
+    loop {
+        crate::reference_lock::validate_reference_name(&current)?;
+        if names.len() == crate::reference_read::MAX_SYMBOLIC_REFERENCE_DEPTH
+            || names.contains(&current)
+        {
+            return Err(LocalGitFailure::Operation);
+        }
+        let root = if reference_is_worktree_local(&current) {
+            worktree
+        } else {
+            common
+        };
+        let Some(bytes) = snapshot_reference(root, &current)? else {
+            if current == "HEAD" {
+                return Err(LocalGitFailure::Operation);
+            }
+            // Packed references are direct. A missing loose leaf is terminal,
+            // including the branch selected by an unborn sibling.
+            return Ok(current);
+        };
+        let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        if let Some(target) = bytes.strip_prefix(b"ref: ") {
+            names.push(current);
+            current = std::str::from_utf8(target).map_err(rejected)?.to_owned();
+        } else {
+            std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|value| crate::layout::parse_full_object_id(value, format))
+                .ok_or(LocalGitFailure::Operation)?;
+            return Ok(current);
+        }
+    }
+}
+
+fn snapshot_reference(root: &File, reference: &str) -> Result<Option<Vec<u8>>, LocalGitFailure> {
+    let path = Path::new(reference);
+    let parent = path.parent().ok_or(LocalGitFailure::Operation)?;
+    let mut directory = root.try_clone().map_err(rejected)?;
+    for component in parent.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(LocalGitFailure::Operation);
+        };
+        directory = match openat(
+            &directory,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => File::from(file),
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(error) => return Err(rejected(error)),
+        };
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(LocalGitFailure::Operation)?;
+    match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(rejected(error)),
+        Ok(_) => {}
+    }
+    let (bytes, _) = read_marker(&directory, name)?;
+    if bytes.len() > crate::limits::MAX_REVISION_BYTES
+        || file_identity(&open_directory(root, parent)?.metadata().map_err(rejected)?)
+            != file_identity(&directory.metadata().map_err(rejected)?)
+    {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(Some(bytes))
+}
+
 pub(super) fn require_branch_unoccupied(
     authority: &crate::pinning::PinnedRepository,
     reference: &str,
 ) -> Result<(), LocalGitFailure> {
-    let (requested_chain, _) =
-        crate::reference_read::resolve_pinned_reference_chain_from(authority, reference, None)?;
-    let requested = requested_chain.last().ok_or(LocalGitFailure::Operation)?;
+    // Validate the common layout once for this scan, not once per sibling/ref.
+    let snapshot = authority.operation_guard()?;
+    let requested = resolved_reference_name(
+        &authority.git_directory,
+        &authority.worktree_directory,
+        reference,
+        authority.object_format,
+    )?;
     let current = file_identity(&authority.worktree_directory.metadata().map_err(rejected)?);
     let inspect = |directory: &File| -> Result<(), LocalGitFailure> {
         if file_identity(&directory.metadata().map_err(rejected)?) == current {
             return Ok(());
         }
-        let (head, _) = read_marker(directory, "HEAD")?;
-        let head = head.strip_suffix(b"\n").unwrap_or(&head);
-        if let Some(target) = head.strip_prefix(b"ref: ") {
-            let target = std::str::from_utf8(target).map_err(rejected)?;
-            let (chain, _) = crate::reference_read::resolve_pinned_reference_chain_from(
-                authority, target, None,
-            )?;
-            if chain.last() == Some(requested) {
-                return Err(LocalGitFailure::Operation);
-            }
+        if resolved_reference_name(
+            &authority.git_directory,
+            directory,
+            "HEAD",
+            authority.object_format,
+        )? == requested
+        {
+            return Err(LocalGitFailure::Operation);
         }
         Ok(())
     };
@@ -218,23 +309,51 @@ pub(super) fn require_branch_unoccupied(
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
-        Ok(directory) => File::from(directory),
-        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Ok(directory) => Some(File::from(directory)),
+        Err(rustix::io::Errno::NOENT) => None,
         Err(error) => return Err(rejected(error)),
     };
-    let mut entries = rustix::fs::Dir::read_from(&worktrees).map_err(rejected)?;
-    let mut inspected = 0;
-    while let Some(entry) = entries.read() {
-        let entry = entry.map_err(rejected)?;
-        let name = OsStr::from_bytes(entry.file_name().to_bytes());
-        if name == OsStr::new(".") || name == OsStr::new("..") {
-            continue;
+    if let Some(worktrees) = &worktrees {
+        let mut entries = rustix::fs::Dir::read_from(worktrees).map_err(rejected)?;
+        let mut inspected = 0;
+        while let Some(entry) = entries.read() {
+            let entry = entry.map_err(rejected)?;
+            let name = OsStr::from_bytes(entry.file_name().to_bytes());
+            if name == OsStr::new(".") || name == OsStr::new("..") {
+                continue;
+            }
+            inspected += 1;
+            if inspected > crate::limits::MAX_REPOSITORY_INSPECTIONS {
+                return Err(LocalGitFailure::Repository);
+            }
+            let directory = open_directory(worktrees, Path::new(name))?;
+            inspect(&directory)?;
+            if file_identity(
+                &open_directory(worktrees, Path::new(name))?
+                    .metadata()
+                    .map_err(rejected)?,
+            ) != file_identity(&directory.metadata().map_err(rejected)?)
+            {
+                return Err(LocalGitFailure::Repository);
+            }
         }
-        inspected += 1;
-        if inspected > crate::limits::MAX_REPOSITORY_INSPECTIONS {
-            return Err(LocalGitFailure::Repository);
-        }
-        inspect(&open_directory(&worktrees, Path::new(name))?)?;
     }
-    Ok(())
+    match (
+        worktrees,
+        statat(
+            &authority.git_directory,
+            "worktrees",
+            AtFlags::SYMLINK_NOFOLLOW,
+        ),
+    ) {
+        (None, Err(rustix::io::Errno::NOENT)) => {}
+        (Some(directory), Ok(_))
+            if file_identity(
+                &open_directory(&authority.git_directory, Path::new("worktrees"))?
+                    .metadata()
+                    .map_err(rejected)?,
+            ) == file_identity(&directory.metadata().map_err(rejected)?) => {}
+        _ => return Err(LocalGitFailure::Repository),
+    }
+    snapshot.validate_supported_layout()
 }

@@ -352,15 +352,10 @@ impl PinnedRepository {
     }
 
     pub(super) fn administration_for(&self, path: &str) -> &fs::File {
-        let reference = path.strip_prefix("logs/").unwrap_or(path);
-        if reference.starts_with("refs/")
-            && !["refs/bisect/", "refs/worktree/", "refs/rewritten/"]
-                .iter()
-                .any(|prefix| reference.starts_with(prefix))
-        {
-            &self.git_directory
-        } else {
+        if crate::repository_directories::reference_is_worktree_local(path) {
             &self.worktree_directory
+        } else {
+            &self.git_directory
         }
     }
 

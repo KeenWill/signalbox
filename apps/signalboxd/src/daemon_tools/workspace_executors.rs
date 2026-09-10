@@ -425,7 +425,9 @@ where
         if self.roots.standing_parent() != Some(parent) {
             return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
         }
-        if families.executors.git_object_format != self.configured.git_object_format {
+        if self.configured.git_object_format.is_some()
+            && families.executors.git_object_format != self.configured.git_object_format
+        {
             return Err(SessionWorkspaceFailure::ObjectFormatDisagreement);
         }
         let composed = families.executors.workspace_identity;

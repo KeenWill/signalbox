@@ -241,15 +241,20 @@ async fn every_git_tool_operates_on_a_linked_worktree() {
 
 #[test]
 fn branch_switch_preserves_sibling_worktree_branch_occupancy() {
-    exercise_branch_occupancy(false);
+    exercise_branch_occupancy(false, false);
 }
 
 #[test]
 fn branch_switch_resolves_sibling_symbolic_head_chains() {
-    exercise_branch_occupancy(true);
+    exercise_branch_occupancy(true, false);
 }
 
-fn exercise_branch_occupancy(indirect: bool) {
+#[test]
+fn branch_switch_resolves_each_siblings_local_symbolic_refs() {
+    exercise_branch_occupancy(true, true);
+}
+
+fn exercise_branch_occupancy(indirect: bool, local: bool) {
     let fixture = super::support::Fixture::new();
     let repository = git2::Repository::open(fixture.root()).expect("main repository");
     let main_branch = repository
@@ -295,6 +300,17 @@ fn exercise_branch_occupancy(indirect: bool) {
                 format!("ref: refs/heads/indirect-{name}\n"),
             )
             .expect("indirect HEAD");
+            if local {
+                fs::create_dir_all(worktree.path().join("refs/worktree"))
+                    .expect("local refs directory");
+                fs::write(
+                    worktree.path().join("refs/worktree/alias"),
+                    format!("ref: refs/heads/indirect-{name}\n"),
+                )
+                .expect("sibling-local alias");
+                fs::write(worktree.path().join("HEAD"), b"ref: refs/worktree/alias\n")
+                    .expect("local symbolic HEAD");
+            }
         }
     }
     let snapshot = |root: &std::path::Path| {
@@ -462,4 +478,46 @@ fn branch_switch_rolls_back_when_a_sibling_claims_the_target_before_head_publica
             .expect("branch name"),
         "target"
     );
+}
+
+fn measure_sibling_scan(count: usize) -> usize {
+    let fixture = super::support::Fixture::new();
+    for index in 0..count {
+        let administration = fixture
+            .root()
+            .join(".git/worktrees")
+            .join(format!("sibling-{index}"));
+        fs::create_dir_all(&administration).expect("generated sibling administration");
+        fs::write(
+            administration.join("HEAD"),
+            format!("ref: refs/heads/sibling-{index}\n"),
+        )
+        .expect("generated unborn sibling HEAD");
+    }
+    let executor = fixture.executor();
+    crate::layout::take_administration_inspections();
+    crate::repository_directories::require_branch_unoccupied(
+        &executor.repository_authority,
+        "refs/heads/unoccupied",
+    )
+    .expect("unoccupied branch");
+    crate::layout::take_administration_inspections()
+}
+
+#[test]
+fn sibling_occupancy_scan_visits_administration_entries_linearly() {
+    let small = measure_sibling_scan(32);
+    let large = measure_sibling_scan(512);
+    assert!(small > 0);
+    assert!(
+        large <= small * 20,
+        "32 siblings: {small} visits; 512 siblings: {large} visits"
+    );
+}
+
+#[test]
+#[ignore = "generated 5,000-sibling scale measurement"]
+fn sibling_occupancy_scan_handles_five_thousand_worktrees() {
+    let visits = measure_sibling_scan(5_000);
+    eprintln!("5,000 sibling worktrees: {visits} administration entry visits");
 }
