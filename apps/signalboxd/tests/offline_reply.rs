@@ -1514,6 +1514,7 @@ async fn automatic_resume_preserves_the_statement_for_an_exempt_provider_failure
 -> Result<(), Box<dyn Error>> {
     let overloaded = Script::delivering(TerminalEvidence::ProviderError(
         signalbox_model_runtime::ProviderErrorEvidence {
+            credential_recovery: None,
             exchange: ExchangeFacts::default(),
             reported_model: Some(ProviderReportedModel::new(SERVED_PROVIDER_MODEL)),
             kind: signalbox_model_runtime::ProviderErrorKind::Overloaded,

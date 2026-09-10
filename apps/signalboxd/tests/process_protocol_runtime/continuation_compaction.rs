@@ -834,6 +834,7 @@ async fn failed_or_refused_compaction_closes_the_active_checkpoint() -> Result<(
     let runtime = RunningRuntime::start().await?;
     let failures = [
         TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            credential_recovery: None,
             exchange: ExchangeFacts::default(),
             reported_model: None,
             kind: ProviderErrorKind::Unrecognized,

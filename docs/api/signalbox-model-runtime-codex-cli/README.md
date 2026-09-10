@@ -4,7 +4,8 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| image | 0 | 0 | 1 | [image](image.md) |
 | translate | 0 | 0 | 2 | [translate](translate.md) |
 | config | 1 | 0 | 0 | [config](config.md) |
-| oauth | 4 | 2 | 0 | [oauth](oauth.md) |
+| oauth | 5 | 2 | 0 | [oauth](oauth.md) |
 | runtime | 4 | 0 | 2 | [runtime](runtime.md) |

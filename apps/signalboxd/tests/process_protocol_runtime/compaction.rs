@@ -1314,6 +1314,7 @@ async fn assert_failed_automatic_compaction_closes_turn(
     } else {
         ScriptedModel::single(Script::delivering(TerminalEvidence::ProviderError(
             ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: ExchangeFacts::default(),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,

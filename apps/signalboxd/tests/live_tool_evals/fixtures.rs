@@ -1242,7 +1242,9 @@ impl OperationTracker {
                 | MessagePart::Thinking { .. }
                 | MessagePart::RedactedThinking { .. }
                 | MessagePart::ProviderCompaction { .. }
-                | MessagePart::ProviderReasoning { .. } => None,
+                | MessagePart::ProviderReasoning { .. }
+                | MessagePart::ImageReference(_)
+                | MessagePart::Image(_) => None,
             })
         });
         self.record_new_results(tool_results);

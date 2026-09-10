@@ -487,7 +487,9 @@ where
         async move {
             let evidence = match operation? {
                 FileMediaOperation::Inspect(request) => {
-                    service_evidence(self.service.inspect(request).await, inspection_evidence)?
+                    service_evidence(self.service.inspect(request).await, |value| {
+                        Ok(inspection_evidence(value))
+                    })?
                 }
                 FileMediaOperation::Read(request) => {
                     service_evidence(self.service.read(request).await, read_evidence)?
@@ -500,10 +502,10 @@ where
 
 fn service_evidence<T>(
     result: Result<T, FileMediaServiceFailure>,
-    completed: fn(T) -> ToolExecutorEvidence,
+    completed: impl FnOnce(T) -> Result<ToolExecutorEvidence, FileMediaExecutorError>,
 ) -> Result<ToolExecutorEvidence, FileMediaExecutorError> {
     match result {
-        Ok(value) => Ok(completed(value)),
+        Ok(value) => completed(value),
         Err(FileMediaServiceFailure::File(failure)) => failure_evidence(failure),
         Err(FileMediaServiceFailure::Operator(error)) => Err(error),
     }
@@ -603,8 +605,9 @@ fn ambiguous_failure(media_types: &[CanonicalMediaType]) -> ToolExecutorEvidence
     }))
 }
 
-fn read_evidence(result: FileReadResult) -> ToolExecutorEvidence {
-    match result {
+fn read_evidence(result: FileReadResult) -> Result<ToolExecutorEvidence, FileMediaExecutorError> {
+    Ok(match result {
+        FileReadResult::Reference(reference) => return reference_evidence(reference),
         FileReadResult::Text { body, continuation } => completed_json(json!({
             "status": "text",
             "body": body,
@@ -617,6 +620,50 @@ fn read_evidence(result: FileReadResult) -> ToolExecutorEvidence {
             "truncated": matches!(&continuation, signalbox_file_media_runtime::ReadContinuation::More { .. }),
             "cursor": continuation_cursor(continuation),
         })),
+    })
+}
+
+fn reference_evidence(
+    reference: signalbox_file_media_runtime::FileMediaReference,
+) -> Result<ToolExecutorEvidence, FileMediaExecutorError> {
+    fn domain_identity(
+        identity: &signalbox_file_media_runtime::MediaValidationIdentity,
+    ) -> Option<signalbox_domain::MediaValidationIdentity> {
+        let evidence = match identity.evidence() {
+            signalbox_file_media_runtime::ValidationEvidence::StrongSignature => {
+                signalbox_domain::MediaValidationEvidence::StrongSignature
+            }
+            signalbox_file_media_runtime::ValidationEvidence::StructuralValidation => {
+                signalbox_domain::MediaValidationEvidence::StructuralValidation
+            }
+            _ => return None,
+        };
+        signalbox_domain::MediaValidationIdentity::try_new(
+            signalbox_domain::BlobDigest::from_bytes(*identity.digest().as_bytes()),
+            identity.media_type().as_str().to_owned(),
+            identity.reader().provider().as_str().to_owned(),
+            identity.reader().reader().as_str().to_owned(),
+            identity.reader().revision().as_str().to_owned(),
+            evidence,
+        )
+    }
+    let (Some(identity), Some(source)) = (
+        domain_identity(reference.presented()),
+        domain_identity(reference.source()),
+    ) else {
+        return Err(FileMediaExecutorError::from_class(
+            OperatorFailureClass::FailClosedCorruption,
+        ));
+    };
+    let text = json!({"status":"read", "output":"image", "digest":identity.digest().to_string(), "media_type":identity.media_type(), "byte_length":reference.byte_length().get().to_string()});
+    let Some(reference) =
+        signalbox_domain::ToolMediaReference::image(identity, source, reference.byte_length())
+    else {
+        return failure_evidence(FileMediaFailure::OutputUnitTooLarge);
+    };
+    match ToolResultText::try_new(text.to_string()) {
+        Ok(text) => Ok(ToolExecutorEvidence::CompletedMedia { text, reference }),
+        Err(_) => failure_evidence(FileMediaFailure::OutputUnitTooLarge),
     }
 }
 
@@ -755,7 +802,9 @@ mod tests {
                 signalbox_file_media_runtime::SourceReadError::Integrity,
             ),
         );
-        let inspected = service_evidence(Err(failure.clone().into()), inspection_evidence);
+        let inspected = service_evidence(Err(failure.clone().into()), |value| {
+            Ok(inspection_evidence(value))
+        });
         let read = service_evidence(Err(failure.into()), read_evidence);
 
         assert_eq!(
@@ -955,7 +1004,7 @@ mod tests {
             continuation: signalbox_file_media_runtime::ReadContinuation::Complete,
         };
 
-        let evidence = read_evidence(result);
+        let evidence = read_evidence(result).unwrap();
 
         let ToolExecutorEvidence::CompletedText(text) = evidence else {
             panic!("the maximum admitted worst-case text must fit the tool result");

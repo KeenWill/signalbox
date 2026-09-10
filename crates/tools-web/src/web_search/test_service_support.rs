@@ -636,7 +636,9 @@ pub(super) fn known_failure_detail(evidence: ToolExecutorEvidence) -> Option<Str
         ToolExecutorEvidence::KnownFailed { detail } => {
             detail.map(|detail| String::from(detail.as_str()))
         }
-        other @ (ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::Ambiguous) => {
+        other @ (ToolExecutorEvidence::CompletedText(_)
+        | ToolExecutorEvidence::CompletedMedia { .. }
+        | ToolExecutorEvidence::Ambiguous) => {
             panic!("expected known failure, got {other:?}")
         }
     }
@@ -671,6 +673,7 @@ pub(super) fn colliding_failure_detail(
         } => String::from(detail.as_str()),
         other @ (ToolExecutorEvidence::KnownFailed { detail: None }
         | ToolExecutorEvidence::CompletedText(_)
+        | ToolExecutorEvidence::CompletedMedia { .. }
         | ToolExecutorEvidence::Ambiguous) => {
             panic!("expected detailed known failure, got {other:?}")
         }
