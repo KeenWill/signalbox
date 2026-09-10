@@ -2375,42 +2375,46 @@ fn classify_terminal(
                                 ModelCallCauseCode::UnrepresentableToolMaterial,
                             );
                         };
-                        let rejected = proposal_limits.max_requests
-                            .filter(|limit| tool_count as u64 > *limit)
-                            .map(|limit| signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded { limit })
-                            .or_else(|| proposal_limits.max_argument_bytes
-                                .filter(|limit| proposal.arguments_json.len() as u64 > *limit)
-                                .map(|limit| signalbox_domain::ToolInadmissibleReason::ArgumentBytesExceeded {
-                                    limit, bytes: proposal.arguments_json.len() as u64,
-                                }));
-                        if let Some(reason) = rejected {
-                            let arguments = rejected_argument_preview(&proposal.arguments_json)?;
-                            response_parts.push(AssistantResponsePart::ToolCall(
-                                DomainToolCallProposal::inadmissible(name, arguments, reason),
-                            ));
-                            continue;
-                        }
-                        let Ok(arguments) = NormalizedToolArguments::try_from_provider_text(
-                            proposal.arguments_json,
-                        ) else {
+                        let raw_arguments = proposal.arguments_json;
+                        let Ok(arguments) =
+                            NormalizedToolArguments::try_from_provider_text(raw_arguments.clone())
+                        else {
                             return classify(
                                 ModelCallTerminalObservation::KnownFailed,
                                 ModelCallCauseCode::UnrepresentableToolMaterial,
                             );
                         };
-                        let proposal = if let Some(limit) = proposal_limits
-                            .max_argument_bytes
-                            .filter(|limit| arguments.as_str().len() as u64 > *limit)
-                        {
-                            let bytes = arguments.as_str().len() as u64;
-                            DomainToolCallProposal::inadmissible(
-                                name,
-                                rejected_argument_preview(arguments.as_str())?,
-                                signalbox_domain::ToolInadmissibleReason::ArgumentBytesExceeded {
+                        let oversized = proposal_limits.max_argument_bytes.and_then(|limit| {
+                            if raw_arguments.len() as u64 > limit {
+                                Some((limit, raw_arguments.as_str()))
+                            } else if arguments.as_str().len() as u64 > limit {
+                                Some((limit, arguments.as_str()))
+                            } else {
+                                None
+                            }
+                        });
+                        let rejected = proposal_limits
+                            .max_requests
+                            .filter(|limit| tool_count as u64 > *limit)
+                            .map(|limit| {
+                                signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded {
                                     limit,
-                                    bytes,
-                                },
-                            )
+                                }
+                            })
+                            .or_else(|| {
+                                oversized.map(|(limit, value)| {
+                                signalbox_domain::ToolInadmissibleReason::ArgumentBytesExceeded {
+                                    limit, bytes: value.len() as u64,
+                                }
+                            })
+                            });
+                        let arguments = if let Some((_, value)) = oversized {
+                            rejected_argument_preview(value)?
+                        } else {
+                            arguments
+                        };
+                        let proposal = if let Some(reason) = rejected {
+                            DomainToolCallProposal::inadmissible(name, arguments, reason)
                         } else {
                             DomainToolCallProposal::new(name, arguments)
                         };
@@ -4333,7 +4337,7 @@ mod tests {
                 AssistantPart::ToolCall(ToolCallProposal {
                     id: ToolCallId::new(format!("call-{index}")),
                     name: ToolName::new("current_time"),
-                    arguments_json: String::from("{}"),
+                    arguments_json: String::from(r#" { "b": 2, "a": 1 } "#),
                 })
             })
             .collect();
@@ -4353,6 +4357,7 @@ mod tests {
             let signalbox_domain::AssistantResponsePart::ToolCall(proposal) = part else {
                 panic!("fixture contains only proposals");
             };
+            assert_eq!(proposal.arguments().as_str(), r#"{"a":1,"b":2}"#);
             assert_eq!(
                 proposal.inadmissible_reason(),
                 if index < 32 {
@@ -4366,6 +4371,29 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn over_cap_proposals_still_reject_unrepresentable_argument_text() {
+        let mut content = (0..32)
+            .map(|index| {
+                AssistantPart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new(format!("call-{index}")),
+                    name: ToolName::new("current_time"),
+                    arguments_json: String::from("{}"),
+                })
+            })
+            .collect::<Vec<_>>();
+        content.push(AssistantPart::ToolCall(ToolCallProposal {
+            id: ToolCallId::new("over-cap-call"),
+            name: ToolName::new("current_time"),
+            arguments_json: String::from("\0"),
+        }));
+        assert_invalid_tool_proposal_closes(completion_with_finish(
+            "model-exact",
+            CompletionFinish::ToolUse,
+            content,
+        ));
     }
 
     #[test]
