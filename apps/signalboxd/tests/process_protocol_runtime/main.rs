@@ -148,6 +148,7 @@ mod imported_conversations;
 mod input_admission;
 mod oauth;
 mod program;
+mod proposals;
 mod reconciliation;
 mod review_orchestration;
 mod runner_recovery;

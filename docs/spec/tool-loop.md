@@ -26,7 +26,7 @@ one call are one batch, and the rules on this page apply per batch.
 Each proposal becomes one immutable `ToolRequest` record fixing its producing
 call, name, normalized arguments, ordinal, and resolved approval posture.
 Arguments that decode are stored as compact JSON with lexically ordered object
-keys; arguments that do not decode are stored as the exact bounded text the
+keys; admitted arguments that do not decode are stored as the exact text the
 provider adapter emitted. Every request has an approval state separate from its
 execution state. A daemon tool mapping may declare an approval posture:
 automatic, delegated to a judge, or human. The selected posture is frozen into
@@ -100,7 +100,7 @@ materialization. Placement loss never rewrites or cancels dispatched work.
 A turn is the logical conversational outcome; a model call and a turn attempt
 are physical executions that may repeat without changing that identity.
 
-Malformed arguments are retained as bounded text instead of being rejected, so
+Admitted malformed arguments are retained as text instead of being rejected, so
 identity-safe evidence of the proposal survives without being treated as JSON.
 
 An `AlwaysConfirm` permission exists so that no session blanket can silently
@@ -258,20 +258,27 @@ command claim and replay, and provenance-only attribution, in
 [identity-and-commands](identity-and-commands.md); transcript append and
 compaction in [sessions-and-transcript](sessions-and-transcript.md).
 
-Undecodable argument text is the exact bounded UTF-8 the provider adapter
+Admitted undecodable argument text is the exact UTF-8 the provider adapter
 emitted after its preparation-time credential scrub. An undecodable value, or
 JSON that does not decode against the selected tool's argument type, becomes a
 typed execution error at preflight. Empty text blocks are omitted at the
 provider boundary and create no semantic entry; tool proposals are never
 omitted. A tool-use entry carries only its call and request references and never
 copies the name or arguments, and a result entry never copies output, error
-detail, or denial reason. A response with more requests than the fixed
-per-response cap closes the producing call `KnownFailed` and creates no partial
-batch, request record, or tool-use entry. If a definitive completion carries a
-tool name or argument payload that cannot enter the bounded domain vocabulary,
-the provider bridge converts the response to a typed `KnownFailed` observation;
-it does not leave the call in flight, persist the inadmissible proposal, or
-partially commit the response.
+detail, or denial reason.
+
+The optional `[tool_proposals]` configuration sets `max_requests` (default 32)
+and `max_argument_bytes` (default 1048576); `"none"` removes the corresponding
+admission bound. The first `max_requests` proposals are eligible for approval;
+each later proposal receives an `execution_failed` result naming the cap and
+retains its normalized arguments unless the argument-byte bound requires a
+preview. Normalization and durable-value validation precede either limit. An
+argument payload exceeding its byte bound before or after canonicalization is
+stored as a bounded UTF-8 preview with retained/dropped byte counts and receives
+an `invalid_arguments` result. These requests remain in their original response
+order and never execute or require approval. Neither limit closes the producing
+model call `KnownFailed`. Tool names and argument text that cannot enter durable
+domain values still produce a typed `KnownFailed` observation.
 
 Approval visits requests in proposal order and the turn parks on the earliest
 undecided request. No request in a batch executes while any request in that

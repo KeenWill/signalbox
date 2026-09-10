@@ -33,7 +33,7 @@
 | submit_input | 5 | 2 | 0 | [submit_input](submit_input.md) |
 | tool_dispatch_gate | 2 | 0 | 0 | [tool_dispatch_gate](tool_dispatch_gate.md) |
 | tool_execution_test_support | 7 | 0 | 1 | [tool_execution_test_support](tool_execution_test_support.md) |
-| tool_loop | 23 | 5 | 0 | [tool_loop](tool_loop.md) |
+| tool_loop | 24 | 5 | 0 | [tool_loop](tool_loop.md) |
 | tool_loop_ports | 7 | 3 | 0 | [tool_loop_ports](tool_loop_ports.md) |
 | turn_liveness | 16 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | update_session_placement | 3 | 1 | 0 | [update_session_placement](update_session_placement.md) |

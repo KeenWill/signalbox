@@ -208,7 +208,8 @@ call its producer and evidence are pre-call exhaustion's; with a predecessor
 call its cause is that provider failure, never pool exhaustion. An accepted stop
 instead consumes the wait, opens a fresh immediate successor with its applied
 interrupt proof, ends it AfterCancellation(Cancelled), and appends TurnCancelled
-after the wait frontier while reclassifying pending steering.
+after the wait frontier while reclassifying pending steering. This includes a
+wait frontier containing a completed tool round.
 
 A due deadline makes a wait eligible. Commit-time wait notifications nudge the
 scheduler; periodic invocation recovery also nudges eligible waits, including
