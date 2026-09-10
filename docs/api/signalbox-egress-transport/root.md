@@ -7,6 +7,7 @@
 ```rust
 pub enum WebFetchTransportFailure {
     RequestFailed,
+    Timeout,
     DispatchUnknown,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq

@@ -877,7 +877,9 @@ fn operation_tool_results(
             | MessagePart::Thinking { .. }
             | MessagePart::RedactedThinking { .. }
             | MessagePart::ProviderCompaction { .. }
-            | MessagePart::ProviderReasoning { .. } => None,
+            | MessagePart::ProviderReasoning { .. }
+            | MessagePart::ImageReference(_)
+            | MessagePart::Image(_) => None,
         })
         .collect::<Result<Vec<_>, _>>()?)
 }

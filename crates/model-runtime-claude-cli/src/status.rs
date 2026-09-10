@@ -7,6 +7,9 @@ pub(crate) fn classify_error(
     subtype: &str,
     message: &str,
 ) -> ProviderErrorKind {
+    if status == Some(401) {
+        return ProviderErrorKind::CredentialRejected;
+    }
     let normalized = format!("{subtype} {message}").to_ascii_lowercase();
     let text_kind = match () {
         _ if contains_any(
@@ -118,6 +121,14 @@ mod tests {
     use signalbox_model_runtime::ProviderErrorKind;
 
     use super::classify_error;
+
+    #[test]
+    fn credential_rejection_status_precedes_rendered_overload_text() {
+        assert_eq!(
+            classify_error(Some(401), "error_during_execution", "overloaded"),
+            ProviderErrorKind::CredentialRejected
+        );
+    }
 
     #[test]
     fn definitive_status_classifies_an_otherwise_generic_error() {

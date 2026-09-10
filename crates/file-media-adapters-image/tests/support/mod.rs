@@ -153,8 +153,13 @@ impl FileMediaProcessor for DirectProcessor {
                         .map_err(|_| ProcessorBoundaryFailure::from(ProcessorFailure::Failed))?;
                 }
                 let metadata_source = MetadataOnlySource(source);
+                let source: &dyn VerifiedBlobSource = if request.view.as_str() == "metadata" {
+                    &metadata_source
+                } else {
+                    source
+                };
                 self.provider
-                    .read(reader, request, &metadata_source, cancellation)
+                    .read(reader, request, source, cancellation)
                     .await
                     .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
             }),

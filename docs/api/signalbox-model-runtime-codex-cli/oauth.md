@@ -50,10 +50,33 @@ pub type OauthDeliveryFuture<'a> = pin::Pin<
 >;
 ```
 
+## OauthRecoveryFuture
+
+```rust
+pub type OauthRecoveryFuture<'a> = pin::Pin<
+    boxed::Box<
+        dyn future::Future<Output = signalbox_model_runtime::CredentialRejectionRecovery>
+            + marker::Send
+            + 'a,
+    >,
+>;
+```
+
 ## OauthCredentialProvider
 
 ```rust
 pub trait OauthCredentialProvider: marker::Send + marker::Sync + fmt::Debug {
+    fn invocation_succeeded<'a>(
+        &'a self,
+        reference: &'a signalbox_model_runtime::CredentialReference,
+        access_token: &'a signalbox_model_runtime::CredentialValue,
+    ) -> pin::Pin<boxed::Box<dyn future::Future<Output = ()> + marker::Send + 'a>>;
+    fn recover_rejection<'a>(
+        &'a self,
+        reference: &'a signalbox_model_runtime::CredentialReference,
+        rejected_access_token: &'a signalbox_model_runtime::CredentialValue,
+        cancellation: signalbox_model_runtime::CancellationSignal,
+    ) -> OauthRecoveryFuture<'a>;
     fn deliver<'a>(
         &'a self,
         reference: &'a signalbox_model_runtime::CredentialReference,
