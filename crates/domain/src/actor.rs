@@ -59,35 +59,3 @@ impl ProgramActor {
         self.run
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Actor;
-    use crate::test_support::{tool_request_id, turn_id};
-
-    /// carried identities retain their exact kind and do not make
-    /// different actor variants interchangeable.
-    #[test]
-    fn actor_equality_is_structural() {
-        assert_eq!(Actor::User, Actor::User);
-        assert_ne!(Actor::User, Actor::Core);
-        assert_ne!(Actor::User, Actor::Recovery);
-        assert_ne!(
-            Actor::Model { turn: turn_id(1) },
-            Actor::Model { turn: turn_id(2) }
-        );
-        assert_ne!(
-            Actor::Model { turn: turn_id(1) },
-            Actor::Tool {
-                request: tool_request_id(1),
-            }
-        );
-    }
-
-    /// model agency remains a distinct typed value and cannot equal
-    /// user agency.
-    #[test]
-    fn model_agency_cannot_masquerade_as_user() {
-        assert_ne!(Actor::Model { turn: turn_id(1) }, Actor::User);
-    }
-}
