@@ -385,6 +385,7 @@ async fn tool_acknowledgement_tail_returns_only_the_original_proposal() {
 async fn tool_acknowledgement_tail_rejects_incomplete_or_conflicting_evidence() {
     for scenario in [
         "tool_acknowledgement_tail_without_result",
+        "tool_acknowledgement_tail_reports_tool_use",
         "tool_acknowledgement_tail_is_empty",
         "tool_acknowledgement_tail_changes_model",
         "tool_acknowledgement_tail_proposes_tool",

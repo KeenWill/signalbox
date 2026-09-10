@@ -166,6 +166,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;
         }
+        "tool_acknowledgement_tail_reports_tool_use" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            success("tool_use", Some(fixtures::ANSWER))?;
+        }
         "tool_acknowledgement_tail_is_empty" => {
             assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
             tool_result(fixtures::TOOL_ID)?;

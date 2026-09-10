@@ -402,7 +402,7 @@ assistant event must repeat that value, and a result carrying a different
 session id is a protocol violation. Assistant content retains its first message
 id. After every proposed tool has its bridge acknowledgement, one text-only
 message with a distinct id and at least one text block may acknowledge the
-batch. Its text is discarded; the reported finish remains `end_turn`, while the
+batch. Its text is discarded; the reported finish must be `end_turn`, while the
 effective completion of the original batch is `ToolUse`. A different message id
 outside that acknowledgement is a protocol violation.
 
