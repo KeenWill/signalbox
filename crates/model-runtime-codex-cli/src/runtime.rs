@@ -1,5 +1,8 @@
 //! One operation, one Codex CLI process spawn.
 
+mod capacity;
+pub use capacity::CodexCliCapacityProbeError;
+
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;

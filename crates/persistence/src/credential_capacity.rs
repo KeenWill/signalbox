@@ -76,6 +76,71 @@ pub(crate) async fn retain_call_rate_limits(
     Ok(result.rows_affected() != 0)
 }
 
+/// Retains an out-of-call capacity observation and atomically grants eligibility
+/// to waits naming the profile. Newer evidence wins against concurrent calls.
+pub async fn retain_credential_capacity_probe(
+    pool: &sqlx::PgPool,
+    credential_reference: &str,
+    snapshot: &ProviderRateLimitSnapshot,
+) -> Result<bool, ModelCallRepositoryError> {
+    use crate::model_execution::credential_pool::{
+        acquire_model_call_outbox_order_guard, lock_credential_pool_action_head,
+    };
+    let windows = snapshot
+        .windows()
+        .iter()
+        .map(|window| WindowRecord {
+            remaining_percent: *window.remaining_percent(),
+            window_duration: *window.window_duration(),
+            resets_at: window.resets_at().map(unix_nanos),
+        })
+        .collect::<Vec<_>>();
+    let windows = serde_json::to_value(windows)
+        .map_err(|_| ModelCallCorruption::Inconsistent("credential capacity window encoding"))?;
+    let mut transaction = pool.begin().await?;
+    acquire_model_call_outbox_order_guard(&mut transaction).await?;
+    lock_credential_pool_action_head(&mut transaction, credential_reference).await?;
+    crate::credential_invocations::lock_profiles(&mut transaction, &[credential_reference]).await?;
+    let result = sqlx::query(
+        "INSERT INTO credential_rate_limit_snapshot
+            (credential_reference, observation_model_call_id, observed_at_nanos, windows)
+         VALUES ($1, NULL, $2, $3)
+         ON CONFLICT (credential_reference) DO UPDATE
+             SET observation_model_call_id = NULL,
+                 observed_at_nanos = EXCLUDED.observed_at_nanos,
+                 windows = EXCLUDED.windows
+           WHERE EXCLUDED.observed_at_nanos > credential_rate_limit_snapshot.observed_at_nanos",
+    )
+    .bind(credential_reference)
+    .bind(Decimal::from_i128_with_scale(
+        unix_nanos(*snapshot.observed_at()),
+        0,
+    ))
+    .bind(windows)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(result.rows_affected() != 0)
+}
+
+/// Configured profiles whose live waits retain a headroom exclusion. Probing
+/// these members can observe an external quota reset before its old deadline.
+pub async fn waiting_capacity_profiles(
+    pool: &sqlx::PgPool,
+    configured_profiles: &[String],
+) -> Result<Vec<String>, ModelCallRepositoryError> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT member.profile FROM credential_availability_wait_member member
+         JOIN credential_availability_wait waiting USING (wait_attempt_id)
+         JOIN turn_lifecycle active ON active.turn_id = waiting.turn_id AND active.session_id = waiting.session_id
+         WHERE member.profile = ANY($1) AND waiting.consumed_by_attempt_id IS NULL
+           AND active.state_kind = 'active' AND NOT active.delegation_runtime_terminal
+           AND goal_turn_is_runtime_relevant(active.session_id, active.turn_id)
+           AND member.exclusions @> '[{\"exclusion\":{\"kind\":\"headroom_reserve\"}}]'::jsonb
+         ORDER BY member.profile",
+    ).bind(configured_profiles).fetch_all(pool).await?)
+}
+
 /// Loads the most recently observed windows for a non-secret profile reference.
 pub async fn load_credential_rate_limits(
     connection: &mut PgConnection,

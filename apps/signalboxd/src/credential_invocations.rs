@@ -12,7 +12,9 @@ use std::{
 };
 use tokio::sync::watch;
 
+mod capacity;
 mod process_identity;
+pub use capacity::CodexCapacityRefresh;
 
 // Process-group absence is polled once per second until shutdown.
 const PROCESS_GROUP_RECHECK_INTERVAL: Duration = Duration::from_secs(1);

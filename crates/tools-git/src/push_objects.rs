@@ -7,7 +7,10 @@ use crate::{
     },
     failure::LocalGitFailure,
     layout::parse_full_object_id,
-    limits::{MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_REPOSITORY_INSPECTIONS, MAX_SHALLOW_ENTRIES},
+    limits::{
+        MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_METADATA_OBJECT_BYTES, MAX_REPOSITORY_INSPECTIONS,
+        MAX_SHALLOW_ENTRIES,
+    },
     pinning::{PinnedRepository, RepositoryShell},
 };
 use flate2::read::ZlibDecoder;
@@ -21,6 +24,10 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
+
+// A full-size metadata object can be slightly larger after zlib framing and
+// stored-block overhead, but compressed metadata must still have its own bound.
+const MAX_COMPRESSED_METADATA_BYTES: u64 = (2 * MAX_METADATA_OBJECT_BYTES) as u64;
 
 pub(super) struct PushObjectSnapshot {
     pub(super) repository: RepositoryShell,
@@ -581,7 +588,11 @@ impl ObjectSource {
 
     fn decode_loose(&self, file: File) -> Result<ObjectContent, LocalGitFailure> {
         let compressed_size = file.metadata().map_err(rejected)?.len();
-        let mut decoder = compressed_decoder(file, || self.check_deadline());
+        // The loose header reveals the object kind. Keep the compressed-input
+        // bound for metadata, and lift it only after identifying a blob.
+        let mut decoder = compressed_decoder(file, Some(MAX_COMPRESSED_METADATA_BYTES), || {
+            self.check_deadline()
+        });
         let mut header = Vec::new();
         loop {
             let byte = byte(&mut decoder)?;
@@ -605,6 +616,9 @@ impl ObjectSource {
                 )
             })
             .ok_or(LocalGitFailure::Repository)?;
+        if kind == ObjectType::Blob {
+            decoder.get_mut().remaining = None;
+        }
         let declared = size;
         let size = size.parse::<usize>().map_err(rejected)?;
         if size.to_string() != declared
@@ -766,21 +780,29 @@ impl ObjectSource {
                 entries.push((pack.end as u64 - remaining.limit(), size));
                 offset = base;
             } else {
-                let mut decoder = compressed_decoder(remaining, || self.check_deadline());
+                let mut decoder =
+                    compressed_decoder(remaining, compressed_metadata_limit(object_kind), || {
+                        self.check_deadline()
+                    });
                 break ObjectContent::decode(&mut decoder, size, object_kind, self.deadline)?;
             }
         };
         let pack = &self.packs[pack_index];
         while let Some((offset, size)) = entries.pop() {
             self.check_deadline()?;
+            let limit = crate::limits::object_byte_limit(self.max_object_bytes, content.kind);
+            if size > limit {
+                return Err(LocalGitFailure::Repository);
+            }
             let mut file = pack_file.try_clone().map_err(rejected)?;
             file.seek(SeekFrom::Start(offset)).map_err(rejected)?;
-            let mut decoder = compressed_decoder(file.take(pack.end as u64 - offset), || {
-                self.check_deadline()
-            });
+            let mut decoder = compressed_decoder(
+                file.take(pack.end as u64 - offset),
+                compressed_metadata_limit(content.kind),
+                || self.check_deadline(),
+            );
             let delta = ObjectContent::decode(&mut decoder, size, ObjectType::Blob, self.deadline)?;
             drop(decoder);
-            let limit = crate::limits::object_byte_limit(self.max_object_bytes, content.kind);
             content = content.apply_delta(delta.file, Some(limit), self.deadline)?;
         }
         if file_snapshot_identity(&pack_file.metadata().map_err(rejected)?)
@@ -845,24 +867,50 @@ impl ObjectSource {
 }
 
 // zlib can consume arbitrarily many empty blocks before returning one decoded
-// byte, so the preparation deadline belongs beneath its compressed-input buffer.
-fn compressed_decoder(
-    reader: impl Read,
-    check: impl FnMut() -> Result<(), LocalGitFailure>,
-) -> ZlibDecoder<impl Read> {
-    ZlibDecoder::new(CompressedInput { reader, check })
+// byte, so deadlines and metadata input bounds belong beneath its input buffer.
+fn compressed_metadata_limit(kind: ObjectType) -> Option<u64> {
+    (kind != ObjectType::Blob).then_some(MAX_COMPRESSED_METADATA_BYTES)
+}
+
+fn compressed_decoder<R, C>(
+    reader: R,
+    remaining: Option<u64>,
+    check: C,
+) -> ZlibDecoder<CompressedInput<R, C>>
+where
+    R: Read,
+    C: FnMut() -> Result<(), LocalGitFailure>,
+{
+    ZlibDecoder::new(CompressedInput {
+        reader,
+        remaining,
+        check,
+    })
 }
 
 struct CompressedInput<R, C> {
     reader: R,
+    remaining: Option<u64>,
     check: C,
 }
 
 impl<R: Read, C: FnMut() -> Result<(), LocalGitFailure>> Read for CompressedInput<R, C> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         (self.check)().map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
-        let count = buffer.len().min(IO_BYTES);
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let mut count = buffer.len().min(IO_BYTES);
+        if let Some(remaining) = self.remaining {
+            if remaining == 0 {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            count = count.min(remaining as usize);
+        }
         let count = self.reader.read(&mut buffer[..count])?;
+        if let Some(remaining) = &mut self.remaining {
+            *remaining -= count as u64;
+        }
         (self.check)().map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
         Ok(count)
     }
@@ -897,7 +945,7 @@ mod compressed_deadline_tests {
 
     // RFC 1950/1951 stored blocks: a valid zlib stream with a long run of
     // non-final, empty blocks between the prefix and suffix output.
-    fn empty_blocks_between(prefix: &[u8], suffix: &[u8]) -> Vec<u8> {
+    fn empty_blocks_between_count(prefix: &[u8], suffix: &[u8], empty_blocks: usize) -> Vec<u8> {
         let mut compressed = vec![0x78, 0x01];
         let mut block = |bytes: &[u8], final_block: bool| {
             let length = u16::try_from(bytes.len()).expect("stored-block size");
@@ -909,7 +957,7 @@ mod compressed_deadline_tests {
         for page in prefix.chunks(u16::MAX as usize) {
             block(page, false);
         }
-        for _ in 0..IO_BYTES {
+        for _ in 0..empty_blocks {
             block(&[], false);
         }
         block(suffix, true);
@@ -920,6 +968,10 @@ mod compressed_deadline_tests {
         }
         compressed.extend_from_slice(&((b << 16) | a).to_be_bytes());
         compressed
+    }
+
+    fn empty_blocks_between(prefix: &[u8], suffix: &[u8]) -> Vec<u8> {
+        empty_blocks_between_count(prefix, suffix, IO_BYTES)
     }
 
     struct CountedInput<'a> {
@@ -948,7 +1000,7 @@ mod compressed_deadline_tests {
             reader: Cursor::new(compressed),
             consumed: &consumed,
         };
-        let mut decoder = compressed_decoder(reader, || {
+        let mut decoder = compressed_decoder(reader, None, || {
             if consumed.get() >= expires_after.get() {
                 Err(LocalGitFailure::Repository)
             } else {
@@ -981,5 +1033,37 @@ mod compressed_deadline_tests {
     fn packed_output_read_stops_inside_empty_deflate_blocks_between_pages() {
         let prefix = vec![b'x'; IO_BYTES];
         assert_empty_blocks_stop_at_deadline(&prefix, b"base tail");
+    }
+
+    #[test]
+    fn compressed_metadata_has_an_independent_input_bound() {
+        // Each empty stored block occupies five compressed bytes. Put the
+        // suffix beyond the metadata budget without increasing decoded size.
+        let empty_blocks = MAX_COMPRESSED_METADATA_BYTES as usize / 5 + 1;
+        let compressed = empty_blocks_between_count(&[], b"x", empty_blocks);
+        let consumed = Cell::new(0);
+        let reader = CountedInput {
+            reader: Cursor::new(compressed.clone()),
+            consumed: &consumed,
+        };
+        let mut metadata =
+            compressed_decoder(reader, compressed_metadata_limit(ObjectType::Tree), || {
+                Ok(())
+            });
+        let failure = metadata
+            .read_to_end(&mut Vec::new())
+            .expect_err("compressed metadata bound");
+        assert_eq!(failure.kind(), io::ErrorKind::InvalidData);
+        assert!(consumed.get() <= MAX_COMPRESSED_METADATA_BYTES as usize);
+
+        let mut blob = compressed_decoder(
+            compressed.as_slice(),
+            compressed_metadata_limit(ObjectType::Blob),
+            || Ok(()),
+        );
+        let mut decoded = Vec::new();
+        blob.read_to_end(&mut decoded)
+            .expect("blob compressed input remains unbounded");
+        assert_eq!(decoded, b"x");
     }
 }

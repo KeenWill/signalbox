@@ -4497,3 +4497,220 @@ async fn ambient_cli_preserves_credential_shaped_text_and_tool_json() {
         Some(expected_arguments.as_str())
     );
 }
+
+/// A read-only peer with an explicitly selected subscription home.
+fn capacity_probe_runtime(directory: &Path) -> CodexCliRuntime {
+    std::fs::write(directory.join("config.toml"), "").expect("nonempty test subscription home");
+    CodexCliRuntime::new(
+        CodexCliConfig::new(
+            test_bin_path!("signalbox-fake-codex-cli"),
+            directory,
+            CredentialReference::new(CREDENTIAL_REFERENCE),
+            None,
+        )
+        .with_credential_homes([(
+            CredentialReference::new(CREDENTIAL_REFERENCE),
+            directory.to_path_buf(),
+        )]),
+    )
+    .expect("explicit subscription home is admitted")
+}
+
+#[tokio::test]
+async fn capacity_probe_observes_external_reset_without_starting_a_model_turn() {
+    let directory = tempfile::tempdir().expect("private probe fixture");
+    let runtime = capacity_probe_runtime(directory.path());
+    let credential = CredentialReference::new(CREDENTIAL_REFERENCE);
+    let fixture = directory.path().join("fake-codex-capacity-probe");
+    std::fs::write(
+        &fixture,
+        r#"{"secondary":{"usedPercent":100,"windowDurationMins":10080,"resetsAt":1800001400}}"#,
+    )
+    .expect("exhausted account");
+    let exhausted = runtime
+        .read_credential_capacity(&credential, OFFLINE_HARNESS_TIMEOUT)
+        .await
+        .expect("read exhausted account");
+    assert_eq!(exhausted.windows[0].remaining_percent, 0);
+    std::fs::write(
+        &fixture,
+        r#"{"secondary":{"usedPercent":0,"windowDurationMins":10080,"resetsAt":1800001400}}"#,
+    )
+    .expect("external account reset");
+    let reset = runtime
+        .read_credential_capacity(&credential, OFFLINE_HARNESS_TIMEOUT)
+        .await
+        .expect("read restored account without model admission");
+    assert_eq!(reset.windows[0].remaining_percent, 100);
+    assert!(reset.observed_at > exhausted.observed_at);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("capacity-probe-requests"))
+            .expect("request trace"),
+        "initialize\ninitialized\naccount/rateLimits/read\ninitialize\ninitialized\naccount/rateLimits/read\n"
+    );
+    assert!(!directory.path().join("fake-codex-thread").exists());
+}
+
+#[tokio::test]
+async fn capacity_probe_rejects_missing_capacity_instead_of_inventing_headroom() {
+    use signalbox_model_runtime_codex_cli::CodexCliCapacityProbeError;
+    let directory = tempfile::tempdir().expect("private probe fixture");
+    std::fs::write(directory.path().join("fake-codex-capacity-probe"), "{}")
+        .expect("empty capacity response");
+    let result = capacity_probe_runtime(directory.path())
+        .read_credential_capacity(
+            &CredentialReference::new(CREDENTIAL_REFERENCE),
+            OFFLINE_HARNESS_TIMEOUT,
+        )
+        .await;
+    assert_eq!(result, Err(CodexCliCapacityProbeError::Failed));
+}
+
+#[tokio::test]
+async fn capacity_probe_never_falls_back_to_an_ambient_login() {
+    use signalbox_model_runtime_codex_cli::CodexCliCapacityProbeError;
+    let directory = tempfile::tempdir().expect("private probe fixture");
+    let runtime = runtime(directory.path(), test_bin_path!("signalbox-fake-codex-cli"));
+    assert_eq!(
+        runtime
+            .read_credential_capacity(
+                &CredentialReference::new(CREDENTIAL_REFERENCE),
+                OFFLINE_HARNESS_TIMEOUT
+            )
+            .await,
+        Err(CodexCliCapacityProbeError::UnsupportedCredential)
+    );
+    assert_eq!(spawn_count(directory.path()), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn capacity_probe_timeout_kills_descendants() {
+    use signalbox_model_runtime_codex_cli::CodexCliCapacityProbeError;
+    let directory = tempfile::tempdir().expect("private probe fixture");
+    std::fs::write(
+        directory.path().join("fake-codex-capacity-probe"),
+        r#"{"hang":true}"#,
+    )
+    .expect("unresponsive capacity peer");
+    let runtime = capacity_probe_runtime(directory.path());
+    let group_record = directory.path().join("capacity-probe-group");
+    let readiness = wall_clock_record_watcher(group_record.clone());
+    let probe = tokio::spawn(async move {
+        runtime
+            .read_credential_capacity(
+                &CredentialReference::new(CREDENTIAL_REFERENCE),
+                Duration::from_secs(1),
+            )
+            .await
+    });
+    readiness.await.expect("probe descendant running");
+    assert_eq!(
+        probe.await.expect("bounded probe completes"),
+        Err(CodexCliCapacityProbeError::TimedOut)
+    );
+    assert_recorded_process_group_exited(group_record);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn capacity_probe_cancellation_kills_descendants() {
+    let directory = tempfile::tempdir().expect("private probe fixture");
+    std::fs::write(
+        directory.path().join("fake-codex-capacity-probe"),
+        r#"{"hang":true}"#,
+    )
+    .expect("unresponsive capacity peer");
+    let runtime = capacity_probe_runtime(directory.path());
+    let group_record = directory.path().join("capacity-probe-group");
+    let readiness = wall_clock_record_watcher(group_record.clone());
+    let probe = tokio::spawn(async move {
+        runtime
+            .read_credential_capacity(
+                &CredentialReference::new(CREDENTIAL_REFERENCE),
+                OFFLINE_HARNESS_TIMEOUT,
+            )
+            .await
+    });
+    readiness.await.expect("probe descendant running");
+    probe.abort();
+    assert!(
+        probe
+            .await
+            .expect_err("cancelled capacity task")
+            .is_cancelled()
+    );
+    assert_recorded_process_group_exited(group_record);
+}
+
+#[tokio::test]
+async fn capacity_probe_retains_superseding_sparse_updates() {
+    let directory = tempfile::tempdir().expect("private probe fixture");
+    let runtime = capacity_probe_runtime(directory.path());
+    std::fs::write(
+        directory.path().join("fake-codex-capacity-probe"),
+        r#"{
+        "primary":{"usedPercent":1}, "secondary":{"usedPercent":2},
+        "updates":[{"primary":{"usedPercent":100}},{"secondary":{"usedPercent":25}}]
+    }"#,
+    )
+    .expect("newer notifications supersede the stale read response");
+    let snapshot = runtime
+        .read_credential_capacity(
+            &CredentialReference::new(CREDENTIAL_REFERENCE),
+            OFFLINE_HARNESS_TIMEOUT,
+        )
+        .await
+        .expect("notification capacity is retained");
+    assert_eq!(
+        snapshot
+            .windows
+            .iter()
+            .map(|window| window.remaining_percent)
+            .collect::<Vec<_>>(),
+        vec![0, 75],
+        "a sparse secondary update must preserve the exhausted primary window and supersede the stale read"
+    );
+}
+
+#[tokio::test]
+async fn capacity_probe_empty_updates_do_not_supersede_the_read() {
+    let directory = tempfile::tempdir().expect("private probe fixture");
+    let runtime = capacity_probe_runtime(directory.path());
+    std::fs::write(
+        directory.path().join("fake-codex-capacity-probe"),
+        r#"{
+        "primary":{"usedPercent":25}, "updates":[{}, {"primary":null,"secondary":null}]
+    }"#,
+    )
+    .expect("empty notifications carry no capacity evidence");
+    let snapshot = runtime
+        .read_credential_capacity(
+            &CredentialReference::new(CREDENTIAL_REFERENCE),
+            OFFLINE_HARNESS_TIMEOUT,
+        )
+        .await
+        .expect("read capacity remains usable");
+    assert_eq!(snapshot.windows[0].remaining_percent, 75);
+}
+
+#[tokio::test]
+async fn capacity_probe_retains_notifications_when_the_pending_read_is_rejected() {
+    let directory = tempfile::tempdir().expect("private probe fixture");
+    let runtime = capacity_probe_runtime(directory.path());
+    std::fs::write(
+        directory.path().join("fake-codex-capacity-probe"),
+        r#"{
+        "readError":true, "updates":[{"primary":{"usedPercent":100}}]
+    }"#,
+    )
+    .expect("valid capacity notification followed by a rejected read");
+    let snapshot = runtime
+        .read_credential_capacity(
+            &CredentialReference::new(CREDENTIAL_REFERENCE),
+            OFFLINE_HARNESS_TIMEOUT,
+        )
+        .await
+        .expect("valid notification remains usable despite the read error");
+    assert_eq!(snapshot.windows[0].remaining_percent, 0);
+}
