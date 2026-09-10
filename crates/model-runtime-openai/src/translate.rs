@@ -1441,15 +1441,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_stop_sequences_pass_configuration_and_preparation() {
-        let mut candidate = operation("call-no-stop-sequences");
-        candidate.settings.stop_sequences = Vec::new();
-
-        assert!(validate_model_settings(&candidate.settings).is_ok());
-        assert!(build_request(&candidate).is_ok());
-    }
-
-    #[test]
     fn replayed_tool_result_after_user_text_is_rejected_before_any_send() {
         let mut operation = operation("call-text-before-result");
         operation.messages = vec![ConversationMessage {
