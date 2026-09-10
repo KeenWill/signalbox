@@ -307,7 +307,7 @@ impl RepositoryWatchRuntime {
             .find(|repository| {
                 repository.repository() == context.repository()
                     && repository.repository() == context.head_repository()
-                    && repository.push_credential_file().is_some()
+                    && repository.git_push_enabled()
             })
             .map(|repository| {
                 (

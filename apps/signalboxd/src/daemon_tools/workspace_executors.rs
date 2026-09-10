@@ -540,7 +540,9 @@ where
                     credential_file: repository
                         .push_credential_file()
                         .map(std::path::Path::to_owned),
-                    ssh_agent_socket: std::env::var_os("SSH_AUTH_SOCK"),
+                    ssh_agent_socket: std::env::var_os("SSH_AUTH_SOCK")
+                        .and_then(|path| crate::configuration::WatchedRepositoryConfiguration::absolute_ssh_agent_socket(std::path::Path::new(&path)))
+                        .map(std::path::PathBuf::into_os_string),
                     sandbox: self.sandbox.clone(),
                 },
                 &filesystem,

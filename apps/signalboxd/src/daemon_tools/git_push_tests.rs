@@ -210,6 +210,7 @@ async fn exercise_ssh_push(use_key: bool, scp_style: bool, blob_bytes: u64) {
     fs::set_permissions(&getent, fs::Permissions::from_mode(0o700))
         .expect("account lookup executable");
     let server = start_ssh_proxy(&agent, remote.clone(), log.clone());
+    let agent = fs::canonicalize(&agent).expect("fixture agent socket resolves");
     let script = r###"#!/usr/bin/python3
 import json
 import os
@@ -298,10 +299,27 @@ while True:
         launcher_path,
         launcher: std::sync::Arc::new(launcher),
     };
+    // The daemon probes from its working directory, while Git runs elsewhere.
+    let relative_agent = std::env::current_dir()
+        .expect("daemon working directory")
+        .components()
+        .filter(|component| matches!(component, std::path::Component::Normal(_)))
+        .fold(std::path::PathBuf::new(), |mut path, _| {
+            path.push("..");
+            path
+        })
+        .join(agent.strip_prefix("/").expect("absolute fixture socket"));
+    assert!(!relative_agent.is_absolute());
+    let retained_agent =
+        crate::configuration::WatchedRepositoryConfiguration::absolute_ssh_agent_socket(
+            &relative_agent,
+        )
+        .expect("normalized socket");
+    assert_eq!(retained_agent, agent);
     let transport = ProcessGitPushTransport {
         runner,
         credential_file: use_key.then_some(key),
-        ssh_agent_socket: Some(agent.as_os_str().to_owned()),
+        ssh_agent_socket: Some(retained_agent.into_os_string()),
         sandbox,
     };
     let url = if scp_style {
@@ -454,10 +472,15 @@ fn start_ssh_proxy(socket: &Path, remote: PathBuf, log: PathBuf) -> std::thread:
                 .shutdown(std::net::Shutdown::Write)
                 .expect("server response ends");
             assert!(child.wait().expect("server exit").success());
-            forward
-                .join()
-                .expect("input forwarding thread")
-                .expect("server input");
+            // A successful Git server can close stdin before the client finishes
+            // forwarding its final protocol bytes.
+            if let Err(error) = forward.join().expect("input forwarding thread") {
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe,
+                    "server input: {error}"
+                );
+            }
         }
     })
 }

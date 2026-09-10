@@ -6257,6 +6257,15 @@ fn repository_ssh_push_requires_a_key_or_available_agent_and_redacts_the_destina
     let directory = tempfile::tempdir().expect("agent fixture");
     let socket = directory.path().join("agent.sock");
     let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("available agent");
+    let relative_socket = std::env::current_dir()
+        .expect("daemon working directory")
+        .components()
+        .filter(|component| matches!(component, std::path::Component::Normal(_)))
+        .fold(std::path::PathBuf::new(), |mut path, _| {
+            path.push("..");
+            path
+        })
+        .join(socket.strip_prefix("/").expect("absolute fixture socket"));
     let unavailable = directory.path().join("unavailable.sock");
     let listener = std::os::unix::net::UnixListener::bind(&unavailable).expect("temporary agent");
     drop(listener);
@@ -6283,6 +6292,7 @@ fn repository_ssh_push_requires_a_key_or_available_agent_and_redacts_the_destina
                 HubModelConfiguration::parse(&document.to_string()).expect("SSH configuration");
             let repository = &parsed.repository_watch().expect("watch").repositories()[0];
             assert!(repository.git_push_enabled_with_agent(Some(&socket)));
+            assert!(repository.git_push_enabled_with_agent(Some(&relative_socket)));
             for absent in [None, Some(unavailable.as_path()), Some(regular.as_path())] {
                 assert_eq!(
                     repository.git_push_enabled_with_agent(absent),

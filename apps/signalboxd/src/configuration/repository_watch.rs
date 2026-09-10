@@ -142,13 +142,20 @@ impl WatchedRepositoryConfiguration {
         self.git_push_enabled_with_agent(socket.as_deref())
     }
 
+    pub(crate) fn absolute_ssh_agent_socket(path: &Path) -> Option<PathBuf> {
+        std::fs::canonicalize(path).ok()
+    }
+
     pub(super) fn git_push_enabled_with_agent(&self, socket: Option<&Path>) -> bool {
         self.push_credential_file.is_some()
             || (self
                 .push_remote_url
                 .as_ref()
                 .is_some_and(|remote| !remote.as_str().starts_with("https://"))
-                && socket.is_some_and(agent_socket_available))
+                && socket
+                    .and_then(Self::absolute_ssh_agent_socket)
+                    .as_deref()
+                    .is_some_and(agent_socket_available))
     }
 
     /// Returns the non-secret request credential reference for this repository.
