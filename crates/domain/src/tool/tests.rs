@@ -384,13 +384,13 @@ fn denial_reason_derivation_preserves_admissible_text_verbatim() {
     );
 }
 
-/// Control characters become spaces and forbidden edge spaces trim.
+/// Internal line feeds are retained while forbidden controls become spaces and edge spaces trim.
 #[test]
 fn denial_reason_derivation_maps_control_characters_and_trims_edges() {
     assert_eq!(
         ToolDenialReason::from_rationale(&admitted_rationale("  first\nsecond\tthird  "))
             .map(ToolDenialReason::into_string),
-        Some(String::from("first second third"))
+        Some(String::from("first\nsecond third"))
     );
 }
 
@@ -413,15 +413,15 @@ fn denial_reason_derivation_preserves_admitted_edge_whitespace() {
     );
 }
 
-/// Oversized text cuts to the reason bound on a character boundary.
+/// A maximum-sized rationale derives without truncation.
 #[test]
-fn denial_reason_derivation_truncates_on_a_character_boundary() {
-    let truncation_prefix = "a".repeat(1023);
-    let oversized = ToolDecisionRationale::try_new(format!("{truncation_prefix}é"))
+fn denial_reason_derivation_preserves_the_rationale_bound() {
+    let prefix = "a".repeat(ToolDecisionRationale::MAX_UTF8_BYTES - 2);
+    let at_bound = ToolDecisionRationale::try_new(format!("{prefix}é"))
         .expect("fixture rationale is admitted");
-    let truncated =
-        ToolDenialReason::from_rationale(&oversized).expect("nonempty text derives a reason");
-    assert_eq!(truncated.as_str(), truncation_prefix);
+    let derived =
+        ToolDenialReason::from_rationale(&at_bound).expect("nonempty text derives a reason");
+    assert_eq!(derived.as_str(), at_bound.as_str());
 }
 
 /// Every derived reason re-admits through the reason validator.

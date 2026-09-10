@@ -4939,8 +4939,10 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
 
   private static func validDenialReason(_ reason: String) -> Bool {
     !reason.isEmpty
-      && reason.utf8.count <= 1_024
-      && reason.unicodeScalars.allSatisfy { $0.properties.generalCategory != .control }
+      && reason.utf8.count <= 4_096
+      && reason.unicodeScalars.allSatisfy {
+        $0.value == 0x0A || $0.properties.generalCategory != .control
+      }
       && reason.unicodeScalars.first.map { !isPOSIXWhitespace($0) } == true
       && reason.unicodeScalars.last.map { !isPOSIXWhitespace($0) } == true
   }
@@ -5192,6 +5194,10 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
     sessionID: SignalboxCanonicalUUID,
     toolRequestID: SignalboxCanonicalUUID
   )
+  case toolDenialReasonTooLong(
+    maximumBytes: SignalboxCanonicalUInt64,
+    actualBytes: SignalboxCanonicalUInt64
+  )
   case defaultsVersionMismatch(
     sessionID: SignalboxCanonicalUUID, expected: SignalboxCanonicalUInt64,
     current: SignalboxCanonicalUInt64)
@@ -5340,6 +5346,25 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
       self = .toolRequestNotInSession(
         sessionID: try decoder.decode("session_id"),
         toolRequestID: try decoder.decode("tool_request_id")
+      )
+    case "tool_denial_reason_too_long":
+      try tagged.rejectUnadmittedFields(
+        ["type", "maximum_bytes", "actual_bytes"],
+        decoder: decoder
+      )
+      let maximumBytes: SignalboxCanonicalUInt64 = try decoder.decode("maximum_bytes")
+      let actualBytes: SignalboxCanonicalUInt64 = try decoder.decode("actual_bytes")
+      guard maximumBytes.rawValue == 4_096, actualBytes.rawValue > maximumBytes.rawValue else {
+        throw DecodingError.dataCorrupted(
+          .init(
+            codingPath: decoder.codingPath,
+            debugDescription: "Tool denial reason bound evidence is inconsistent."
+          )
+        )
+      }
+      self = .toolDenialReasonTooLong(
+        maximumBytes: maximumBytes,
+        actualBytes: actualBytes
       )
     case "defaults_version_mismatch":
       try tagged.rejectUnadmittedFields(
