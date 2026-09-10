@@ -141,6 +141,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn record_and_evaluate_preserve_policy_defaults_and_optional_flags() {
+        for command in ["record", "evaluate"] {
+            let cli = Cli::try_parse_from(["signalbox-converge", command, "--pr", "1566"]).unwrap();
+            let (Command::Record(args) | Command::Evaluate(args)) = cli.command else {
+                panic!("evidence command expected")
+            };
+            assert_eq!(
+                args.policy,
+                PathBuf::from("crates/convergence/examples/repository.toml")
+            );
+            assert_eq!(args.pr, Some(1566));
+            assert_eq!(args.repo, None);
+            assert_eq!(args.fixture, None);
+            assert_eq!(args.state, None);
+            assert_eq!(args.out, None);
+            let cli = Cli::try_parse_from([
+                "signalbox-converge",
+                command,
+                "--fixture",
+                "input.json",
+                "--state",
+                "state.json",
+                "--out",
+                "output.json",
+                "--repo",
+                "owner/name",
+                "--policy",
+                "policy.toml",
+            ])
+            .unwrap();
+            let (Command::Record(args) | Command::Evaluate(args)) = cli.command else {
+                panic!("evidence command expected")
+            };
+            assert_eq!(args.policy, PathBuf::from("policy.toml"));
+            assert_eq!(args.fixture, Some(PathBuf::from("input.json")));
+            assert_eq!(args.state, Some(PathBuf::from("state.json")));
+            assert_eq!(args.out, Some(PathBuf::from("output.json")));
+            assert_eq!(args.repo.as_deref(), Some("owner/name"));
+        }
+    }
+
+    #[test]
     fn help_is_available_without_configuration_for_every_subcommand() {
         for command in ["record", "evaluate", "reconcile"] {
             let error = Cli::try_parse_from(["signalbox-converge", command, "--help"]).unwrap_err();

@@ -308,6 +308,14 @@ fn real_bwrap_gate_requires_the_installed_binary_in_ci() {
 }
 
 #[test]
+fn real_bwrap_refusal_is_rejected_in_ci() {
+    assert_eq!(
+        real_bwrap_refusal_policy(true),
+        Err("CI requires the real bwrap profile to confine successfully")
+    );
+}
+
+#[test]
 fn real_bwrap_refusal_remains_typed_evidence_outside_ci() {
     assert_eq!(real_bwrap_refusal_policy(false), Ok(()));
 }
