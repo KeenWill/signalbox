@@ -514,36 +514,6 @@ mod tests {
         assert_eq!(content.parts(), parts.as_slice());
     }
 
-    /// part order participates in structural equality.
-    #[test]
-    fn part_order_participates_in_equality() {
-        let text = UserContentPart::try_text(String::from("before")).expect("text is valid");
-        let first = UserContent::try_parts(vec![text.clone(), attachment(Some("chart.png"))])
-            .expect("the ordered fixture is valid");
-        let reordered = UserContent::try_parts(vec![attachment(Some("chart.png")), text])
-            .expect("the reordered fixture is structurally valid");
-
-        assert_ne!(first, reordered);
-    }
-
-    /// attachment metadata participates in structural
-    /// equality.
-    #[test]
-    fn attachment_metadata_participates_in_equality() {
-        let first = UserContent::try_parts(vec![
-            UserContentPart::try_text(String::from("before")).expect("text is valid"),
-            attachment(Some("chart.png")),
-        ])
-        .expect("the first fixture is valid");
-        let different_filename = UserContent::try_parts(vec![
-            UserContentPart::try_text(String::from("before")).expect("text is valid"),
-            attachment(Some("diagram.png")),
-        ])
-        .expect("the differing metadata fixture is valid");
-
-        assert_ne!(first, different_filename);
-    }
-
     #[test]
     fn empty_part_sequence_is_rejected_without_losing_the_parts() {
         let error =

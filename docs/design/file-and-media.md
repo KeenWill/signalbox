@@ -1,36 +1,17 @@
 # File and media interpretation design
 
 This design is not built. It extends
-[file and media interpretation](../spec/file-and-media.md) with daemon
-composition of the file tools and with the rich media result path.
+[file and media interpretation](../spec/file-and-media.md) with the rich media
+result path.
 
 ## Goal
 
-The daemon registers `file_inspect` and `file_read` in its tool catalog behind a
-`FileUseResolver` that authorizes each request with the rendered-frontier
-attachment allow-set. A reader may then offer image, audio, and general-file
-views, and a read of such a view returns a durable reference to immutable bytes
-that a capable model adapter can present. A classification cache and OCR or
-transcription are outside this design; both remain undecided in
-[open questions](../open-questions.md).
+A reader may offer image, audio, and general-file views, and a read of such a
+view returns a durable reference to immutable bytes that a capable model adapter
+can present. A classification cache and OCR or transcription are outside this
+design; both remain undecided in [open questions](../open-questions.md).
 
 ## Design
-
-The resolver takes the request's digest and optional visible-part selector and
-resolves exactly one visible use. Authorization reuses the `blob_read`
-rendered-frontier allow-set and verifies the selector; a digest alone never
-chooses among repeated uses of the same bytes. Because the stub members named on
-[blob storage](../spec/blob-storage.md) distinguish no two uses of one digest,
-each rendered attachment stub carries that selector: the semantic entry's
-identity and the part's zero-based ordinal within it. The resolver finishes all
-catalog work before returning the exact file use and a placement-free verified
-source, so no database transaction stays open into source or worker I/O. A
-continuation request presents the cursor from the preceding visible result; the
-cursor, or the state it authenticates, binds the digest, selector, reader, view,
-and normalized options of the first read, so later pages keep the first result's
-semantics. The bound digest, selector, reader, and view must still name a stub
-in the current allow-set; once a stub leaves the rendered frontier, a remembered
-digest, selector, or cursor grants nothing.
 
 `FileReadResult` gains one provider-neutral reference arm carrying two complete
 identities. The presented identity is the blob's digest and length, its
@@ -76,20 +57,11 @@ the rendered durable result, not from catalog presence.
 Registry construction keeps rejecting image, audio, and general-file views, and
 `FileReadResult` keeps only its text and structured arms, until one producer
 path has proved publication, registration, preparation, and failure behavior end
-to end. Any daemon composition supplies the existing rendered-frontier
-visibility proof to `FileUseResolver`; a catalog-presence check is no
-substitute. Composed against a store-backed source neither tool is effect-free,
-so both are declared external-effect: a read is observable to the store
-operator, and a derived read publishes a blob. The service keeps re-inspecting
-on every read. The rich arm changes no adapter and adds no MIME branch to the
-executor, bridge, or daemon.
+to end. The rich arm changes no adapter and adds no MIME branch to the executor,
+bridge, or daemon.
 
 ## Acceptance criteria
 
-- `file_inspect` and `file_read` appear in the daemon catalog only when a
-  resolver backed by the rendered-frontier allow-set is composed, and both are
-  declared external-effect; a digest outside the current frontier fails
-  authorization, and a repeated use is selected only by its selector.
 - A derived read publishes and verifies, registers, then commits, in that order;
   a fault injected at each step commits no result, and the only residue is an
   unreferenced blob. A direct read publishes and registers nothing, and commits
