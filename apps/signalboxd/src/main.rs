@@ -413,6 +413,7 @@ enum SanitizedStartupCause<'a> {
     TemplateConfiguration(&'a SessionTemplateConfigurationError),
     TelemetryConfiguration(&'a TelemetryConfigurationError),
     Database(&'a FencedHubDatabaseError),
+    BlobStorage(&'a signalboxd::BlobStoreRegistryError),
     Tools(&'a DaemonToolsConstructionError),
     Socket(&'a LocalSocketError),
     WebHttpConfiguration(&'a WebHttpConfigurationError),
@@ -428,6 +429,7 @@ impl fmt::Display for SanitizedStartupCause<'_> {
             Self::TemplateConfiguration(error) => error.fmt(formatter),
             Self::TelemetryConfiguration(error) => error.fmt(formatter),
             Self::Database(error) => error.fmt(formatter),
+            Self::BlobStorage(error) => error.fmt(formatter),
             Self::Tools(error) => error.fmt(formatter),
             Self::Socket(error) => error.fmt(formatter),
             Self::WebHttpConfiguration(error) => error.fmt(formatter),
@@ -441,7 +443,32 @@ impl fmt::Display for SanitizedStartupCause<'_> {
 /// `SanitizedStartupCause` is a closed admission boundary, so the emitted
 /// cause cannot include configuration values, paths, credentials, or content.
 fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) -> HubRuntimeError {
-    let error = HubRuntimeError::infrastructure(phase);
+    let mut error = HubRuntimeError::infrastructure(phase);
+    if let SanitizedStartupCause::BlobStorage(signalboxd::BlobStoreRegistryError::Catalog(
+        catalog,
+    )) = &cause
+    {
+        error.failure_class = match catalog {
+            signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_) => {
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                }
+            }
+            signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_) => {
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                }
+            }
+            signalbox_persistence::blob::BlobCatalogRepositoryError::Corruption(_) => {
+                OperatorFailureClass::FailClosedCorruption
+            }
+        };
+        error.database_failure = matches!(
+            catalog,
+            signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_)
+                | signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_)
+        );
+    }
     tracing::error!(
         ?phase,
         failure_class = ?error.failure_class,
@@ -1930,10 +1957,10 @@ async fn run_hub_incarnation(
     .await
     {
         GuardedAwait::Completed(Ok(registry)) => registry,
-        GuardedAwait::Completed(Err(_)) => {
+        GuardedAwait::Completed(Err(error)) => {
             let failure = erase_startup_cause(
                 RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("blob_storage_startup_reconciliation_failed"),
+                SanitizedStartupCause::BlobStorage(&error),
             );
             let _ = database.close().await;
             return Err(failure);
@@ -3446,6 +3473,97 @@ mod tests {
                 Duration::from_secs(9)
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blob_catalog_startup_failures_reacquire_with_capped_backoff() {
+        use signalbox_persistence::blob::BlobCatalogRepositoryError;
+        use signalboxd::guard_recovery::{GuardRecoveryPolicy, run_guarded_incarnations};
+        use signalboxd::{BlobStoreRegistry, BlobStoreRegistryError};
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://fixture:fixture@localhost/fixture")
+            .expect("fixture URL is valid");
+        pool.close().await;
+        let unavailable = BlobStoreRegistry::initialize(None, pool)
+            .await
+            .expect_err("catalog access reports the closed pool");
+        let ambiguous = BlobStoreRegistryError::Catalog(
+            BlobCatalogRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+        );
+        let unavailable = super::erase_startup_cause(
+            RuntimePhase::Configuration,
+            super::SanitizedStartupCause::BlobStorage(&unavailable),
+        );
+        let ambiguous = super::erase_startup_cause(
+            RuntimePhase::Configuration,
+            super::SanitizedStartupCause::BlobStorage(&ambiguous),
+        );
+        assert_eq!(
+            ambiguous.failure_class,
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
+        let failures = RefCell::new(VecDeque::from([
+            Ok(ShutdownOutcome::GuardLost),
+            Err(unavailable),
+            Err(ambiguous),
+            Ok(ShutdownOutcome::Clean),
+        ]));
+        let started = tokio::time::Instant::now();
+        let attempts = RefCell::new(Vec::new());
+        let result = run_guarded_incarnations(
+            GuardRecoveryPolicy::new(
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Some(Duration::from_secs(10)),
+            )
+            .unwrap(),
+            |observer| {
+                attempts.borrow_mut().push(started.elapsed());
+                ready(super::recovery_incarnation_outcome(
+                    failures
+                        .borrow_mut()
+                        .pop_front()
+                        .expect("four blob recovery attempts"),
+                    observer.is_recovering(),
+                ))
+            },
+            pending(),
+        )
+        .await;
+        assert_eq!(result, Ok(Ok(ShutdownOutcome::Clean)));
+        assert_eq!(
+            *attempts.borrow(),
+            [
+                Duration::ZERO,
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+                Duration::from_secs(5)
+            ]
+        );
+    }
+
+    #[test]
+    fn blob_configuration_and_corruption_failures_do_not_reacquire_the_database() {
+        use signalbox_persistence::blob::{BlobCatalogCorruption, BlobCatalogRepositoryError};
+        use signalboxd::BlobStoreRegistryError;
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        for failure in [
+            BlobStoreRegistryError::ConfigurationRequired,
+            BlobStoreRegistryError::S3StartupDeadline,
+            BlobStoreRegistryError::Catalog(BlobCatalogRepositoryError::Corruption(
+                BlobCatalogCorruption::InvalidDigest,
+            )),
+        ] {
+            let error = super::erase_startup_cause(
+                RuntimePhase::Configuration,
+                super::SanitizedStartupCause::BlobStorage(&failure),
+            );
+            assert!(
+                matches!(super::recovery_incarnation_outcome(Err(error), true), GuardedIncarnationOutcome::Finished(Err(observed)) if observed == error)
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
