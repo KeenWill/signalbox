@@ -41,7 +41,7 @@ test('keeps the imported typed artifact view synchronized with keyboard selectio
   )
   const blockedArtifact = page.getByRole('article', { name: 'Artifact Imported entry 51' })
   await expect(blockedArtifact).toContainText('Preview unavailable')
-  await expect(blockedArtifact).toContainText('No preview for this content.')
+  await expect(blockedArtifact).toContainText('No preview for this content type.')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

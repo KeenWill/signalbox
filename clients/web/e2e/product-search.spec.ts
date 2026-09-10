@@ -601,7 +601,7 @@ test('keeps artifact inspector inputs in their editing context on Search', async
   await useSearchFixture(page)
   await page.goto('/search')
   await page.getByRole('button', { name: 'Open artifact inspector' }).click()
-  for (const name of ['Digest', 'Media type (as declared)', 'Display filename optional']) {
+  for (const name of ['Digest', 'Declared media type', 'Display filename optional']) {
     const input = page.getByRole('textbox', { name, exact: true })
     await input.focus()
     await input.press('Escape')

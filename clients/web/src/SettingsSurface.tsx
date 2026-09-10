@@ -66,7 +66,7 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
           </label>
         </PreferenceGroup>
 
-        <PreferenceGroup legend="Transcript presentation">
+        <PreferenceGroup legend="Transcript detail">
           <label>
             <input
               type="radio"
