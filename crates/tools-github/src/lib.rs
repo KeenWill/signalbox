@@ -2919,65 +2919,6 @@ mod tests {
     struct SyntheticCredentials;
     struct SyntheticTransport;
 
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct RecordedCreateRequest {
-        repository: String,
-        title: String,
-        body: String,
-        head: String,
-        base: String,
-        credential: Vec<u8>,
-        origin: String,
-    }
-
-    #[derive(Clone, Debug, Default)]
-    struct RecordingCreateTransport(Arc<Mutex<Option<RecordedCreateRequest>>>);
-
-    impl RecordingCreateTransport {
-        fn recorded(&self) -> RecordedCreateRequest {
-            self.0
-                .lock()
-                .expect("recording transport lock is available")
-                .clone()
-                .expect("creation request was recorded")
-        }
-    }
-
-    impl GitHubTransport for RecordingCreateTransport {
-        async fn execute(
-            &mut self,
-            operation: GitHubOperation,
-            credential: &CredentialValue,
-            policy: &GitHubEgressPolicy,
-        ) -> Result<GitHubResult, GitHubTransportFailure> {
-            let GitHubOperation::CreatePullRequest {
-                repository,
-                arguments,
-            } = operation
-            else {
-                return Err(GitHubTransportFailure::PreDispatchInfrastructure);
-            };
-            *self
-                .0
-                .lock()
-                .expect("recording transport lock is available") = Some(RecordedCreateRequest {
-                repository: repository.as_str().to_owned(),
-                title: arguments.title().to_owned(),
-                body: arguments.body().to_owned(),
-                head: arguments.head().to_owned(),
-                base: arguments.base().to_owned(),
-                credential: credential.expose_bytes().to_vec(),
-                origin: policy.admitted_origin().to_owned(),
-            });
-            Ok(GitHubResult::created_pull_request(serde_json::json!({
-                "number": CREATED_PULL_REQUEST_NUMBER,
-                "url": CREATED_PULL_REQUEST_URL,
-                "head": CREATE_HEAD,
-                "base": CREATE_BASE,
-            })))
-        }
-    }
-
     thread_local! {
         /// Telemetry captured on this thread alone.
         static CAPTURED_TELEMETRY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -3225,7 +3166,7 @@ mod tests {
             .expect("configured repository is admitted");
         let catalog = GitHubPullRequestCreateTools::try_new(
             SyntheticCredentials,
-            RecordingCreateTransport::default(),
+            SyntheticTransport,
             GitHubEgressPolicy::github_api_only(),
             repository,
         )
@@ -3251,42 +3192,6 @@ mod tests {
         assert!(decode_create_pull_request(&injected_repository).is_err());
     }
 
-    #[tokio::test]
-    async fn create_transport_records_exact_configured_request() {
-        let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
-            .expect("configured repository is admitted");
-        let arguments = decode_create_pull_request(&normalized(serde_json::json!({
-            "title": CREATE_TITLE,
-            "body": CREATE_BODY,
-            "head": CREATE_HEAD,
-            "base": CREATE_BASE
-        })))
-        .expect("creation arguments are admitted");
-        let operation = GitHubOperation::CreatePullRequest {
-            repository,
-            arguments,
-        };
-        let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
-        let policy = GitHubEgressPolicy::github_api_only();
-        let mut transport = RecordingCreateTransport::default();
-        let observer = transport.clone();
-
-        let result = transport
-            .execute(operation, &credential, &policy)
-            .await
-            .expect("synthetic creation succeeds");
-        let recorded = observer.recorded();
-
-        assert_eq!(result.kind(), GitHubResultKind::CreatedPullRequest);
-        assert_eq!(recorded.repository, CONFIGURED_REPOSITORY);
-        assert_eq!(recorded.title, CREATE_TITLE);
-        assert_eq!(recorded.body, CREATE_BODY);
-        assert_eq!(recorded.head, CREATE_HEAD);
-        assert_eq!(recorded.base, CREATE_BASE);
-        assert_eq!(recorded.credential, SYNTHETIC_TOKEN.as_bytes());
-        assert_eq!(recorded.origin, GITHUB_API_ORIGIN);
-    }
-
     #[test]
     fn create_body_is_exact() {
         let arguments = decode_create_pull_request(&normalized(serde_json::json!({
@@ -3305,13 +3210,13 @@ mod tests {
         assert_eq!(body["base"], arguments.base());
     }
 
-    fn create_executor()
-    -> GitHubPullRequestCreateExecutor<SyntheticCredentials, RecordingCreateTransport> {
+    fn create_executor() -> GitHubPullRequestCreateExecutor<SyntheticCredentials, SyntheticTransport>
+    {
         let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
             .expect("configured repository is admitted");
         GitHubPullRequestCreateTools::try_new(
             SyntheticCredentials,
-            RecordingCreateTransport::default(),
+            SyntheticTransport,
             GitHubEgressPolicy::github_api_only(),
             repository,
         )

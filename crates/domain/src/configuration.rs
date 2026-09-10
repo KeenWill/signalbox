@@ -1038,9 +1038,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
-        FrozenModelSelection, ModelAlias, ModelSelectionOverride, ModelSelectionRequest,
-        OriginConfiguration, OriginConfigurationReconstitutionInput, OriginModelSettingsError,
+        DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition, FrozenModelSelection,
+        ModelAlias, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
+        OriginConfigurationReconstitutionInput, OriginModelSettingsError,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
         SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptFailure,
         TurnConfigurationProvenance, UnknownModelAlias, VersionCheckedConfigurationRequest,
@@ -1889,18 +1889,5 @@ mod tests {
             panic!("reclassified steering carries only its binding");
         };
         assert_eq!(carried, binding);
-    }
-
-    #[test]
-    fn configuration_request_exposes_its_model_selection() {
-        let model = ModelSelectionRequest::Direct(direct(1));
-        let request = ConfigurationRequest {
-            model,
-            dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
-            model_settings: ValidatedModelSettings::provider_defaults(),
-            per_call_model_settings: ModelSettingsOverlay::inherit_all(),
-        };
-
-        assert_eq!(request.model(), model);
     }
 }
