@@ -149,11 +149,13 @@ A transient successor commit writes a credential-scoped durable exclusion whose
 reset equals the successor's durable retry deadline. Every session's call
 preparation skips that credential until the reset passes; after it passes, the
 member is admitted again. A chain exclusion is written when a failure rotates
-the pool and removes that member for the remainder of the turn. If another
-durable action excludes a retry successor's credential before preparation, that
-successor fails instead of selecting another member; when a fallback member
-remains admissible, the failure keeps the generic failed projection and records
-no pool exhaustion.
+the pool and removes that member for the remainder of the turn. A quota rotation
+uses the current headroom exclusion instead when the reported capacity already
+excludes that member, allowing a parked turn to resume after capacity returns.
+If another durable action excludes a retry successor's credential before
+preparation, that successor fails instead of selecting another member; when a
+fallback member remains admissible, the failure keeps the generic failed
+projection and records no pool exhaustion.
 
 A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially
