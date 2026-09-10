@@ -1170,30 +1170,20 @@ where
     Converter::Error: ClassifyConversationImportError,
     Converter::RecordFailure: ClassifyConversationImportRecordFailure + Copy,
 {
-    let runtime = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        let _import_permit = import_permit;
-        runtime.block_on(async move {
-            match source {
-                ConversationImportSource::Inline(source) => {
-                    execute_streamed_import(
-                        &mut converter,
-                        BufReader::new(Cursor::new(source)),
-                        &repository,
-                    )
-                    .await
-                }
-                ConversationImportSource::Spooled(source) => {
-                    execute_streamed_import(&mut converter, BufReader::new(source), &repository)
-                        .await
-                }
-            }
-        })
-    })
-    .await
-    .map_err(|_| {
-        OperationalImportError::Internal(InternalDiagnostic::ConversationImportWorkerTerminated)
-    })?
+    let _import_permit = import_permit;
+    match source {
+        ConversationImportSource::Inline(source) => {
+            execute_streamed_import(
+                &mut converter,
+                BufReader::new(Cursor::new(source)),
+                &repository,
+            )
+            .await
+        }
+        ConversationImportSource::Spooled(source) => {
+            execute_streamed_import(&mut converter, BufReader::new(source), &repository).await
+        }
+    }
 }
 
 async fn execute_streamed_import<Converter, Reader>(
@@ -1211,6 +1201,9 @@ where
     let candidate = ids.next_conversation_id();
     let format = converter.format();
     let maximum_record_bytes = repository.maximum_raw_record_bytes();
+    if maximum_record_bytes == 0 {
+        return Err(OperationalImportError::Unavailable);
+    }
     let records =
         converter.convert_resilient_from_reader(candidate, source, maximum_record_bytes, || {
             ids.next_entry_id()
@@ -1827,7 +1820,9 @@ async fn spool_imported_conversation(
     .await
     .map_err(ImportedConversationSpoolError::Spool)?;
     let mut entry_count = 0_u64;
-    let page_limit = NonZeroUsize::new(128).expect("inspection page size is positive");
+    let page_limit = NonZeroUsize::new(128)
+        .ok_or(SnapshotSpoolError::EncodeInvariant)
+        .map_err(ImportedConversationSpoolError::Spool)?;
     let maximum_preview_bytes = max_text_preview_utf8_bytes
         .unwrap_or(MAX_CONTENT_FRAGMENT_BYTES)
         .min(MAX_CONTENT_FRAGMENT_BYTES);

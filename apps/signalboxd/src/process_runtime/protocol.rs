@@ -35,7 +35,6 @@ pub(super) enum InternalDiagnostic {
     ReviewOrchestrationServiceContract,
     ConversationImportSpoolUnavailable,
     ConversationImportContractDefect,
-    ConversationImportWorkerTerminated,
     ImportedSessionDatabase,
     ImportedSessionCommitAmbiguous,
     ImportedSessionCommandKindMismatch,
@@ -118,7 +117,6 @@ impl InternalDiagnostic {
             },
             Self::ReviewOrchestrationServiceContract
             | Self::ConversationImportContractDefect
-            | Self::ConversationImportWorkerTerminated
             | Self::ImportedSessionCommandKindMismatch
             | Self::ImportedSessionPreparation
             | Self::SessionCreationPreparation
@@ -185,7 +183,6 @@ impl InternalDiagnostic {
             Self::ReviewOrchestrationServiceContract => "review_orchestration_service_contract",
             Self::ConversationImportSpoolUnavailable => "conversation_import_spool_unavailable",
             Self::ConversationImportContractDefect => "conversation_import_contract_defect",
-            Self::ConversationImportWorkerTerminated => "conversation_import_worker_terminated",
             Self::ImportedSessionDatabase => "imported_session_database",
             Self::ImportedSessionCommitAmbiguous => "imported_session_commit_ambiguous",
             Self::ImportedSessionCommandKindMismatch => "imported_session_command_kind_mismatch",

@@ -5,8 +5,10 @@ pub(crate) mod tests {
         collections::{BTreeSet, VecDeque},
         error::Error,
         io::{self, Seek, Write},
-        sync::{Arc, Mutex, OnceLock, mpsc},
-        thread,
+        sync::{
+            Arc, Mutex, OnceLock,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     use signalbox_application::{
@@ -53,7 +55,7 @@ pub(crate) mod tests {
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, duplex},
         net::UnixStream,
-        sync::{Semaphore, watch},
+        sync::{Notify, Semaphore, watch},
         time::{Duration, Instant, timeout},
     };
     use uuid::Uuid;
@@ -2304,113 +2306,63 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn spooled_import_conversion_runs_from_the_file_off_the_async_worker()
-    -> Result<(), Box<dyn Error>> {
-        let async_worker = thread::current().id();
-        let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
+    async fn unavailable_import_storage_fails_before_conversion() -> Result<(), Box<dyn Error>> {
+        let conversion_started = Arc::new(AtomicBool::new(false));
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
-        let repository = ImportedConversationRepository::new(pool);
+        let storage = Arc::new(crate::imported_source_blobs::ImportedSourceBlobStorage::new(
+            pool.clone(),
+            None,
+        ));
+        let repository = ImportedConversationRepository::with_blob_storage(pool, storage);
         let import_permit = Arc::new(Semaphore::new(1)).acquire_owned().await?;
         let mut source = tempfile::tempfile()?;
         source.write_all(b"fixture")?;
         source.rewind()?;
 
         let outcome = execute_import(
-            ThreadReportingRejectConverter(thread_sender),
+            ConversionReportingRejectConverter(Arc::clone(&conversion_started)),
             ConversationImportSource::Spooled(source),
             repository,
             import_permit,
         )
         .await;
-        let conversion_worker = thread_receiver.recv_timeout(Duration::from_secs(1))?;
 
-        assert_eq!(
-            outcome,
-            Err(OperationalImportError::InvalidSource(
-                super::import_evidence(
-                    signalbox_process_protocol::ConversationImportRejectionClass::InvalidJson,
-                    Some(1),
-                )
-            ))
-        );
-        assert_ne!(conversion_worker, async_worker);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn import_worker_termination_remains_distinct_from_repository_corruption()
-    -> Result<(), Box<dyn Error>> {
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
-        let repository = ImportedConversationRepository::new(pool);
-        let import_permit = Arc::new(Semaphore::new(1)).acquire_owned().await?;
-
-        let outcome = execute_import(
-            PanickingConverter,
-            ConversationImportSource::Inline(Vec::new()),
-            repository,
-            import_permit,
-        )
-        .await;
-
-        assert_eq!(
-            outcome,
-            Err(OperationalImportError::Internal(
-                InternalDiagnostic::ConversationImportWorkerTerminated,
-            )),
-        );
+        assert_eq!(outcome, Err(OperationalImportError::Unavailable));
+        assert!(!conversion_started.load(Ordering::SeqCst));
         Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelled_import_wait_retains_the_permit_until_the_worker_exits()
+    async fn cancelled_import_stops_storage_work_and_releases_the_permit()
     -> Result<(), Box<dyn Error>> {
         let budget = Arc::new(Semaphore::new(1));
         let import_permit = Arc::clone(&budget).acquire_owned().await?;
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
-        let repository = ImportedConversationRepository::new(pool);
-        let (started_sender, started_receiver) = mpsc::sync_channel(1);
-        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let publication_started = Arc::new(Notify::new());
+        let publication_cancelled = Arc::new(AtomicBool::new(false));
+        let storage = Arc::new(PendingPublicationStorage {
+            started: Arc::clone(&publication_started),
+            cancelled: Arc::clone(&publication_cancelled),
+        });
+        let repository = ImportedConversationRepository::with_blob_storage(pool, storage);
         let import = tokio::spawn(execute_import(
-            BlockingRejectConverter {
-                started: started_sender,
-                release: Some(release_receiver),
-            },
-            ConversationImportSource::Inline(Vec::new()),
+            signalbox_conversation_import_codex::ResilientCodexRolloutJsonlConverter,
+            ConversationImportSource::Inline(
+                b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n".to_vec(),
+            ),
             repository,
             import_permit,
         ));
-        started_receiver.recv_timeout(Duration::from_secs(1))?;
+        timeout(Duration::from_secs(1), publication_started.notified()).await?;
 
         import.abort();
-        let _ = import.await;
-        assert!(
-            timeout(Duration::from_millis(20), Arc::clone(&budget).acquire_owned())
-                .await
-                .is_err(),
-            "dropping the join wait must not release the worker-owned permit"
-        );
-
-        release_sender.send(())?;
+        assert!(import.await.is_err());
         let permit = timeout(Duration::from_secs(1), Arc::clone(&budget).acquire_owned()).await??;
         drop(permit);
+        assert!(publication_cancelled.load(Ordering::SeqCst));
         Ok(())
-    }
-
-    #[test]
-    fn import_worker_termination_has_exact_operator_diagnostic() {
-        let diagnostic = InternalDiagnostic::ConversationImportWorkerTerminated;
-
-        assert_eq!(
-            diagnostic.failure_class(),
-            signalbox_application::OperatorFailureClass::CallerOrHubBug
-        );
-        assert_eq!(
-            diagnostic.cause_code(),
-            "conversation_import_worker_terminated"
-        );
     }
 
     #[test]
@@ -2547,65 +2499,6 @@ pub(crate) mod tests {
         );
     }
 
-    struct PanickingConverter;
-
-    impl ImportedConversationConverter for PanickingConverter {
-        type Error = io::Error;
-
-        fn format(&self) -> ImportedConversationFormat {
-            ImportedConversationFormat::CodexRolloutJsonlV1
-        }
-
-        fn convert<NextEntryId>(
-            &mut self,
-            _conversation: ImportedConversationId,
-            _source: &[u8],
-            _next_entry_id: NextEntryId,
-        ) -> Result<ImportedConversation, Self::Error>
-        where
-            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
-        {
-            panic!("synthetic import worker panic")
-        }
-    }
-
-    impl ResilientImportedConversationConverter for PanickingConverter {
-        type RecordFailure = SyntheticRecordFailure;
-
-        fn convert_resilient<NextEntryId>(
-            &mut self,
-            _conversation: ImportedConversationId,
-            _source: &[u8],
-            _next_entry_id: NextEntryId,
-        ) -> Result<ImportedConversationConversionReport<Self::RecordFailure>, Self::Error>
-        where
-            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
-        {
-            panic!("synthetic import worker panic")
-        }
-    }
-
-    impl StreamingResilientImportedConversationConverter for PanickingConverter {
-        fn convert_resilient_from_reader<Reader, NextEntryId>(
-            &mut self,
-            _conversation: ImportedConversationId,
-            _source: Reader,
-            _maximum_record_bytes: u64,
-            _next_entry_id: NextEntryId,
-        ) -> impl Iterator<
-            Item = Result<
-                ImportedConversationStreamItem<Self::RecordFailure>,
-                StreamConversionError<Self::Error>,
-            >,
-        > + Send
-        where
-            Reader: std::io::BufRead + Send,
-            NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
-        {
-            std::iter::once_with(|| panic!("synthetic import worker panic"))
-        }
-    }
-
     #[derive(Clone, Copy)]
     struct SyntheticRecordFailure;
 
@@ -2618,14 +2511,9 @@ pub(crate) mod tests {
         }
     }
 
-    struct ThreadReportingRejectConverter(mpsc::SyncSender<thread::ThreadId>);
+    struct ConversionReportingRejectConverter(Arc<AtomicBool>);
 
-    struct BlockingRejectConverter {
-        started: mpsc::SyncSender<()>,
-        release: Option<mpsc::Receiver<()>>,
-    }
-
-    impl ImportedConversationConverter for BlockingRejectConverter {
+    impl ImportedConversationConverter for ConversionReportingRejectConverter {
         type Error = io::Error;
 
         fn format(&self) -> ImportedConversationFormat {
@@ -2641,85 +2529,12 @@ pub(crate) mod tests {
         where
             NextEntryId: FnMut() -> ImportedTranscriptEntryId,
         {
-            panic!("the fixture uses only streamed conversion")
-        }
-    }
-
-    impl ResilientImportedConversationConverter for BlockingRejectConverter {
-        type RecordFailure = SyntheticRecordFailure;
-
-        fn convert_resilient<NextEntryId>(
-            &mut self,
-            _conversation: ImportedConversationId,
-            _source: &[u8],
-            _next_entry_id: NextEntryId,
-        ) -> Result<ImportedConversationConversionReport<Self::RecordFailure>, Self::Error>
-        where
-            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
-        {
-            panic!("the fixture uses only streamed conversion")
-        }
-    }
-
-    impl StreamingResilientImportedConversationConverter for BlockingRejectConverter {
-        fn convert_resilient_from_reader<Reader, NextEntryId>(
-            &mut self,
-            _conversation: ImportedConversationId,
-            _source: Reader,
-            _maximum_record_bytes: u64,
-            _next_entry_id: NextEntryId,
-        ) -> impl Iterator<
-            Item = Result<
-                ImportedConversationStreamItem<Self::RecordFailure>,
-                StreamConversionError<Self::Error>,
-            >,
-        > + Send
-        where
-            Reader: std::io::BufRead + Send,
-            NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
-        {
-            let started = self.started.clone();
-            let release = self.release.take().expect("the fixture converts once");
-            std::iter::once_with(move || {
-                started
-                    .send(())
-                    .map_err(|_| io::Error::other("the started receiver closed"))
-                    .map_err(StreamConversionError::Conversion)?;
-                release
-                    .recv()
-                    .map_err(|_| io::Error::other("the release sender closed"))
-                    .map_err(StreamConversionError::Conversion)?;
-                Ok(ImportedConversationStreamItem::Skipped(
-                    ImportedConversationSkippedRecord::new(1, SyntheticRecordFailure),
-                ))
-            })
-        }
-    }
-
-    impl ImportedConversationConverter for ThreadReportingRejectConverter {
-        type Error = io::Error;
-
-        fn format(&self) -> ImportedConversationFormat {
-            ImportedConversationFormat::CodexRolloutJsonlV1
-        }
-
-        fn convert<NextEntryId>(
-            &mut self,
-            _conversation: ImportedConversationId,
-            _source: &[u8],
-            _next_entry_id: NextEntryId,
-        ) -> Result<ImportedConversation, Self::Error>
-        where
-            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
-        {
-            self.0
-                .send(thread::current().id())
-                .map_err(|_| io::Error::other("the test thread receiver closed"))?;
+            self.0.store(true, Ordering::SeqCst);
             Err(io::Error::other("fixture conversion rejection"))
         }
     }
 
-    impl ResilientImportedConversationConverter for ThreadReportingRejectConverter {
+    impl ResilientImportedConversationConverter for ConversionReportingRejectConverter {
         type RecordFailure = SyntheticRecordFailure;
 
         fn convert_resilient<NextEntryId>(
@@ -2731,9 +2546,7 @@ pub(crate) mod tests {
         where
             NextEntryId: FnMut() -> ImportedTranscriptEntryId,
         {
-            self.0
-                .send(thread::current().id())
-                .map_err(|_| io::Error::other("the test thread receiver closed"))?;
+            self.0.store(true, Ordering::SeqCst);
             Ok(ImportedConversationConversionReport::NoValidRecords {
                 skipped_records: vec![ImportedConversationSkippedRecord::new(
                     1,
@@ -2744,7 +2557,7 @@ pub(crate) mod tests {
         }
     }
 
-    impl StreamingResilientImportedConversationConverter for ThreadReportingRejectConverter {
+    impl StreamingResilientImportedConversationConverter for ConversionReportingRejectConverter {
         fn convert_resilient_from_reader<Reader, NextEntryId>(
             &mut self,
             _conversation: ImportedConversationId,
@@ -2761,15 +2574,12 @@ pub(crate) mod tests {
             Reader: std::io::BufRead + Send,
             NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
         {
-            let sender = self.0.clone();
+            let conversion_started = Arc::clone(&self.0);
             std::iter::once_with(move || {
                 source
                     .fill_buf()
                     .map_err(|_| StreamConversionError::SourceRead)?;
-                sender
-                    .send(thread::current().id())
-                    .map_err(|_| io::Error::other("the test thread receiver closed"))
-                    .map_err(StreamConversionError::Conversion)?;
+                conversion_started.store(true, Ordering::SeqCst);
                 Ok(ImportedConversationStreamItem::Skipped(
                     ImportedConversationSkippedRecord::new(
                     1,
@@ -2777,6 +2587,49 @@ pub(crate) mod tests {
                     ),
                 ))
             })
+        }
+    }
+
+    #[derive(Debug)]
+    struct PendingPublicationStorage {
+        started: Arc<Notify>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl signalbox_persistence::conversation_import::ImportedRawBlobStorage
+        for PendingPublicationStorage
+    {
+        fn maximum_blob_bytes(&self) -> u64 {
+            u64::MAX
+        }
+
+        fn publish(
+            &self,
+            _blobs: Box<[signalbox_persistence::conversation_import::ImportedRawBlobInput]>,
+        ) -> signalbox_persistence::conversation_import::ImportedRawBlobPublicationFuture<'_>
+        {
+            let started = Arc::clone(&self.started);
+            let cancelled = Arc::clone(&self.cancelled);
+            Box::pin(async move {
+                struct CancellationGuard(Arc<AtomicBool>);
+
+                impl Drop for CancellationGuard {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+
+                let _guard = CancellationGuard(cancelled);
+                started.notify_one();
+                std::future::pending().await
+            })
+        }
+
+        fn read(
+            &self,
+            _blobs: Box<[signalbox_blob_store::ExpectedBlob]>,
+        ) -> signalbox_persistence::conversation_import::ImportedRawBlobReadFuture<'_> {
+            Box::pin(async { Err(ImportedRawBlobStorageError::Unavailable) })
         }
     }
 

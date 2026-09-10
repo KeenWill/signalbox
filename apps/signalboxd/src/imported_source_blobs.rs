@@ -57,7 +57,7 @@ impl ImportedRawBlobStorage for ImportedSourceBlobStorage {
     fn maximum_blob_bytes(&self) -> u64 {
         self.registry
             .as_deref()
-            .map_or(u64::MAX, BlobStoreRegistry::max_blob_bytes)
+            .map_or(0, BlobStoreRegistry::max_blob_bytes)
     }
 
     fn publish(&self, blobs: Box<[ImportedRawBlobInput]>) -> ImportedRawBlobPublicationFuture<'_> {
