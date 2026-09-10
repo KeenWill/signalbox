@@ -379,7 +379,7 @@ async fn fatal_session_supervision_parks_its_cause_while_another_turn_completes(
     let mut submit = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
         SubmitInputRepository::new(pool.clone()),
-        nudge,
+        nudge.clone(),
         tool_dispatch_gate.clone(),
     );
     let submitted_content = UserContent::try_text(String::from("offline user request"))
@@ -498,7 +498,7 @@ async fn fatal_session_supervision_parks_its_cause_while_another_turn_completes(
     let scheduled = async {
         tokio::select! {
             result = scheduler.run_until(shutdown) => result,
-            () = reporter.park_failed_sessions(pool.clone()) => panic!("supervision must remain running"),
+            () = reporter.park_failed_sessions(pool.clone(), nudge.clone()) => panic!("supervision must remain running"),
         }
     };
     assert_eq!(

@@ -2571,10 +2571,11 @@ async fn run_hub_incarnation(
     let (lifecycle_metrics_shutdown, lifecycle_metrics_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
     let supervision_pool = pool.clone();
+    let supervision_nudge = eligibility_nudge.clone();
     let mut supervision_shutdown = process_shutdown.subscribe();
     runtime_tasks.spawn(async move {
         select! {
-            () = session_supervision.park_failed_sessions(supervision_pool) => {},
+            () = session_supervision.park_failed_sessions(supervision_pool, supervision_nudge) => {},
             _ = supervision_shutdown.changed() => {},
         }
         RuntimeTaskExit::SessionSupervision

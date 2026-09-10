@@ -581,6 +581,7 @@ impl FatalRecoveryReporter {
     async fn record_session_failure<Write, Outcome>(
         &self,
         session: SessionId,
+        nudge: &signalbox_application::InProcessEligibilityNudge,
         mut write: Write,
     ) -> Result<(), signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError>
     where
@@ -606,12 +607,17 @@ impl FatalRecoveryReporter {
             self.fatal_signal.send_modify(|state| {
                 state.suspended.remove(&session);
             });
+            nudge.nudge_waiting_for_capacity(session).await;
         }
         result
     }
 
     /// Records session failures in the operator queue while other sessions execute.
-    pub async fn park_failed_sessions(&self, pool: sqlx::PgPool) {
+    pub async fn park_failed_sessions(
+        &self,
+        pool: sqlx::PgPool,
+        nudge: signalbox_application::InProcessEligibilityNudge,
+    ) {
         let repository =
             signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(pool);
         let mut changed = self.fatal_signal.subscribe();
@@ -626,7 +632,7 @@ impl FatalRecoveryReporter {
             });
             for (session, failure) in pending {
                 let result = self
-                    .record_session_failure(session, || {
+                    .record_session_failure(session, &nudge, || {
                         repository.record_supervision_failure(session, &failure)
                     })
                     .await;
@@ -4736,9 +4742,10 @@ mod tests {
         let session = SessionId::from_uuid(Uuid::from_u128(144));
         reporter.report_session_recovery_required(session);
         let mut durable_park = false;
+        let (nudge, _work_source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
         let mut writes = 0;
         reporter
-            .record_session_failure(session, || {
+            .record_session_failure(session, &nudge, || {
                 writes += 1;
                 let already_parked = std::mem::replace(&mut durable_park, true);
                 ready(if already_parked {
@@ -4758,16 +4765,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn releasing_supervision_requeues_a_resume_consumed_during_local_suspension() {
+        use signalbox_application::{EligibilityNudge, EligibilityNudgeOutcome};
+        let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
+        let reporter = execution.recovery_reporter();
+        let session = SessionId::from_uuid(Uuid::from_u128(146));
+        let (nudge, mut source) =
+            InProcessEligibilityWorkSource::with_options(EmptyEligibilitySweep, None, None);
+        reporter.report_session_recovery_required(session);
+        let mut acknowledgement = Some(async {
+            assert_eq!(nudge.nudge(session), EligibilityNudgeOutcome::Enqueued);
+            assert_eq!(source.next().await, Ok(session));
+            assert!(execution.session_is_suspended(session));
+            Ok(())
+        });
+        reporter
+            .record_session_failure(session, &nudge, || {
+                acknowledgement
+                    .take()
+                    .expect("the durable park acknowledges once")
+            })
+            .await
+            .expect("the park commit is acknowledged after the resume hint is consumed");
+        drop(acknowledgement);
+        assert!(!execution.session_is_suspended(session));
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), source.next()).await,
+            Ok(Ok(session)),
+            "resume remains eligible with periodic sweeps disabled"
+        );
+    }
+
+    #[tokio::test]
     async fn supervision_keeps_local_suspension_when_the_park_cannot_be_recorded() {
         use signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError;
         let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
         let reporter = execution.recovery_reporter();
         let session = SessionId::from_uuid(Uuid::from_u128(145));
         reporter.report_session_recovery_required(session);
+        let (nudge, _work_source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
         let mut writes = 0;
         assert!(
             reporter
-                .record_session_failure(session, || {
+                .record_session_failure(session, &nudge, || {
                     writes += 1;
                     ready(Err(SessionLifecycleRepositoryError::Database(
                         sqlx::Error::PoolClosed,

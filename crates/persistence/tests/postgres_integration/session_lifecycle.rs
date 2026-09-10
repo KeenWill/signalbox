@@ -3500,3 +3500,118 @@ async fn startup_reports_missing_and_undecodable_lifecycle_without_repair()
     drop(container);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn startup_settles_repaired_terminal_supervision_without_resuming()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(115);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(115))
+        .await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    lifecycle
+        .close(
+            session,
+            SessionTerminalOutcome::Retired {
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
+            },
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+    let original_actor: String =
+        sqlx::query_scalar("SELECT actor_kind FROM session_lifecycle WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    let original: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(session_lifecycle) FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut corruption = pool.begin().await?;
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query("ALTER TABLE session_lifecycle DROP CONSTRAINT session_lifecycle_actor_closed, DROP CONSTRAINT session_lifecycle_actor_shape")
+        .execute(&mut *corruption).await?;
+    sqlx::query(
+        "UPDATE session_lifecycle SET actor_kind = 'corrupt_fixture' WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *corruption)
+    .await?;
+    corruption.commit().await?;
+    let mut scan = signalbox_application::StartupScanService::new(
+        signalbox_application::UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    assert_eq!(scan.execute().await?.skipped_corrupt_sessions(), &[session]);
+    assert_eq!(scan.execute().await?.skipped_corrupt_sessions(), &[session]);
+    let pending: bool = sqlx::query_scalar(
+        "SELECT supervision_pending FROM session_supervision WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        pending,
+        "a still-corrupt terminal session keeps its operator item"
+    );
+    let mut repair = pool.begin().await?;
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *repair)
+        .await?;
+    sqlx::query("UPDATE session_lifecycle SET actor_kind = $2 WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .bind(original_actor)
+        .execute(&mut *repair)
+        .await?;
+    repair.commit().await?;
+    let repaired = lifecycle
+        .load(session)
+        .await?
+        .expect("repaired lifecycle exists");
+    let failure = repaired
+        .supervision_failure()
+        .expect("operator cause is retained");
+    assert!(failure.pending);
+    let outcome = scan.execute().await?;
+    assert!(outcome.skipped_corrupt_sessions().is_empty());
+    assert_eq!(outcome.recovered_turn_count(), 0);
+    let settled = lifecycle
+        .load(session)
+        .await?
+        .expect("terminal lifecycle remains");
+    assert_eq!(settled.state(), repaired.state());
+    let settled_failure = settled
+        .supervision_failure()
+        .expect("settled cause remains");
+    assert_eq!(settled_failure.class, failure.class);
+    assert_eq!(settled_failure.cause_code, failure.cause_code);
+    assert!(!settled_failure.pending);
+    let after: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(session_lifecycle) FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(after, original);
+    let mut status =
+        signalbox_persistence::operator_status::ProcessOperatorStatusRepository::new(pool.clone())
+            .open()
+            .await?;
+    while let Some(item) = status.next_item().await? {
+        assert!(!matches!(
+            item,
+            signalbox_persistence::operator_status::ProcessOperatorStatusItem::SessionSupervision { .. }
+        ));
+    }
+    assert_eq!(status.counts().unwrap().session_supervision(), 0);
+    assert!(scan.execute().await?.skipped_corrupt_sessions().is_empty());
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

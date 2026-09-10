@@ -496,8 +496,10 @@ where
         ));
     }
 
-    match crate::session_lifecycle::load_optional(connection, requested_session).await {
-        Ok(Some(_)) => {}
+    let lifecycle = match crate::session_lifecycle::load_optional(connection, requested_session)
+        .await
+    {
+        Ok(Some(lifecycle)) => lifecycle,
         Ok(None) => return Err(StartupScanCorruption::Missing("session lifecycle row").into()),
         Err(crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source)) => {
             return Err(source.into());
@@ -505,7 +507,7 @@ where
         Err(_) => {
             return Err(StartupScanCorruption::Inconsistent("session lifecycle projection").into());
         }
-    }
+    };
 
     if let Some(recovered) =
         recover_context_compaction(connection, requested_session, None, active_turn).await?
@@ -587,6 +589,23 @@ where
         .map(signalbox_domain::ActivatedAcceptedInputTurn::turn)
         .or(delegated_active_turn);
     let Some(active_turn_id) = active_turn_id else {
+        if matches!(
+            lifecycle.state(),
+            signalbox_domain::SessionLifecycleState::Terminal { .. }
+        ) && lifecycle
+            .supervision_failure()
+            .is_some_and(|failure| failure.pending)
+        {
+            sqlx::query(
+                "UPDATE session_supervision SET supervision_pending = false WHERE session_id = $1",
+            )
+            .bind(session_id_to_uuid(requested_session))
+            .execute(&mut *connection)
+            .await?;
+            return Ok(TransactionDecision::Commit(
+                StartupScanSessionOutcome::NoActiveTurn,
+            ));
+        }
         return Ok(TransactionDecision::Rollback(
             StartupScanSessionOutcome::NoActiveTurn,
         ));
