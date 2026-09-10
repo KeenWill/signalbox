@@ -6251,6 +6251,21 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
 }
 
 #[test]
+fn file_media_requires_blob_storage_before_worker_startup() {
+    let enabled = format!("file_media = true\n{CONFIGURATION}");
+    assert_eq!(
+        HubModelConfiguration::parse(&enabled).err(),
+        Some(HubModelConfigurationError::InvalidBlobStorageConfiguration)
+    );
+    let disabled = format!("file_media = false\n{CONFIGURATION}");
+    assert!(
+        !HubModelConfiguration::parse(&disabled)
+            .expect("disabled file tools require no store")
+            .file_media()
+    );
+}
+
+#[test]
 fn checked_in_example_admits_unlisted_web_origins() {
     use signalbox_application::ToolCatalog;
     let configuration = super::checked_in_example_configuration().expect("example parses");
@@ -6308,7 +6323,7 @@ max_candidate_source_bytes = 5
 max_elapsed = "6s""#,
             signalbox_application::InstructionDiscoveryLimits {
                 classified_entries: Some(3),
-                findings: Some(4),
+                findings: std::num::NonZeroUsize::new(4),
                 candidate_source_bytes: Some(5),
                 elapsed: Some(std::time::Duration::from_secs(6)),
             },
@@ -6362,4 +6377,12 @@ fn tool_proposal_limits_use_defaults_values_and_none() {
             max_argument_bytes: None,
         }
     );
+}
+
+#[test]
+fn workspace_instruction_finding_limit_rejects_zero() {
+    let text = format!(
+        "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = []\nmax_findings = 0\n"
+    );
+    assert!(HubModelConfiguration::parse(&text).is_err());
 }

@@ -10,6 +10,12 @@ use signalbox_model_runtime::{
 
 use crate::wire::{CreateResponse, WireFunctionTool, WireInputItem, WireReasoning};
 
+/// Measures the complete adapter request, including instructions and tool declarations.
+pub fn serialized_request_bytes<C>(operation: &ModelOperation<C>) -> Option<usize> {
+    let request = build_request_with_fast_mode(operation, operation.settings.fast_mode).ok()?;
+    Some(serde_json::to_vec(&request).ok()?.len())
+}
+
 /// Measures one standalone history message through the adapter's request serializer.
 ///
 /// Returns `None` for a message the adapter cannot render. Independent message

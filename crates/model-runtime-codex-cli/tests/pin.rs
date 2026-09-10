@@ -26,7 +26,15 @@ fn the_pin_manifest_uses_an_exact_version() {
         .get("release")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_else(|| panic!("{PIN_MANIFEST} declares a fork release tag"));
+    let executable_release = manifest
+        .get("executableRelease")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("{PIN_MANIFEST} declares an executable fork release tag"));
 
+    assert_eq!(
+        pinned, executable_release,
+        "the archive and executable pins must use one release"
+    );
     assert_eq!(
         version_pin::upstream_version(pinned),
         Some(signalbox_model_runtime_codex_cli::SUPPORTED_CODEX_CLI_VERSION),
@@ -102,7 +110,7 @@ fn exact_pin_rejects_build_metadata() {
 #[test]
 fn fork_revisions_preserve_the_upstream_binary_version() {
     assert_eq!(
-        version_pin::upstream_version("rust-v1.2.3-signalbox.12"),
+        version_pin::upstream_version("rust-v1.2.3-fork.12"),
         Some("1.2.3")
     );
 }
@@ -110,10 +118,11 @@ fn fork_revisions_preserve_the_upstream_binary_version() {
 #[test]
 fn fork_pin_rejects_branch_names_and_inexact_releases() {
     for tag in [
-        "signalbox",
-        "rust-v^1.2.3-signalbox.1",
-        "rust-v1.2.3-signalbox.0",
-        "rust-v1.2.3-signalbox.latest",
+        "fork",
+        "rust-v^1.2.3-fork.1",
+        "rust-v1.2.3-fork.0",
+        "rust-v1.2.3-fork.latest",
+        "rust-v1.2.3-signalbox.1",
         "rust-v1.2.3",
     ] {
         assert_eq!(version_pin::upstream_version(tag), None);

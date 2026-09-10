@@ -14,6 +14,17 @@ use crate::wire::{
     parse_response_block,
 };
 
+/// Measures the complete adapter request, including instructions and tool declarations.
+pub fn serialized_request_bytes<C>(operation: &ModelOperation<C>) -> Option<usize> {
+    let request = build_request_with_fast_mode(
+        operation,
+        operation.settings.fast_mode,
+        operation.provider_compaction_supported,
+    )
+    .ok()?;
+    Some(serde_json::to_vec(&request).ok()?.len())
+}
+
 /// Measures one history message with array framing and possible cache-prefix growth.
 ///
 /// Returns `None` for a message the adapter cannot render. Independent message

@@ -14,6 +14,8 @@ to `$HOME/.local/lib/signalbox-codex/codex` during deployment. The binary
 reports the upstream version. Startup also checks its SHA-256 against the
 manifest to verify the exact fork binary.
 
-Renovate groups the release tag, asset checksum, and executable checksum into
-one Codex CLI update. The compatibility smoke installs this same manifest before
-invoking the adapter.
+The manifest repeats the release tag beside the archive and executable
+checksums, and the offline pin test requires those tags to agree. This gives
+each Renovate attachment update one release-and-checksum replacement; Renovate
+groups both replacements into one Codex CLI update. The compatibility smoke
+installs this same manifest before invoking the adapter.

@@ -5956,3 +5956,108 @@ async fn assert_bounded_269_kib_batch(arguments: &str) -> Result<Vec<i64>, Box<d
     drop(container);
     Ok(result_limits)
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn file_use_resolution_requires_the_selector_for_repeated_visible_attachments()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::RenderedAttachmentSelector;
+    let (container, pool, _) = migrated_postgres().await?;
+    let seed = 0x133010;
+    let digest = BlobDigest::digest(b"same bytes, different uses");
+    let hidden = BlobDigest::digest(b"catalogued but absent from the frontier");
+    register_fixture_blob(&pool, seed, digest).await?;
+    register_fixture_blob(&pool, seed + 0x100, hidden).await?;
+    let parts = UserContent::try_parts(vec![
+        UserContentPart::Attachment {
+            digest,
+            kind: AttachmentKind::File,
+            media_type: DeclaredMediaType::try_new("text/plain".into())
+                .expect("fixture media type"),
+            display_filename: Some(
+                AttachmentDisplayFilename::try_new("first.txt".into()).expect("fixture filename"),
+            ),
+        },
+        UserContentPart::try_text("between".into()).expect("fixture text"),
+        UserContentPart::Attachment {
+            digest,
+            kind: AttachmentKind::Document,
+            media_type: DeclaredMediaType::try_new("text/csv".into()).expect("fixture media type"),
+            display_filename: Some(
+                AttachmentDisplayFilename::try_new("second.csv".into()).expect("fixture filename"),
+            ),
+        },
+    ])
+    .expect("fixture parts");
+    let input = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(seed + 8)),
+        SessionId::from_uuid(Uuid::from_u128(seed + 1)),
+        parts,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let fixture = checkpoint_restart_model_call_with_input(&pool, seed, false, input, &[]).await?;
+    let authorized = authorize_checkpointed_fixture(&pool, seed, fixture).await?;
+    let (fixture, _, _, _) = commit_authorized_tool_batch(
+        seed,
+        authorized,
+        &[("file_inspect", "{}")],
+        InitialToolApproval::PolicyAuto,
+        ProviderReportedTokenUsage::unreported(),
+        None,
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let batch = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("fixture tool batch");
+    let request = &batch.requests()[0];
+    assert!(
+        repository
+            .resolve_visible_attachment(request, hidden, None)
+            .await?
+            .is_none()
+    );
+    assert!(
+        repository
+            .resolve_visible_attachment(request, digest, None)
+            .await?
+            .is_none()
+    );
+    let entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 10));
+    let selected = repository
+        .resolve_visible_attachment(
+            request,
+            digest,
+            Some(RenderedAttachmentSelector::new(entry, 2)),
+        )
+        .await?
+        .expect("the selected second occurrence is visible");
+    assert_eq!(selected.selector.part_ordinal(), 2);
+    assert_eq!(
+        selected.part,
+        UserContentPart::Attachment {
+            digest,
+            kind: AttachmentKind::Document,
+            media_type: DeclaredMediaType::try_new("text/csv".into()).expect("fixture media type"),
+            display_filename: Some(
+                AttachmentDisplayFilename::try_new("second.csv".into()).expect("fixture filename")
+            )
+        }
+    );
+    assert!(
+        repository
+            .resolve_visible_attachment(
+                request,
+                digest,
+                Some(RenderedAttachmentSelector::new(entry, 1))
+            )
+            .await?
+            .is_none()
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

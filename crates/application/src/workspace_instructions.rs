@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashSet,
+    num::NonZeroUsize,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -175,8 +176,8 @@ static FILESYSTEM_WORKERS: LazyLock<Arc<FilesystemWorkerRegistry>> =
 pub struct InstructionDiscoveryLimits {
     /// Maximum classified directory entries.
     pub classified_entries: Option<u64>,
-    /// Maximum findings, including the terminal incomplete marker.
-    pub findings: Option<usize>,
+    /// Positive maximum findings, including the terminal incomplete marker.
+    pub findings: Option<NonZeroUsize>,
     /// Maximum candidate-source bytes read.
     pub candidate_source_bytes: Option<u64>,
     /// Maximum elapsed scan duration.
@@ -187,7 +188,7 @@ impl Default for InstructionDiscoveryLimits {
     fn default() -> Self {
         Self {
             classified_entries: Some(DEFAULT_CLASSIFIED_ENTRIES),
-            findings: Some(DEFAULT_FINDINGS),
+            findings: NonZeroUsize::new(DEFAULT_FINDINGS),
             candidate_source_bytes: Some(DEFAULT_CANDIDATE_SOURCE_BYTES),
             elapsed: Some(DEFAULT_ELAPSED),
         }
@@ -1468,7 +1469,7 @@ fn push_finding(
     if state
         .limits
         .findings
-        .is_some_and(|limit| findings.len() >= limit.saturating_sub(1))
+        .is_some_and(|limit| findings.len() >= limit.get().saturating_sub(1))
     {
         return reach_limit(
             path,
@@ -1505,14 +1506,12 @@ fn reach_limit(
 ) -> bool {
     state.complete = false;
     if let Some(limit) = state.limits.findings {
-        findings.truncate(limit.saturating_sub(1));
+        findings.truncate(limit.get().saturating_sub(1));
     }
-    if state.limits.findings != Some(0) {
-        findings.push(InstructionDiscoveryFinding {
-            path,
-            kind: InstructionDiscoveryFindingKind::LimitReached(limit),
-        });
-    }
+    findings.push(InstructionDiscoveryFinding {
+        path,
+        kind: InstructionDiscoveryFindingKind::LimitReached(limit),
+    });
     false
 }
 
@@ -2608,7 +2607,7 @@ mod tests {
     ) -> InstructionDiscoveryLimits {
         InstructionDiscoveryLimits {
             classified_entries: Some(classified_entries),
-            findings: Some(findings),
+            findings: Some(NonZeroUsize::new(findings).expect("positive fixture finding limit")),
             candidate_source_bytes: Some(candidate_source_bytes),
             elapsed: Some(elapsed),
         }

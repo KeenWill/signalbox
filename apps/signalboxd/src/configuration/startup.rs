@@ -8,6 +8,7 @@ pub(super) struct ParsedStartup {
     pub(super) model_settings_profiles: HashMap<Arc<str>, ModelSettingsOverlay>,
     pub(super) compaction_prompt: Arc<str>,
     pub(super) conversation_import_max_source_bytes: usize,
+    pub(super) file_media: bool,
     pub(super) blob_storage: Option<BlobStorageConfiguration>,
     pub(super) web_fetch_egress_policy: WebFetchEgressPolicy,
     pub(super) daemon_tools: Option<DaemonToolConfiguration>,
@@ -59,6 +60,7 @@ pub(super) fn parse_startup(
             "convergence",
             "repository_watch",
             "blob_storage",
+            "file_media",
             "workspace_instructions",
             "tool_proposals",
         ],
@@ -110,6 +112,18 @@ pub(super) fn parse_startup(
     let blob_storage =
         BlobStorageConfiguration::parse(document.get("blob_storage"), minimum_blob_bytes)
             .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
+    let file_media = document
+        .get("file_media")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or(HubModelConfigurationError::InvalidDocument)
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if file_media && blob_storage.is_none() {
+        return Err(HubModelConfigurationError::InvalidBlobStorageConfiguration);
+    }
     let web_fetch_egress_policy = document
         .get("web_fetch")
         .map(|item| {
@@ -371,6 +385,7 @@ pub(super) fn parse_startup(
         compaction_prompt,
         conversation_import_max_source_bytes,
         blob_storage,
+        file_media,
         web_fetch_egress_policy,
         daemon_tools,
         credential_profiles,

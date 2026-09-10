@@ -54,7 +54,8 @@ use signalbox_model_runtime::{
 };
 
 const MODEL_IDENTITY_CHANGE_MESSAGE: &str = "Signalbox session event: your model identity is now";
-const CONTEXT_SUMMARY_MESSAGE: &str = "Signalbox prior-conversation summary:";
+/// Prefix included in every model-visible context summary.
+pub const CONTEXT_SUMMARY_MESSAGE: &str = "Signalbox prior-conversation summary:";
 
 /// One already-redacted provider text fragment for ephemeral presentation.
 #[derive(Clone, Debug, Eq, PartialEq)]

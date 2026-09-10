@@ -42,6 +42,7 @@ async fn incomplete_discovery_starts_counted_and_uncounted_turns() -> Result<(),
             signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, vec![root])
                 .with_discovery_limits(signalbox_application::InstructionDiscoveryLimits {
                     classified_entries: Some(2),
+                    findings: std::num::NonZeroUsize::new(1),
                     ..Default::default()
                 });
         let configuration = support::parse_model_configuration(&configuration_text)?;
