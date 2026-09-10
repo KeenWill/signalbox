@@ -100,6 +100,11 @@ nothing about the rest. A canonical URL repeated in that list makes Git invoke
 the destination twice, so the repetition is rejected: the second invocation
 could report a known failure after the first had already changed external state.
 
+Branch-occupancy serialization covers cooperating daemon Git executors that
+honor its locks. External native worktree registration, including
+`git worktree add --no-checkout` outside the daemon, is outside this isolation
+contract. Occupancy scans reject conflicts visible at their validation points.
+
 Signalbox does not isolate a repository from every process that can write it:
 another same-authority or privileged process can mutate repository data after
 the final validation or after an operation returns. Descriptor pinning does not
