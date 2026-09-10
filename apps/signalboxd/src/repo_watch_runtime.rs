@@ -1,5 +1,7 @@
 //! Daemon composition of repository ingestion, dispatch, and lifecycle consumption.
 
+mod workflows;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use ring::rand::{SecureRandom, SystemRandom};
@@ -41,7 +43,7 @@ pub(crate) fn git_push_repository<'a>(
     configuration.repositories().iter().find(|repository| {
         repository.repository() == event.repository()
             && repository.repository() == context.head_repository()
-            && repository.push_credential_file().is_some()
+            && repository.admits_push()
     })
 }
 
@@ -162,7 +164,6 @@ enum WorkerState {
 
 struct RuntimeState {
     workers: WorkerState,
-    module_pool: PgPool,
     store: RepoWatchStore,
     lifecycle: LifecycleEventSource,
     factory: RepositoryWatchCommandFactory,
@@ -333,7 +334,7 @@ impl RepositoryWatchRuntime {
             .find(|repository| {
                 repository.repository() == context.repository()
                     && repository.repository() == context.head_repository()
-                    && repository.push_credential_file().is_some()
+                    && repository.admits_push()
             })
             .map(|repository| {
                 (
@@ -358,7 +359,7 @@ impl RepositoryWatchRuntime {
     /// Composes the idle supervisor without activating on-disk rules before recovery.
     pub fn unstarted(module_pool: PgPool, services: RepositoryWatchServices) -> Self {
         let (repository_shutdown, _) = watch::channel(false);
-        let store = RepoWatchStore::new(module_pool.clone());
+        let store = RepoWatchStore::new(module_pool);
         Self {
             measurements_store: store.clone(),
             state: Arc::new(Mutex::new(RuntimeState {
@@ -372,7 +373,6 @@ impl RepositoryWatchRuntime {
                 prepared_sweep: None,
                 commands: None,
                 store,
-                module_pool,
                 lifecycle: LifecycleEventSource::new(services.core_pool.clone()),
                 factory: RepositoryWatchCommandFactory(services.templates),
                 sink: RepositoryWatchCommandSink {
@@ -711,7 +711,6 @@ impl RepositoryWatchRuntime {
         state.pause().await;
         state.listener.shutdown().await;
         state.workers = WorkerState::Prepared;
-        state.module_pool.close().await;
         outcome
     }
 }
