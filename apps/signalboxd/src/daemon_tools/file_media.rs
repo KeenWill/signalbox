@@ -254,7 +254,7 @@ impl VerifiedBlobSource for CatalogFileSource {
                     BlobReadError::NotFound | BlobReadError::Missing => SourceReadError::Missing,
                     BlobReadError::Corrupt => SourceReadError::Corrupt,
                     BlobReadError::Unavailable => SourceReadError::Unavailable,
-                    BlobReadError::RangeOutOfBounds { .. } => SourceReadError::RangeOutOfBounds,
+                    BlobReadError::RangeOutOfBounds => SourceReadError::RangeOutOfBounds,
                     BlobReadError::Integrity => SourceReadError::Integrity,
                 })
         })

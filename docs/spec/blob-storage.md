@@ -213,8 +213,9 @@ kind; no operation or client field selects a route.
 
 A process-protocol or tool range crossing EOF returns the available tail; a
 range starting at or beyond EOF returns empty bytes. Both return the blob's
-catalogued length. Tool reads retain at most 512 KiB per request and have no
-per-turn byte or request reservations. Filesystem range reads seek to the
+catalogued length. Empty tool reads open candidates and check their length
+without reading the body. Tool reads retain at most 512 KiB per request and have
+no per-turn byte or request reservations. Filesystem range reads seek to the
 requested offset and read only that page; S3 uses a bounded HTTP range request.
 Filesystem opens check file length and descriptor inode identity. Same-UID
 in-place writes after ingest are an accepted residual under the

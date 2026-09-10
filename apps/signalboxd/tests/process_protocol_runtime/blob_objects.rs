@@ -506,17 +506,9 @@ async fn blob_ten_gib_preparation_and_two_hundred_reads_stay_bounded() -> Result
     assert_eq!(page.byte_length(), 524_288);
     assert_eq!(measured.read_bytes_for_test(), 524_288);
     let before_turn_reads = measured.read_bytes_for_test();
-    execute_sparse_blob_turn(
-        &calls,
-        &runtime.pool,
-        session,
-        turn,
-        call,
-        registry,
-        expected,
-    )
-    .await?;
+    execute_sparse_blob_turn(&calls, &runtime, session, turn, call, registry, expected).await?;
     // Five full pages, 194 one-byte pages, and one three-byte short tail.
+    // Healthy, truncated, and deleted EOF candidates read no body bytes.
     assert_eq!(
         measured.read_bytes_for_test() - before_turn_reads,
         2_621_637
@@ -555,7 +547,7 @@ async fn blob_operator_range_crossing_eof_returns_the_short_tail() -> Result<(),
 
 async fn execute_sparse_blob_turn(
     calls: &PostgresModelCallRepository,
-    pool: &PgPool,
+    runtime: &RunningRuntime,
     session: SessionId,
     turn: TurnId,
     mut call: ModelCallId,
@@ -566,8 +558,14 @@ async fn execute_sparse_blob_turn(
         ToolExecutionService, ToolExecutionServiceOutcome, UuidV7ToolLoopIdGenerator,
     };
     use signalbox_domain::{ToolAttemptEnd, ToolResultContent, TurnAttemptId};
+    let object_path = runtime
+        .blob_storage_root
+        .as_ref()
+        .expect("blob fixture")
+        .store
+        .join(BlobObjectKey::for_digest(expected.digest()).as_str());
     let (catalog, executor) = signalboxd::BlobTools::try_new(
-        signalbox_persistence::blob::BlobCatalogRepository::new(pool.clone()),
+        signalbox_persistence::blob::BlobCatalogRepository::new(runtime.pool.clone()),
         Some(registry),
     )?
     .into_parts();
@@ -578,7 +576,7 @@ async fn execute_sparse_blob_turn(
         executor,
         InProcessToolDispatchGate::default(),
     );
-    for round in 0..25 {
+    for round in 0..28 {
         let AuthorizeModelCallOutcome::Authorized(authorized) =
             calls.authorize_send(session, call).await?
         else {
@@ -586,7 +584,7 @@ async fn execute_sparse_blob_turn(
         };
         let response = ToolUsingAssistantResponse::try_from_parts((0..8).map(|page| {
             let index = round * 8 + page;
-            let offset = if index == 199 { expected.byte_length() - 3 } else { expected.byte_length() / 2 + index };
+            let offset = if round >= 25 { if page % 2 == 0 { expected.byte_length() } else { u64::MAX } } else if index == 199 { expected.byte_length() - 3 } else { expected.byte_length() / 2 + index };
             let length = if index < 5 || index == 199 { 524_288 } else { 1 };
             AssistantResponsePart::ToolCall(ToolCallProposal::new(
                 ToolName::try_new("blob_read".into()).expect("tool name"),
@@ -620,6 +618,15 @@ async fn execute_sparse_blob_turn(
                 |_| panic!("no pending steering"),
             )
             .await?;
+        // Mutate after admission so failures come from the model read itself.
+        if round == 26 {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&object_path)?
+                .set_len(expected.byte_length() - 1)?;
+        } else if round == 27 {
+            fs::remove_file(&object_path)?;
+        }
         for page in 0..8 {
             assert!(matches!(
                 tools.execute(session, turn).await?,
@@ -630,6 +637,20 @@ async fn execute_sparse_blob_turn(
             else {
                 panic!("range request completes");
             };
+            if round >= 26 {
+                let ToolAttemptEnd::KnownFailed { error } = ended.end() else {
+                    panic!("EOF read detects the damaged replica: {:?}", ended.end());
+                };
+                assert_eq!(
+                    error.detail().expect("blob failure detail").as_str(),
+                    if round == 26 {
+                        "blob_corrupt"
+                    } else {
+                        "blob_missing"
+                    }
+                );
+                continue;
+            }
             let ToolAttemptEnd::Completed {
                 result: ToolResultContent::Text(text),
             } = ended.end()
@@ -638,6 +659,9 @@ async fn execute_sparse_blob_turn(
             };
             let result: serde_json::Value = serde_json::from_str(text.as_str())?;
             assert_eq!(result["blob_length_bytes"], "10737418240");
+            if round == 25 {
+                assert_eq!(result["bytes_base64"], "", "healthy EOF read is empty");
+            }
             if round == 24 && page == 7 {
                 assert_eq!(
                     result["bytes_base64"], "AAAA",

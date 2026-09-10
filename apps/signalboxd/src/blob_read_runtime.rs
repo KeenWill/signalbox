@@ -67,9 +67,6 @@ pub(crate) async fn read_blob_chunk(
     let actual_length = length
         .get()
         .min(expected.byte_length().saturating_sub(offset));
-    if actual_length == 0 {
-        return Ok(Vec::new());
-    }
     let mut saw_missing = false;
     let mut saw_corrupt = false;
     let mut saw_unavailable = false;
@@ -77,11 +74,22 @@ pub(crate) async fn read_blob_chunk(
         let Some(store) = registry.recorded_store(replica.store()) else {
             return Err(BlobReadError::Integrity);
         };
-        match store
-            .open_range(expected, replica.object_key(), offset, length)
-            .await
-        {
+        let opened = if actual_length == 0 {
+            store.open(replica.object_key()).await
+        } else {
+            store
+                .open_range(expected, replica.object_key(), offset, length)
+                .await
+        };
+        match opened {
             Ok(opened) => {
+                if actual_length == 0 {
+                    if opened.byte_length() == expected.byte_length() {
+                        return Ok(Vec::new());
+                    }
+                    saw_corrupt = true;
+                    continue;
+                }
                 if opened.byte_length() != actual_length {
                     return Err(BlobReadError::Integrity);
                 }
