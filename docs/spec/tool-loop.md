@@ -154,7 +154,8 @@ refuses every exchange; a root-level union in a schema is a family-wide outage,
 not a per-tool cost.
 
 The daemon registers `git_push_configured` when mapped workspace tools are
-composed and a watched repository configures `push_credential_file` or an SSH
+composed and a watched repository configures `push_credential_file`, a GitHub
+HTTPS destination with a `github_app` credential profile, or an SSH
 `push_remote_url` with an available host agent; execution resolves the session's
 retained commissioned or repository-dispatched branch and head fences and
 current repository configuration on every call; the judge or CLI approval
