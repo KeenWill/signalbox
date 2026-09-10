@@ -100,9 +100,9 @@ pub enum RejectionDetail {
         /// The unavailable immutable byte identity.
         digest: CanonicalBlobDigest,
     },
-    /// Distinct attachment bytes exceeded the deployment admission ceiling.
+    /// An attachment exceeded the deployment per-blob admission ceiling.
     AttachmentByteBudgetExceeded {
-        /// Configured maximum aggregate byte count.
+        /// Configured maximum per-blob byte count.
         maximum_bytes: PositiveCanonicalU64,
     },
     /// The placement head advanced beyond the caller-observed version.
