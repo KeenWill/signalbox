@@ -333,6 +333,10 @@ impl<R> RuntimeModelCallProvider<R> {
         models: RuntimeModelCatalog,
         diagnostic_model_identity_limit: option::Option<usize>,
     ) -> Self;
+    pub const fn with_tool_proposal_limits(
+        self,
+        limits: signalbox_application::ToolProposalLimits,
+    ) -> Self;
     pub fn with_invocation_process_observer(
         self,
         observer: impl InvocationProcessObserver + 'static,

@@ -6461,6 +6461,35 @@ max_elapsed = "none""#,
 }
 
 #[test]
+fn tool_proposal_limits_use_defaults_values_and_none() {
+    let defaults = HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration");
+    assert_eq!(
+        defaults.tool_proposal_limits(),
+        signalbox_application::ToolProposalLimits::default()
+    );
+    let configured = HubModelConfiguration::parse(&format!(
+        "{CONFIGURATION}\n[tool_proposals]\nmax_requests = 5\nmax_argument_bytes = 2048\n"
+    ))
+    .expect("finite tool proposal limits");
+    assert_eq!(
+        configured.tool_proposal_limits(),
+        signalbox_application::ToolProposalLimits {
+            max_requests: Some(5),
+            max_argument_bytes: Some(2048),
+        }
+    );
+    let unbounded = HubModelConfiguration::parse(&format!("{CONFIGURATION}\n[tool_proposals]\nmax_requests = \"none\"\nmax_argument_bytes = \"none\"\n"))
+        .expect("unbounded tool proposals");
+    assert_eq!(
+        unbounded.tool_proposal_limits(),
+        signalbox_application::ToolProposalLimits {
+            max_requests: None,
+            max_argument_bytes: None,
+        }
+    );
+}
+
+#[test]
 fn workspace_instruction_finding_limit_rejects_zero() {
     let text = format!(
         "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = []\nmax_findings = 0\n"

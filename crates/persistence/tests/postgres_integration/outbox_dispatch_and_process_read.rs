@@ -725,33 +725,28 @@ async fn outbox_consumers_advance_independent_typed_prefixes() -> Result<(), Box
     Ok(())
 }
 
-/// storage independently rejects a restored tool response whose request inventory exceeds the
-/// bounded domain vocabulary.
+/// Storage retains every proposal in a response above the default admission cap.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn tool_round_storage_rejects_more_than_32_requests() -> Result<(), Box<dyn Error>> {
+async fn tool_round_storage_retains_more_than_32_requests() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let error = sqlx::query(
-        "INSERT INTO tool_round
-            (producing_model_call_id, session_id, turn_id, boundary_kind,
-             boundary_frontier_id, response_part_count, request_count)
-         VALUES ($1, $2, $3, 'continuing', $4, 33, 33)",
+    // Supplies distinct model-call and request identities for this fixture.
+    const ARBITRARY_SEED: u128 = 0x9650_0000;
+    let (fixture, _, _, requests) =
+        checkpoint_confirmed_tool_batch(&pool, ARBITRARY_SEED, &[("current_time", "{}"); 40])
+            .await?;
+    assert_eq!(requests.len(), 40);
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT round.request_count::bigint, count(request.request_id)
+           FROM tool_round round
+           JOIN tool_request request USING (producing_model_call_id)
+          WHERE round.producing_model_call_id = $1
+          GROUP BY round.request_count",
     )
-    .bind(Uuid::from_u128(1))
-    .bind(Uuid::from_u128(2))
-    .bind(Uuid::from_u128(3))
-    .bind(Uuid::from_u128(4))
-    .execute(&pool)
-    .await
-    .expect_err("the request-count constraint rejects the thirty-third request");
-
-    assert_eq!(
-        error
-            .as_database_error()
-            .and_then(sqlx::error::DatabaseError::constraint),
-        Some("tool_round_counts_bounded")
-    );
-
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (40, 40));
     pool.close().await;
     drop(container);
     Ok(())

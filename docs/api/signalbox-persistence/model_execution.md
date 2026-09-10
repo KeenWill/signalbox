@@ -26,6 +26,8 @@ impl model_execution::ToolContinuationUsageLimit {
         context_window_tokens: u64,
     ) -> Self;
     #[must_use]
+    pub const fn with_max_tool_requests(self, maximum: option::Option<u64>) -> Self;
+    #[must_use]
     pub fn with_entry_measurement(
         self,
         measurement: sync::Arc<dyn model_execution::ToolContinuationEntryMeasurement>,

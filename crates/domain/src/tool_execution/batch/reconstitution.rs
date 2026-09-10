@@ -4,8 +4,8 @@ use super::{ToolBatch, ToolBatchPhase};
 use crate::{
     ReconstitutedToolAttempt, ResolvedContextFrontierSnapshot, SessionId, ToolApprovalResolution,
     ToolAttemptEnd, ToolAttemptId, ToolEffectClass, ToolExecutionErrorKind, ToolRequest,
-    ToolRequestId, TurnAttemptId, TurnId, tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
-    tool_attempt::RUNNER_ISSUANCE_AVAILABLE, tool_attempt::RUNNER_ISSUANCE_ISSUED,
+    ToolRequestId, TurnAttemptId, TurnId, tool_attempt::RUNNER_ISSUANCE_AVAILABLE,
+    tool_attempt::RUNNER_ISSUANCE_ISSUED,
 };
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -109,8 +109,6 @@ impl ToolBatchReconstitutionInput {
 pub enum ToolBatchReconstitutionFailure {
     /// A producing call cannot yield an empty request batch.
     EmptyRequestBatch,
-    /// A producing call cannot exceed the per-response request bound.
-    TooManyRequests,
     /// A request belongs to a different session, turn, or producing call.
     RequestOwnershipMismatch,
     /// Request identity or ordinal is duplicated or noncontiguous.
@@ -173,9 +171,6 @@ fn reconstitute_batch(
             input,
             ToolBatchReconstitutionFailure::EmptyRequestBatch,
         ));
-    }
-    if input.requests.len() > MAX_TOOL_REQUESTS_PER_RESPONSE {
-        return Err(fail(input, ToolBatchReconstitutionFailure::TooManyRequests));
     }
     if input.yielded_snapshot.frontier().owning_session() != input.session {
         return Err(fail(

@@ -376,7 +376,6 @@ impl ToolBatchReconstitutionInput {
 ```rust
 pub enum ToolBatchReconstitutionFailure {
     EmptyRequestBatch,
-    TooManyRequests,
     RequestOwnershipMismatch,
     RequestOrderMismatch,
     YieldedSnapshotSessionMismatch,

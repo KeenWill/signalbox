@@ -105,6 +105,7 @@ pub struct ToolContinuationUsageLimit {
     context_window_tokens: u64,
     replays_provider_compaction: bool,
     compaction_prompt_bytes: u64,
+    max_tool_requests: Option<u64>,
     request_overhead_bytes: u64,
     steering_part_framing_bytes: u64,
     entry_measurement: Option<std::sync::Arc<dyn ToolContinuationEntryMeasurement>>,
@@ -125,10 +126,24 @@ impl ToolContinuationUsageLimit {
             context_window_tokens,
             replays_provider_compaction: false,
             compaction_prompt_bytes: 0,
+            max_tool_requests: Some(
+                signalbox_application::ToolProposalLimits::DEFAULT_MAX_REQUESTS,
+            ),
             request_overhead_bytes: 0,
             steering_part_framing_bytes: 0,
             entry_measurement: None,
         }
+    }
+
+    /// Sets the configured cap used to reserve the next response's result envelopes.
+    #[must_use]
+    pub const fn with_max_tool_requests(mut self, maximum: Option<u64>) -> Self {
+        self.max_tool_requests = maximum;
+        self
+    }
+
+    pub(crate) const fn max_tool_requests(&self) -> Option<u64> {
+        self.max_tool_requests
     }
 
     /// Supplies the adapter measurement for model-visible entries after a summary.
