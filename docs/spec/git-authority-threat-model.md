@@ -86,8 +86,26 @@ records a withdrawal rather than editing or deleting the mint. The live
 destination table is derived from those facts, so a mint stands in it until its
 withdrawal is recorded.
 
-A push destination is `https` only; the durable mint and the configured remote
-judge a URL by one type, so both refuse the same set.
+Push destinations accept HTTPS, `ssh://`, and `git@host:` forms. The durable
+mint and the configured remote use the same destination type. SSH uses a
+configured private key file or, on Linux, the host SSH agent exposed to the
+sandbox. Push approval, branch and commit fences, captured object authority,
+non-forced updates, and remote confirmation apply to both transports. SSH runs
+in batch mode with user SSH configuration disabled. Credential preparation,
+account lookup, sandbox setup, push and confirmation share one 300-second
+deadline. Agent-backed pushes run through the execution sandbox with the private
+captured repository as its workspace, host networking, and read-only binds for
+the agent socket and host trust stores. User trust files are `known_hosts` and
+`known_hosts2` under the account home returned by the host account database; the
+`HOME` environment variable does not select them. These files are mounted at
+fixed paths outside the private workspace and selected explicitly for OpenSSH.
+Agent-backed push authority requires a socket that accepts a connection when
+authority is derived. Relative agent socket paths resolve to absolute paths
+before probing and retention. The socket is mounted at a fixed UTF-8 sandbox
+path, preserving arbitrary host pathname bytes. The sandbox receives a minimal
+passwd entry from the host account lookup, including the resolved UID and home.
+Its NSS configuration resolves passwd and group entries from mounted files and
+hostnames through hosts files and DNS.
 
 Workspace roots are globally unique by canonical spelling, and the key carries
 no runner or location dimension. Why: the single-runner rule means no two
@@ -213,8 +231,9 @@ workspace.
 Operator workspace registration canonicalizes the root once in the daemon
 filesystem and stores its unique spelling with the registering command.
 Workspace comparisons use the resulting identity. Git remote minting records one
-HTTPS destination per workspace and name; withdrawal retires exactly one mint
-and frees its name. Neither operation changes which roots the daemon may open.
+HTTPS or SSH destination per workspace and name; withdrawal retires exactly one
+mint and frees its name. Neither operation changes which roots the daemon may
+open.
 
 ## Planned
 

@@ -138,12 +138,13 @@ at least one second or `"none"` and bounds the timeout requested from
 `"none"`, or `"host"`), `sandbox_read_only_binds` (default `[]`), and
 `sandbox_path_prepend` (default `[]`) select networking, absolute host paths
 bound read-only at the same paths, and absolute directories prepended to `PATH`.
-Host networking shares the daemon's network namespace and DNS configuration
-without destination filtering, independently of web-egress and tool-mapping
-policies. Optional `sandbox_rustup_home` and `sandbox_rustup_toolchain` set
-`RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; automatic toolchain installation is
-disabled, `CARGO_HOME` stays private and writable, and `npm_config_cache` is
-`/workspace/.npm`.
+Programmatic read-only mounts at explicit destinations overlay the workspace,
+worktree, and working-directory binds. Host networking shares the daemon's
+network namespace and DNS configuration without destination filtering,
+independently of web-egress and tool-mapping policies. Optional
+`sandbox_rustup_home` and `sandbox_rustup_toolchain` set `RUSTUP_HOME` and
+`RUSTUP_TOOLCHAIN`; automatic toolchain installation is disabled, `CARGO_HOME`
+stays private and writable, and `npm_config_cache` is `/workspace/.npm`.
 
 The optional `[tool_proposals]` table sets `max_requests` and
 `max_argument_bytes` to nonnegative integers or `"none"`, with defaults of 32
@@ -792,15 +793,24 @@ credential needs read access for polling and checkout provisioning. Classic
 `repo` is broader than read-only access, so a fine-grained read credential
 limits that role to the watched repositories. An optional absolute
 `push_credential_file` on `[[repository_watch.repositories]]` supplies a
-deployment-owned token with push authority. An App-backed repository uses its
-installation token for pushes when no separate push file is configured. Git
-receives an `https://x-access-token:<token>@github.com/` URL rewrite only
-through the child environment; command arguments retain the public destination.
+deployment-owned HTTPS token or SSH private key. Optional `push_remote_url`
+selects an exact HTTPS, `ssh://`, or `git@host:` destination; its default is the
+watched repository's GitHub HTTPS URL. HTTPS uses the push token, or the
+installation token for an App-backed repository targeting GitHub when no
+separate push file is configured. SSH uses the configured key when present, or,
+on Linux, the host SSH agent exposed through `SSH_AUTH_SOCK` in the sandbox.
+Agent-backed push authority is derived only when that socket accepts a
+connection. Each configured credential file is reread through
+`FileCredentialAccess` on every push; HTTPS passes an authenticated URL rewrite
+in the child environment, and SSH retains a private temporary key file through
+push and remote confirmation. GitHub HTTPS destination matching uses the parsed,
+normalized hostname.
+
 Push credential files participate in the repository-watch credential isolation
 checks, including symlink and hard-link aliases of polling, push, and webhook
 credentials. The push family is registered from the configuration installed by
-durable reload recovery at startup; a repository-watch reload that adds or
-removes `push_credential_file` takes effect for registration at the next boot.
+durable reload recovery at startup; a repository-watch reload that changes push
+registration takes effect at the next boot.
 
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to

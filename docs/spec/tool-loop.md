@@ -155,15 +155,17 @@ refuses every exchange; a root-level union in a schema is a family-wide outage,
 not a per-tool cost.
 
 The daemon registers `git_push_configured` when mapped workspace tools are
-composed and a watched repository configures `push_credential_file`; execution
-resolves the session's retained commissioned or repository-dispatched branch and
-head fences and current repository configuration on every call; the judge or CLI
-approval authorizes execution. The transport pushes without force to the
-configured repository URL and confirms the remote branch equals the resolved
-commit before acknowledging success. For a two-parent merge, exactly one parent
-must equal or descend from the retained-head fence; it is the branch parent,
-regardless of parent order. A missing or ambiguous fence binding refuses the
-push with `UnprovenMergeParents`. Multiple merge bases refuse it with
+composed and a watched repository configures `push_credential_file`, a GitHub
+HTTPS destination with a `github_app` credential profile, or an SSH
+`push_remote_url` with an available host agent on Linux; execution resolves the
+session's retained commissioned or repository-dispatched branch and head fences
+and current repository configuration on every call; the judge or CLI approval
+authorizes execution. The transport pushes without force to the configured
+repository URL and confirms the remote branch equals the resolved commit before
+acknowledging success. For a two-parent merge, exactly one parent must equal or
+descend from the retained-head fence; it is the branch parent, regardless of
+parent order. A missing or ambiguous fence binding refuses the push with
+`UnprovenMergeParents`. Multiple merge bases refuse it with
 `AmbiguousMergeBases`, listing base object IDs and an omitted count when the
 detail cannot fit them all; verification does not construct a virtual merge
 base. Before pushing a merge, the executor compares the base parent's additions

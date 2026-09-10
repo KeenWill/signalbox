@@ -275,11 +275,22 @@ pub enum SandboxNetwork {
 pub struct SandboxConfiguration {
     pub network: SandboxNetwork,
     pub read_only_binds: vec::Vec<path::PathBuf>,
+    pub read_only_mounts: vec::Vec<SandboxReadOnlyMount>,
     pub path_prepend: vec::Vec<path::PathBuf>,
     pub rustup_home: option::Option<path::PathBuf>,
     pub rustup_toolchain: option::Option<string::String>,
 }
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
+```
+
+## SandboxReadOnlyMount
+
+```rust
+pub struct SandboxReadOnlyMount {
+    pub source: path::PathBuf,
+    pub destination: path::PathBuf,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## SandboxedCommandRunner

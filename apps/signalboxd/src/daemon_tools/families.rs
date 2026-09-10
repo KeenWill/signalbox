@@ -87,28 +87,24 @@ where
         repository: &crate::WatchedRepositoryConfiguration,
         branch: signalbox_domain::BranchName,
         commit: signalbox_domain::CommitSha,
-        runner: ExecRunner,
+        transport: super::git_push::ProcessGitPushTransport<ExecRunner>,
         filesystem: &FileSystem,
         max_git_object_bytes: Option<usize>,
     ) -> Result<
         signalbox_tools_git::GitPushExecutor<super::git_push::ProcessGitPushTransport<ExecRunner>>,
         DaemonToolsConstructionError,
     > {
-        let remote = signalbox_tools_git::ConfiguredGitRemote::try_new(
-            "origin",
-            format!(
-                "https://github.com/{}.git",
-                repository.repository().as_str()
-            ),
-        )
-        .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
-        let transport = super::git_push::ProcessGitPushTransport {
-            runner,
-            credentials:
-                crate::repo_watch_credentials::RepositoryWatchClientLoader::for_repository_push(
-                    repository,
-                ),
-        };
+        let destination = repository.push_remote_url().map_or_else(
+            || {
+                format!(
+                    "https://github.com/{}.git",
+                    repository.repository().as_str()
+                )
+            },
+            |remote| remote.as_str().to_owned(),
+        );
+        let remote = signalbox_tools_git::ConfiguredGitRemote::try_new("origin", destination)
+            .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
         let (_, executor) =
             signalbox_tools_git::GitPushTools::try_new(filesystem, root, remote, transport)
                 .map_err(|_| DaemonToolsConstructionError::LocalGit)?

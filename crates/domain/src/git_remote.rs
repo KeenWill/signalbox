@@ -31,7 +31,7 @@ pub const fn max_git_remote_url_bytes() -> usize {
     MAX_GIT_REMOTE_URL_BYTES
 }
 
-/// The only admitted destination scheme.
+/// The admitted HTTP transport scheme.
 const REQUIRED_URL_SCHEME: &str = "https://";
 
 /// Why one Git remote text value was refused.
@@ -50,7 +50,7 @@ pub enum GitRemoteTextError {
     },
     /// The value carried a byte outside its admitted shape.
     Malformed,
-    /// The destination did not name the required https scheme.
+    /// The destination did not name an admitted HTTPS or SSH transport.
     UnsupportedScheme,
 }
 
@@ -65,7 +65,7 @@ impl fmt::Display for GitRemoteTextError {
             ),
             Self::Malformed => formatter.write_str("Git remote text was malformed"),
             Self::UnsupportedScheme => {
-                formatter.write_str("Git remote destination was not an https URL")
+                formatter.write_str("Git remote destination did not use HTTPS or SSH")
             }
         }
     }
@@ -130,7 +130,7 @@ impl GitRemoteName {
     }
 }
 
-/// One exact https destination for a minted remote.
+/// One exact HTTPS or SSH destination for a minted remote.
 ///
 /// The value is never rendered by [`fmt::Debug`] because a destination may
 /// carry a deployment-identifying host or path.
@@ -138,7 +138,7 @@ impl GitRemoteName {
 pub struct GitRemoteUrl(String);
 
 impl GitRemoteUrl {
-    /// Admits one bounded https URL naming a host, written in printable ASCII.
+    /// Admits a bounded HTTPS or SSH destination written in printable ASCII.
     ///
     /// The byte test is `is_ascii_graphic` rather than a Unicode whitespace or
     /// control test, because the SQL predicate that restates this rule
@@ -148,11 +148,16 @@ impl GitRemoteUrl {
     /// so both sides judge the same bytes.
     pub fn try_new(value: String) -> Result<Self, GitRemoteTextError> {
         validate_text(&value, MAX_GIT_REMOTE_URL_BYTES)?;
-        if !value.starts_with(REQUIRED_URL_SCHEME) {
-            return Err(GitRemoteTextError::UnsupportedScheme);
-        }
         if !value.bytes().all(|byte| byte.is_ascii_graphic()) {
             return Err(GitRemoteTextError::Malformed);
+        }
+        if value.starts_with("ssh://") || value.starts_with("git@") {
+            return valid_ssh_destination(&value)
+                .then_some(Self(value))
+                .ok_or(GitRemoteTextError::Malformed);
+        }
+        if !value.starts_with(REQUIRED_URL_SCHEME) {
+            return Err(GitRemoteTextError::UnsupportedScheme);
         }
         let parsed = url::Url::parse(&value).map_err(|_| GitRemoteTextError::Malformed)?;
         let authority = value[REQUIRED_URL_SCHEME.len()..]
@@ -188,6 +193,56 @@ impl GitRemoteUrl {
     pub fn into_string(self) -> String {
         self.0
     }
+}
+
+fn valid_ssh_destination(value: &str) -> bool {
+    let Some((authority, path)) = (if let Some(value) = value.strip_prefix("ssh://") {
+        value.split_once('/')
+    } else {
+        value
+            .strip_prefix("git@")
+            .and_then(|value| value.split_once(':'))
+    }) else {
+        return false;
+    };
+    if path.is_empty() || path.contains(['?', '#']) {
+        return false;
+    }
+    let authority = if value.starts_with("ssh://") {
+        match authority.split_once('@') {
+            Some((user, host))
+                if !user.is_empty()
+                    && !user.starts_with('-')
+                    && user.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
+                    }) =>
+            {
+                host
+            }
+            Some(_) => return false,
+            None => authority,
+        }
+    } else {
+        authority
+    };
+    let host = match authority.split_once(':') {
+        Some((host, port))
+            if value.starts_with("ssh://")
+                && !port.is_empty()
+                && port.len() <= 5
+                && port.bytes().all(|byte| byte.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|port| port != 0) =>
+        {
+            host
+        }
+        Some(_) => return false,
+        None => authority,
+    };
+    !host.is_empty()
+        && host.as_bytes()[0].is_ascii_alphanumeric()
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-'))
 }
 
 fn explicit_port_is_too_long(value: &str) -> bool {
@@ -255,7 +310,7 @@ impl ConfiguredGitRemoteRecord {
         &self.name
     }
 
-    /// Borrows the exact https destination.
+    /// Borrows the exact HTTPS or SSH destination.
     pub const fn url(&self) -> &GitRemoteUrl {
         &self.url
     }
@@ -334,19 +389,45 @@ mod tests {
     }
 
     #[test]
-    fn a_non_https_destination_is_refused() {
-        assert_eq!(
-            GitRemoteUrl::try_new("git@example.test:namespace/project.git".to_owned()),
-            Err(GitRemoteTextError::UnsupportedScheme)
-        );
+    fn ssh_destinations_are_admitted_and_other_schemes_are_refused() {
+        for destination in [
+            "git@example.test:namespace/project.git",
+            "ssh://example.test/project.git",
+            "ssh://git@example.test:2222/project.git",
+        ] {
+            assert_eq!(
+                GitRemoteUrl::try_new(destination.to_owned())
+                    .expect("SSH destination")
+                    .as_str(),
+                destination
+            );
+        }
         assert_eq!(
             GitRemoteUrl::try_new("http://example.test/project.git".to_owned()),
             Err(GitRemoteTextError::UnsupportedScheme)
         );
-        assert_eq!(
-            GitRemoteUrl::try_new("ssh://example.test/project.git".to_owned()),
-            Err(GitRemoteTextError::UnsupportedScheme)
-        );
+    }
+
+    #[test]
+    fn malformed_ssh_destinations_are_refused() {
+        for destination in [
+            "ssh://-option/project",
+            "ssh://-option@host/project",
+            "ssh://git:secret@example.test/project",
+            "git@host:",
+            "ssh://host:0/project",
+            "ssh://host:99999/project",
+            "ssh://host/project?query",
+            "git@host:project#fragment",
+            "ssh://host/",
+            "ssh://@host/project",
+            "ssh://host:000001/project",
+        ] {
+            assert!(
+                GitRemoteUrl::try_new(destination.to_owned()).is_err(),
+                "{destination}"
+            );
+        }
     }
 
     #[test]

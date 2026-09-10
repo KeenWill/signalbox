@@ -6220,6 +6220,7 @@ sandbox_rustup_toolchain = "stable"
         &signalbox_tools_exec::SandboxConfiguration {
             network: signalbox_tools_exec::SandboxNetwork::Host,
             read_only_binds: vec![runtime.path().to_owned()],
+            read_only_mounts: Vec::new(),
             path_prepend: vec![runtime.path().to_owned()],
             rustup_home: Some(runtime.path().to_owned()),
             rustup_toolchain: Some(String::from("stable")),
@@ -6307,6 +6308,91 @@ fn checked_in_example_parses_unbounded_git_object_content() {
 }
 
 #[test]
+fn repository_ssh_push_requires_a_key_or_available_agent_and_redacts_the_destination() {
+    use std::os::unix::ffi::OsStrExt;
+    let directory = tempfile::tempdir().expect("agent fixture");
+    let socket = directory.path().join("agent.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("available agent");
+    let non_utf8 = directory
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"agent-\xff.sock"));
+    let _non_utf8_listener =
+        std::os::unix::net::UnixListener::bind(&non_utf8).expect("byte-path agent");
+    let relative_socket = std::env::current_dir()
+        .expect("daemon working directory")
+        .components()
+        .filter(|component| matches!(component, std::path::Component::Normal(_)))
+        .fold(std::path::PathBuf::new(), |mut path, _| {
+            path.push("..");
+            path
+        })
+        .join(socket.strip_prefix("/").expect("absolute fixture socket"));
+    let unavailable = directory.path().join("unavailable.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&unavailable).expect("temporary agent");
+    drop(listener);
+    let regular = directory.path().join("regular");
+    std::fs::write(&regular, b"not a socket").expect("regular file");
+    for remote in [
+        "ssh://git@example.test/project.git",
+        "git@example.test:project.git",
+    ] {
+        for key in [None, Some("/unused/ssh-push-key")] {
+            let mut document = configuration_with_repository_watch()
+                .parse::<toml_edit::DocumentMut>()
+                .expect("watch document");
+            let repository = document["repository_watch"]["repositories"]
+                .as_array_of_tables_mut()
+                .expect("repositories")
+                .get_mut(0)
+                .expect("first repository");
+            repository["push_remote_url"] = toml_edit::value(remote);
+            if let Some(key) = key {
+                repository["push_credential_file"] = toml_edit::value(key);
+            }
+            let parsed =
+                HubModelConfiguration::parse(&document.to_string()).expect("SSH configuration");
+            let repository = &parsed.repository_watch().expect("watch").repositories()[0];
+            assert_eq!(
+                repository.git_push_enabled_with_agent(Some(&socket)),
+                key.is_some() || cfg!(target_os = "linux")
+            );
+            assert_eq!(
+                repository.git_push_enabled_with_agent(Some(&relative_socket)),
+                key.is_some() || cfg!(target_os = "linux")
+            );
+            assert_eq!(
+                repository.git_push_enabled_with_agent(Some(&non_utf8)),
+                key.is_some() || cfg!(target_os = "linux")
+            );
+            for absent in [None, Some(unavailable.as_path()), Some(regular.as_path())] {
+                assert_eq!(
+                    repository.git_push_enabled_with_agent(absent),
+                    key.is_some()
+                );
+            }
+            assert_eq!(
+                repository.push_remote_url().expect("remote").as_str(),
+                remote
+            );
+            assert_eq!(
+                repository.push_credential_file(),
+                key.map(std::path::Path::new)
+            );
+            assert!(!format!("{repository:?}").contains(remote));
+        }
+    }
+}
+
+#[test]
+fn repository_push_refuses_an_unadmitted_destination() {
+    let document = configuration_with_repository_watch().replace(
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\"\npush_remote_url = \"file:///tmp/remote.git\""),
+    );
+    assert!(HubModelConfiguration::parse(&document).is_err());
+}
+
+#[test]
 fn repository_watch_and_tools_share_the_configured_app_cache() {
     let source = configuration_with_repository_watch().replace(
         &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
@@ -6334,6 +6420,31 @@ fn repository_watch_and_tools_share_the_configured_app_cache() {
     let watch = configuration.repository_watch().expect("repository watch");
     let repository = &watch.repositories()[0];
     assert!(repository.admits_push());
+    for (destination, enabled) in [
+        ("https://github.com/fixture/project.git", true),
+        ("https://github.com:443/fixture/project.git", true),
+        ("https://GitHub.com/fixture/project.git", true),
+        ("https://GitHub.com:443/fixture/project.git", true),
+        ("ssh://git@github.com/fixture/project.git", false),
+        ("https://git.example.test/fixture/project.git", false),
+    ] {
+        let mut alternate = source
+            .parse::<toml_edit::DocumentMut>()
+            .expect("fixture TOML");
+        alternate["repository_watch"]["repositories"]
+            .as_array_of_tables_mut()
+            .expect("repository entries")
+            .get_mut(0)
+            .expect("watched repository")["push_remote_url"] = toml_edit::value(destination);
+        let alternate = HubModelConfiguration::parse(&alternate.to_string())
+            .expect("explicit push destination");
+        assert_eq!(
+            alternate.repository_watch().expect("watch").repositories()[0]
+                .git_push_enabled_with_agent(None),
+            enabled,
+            "{destination}"
+        );
+    }
     assert!(repository.credential_file().is_none());
     assert!(std::sync::Arc::ptr_eq(
         &app,
