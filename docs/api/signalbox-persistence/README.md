@@ -60,7 +60,7 @@
 | submit_input | 5 | 0 | 0 | [submit_input](submit_input.md) |
 | termination_receipt | 2 | 0 | 1 | [termination_receipt](termination_receipt.md) |
 | test_support | 3 | 0 | 6 | [test_support](test_support.md) |
-| tool_loop | 3 | 0 | 0 | [tool_loop](tool_loop.md) |
+| tool_loop | 4 | 0 | 0 | [tool_loop](tool_loop.md) |
 | turn_liveness | 5 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | usage | 3 | 0 | 1 | [usage](usage.md) |
 | workspace | 3 | 0 | 0 | [workspace](workspace.md) |

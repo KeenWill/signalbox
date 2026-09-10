@@ -1137,9 +1137,12 @@ pub(super) async fn context_compaction_entry_value(
                     .ok_or(ContextCompactionRangeLoadError::Integrity)?;
                 lengths.insert(*digest, length);
             }
-            let rendered =
-                render_model_user_content(content.clone(), |digest| lengths.get(&digest).copied())
-                    .map_err(|_| ContextCompactionRangeLoadError::Integrity)?;
+            let rendered = render_model_user_content(
+                transcript_entry_reference(entry).entry(),
+                content.clone(),
+                |digest| lengths.get(&digest).copied(),
+            )
+            .map_err(|_| ContextCompactionRangeLoadError::Integrity)?;
             let rendered_parts = rendered
                 .parts()
                 .iter()

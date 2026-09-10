@@ -12,13 +12,15 @@ use super::{
 /// Renders ordered user content into canonical provider-visible text and
 /// bounded attachment stubs.
 pub fn render_model_user_content(
+    entry: signalbox_domain::SemanticTranscriptEntryId,
     content: UserContent,
     mut attachment_byte_length: impl FnMut(BlobDigest) -> Option<NonZeroU64>,
 ) -> Result<ModelUserContent, ModelFrontierRenderingError> {
     let parts = content
         .into_parts()
         .into_iter()
-        .map(|part| match part {
+        .enumerate()
+        .map(|(ordinal, part)| match part {
             UserContentPart::Text { value } => Ok(ModelUserContentPart::Text(value)),
             UserContentPart::Attachment {
                 digest,
@@ -42,6 +44,13 @@ pub fn render_model_user_content(
                             .map(signalbox_domain::AttachmentDisplayFilename::as_str),
                         byte_length: byte_length.get().to_string(),
                         digest: digest.to_string(),
+                        visible_part: super::RenderedAttachmentSelector::new(
+                            entry,
+                            u8::try_from(ordinal).map_err(|_| {
+                                ModelFrontierRenderingError::AttachmentStubBoundExceeded
+                            })?,
+                        )
+                        .to_string(),
                     },
                 })
                 .map_err(|_| ModelFrontierRenderingError::AttachmentStubSerialization)?;
@@ -169,7 +178,11 @@ pub(super) fn render_frontier_messages_with_placements<'a>(
                         accepted_input: *accepted_input,
                     },
                 )?;
-                let content = render_model_user_content(content, &mut attachment_byte_length)?;
+                let content = render_model_user_content(
+                    source.entry(),
+                    content,
+                    &mut attachment_byte_length,
+                )?;
                 messages.push(ModelConversationMessage::User {
                     source,
                     accepted_input: *accepted_input,
@@ -499,8 +512,8 @@ pub fn projected_frontier_container_bytes<'a>(
 }
 
 /// Counts heap-backed user content without cloning its text or metadata.
-/// Attachment length uses the widest u64 spelling, reserving at most nineteen
-/// extra bytes per stub before catalog evidence is consulted by rendering.
+/// Attachment length and ordinal reserve their widest spellings before catalog
+/// evidence is consulted by rendering.
 pub(super) fn user_content_retained_bytes(content: &UserContent) -> usize {
     content.parts().iter().fold(0_usize, |total, part| {
         let bytes = match part {
@@ -525,6 +538,13 @@ pub(super) fn user_content_retained_bytes(content: &UserContent) -> usize {
                             .map(signalbox_domain::AttachmentDisplayFilename::as_str),
                         byte_length: u64::MAX.to_string(),
                         digest: digest.to_string(),
+                        visible_part: super::RenderedAttachmentSelector::new(
+                            signalbox_domain::SemanticTranscriptEntryId::from_uuid(
+                                uuid::Uuid::nil(),
+                            ),
+                            u8::MAX,
+                        )
+                        .to_string(),
                     },
                 };
                 if serde_json::to_writer(&mut counter, &envelope).is_err() {

@@ -6254,6 +6254,21 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
 }
 
 #[test]
+fn file_media_requires_blob_storage_before_worker_startup() {
+    let enabled = format!("file_media = true\n{CONFIGURATION}");
+    assert_eq!(
+        HubModelConfiguration::parse(&enabled).err(),
+        Some(HubModelConfigurationError::InvalidBlobStorageConfiguration)
+    );
+    let disabled = format!("file_media = false\n{CONFIGURATION}");
+    assert!(
+        !HubModelConfiguration::parse(&disabled)
+            .expect("disabled file tools require no store")
+            .file_media()
+    );
+}
+
+#[test]
 fn checked_in_example_admits_unlisted_web_origins() {
     use signalbox_application::ToolCatalog;
     let configuration = super::checked_in_example_configuration().expect("example parses");
