@@ -131,21 +131,8 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for ResumableRead<'_, 
             return Err(ObservationError::InvalidResponse);
         }
         let connection = &value["data"]["repository"]["pullRequest"]["reviewThreads"];
-        let nodes = crate::observation_decode::array(&connection["nodes"], |node| {
-            let resolved = node["isResolved"].as_bool()?;
-            let resolved_by = if resolved {
-                Some(node["resolvedBy"]["login"].as_str()?)
-            } else {
-                None
-            };
-            Some(json!({
-                "id":node["id"].as_str()?,
-                "isResolved":resolved,
-                "resolvedBy":resolved_by.map(|login| json!({"login":login})),
-                "comments":{"nodes":[{"author":{"login":node["comments"]["nodes"][0]["author"]["login"].as_str()?}}]}
-            }))
-        })
-        .ok_or(ObservationError::InvalidResponse)?;
+        let nodes = crate::observation_decode::array(&connection["nodes"], snapshot_thread)
+            .ok_or(ObservationError::InvalidResponse)?;
         let next = connection["pageInfo"]["hasNextPage"]
             .as_bool()
             .ok_or(ObservationError::InvalidResponse)?;
@@ -157,6 +144,27 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for ResumableRead<'_, 
         cursor.threads.insert(key, snapshot.clone());
         Ok(json!({"data":{"repository":{"pullRequest":{"reviewThreads":snapshot}}}}))
     }
+}
+
+fn snapshot_thread(node: &Value) -> Option<Value> {
+    let resolved = node["isResolved"].as_bool()?;
+    let resolved_by = if !resolved || node["resolvedBy"].is_null() {
+        None
+    } else {
+        Some(node["resolvedBy"]["login"].as_str()?)
+    };
+    let comment = node["comments"]["nodes"].as_array()?.first()?;
+    let author = if comment["author"].is_null() {
+        None
+    } else {
+        Some(comment["author"]["login"].as_str()?)
+    };
+    Some(json!({
+        "id":node["id"].as_str()?,
+        "isResolved":resolved,
+        "resolvedBy":resolved_by.map(|login| json!({"login":login})),
+        "comments":{"nodes":[{"author":author.map(|login| json!({"login":login}))}]}
+    }))
 }
 
 enum Step {
@@ -317,4 +325,43 @@ pub(super) async fn webhook_observed(
         cursor.save(store, repository).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolved_thread() -> Value {
+        json!({
+            "id": "thread-one",
+            "isResolved": true,
+            "resolvedBy": {"login": "resolver"},
+            "comments": {"nodes": [{"author": {"login": "author"}}]},
+        })
+    }
+
+    #[test]
+    fn resumable_thread_snapshot_preserves_null_resolver() {
+        let mut thread = resolved_thread();
+        thread["resolvedBy"] = Value::Null;
+
+        let snapshot = snapshot_thread(&thread).expect("nullable resolver is accepted");
+
+        assert_eq!(snapshot["resolvedBy"], Value::Null);
+        assert_eq!(
+            snapshot["comments"]["nodes"][0]["author"]["login"],
+            "author"
+        );
+    }
+
+    #[test]
+    fn resumable_thread_snapshot_preserves_null_author() {
+        let mut thread = resolved_thread();
+        thread["comments"]["nodes"][0]["author"] = Value::Null;
+
+        let snapshot = snapshot_thread(&thread).expect("nullable author is accepted");
+
+        assert_eq!(snapshot["resolvedBy"]["login"], "resolver");
+        assert_eq!(snapshot["comments"]["nodes"][0]["author"], Value::Null);
+    }
 }

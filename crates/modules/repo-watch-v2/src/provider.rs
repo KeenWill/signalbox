@@ -1037,9 +1037,9 @@ async fn fetch_threads(
                 )?)
             };
             threads.push(if value.admit(thread["isResolved"].as_bool())? {
-                RepoWatchThreadObservation::resolved(
-                    id,
-                    author,
+                let resolver = if thread["resolvedBy"].is_null() {
+                    None
+                } else {
                     Some(
                         value.admit(
                             RepoWatchAuthorLogin::try_new(
@@ -1047,8 +1047,9 @@ async fn fetch_threads(
                             )
                             .ok(),
                         )?,
-                    ),
-                )
+                    )
+                };
+                RepoWatchThreadObservation::resolved(id, author, resolver)
             } else {
                 RepoWatchThreadObservation::open(id, author)
             });
@@ -1660,6 +1661,23 @@ mod tests {
 
         assert_eq!(thread.state(), RepoWatchThreadState::Open);
         assert_eq!(thread.author(), None);
+    }
+
+    #[tokio::test]
+    async fn unavailable_resolver_does_not_reject_resolved_threads() {
+        let mut io = fixture();
+        io.threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["resolvedBy"] =
+            Value::Null;
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+
+        let observed = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect("unavailable resolver is accepted");
+        let thread = &observed.observation.state().pull_requests()[0].threads()[0];
+
+        assert_eq!(thread.state(), RepoWatchThreadState::Resolved);
+        assert_eq!(thread.resolver(), None);
     }
 
     #[tokio::test]
