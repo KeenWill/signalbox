@@ -375,6 +375,8 @@ pub(crate) enum IsolateCapability {
     EvalRecord,
     Blob,
     Register,
+    /// Checked repository-watch module operations.
+    RepoWatch,
 }
 
 impl From<IsolateCapability> for ProgramCapability {
@@ -391,6 +393,7 @@ impl From<IsolateCapability> for ProgramCapability {
             IsolateCapability::EvalRecord => Self::EvalRecord,
             IsolateCapability::Blob => Self::Blob,
             IsolateCapability::Register => Self::Register,
+            IsolateCapability::RepoWatch => Self::RepoWatch,
         }
     }
 }

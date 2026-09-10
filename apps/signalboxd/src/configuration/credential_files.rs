@@ -259,14 +259,46 @@ pub(super) fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
     &file_bytes[..end]
 }
 
-/// Credential source that rereads one deployment-owned secret file for every
-/// request preparation so rotation is visible without restarting signalboxd.
+/// Resolves deployment-owned token files and GitHub installation profiles.
+/// Files are reread at use; App profiles share their installation-token cache.
 #[derive(Clone)]
 pub struct FileCredentialAccess {
+    request_timeout: Option<std::time::Duration>,
     paths: Arc<HashMap<CredentialReference, PathBuf>>,
+    app: Option<(
+        CredentialReference,
+        Arc<signalbox_github_transport::AppAuthentication>,
+    )>,
 }
 
 impl FileCredentialAccess {
+    /// Binds one GitHub profile without reading credentials.
+    pub fn from_github(
+        profile: &crate::credential_pools::GithubCredentialProfile,
+        reference: CredentialReference,
+    ) -> Self {
+        match profile.delivery() {
+            crate::credential_pools::GithubCredentialDelivery::File(path) => {
+                Self::new(path.clone(), reference)
+            }
+            crate::credential_pools::GithubCredentialDelivery::GithubApp { .. } => Self {
+                paths: Arc::new(HashMap::new()),
+                request_timeout: None,
+                app: profile.authentication().map(|app| (reference, app)),
+            },
+        }
+    }
+    /// Shared installation authentication for GitHub request transports.
+    pub fn github_app(&self) -> Option<Arc<signalbox_github_transport::AppAuthentication>> {
+        self.app.as_ref().map(|(_, app)| app.clone())
+    }
+
+    /// Applies the caller's HTTP budget to installation-token preparation.
+    pub fn with_request_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
     /// Checks each configured file's admission without reading its secret bytes.
     pub fn validate(&self) -> Result<(), CredentialAccessError> {
         for (reference, path) in self.paths.iter() {
@@ -285,11 +317,16 @@ impl FileCredentialAccess {
     pub fn from_files(files: impl IntoIterator<Item = (CredentialReference, PathBuf)>) -> Self {
         Self {
             paths: Arc::new(files.into_iter().collect()),
+            request_timeout: None,
+            app: None,
         }
     }
 
     /// Returns the non-secret reference accepted by this source.
     pub fn credential_reference(&self) -> Option<CredentialReference> {
+        if let Some((reference, _)) = &self.app {
+            return Some(reference.clone());
+        }
         (self.paths.len() == 1)
             .then(|| self.paths.keys().next().cloned())
             .flatten()
@@ -311,6 +348,25 @@ impl CredentialAccess for FileCredentialAccess {
         &self,
         reference: &CredentialReference,
     ) -> Result<CredentialValue, CredentialAccessError> {
+        if let Some((mapped, app)) = &self.app {
+            if mapped != reference {
+                return Err(CredentialAccessError::new(
+                    reference.clone(),
+                    CredentialAccessFailure::Unmapped,
+                ));
+            }
+            let header = app
+                .authorization(self.request_timeout)
+                .await
+                .map_err(|failure| {
+                    tracing::warn!(?failure, "GitHub App credential unavailable");
+                    CredentialAccessError::new(
+                        reference.clone(),
+                        CredentialAccessFailure::Unavailable,
+                    )
+                })?;
+            return Ok(CredentialValue::new(&header.as_bytes()[b"Bearer ".len()..]));
+        }
         let path = self.paths.get(reference).ok_or_else(|| {
             CredentialAccessError::new(reference.clone(), CredentialAccessFailure::Unmapped)
         })?;
@@ -324,7 +380,28 @@ impl CredentialAccess for FileCredentialAccess {
 }
 
 impl super::HubModelConfiguration {
-    /// Admits all model-provider and repository-watch credential files.
+    /// Checks token-file isolation between the GitHub tools and repository polling.
+    pub fn github_tool_credential_conflicts(&self, fallback: &Path) -> bool {
+        use crate::credential_pools::GithubCredentialDelivery;
+        let path = match self
+            .github_credential_profile(signalbox_tools_code_host::CODE_HOST_CREDENTIAL_REFERENCE)
+        {
+            Some(profile) => match profile.delivery() {
+                GithubCredentialDelivery::File(path) => path.as_path(),
+                GithubCredentialDelivery::GithubApp { .. } => return false,
+            },
+            None => fallback,
+        };
+        self.repository_watch().is_some_and(|watch| {
+            watch.repositories().iter().any(|repository| {
+                repository.credential_file().is_some_and(|polling| {
+                    crate::repo_watch_credentials::credential_files_conflict(path, polling)
+                })
+            })
+        })
+    }
+
+    /// Admits model-provider, token, and webhook files; App keys are admitted at use.
     pub fn validate_credential_files(&self) -> Result<(), CredentialAccessError> {
         for profile in self.credential_profiles.values() {
             use crate::credential_pools::CredentialDelivery;
@@ -339,10 +416,9 @@ impl super::HubModelConfiguration {
         }
         if let Some(watch) = self.repository_watch() {
             for repository in watch.repositories() {
-                validate_credential_file(
-                    repository.credential_file(),
-                    repository.credential_reference(),
-                )?;
+                if let Some(path) = repository.credential_file() {
+                    validate_credential_file(path, repository.credential_reference())?;
+                }
                 if let Some(path) = repository.push_credential_file() {
                     validate_credential_file(
                         path,
@@ -360,6 +436,13 @@ impl super::HubModelConfiguration {
         }
         Ok(())
     }
+}
+
+pub(crate) fn read_github_app_key(
+    path: &Path,
+) -> Result<Vec<u8>, signalbox_github_transport::AppCredentialFailure> {
+    read_credential_file(path)
+        .map_err(|_| signalbox_github_transport::AppCredentialFailure::KeyUnreadable)
 }
 
 #[cfg(test)]
