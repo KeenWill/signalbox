@@ -175,8 +175,11 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
                 }
                 Ok(WorkspaceEntryKind::Symlink)
                 | Err(WorkspaceResolveError::Rejected(WorkspacePathRejection::Symlink)) => {
-                    let bytes =
-                        read_worktree_symlink(authority, &path, repository.object_byte_limit())?;
+                    let bytes = read_worktree_symlink(
+                        authority,
+                        &path,
+                        repository.object_byte_limit(git2::ObjectType::Blob),
+                    )?;
                     Some((bytes, 0o120000))
                 }
                 Ok(WorkspaceEntryKind::Other) => return Err(LocalGitFailure::Path),

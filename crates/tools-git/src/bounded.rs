@@ -109,7 +109,7 @@ fn validate_tree_discovery_options(
         let (size, kind) = repository
             .read_object_header(oid)
             .map_err(|_| LocalGitFailure::Operation)?;
-        if kind != git2::ObjectType::Tree || size > repository.object_byte_limit() {
+        if kind != git2::ObjectType::Tree || size > repository.object_byte_limit(kind) {
             return Err(LocalGitFailure::Operation);
         }
         let tree = repository
@@ -138,7 +138,7 @@ fn validate_tree_discovery_options(
                     let (size, kind) = repository
                         .read_object_header(entry.id())
                         .map_err(|_| LocalGitFailure::Operation)?;
-                    if kind != git2::ObjectType::Blob || size > repository.object_byte_limit() {
+                    if kind != git2::ObjectType::Blob || size > repository.object_byte_limit(kind) {
                         return Err(LocalGitFailure::Operation);
                     }
                 }
@@ -176,7 +176,7 @@ pub(super) fn validate_index_objects(
         let (size, kind) = repository
             .read_object_header(entry.id)
             .map_err(|_| LocalGitFailure::Operation)?;
-        if kind != git2::ObjectType::Blob || size > repository.object_byte_limit() {
+        if kind != git2::ObjectType::Blob || size > repository.object_byte_limit(kind) {
             return Err(LocalGitFailure::Operation);
         }
     }
@@ -206,7 +206,7 @@ pub(super) fn validate_object_header(
     let (size, kind) = repository
         .read_object_header(oid)
         .map_err(|_| LocalGitFailure::Operation)?;
-    if size > repository.object_byte_limit() {
+    if size > repository.object_byte_limit(kind) {
         Err(LocalGitFailure::Operation)
     } else {
         Ok(kind)
