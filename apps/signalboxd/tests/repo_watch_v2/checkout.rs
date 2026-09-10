@@ -59,55 +59,68 @@ impl ProcessRunner for LocalGitRunner {
             .lock()
             .expect("steps lock")
             .push(request.arguments[0].to_string_lossy().into_owned());
-        if request.arguments[0] == "push" {
-            self.push_authorizations
-                .lock()
-                .expect("push authorizations")
-                .push(
-                    request
-                        .environment
-                        .get(OsStr::new("GIT_CONFIG_VALUE_0"))
-                        .expect("push authorization")
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-        }
+        let pushing = request.arguments[0] == "push";
+        let push_transport = pushing || request.arguments[0] == "ls-remote";
         for argument in &mut request.arguments {
             if argument == "https://github.com/checkout/project.git"
                 || argument == "https://github.com/contributor/project.git"
             {
-                let authorization = tokio::process::Command::new("git")
-                    .args(["config", "--get-urlmatch", "http.extraheader"])
-                    .arg(&argument)
-                    .current_dir(&request.working_directory)
-                    .env_clear()
-                    .envs(&request.environment)
-                    .output()
-                    .await
-                    .expect("resolve Git URL authorization");
-                if argument == "https://github.com/checkout/project.git" {
-                    assert!(authorization.status.success());
-                    assert!(authorization.stdout.starts_with(b"Authorization: Basic "));
-                    let unrelated = tokio::process::Command::new("git")
-                        .args([
-                            "config",
-                            "--get-urlmatch",
-                            "http.extraheader",
-                            "https://github.com/unrelated/project.git",
-                        ])
+                if push_transport {
+                    let resolved = tokio::process::Command::new("git")
+                        .args(["ls-remote", "--get-url"])
+                        .arg(&argument)
                         .current_dir(&request.working_directory)
                         .env_clear()
                         .envs(&request.environment)
                         .output()
                         .await
-                        .expect("resolve unrelated repository authorization");
-                    assert!(unrelated.stdout.is_empty());
+                        .expect("resolve authenticated push URL");
+                    assert!(resolved.status.success());
+                    let url = std::str::from_utf8(&resolved.stdout)
+                        .expect("authenticated push URL is UTF-8")
+                        .trim();
+                    assert!(url.starts_with("https://x-access-token:"));
+                    assert!(url.ends_with("@github.com/checkout/project.git"));
+                    if pushing {
+                        self.push_authorizations
+                            .lock()
+                            .expect("push authorizations")
+                            .push(url.to_owned());
+                    }
                 } else {
-                    assert!(authorization.stdout.is_empty());
-                    assert_eq!(
-                        request.environment.get(OsStr::new("GIT_CONFIG_VALUE_0")),
-                        Some(&"".into())
-                    );
+                    let authorization = tokio::process::Command::new("git")
+                        .args(["config", "--get-urlmatch", "http.extraheader"])
+                        .arg(&argument)
+                        .current_dir(&request.working_directory)
+                        .env_clear()
+                        .envs(&request.environment)
+                        .output()
+                        .await
+                        .expect("resolve Git URL authorization");
+                    if argument == "https://github.com/checkout/project.git" {
+                        assert!(authorization.status.success());
+                        assert!(authorization.stdout.starts_with(b"Authorization: Basic "));
+                        let unrelated = tokio::process::Command::new("git")
+                            .args([
+                                "config",
+                                "--get-urlmatch",
+                                "http.extraheader",
+                                "https://github.com/unrelated/project.git",
+                            ])
+                            .current_dir(&request.working_directory)
+                            .env_clear()
+                            .envs(&request.environment)
+                            .output()
+                            .await
+                            .expect("resolve unrelated repository authorization");
+                        assert!(unrelated.stdout.is_empty());
+                    } else {
+                        assert!(authorization.stdout.is_empty());
+                        assert_eq!(
+                            request.environment.get(OsStr::new("GIT_CONFIG_VALUE_0")),
+                            Some(&"".into())
+                        );
+                    }
                 }
                 if let Some(url) = &self.redirect {
                     *argument = url.into();
@@ -1847,10 +1860,13 @@ async fn assert_push_retained_fences(origin: PushSessionOrigin) -> Result<(), Bo
             .push_authorizations
             .lock()
             .expect("push authorizations");
-        assert_eq!(authorizations.len(), 2);
-        assert_ne!(
-            authorizations[0], authorizations[1],
-            "each push reads the current credential file"
+        assert_eq!(
+            authorizations.as_slice(),
+            [
+                "https://x-access-token:push-fixture-token@github.com/checkout/project.git",
+                "https://x-access-token:rotated-push-fixture-token@github.com/checkout/project.git",
+            ],
+            "each push resolves the current credential into its effective URL"
         );
     }
     local.find_reference("refs/heads/review")?.set_target(
