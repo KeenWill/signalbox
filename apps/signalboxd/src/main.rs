@@ -2255,7 +2255,13 @@ async fn run_hub(
         .with_runner_recovery(runner_recovery.clone())
         .with_same_credential_attempt_bound(same_credential_attempt_bound)
         .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
-        .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
+        .with_continuation_usage_limits(
+            model_configuration
+                .tool_continuation_usage_limits(&signalbox_application::ToolCatalog::definitions(
+                    &tool_catalog,
+                ))
+                .map_err(signalboxd::model_catalog_runtime::ModelRuntimeBuildError::from)?,
+        );
         let provider = AttachmentPreparingModelCallProvider::new(
             UsageLimitedModelCallProvider::new(provider, model_configuration),
             pass_pool.clone(),

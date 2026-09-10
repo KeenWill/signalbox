@@ -2,6 +2,14 @@
 
 # translate
 
+## serialized_request_bytes
+
+```rust
+pub fn serialized_request_bytes<C>(
+    operation: &signalbox_model_runtime::ModelOperation<C>,
+) -> option::Option<usize>;
+```
+
 ## serialized_message_bytes
 
 ```rust

@@ -18,7 +18,7 @@ mod oauth;
 mod runtime;
 mod translate;
 
-pub use translate::serialized_message_bytes;
+pub use translate::{serialized_message_bytes, serialized_request_bytes};
 mod wire;
 
 pub use config::CodexCliConfig;
