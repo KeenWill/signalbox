@@ -13,6 +13,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::io::stdin().read_to_string(&mut prompt)?;
     std::fs::write("fake-claude-prompt", &prompt)?;
     let scenario = scenario(&prompt)?;
+    if scenario == "piped_stdin_too_large" {
+        std::io::stderr().write_all(b"Error: piped stdin input exceeds a synthetic limit.\n")?;
+        std::process::exit(1);
+    }
     if scenario == "process_nonzero" {
         system_status(None)?;
         std::io::stderr().write_all(b"authentication failed for synthetic login\n")?;

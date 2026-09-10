@@ -46,6 +46,7 @@ pub(crate) fn classify_error(
             &normalized,
             &[
                 "request too large",
+                "piped stdin input exceeds",
                 "context length exceeded",
                 "context_length_exceeded",
             ],
