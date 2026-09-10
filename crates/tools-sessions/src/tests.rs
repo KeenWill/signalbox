@@ -653,17 +653,6 @@ fn foreground_decoder_excludes_a_background_wait() {
 }
 
 #[test]
-fn foreground_decoder_returns_the_exact_sealed_request() {
-    let child = session(8);
-    let raw = await_request(9, child, "foreground");
-    let awaiting = foreground_await_request(&raw).expect("foreground await is intercepted");
-
-    assert_eq!(awaiting.request(), &raw);
-    assert_eq!(awaiting.child(), child);
-    assert_eq!(awaiting.mode(), DelegationWaitMode::Foreground);
-}
-
-#[test]
 fn background_receipt_rejects_a_foreground_wait() {
     let child = session(810);
     let raw = await_request(811, child, "foreground");

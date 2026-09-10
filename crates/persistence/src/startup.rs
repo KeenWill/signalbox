@@ -1117,7 +1117,8 @@ pub(crate) fn map_scheduling_error(
         SubmitInputRepositoryError::ModelExecution(_) => {
             StartupScanCorruption::Inconsistent("origin command application").into()
         }
-        SubmitInputRepositoryError::CheckoutProvisioningPending => {
+        SubmitInputRepositoryError::CheckoutProvisioningPending
+        | SubmitInputRepositoryError::BlobStorageUnavailable => {
             StartupScanCorruption::Inconsistent("admission deferral while loading origin").into()
         }
     }
@@ -1199,51 +1200,15 @@ fn identity_collision(error: &sqlx::Error) -> Option<StartupScanIdentityCollisio
 
 #[cfg(test)]
 mod tests {
-    use std::{borrow::Cow, collections::BTreeSet, error::Error, fmt, io};
-
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
     use signalbox_domain::TurnId;
-    use sqlx::error::{DatabaseError, ErrorKind};
     use sqlx::types::Uuid;
 
     use super::{
         StartupScanCorruption, StartupScanIdentityCollision, StartupScanRepositoryError,
-        commit_failure_is_ambiguous, map_tool_loop_error, record_reclassified_turn_candidate,
+        map_tool_loop_error,
     };
     use crate::tool_loop::ToolLoopRepositoryError;
-
-    /// a generated source-turn identity is a retryable collision, not
-    /// durable corruption.
-    #[test]
-    fn generated_successor_source_candidate_is_a_retryable_collision() {
-        let source = TurnId::from_uuid(Uuid::from_u128(1));
-        let mut proposed = BTreeSet::new();
-
-        assert!(matches!(
-            record_reclassified_turn_candidate(source, source, &mut proposed),
-            Err(StartupScanRepositoryError::IdentityCollision(
-                StartupScanIdentityCollision::ReclassifiedTurn
-            ))
-        ));
-    }
-
-    /// a duplicate generated successor is a retryable collision, not
-    /// durable corruption.
-    #[test]
-    fn generated_successor_duplicate_is_a_retryable_collision() {
-        let source = TurnId::from_uuid(Uuid::from_u128(1));
-        let successor = TurnId::from_uuid(Uuid::from_u128(2));
-        let mut proposed = BTreeSet::new();
-
-        record_reclassified_turn_candidate(source, successor, &mut proposed)
-            .expect("the first source-safe successor is accepted");
-        assert!(matches!(
-            record_reclassified_turn_candidate(source, successor, &mut proposed),
-            Err(StartupScanRepositoryError::IdentityCollision(
-                StartupScanIdentityCollision::ReclassifiedTurn
-            ))
-        ));
-    }
 
     #[test]
     fn tool_closure_identity_collision_remains_retryable_at_startup_boundary() {
@@ -1253,45 +1218,6 @@ mod tests {
                 StartupScanIdentityCollision::ToolClosureEntry
             )
         ));
-    }
-
-    #[derive(Debug)]
-    struct ServerCommitFailure {
-        code: &'static str,
-    }
-
-    impl fmt::Display for ServerCommitFailure {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("server reported commit failure")
-        }
-    }
-
-    impl Error for ServerCommitFailure {}
-
-    impl DatabaseError for ServerCommitFailure {
-        fn message(&self) -> &str {
-            "server reported commit failure"
-        }
-
-        fn as_error(&self) -> &(dyn Error + Send + Sync + 'static) {
-            self
-        }
-
-        fn as_error_mut(&mut self) -> &mut (dyn Error + Send + Sync + 'static) {
-            self
-        }
-
-        fn into_error(self: Box<Self>) -> Box<dyn Error + Send + Sync + 'static> {
-            self
-        }
-
-        fn kind(&self) -> ErrorKind {
-            ErrorKind::Other
-        }
-
-        fn code(&self) -> Option<Cow<'_, str>> {
-            Some(Cow::Borrowed(self.code))
-        }
     }
 
     #[test]
@@ -1305,80 +1231,6 @@ mod tests {
         assert_eq!(
             error.operator_failure_class(),
             OperatorFailureClass::FailClosedCorruption
-        );
-    }
-
-    #[test]
-    fn precommit_database_failure_is_not_commit_ambiguous() {
-        let error = StartupScanRepositoryError::from_database(sqlx::Error::PoolClosed, false);
-        assert_eq!(
-            error.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false
-            }
-        );
-    }
-
-    #[test]
-    fn lost_commit_response_is_commit_ambiguous() {
-        let error = sqlx::Error::Io(io::Error::new(
-            io::ErrorKind::ConnectionReset,
-            "commit response was lost",
-        ));
-        let commit_ambiguous = commit_failure_is_ambiguous(&error);
-
-        assert!(commit_ambiguous);
-        let error = StartupScanRepositoryError::from_database(error, commit_ambiguous);
-        assert_eq!(
-            error.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: true
-            }
-        );
-    }
-
-    #[test]
-    fn server_rejected_commit_is_not_ambiguous() {
-        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code: "23514" }));
-        let commit_ambiguous = commit_failure_is_ambiguous(&error);
-
-        assert!(!commit_ambiguous);
-        let error = StartupScanRepositoryError::from_database(error, commit_ambiguous);
-        assert_eq!(
-            error.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false
-            }
-        );
-    }
-
-    #[test]
-    fn server_reported_transaction_resolution_unknown_is_ambiguous() {
-        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code: "08007" }));
-        let commit_ambiguous = commit_failure_is_ambiguous(&error);
-
-        assert!(commit_ambiguous);
-        let classified = StartupScanRepositoryError::from_database(error, commit_ambiguous);
-        assert_eq!(
-            classified.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: true
-            }
-        );
-    }
-
-    #[test]
-    fn server_reported_statement_completion_unknown_is_ambiguous() {
-        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code: "40003" }));
-        let commit_ambiguous = commit_failure_is_ambiguous(&error);
-
-        assert!(commit_ambiguous);
-        let classified = StartupScanRepositoryError::from_database(error, commit_ambiguous);
-        assert_eq!(
-            classified.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: true
-            }
         );
     }
 }

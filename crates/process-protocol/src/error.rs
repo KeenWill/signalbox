@@ -100,9 +100,9 @@ pub enum RejectionDetail {
         /// The unavailable immutable byte identity.
         digest: CanonicalBlobDigest,
     },
-    /// Distinct attachment bytes exceeded the deployment admission ceiling.
+    /// An attachment exceeded the deployment per-blob admission ceiling.
     AttachmentByteBudgetExceeded {
-        /// Configured maximum aggregate byte count.
+        /// Configured maximum per-blob byte count.
         maximum_bytes: PositiveCanonicalU64,
     },
     /// The placement head advanced beyond the caller-observed version.
@@ -421,12 +421,6 @@ pub enum RejectionDetail {
         max_length_bytes: CanonicalU64,
         requested_length_bytes: CanonicalU64,
     },
-    /// The requested exact half-open range is not contained by the blob.
-    BlobReadRangeOutOfBounds {
-        offset_bytes: CanonicalU64,
-        length_bytes: CanonicalU64,
-        blob_length_bytes: CanonicalU64,
-    },
     /// A durable session-lifecycle command was rejected by current state.
     SessionLifecycleCommandRejected {
         /// Target session.
@@ -454,10 +448,7 @@ impl RejectionDetail {
     }
 
     pub(crate) const fn is_blob_read(self) -> bool {
-        matches!(
-            self,
-            Self::BlobReadLengthOutOfRange { .. } | Self::BlobReadRangeOutOfBounds { .. }
-        )
+        matches!(self, Self::BlobReadLengthOutOfRange { .. })
     }
 
     pub(crate) const fn is_conversation_import(self) -> bool {
@@ -474,7 +465,6 @@ impl RejectionDetail {
             | Self::BlobUploadLengthMismatch { .. }
             | Self::BlobUploadDigestMismatch { .. }
             | Self::BlobReadLengthOutOfRange { .. }
-            | Self::BlobReadRangeOutOfBounds { .. }
             | Self::BulkIngestAlreadyInProgress { .. }
             | Self::SessionNotFound { .. }
             | Self::AttachmentBlobNotFound { .. }
@@ -658,8 +648,7 @@ pub(crate) fn validate_rejection_detail(
         | RejectionDetail::BlobUploadSizeExceeded { .. }
         | RejectionDetail::BlobUploadLengthMismatch { .. }
         | RejectionDetail::BlobUploadDigestMismatch { .. }
-        | RejectionDetail::BlobReadLengthOutOfRange { .. }
-        | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
+        | RejectionDetail::BlobReadLengthOutOfRange { .. } => false,
     };
     if valid {
         Ok(())
@@ -770,8 +759,7 @@ pub(crate) fn validate_conversation_import_detail(
         | RejectionDetail::BlobUploadSizeExceeded { .. }
         | RejectionDetail::BlobUploadLengthMismatch { .. }
         | RejectionDetail::BlobUploadDigestMismatch { .. }
-        | RejectionDetail::BlobReadLengthOutOfRange { .. }
-        | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
+        | RejectionDetail::BlobReadLengthOutOfRange { .. } => false,
     };
     if valid {
         Ok(())
@@ -833,19 +821,6 @@ pub(crate) fn validate_blob_read_detail(
                 && max_length_bytes.value() == MAX_BLOB_READ_BYTES as u64
                 && (requested_length_bytes.value() < min_length_bytes.value()
                     || requested_length_bytes.value() > max_length_bytes.value())
-        }
-        RejectionDetail::BlobReadRangeOutOfBounds {
-            offset_bytes,
-            length_bytes,
-            blob_length_bytes,
-            ..
-        } => {
-            (1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value())
-                && blob_length_bytes.value() > 0
-                && (offset_bytes
-                    .value()
-                    .checked_add(length_bytes.value())
-                    .is_none_or(|end| end > blob_length_bytes.value()))
         }
         _ => false,
     };

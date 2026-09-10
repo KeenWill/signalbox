@@ -1013,7 +1013,8 @@ pub(crate) fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCa
         SubmitInputRepositoryError::ModelExecution(_) => {
             ModelCallCorruption::Inconsistent("origin command application").into()
         }
-        SubmitInputRepositoryError::CheckoutProvisioningPending => {
+        SubmitInputRepositoryError::CheckoutProvisioningPending
+        | SubmitInputRepositoryError::BlobStorageUnavailable => {
             ModelCallCorruption::Inconsistent("admission deferral while loading origin").into()
         }
     }

@@ -79,7 +79,8 @@ impl ClassifyOperatorFailure for ContinuationCompactionError {
             }
             Self::Session(SessionRepositoryError::Database(_))
             | Self::Submit(SubmitInputRepositoryError::Database(_))
-            | Self::Submit(SubmitInputRepositoryError::CheckoutProvisioningPending) => {
+            | Self::Submit(SubmitInputRepositoryError::CheckoutProvisioningPending)
+            | Self::Submit(SubmitInputRepositoryError::BlobStorageUnavailable) => {
                 OperatorFailureClass::Infrastructure {
                     commit_ambiguous: false,
                 }

@@ -218,9 +218,12 @@ pub enum SubmitInputCorruption {
 }
 
 #[derive(signalbox_derive::OperatorError)]
-/// A transient admission refusal, database failure, wrong purpose-specific load, or integrity failure.
+/// An admission refusal, database failure, wrong purpose-specific load, or integrity failure.
 #[derive(Debug)]
 pub enum SubmitInputRepositoryError {
+    #[error("SubmitInput attachment storage is not configured")]
+    /// Attachments cannot be admitted without a configured blob-storage maximum.
+    BlobStorageUnavailable,
     #[error("SubmitInput awaits repository-watch kickoff during checkout provisioning")]
     /// Client input is deferred without claiming its command identity while
     /// the repository-watch kickoff owns the first input under the provisioning hold.
