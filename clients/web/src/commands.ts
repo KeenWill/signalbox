@@ -82,7 +82,7 @@ export const commandRegistry = [
   {
     id: 'artifact.attachment.remove',
     title: 'Remove composer attachment',
-    description: 'Remove this attachment.',
+    description: '',
     category: 'Artifact',
     bindings: [],
     available: (context) => context.removeAttachment !== undefined,
@@ -91,7 +91,7 @@ export const commandRegistry = [
   {
     id: 'artifact.select',
     title: 'Select artifact',
-    description: 'Select this artifact.',
+    description: '',
     category: 'Artifact',
     bindings: [],
     available: (context) => context.artifactSelectionTarget !== undefined,
@@ -244,7 +244,7 @@ export const commandRegistry = [
   {
     id: 'artifact.open',
     title: 'Open artifact inspector',
-    description: 'Look up stored content by digest.',
+    description: 'Look up a blob by digest.',
     category: 'Surface',
     bindings: [],
     available: artifactInspector,
@@ -378,7 +378,7 @@ export const commandRegistry = [
   {
     id: 'imports.entry.select',
     title: 'Select entry',
-    description: 'Select this entry.',
+    description: '',
     category: 'Imports',
     bindings: [],
     available: (context) =>
@@ -477,7 +477,7 @@ export const commandRegistry = [
   {
     id: 'imports.continue.fork',
     title: 'Fork from this entry',
-    description: 'Start a new branch from this entry.',
+    description: 'Start a forked session from this entry.',
     category: 'Imports',
     bindings: [],
     available: (context) =>
@@ -588,7 +588,7 @@ export const commandRegistry = [
   {
     id: 'theme.dark',
     title: 'Use dark theme',
-    description: 'Use the dark theme.',
+    description: '',
     category: 'Settings',
     bindings: [],
     available: always,
@@ -597,7 +597,7 @@ export const commandRegistry = [
   {
     id: 'theme.light',
     title: 'Use light theme',
-    description: 'Use the light theme.',
+    description: '',
     category: 'Settings',
     bindings: [],
     available: always,
@@ -718,7 +718,7 @@ export const commandRegistry = [
   {
     id: 'preferences.reset',
     title: 'Restore preference defaults',
-    description: 'Reset all settings.',
+    description: 'Reset browser preferences.',
     category: 'Settings',
     bindings: [],
     available: always,

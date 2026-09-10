@@ -8,7 +8,7 @@ const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.met
 const thumbnailFixture = readFileSync(new URL('./fixtures/thumbnail.png', import.meta.url))
 const jpegOriginalFixture = readFileSync(new URL('./fixtures/original.jpg', import.meta.url))
 const incompatibleDescriptorFixture = { invented: true } as const
-const incompatibleDescriptorMessage = 'The server sent an unexpected response.'
+const incompatibleDescriptorMessage = 'Unexpected daemon response.'
 // The shared renderer admits an inline original only for a single-frame JPEG carrying a bounded
 // decode proof, so the inspector borrows the landed scenario descriptor that satisfies it.
 const admittedOriginalArtifact = jpegDescriptor
