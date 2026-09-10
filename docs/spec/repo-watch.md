@@ -352,8 +352,8 @@ file on each load, or installs a sender that resolves the selected App profile's
 shared installation-token cache at request dispatch. It returns only an
 authenticated client handle. Credential and client-construction failures have
 distinct redacted error classes. App responses scrub the token used for that
-response, including its JSON-escaped form, from observation text and retained
-validators before poll-cache and PR-state persistence.
+response, including its JSON-escaped form, from observation text, JSON member
+names, and retained validators before poll-cache and PR-state persistence.
 
 App-backed repository-watch and goal-verification clients resolve no credential
 during construction. Each observation request shares one 300-second budget

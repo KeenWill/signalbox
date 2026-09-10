@@ -315,8 +315,9 @@ pub(crate) fn scrub_app_json(value: &mut serde_json::Value, token: &str, escaped
             }
         }
         serde_json::Value::Object(object) => {
-            for value in object.values_mut() {
-                scrub_app_json(value, token, escaped);
+            for (key, mut value) in std::mem::take(object) {
+                scrub_app_json(&mut value, token, escaped);
+                object.insert(redact_app_token(&key, token, escaped), value);
             }
         }
         _ => {}
@@ -516,6 +517,36 @@ mod tests {
         assert_eq!(
             client.rest_quota().await.expect("App quota header"),
             Some(14987)
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_observations_scrub_response_token_keys_before_cache_ingestion() {
+        let client = observation_client(serde_json::json!([{
+            "title": "Pull request",
+            (format!("extra {RESPONSE_TOKEN}")): [{
+                r#"nested refreshed\"installation\\token"#: RESPONSE_TOKEN,
+                "ordinary": "retained",
+            }],
+        }]));
+        let page = client
+            .conditional_page(OBSERVATION_PATH, None)
+            .await
+            .expect("sanitized page");
+        let signalbox_module_repo_watch_v2::github::ConditionalPage::Modified { body, .. } = page
+        else {
+            panic!("the successful response supplies a replacement snapshot");
+        };
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("valid cached JSON");
+        assert_eq!(
+            value,
+            serde_json::json!([{
+                "title": "Pull request",
+                "extra [redacted]": [{
+                    "nested [redacted]": "[redacted]",
+                    "ordinary": "retained",
+                }],
+            }])
         );
     }
 
