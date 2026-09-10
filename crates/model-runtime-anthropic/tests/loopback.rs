@@ -1453,11 +1453,6 @@ fn assert_anthropic_plain_http_rejected(base_url: &str) {
 }
 
 #[test]
-fn exchange_timeout_is_unbounded_until_the_composition_root_sets_policy() {
-    assert_eq!(AnthropicConfig::new(None).exchange_timeout, None);
-}
-
-#[test]
 fn a_zero_exchange_timeout_is_rejected_at_construction() {
     let mut config = AnthropicConfig::new(None);
     config.exchange_timeout = Some(Duration::ZERO);

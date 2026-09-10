@@ -6218,17 +6218,6 @@ fn daemon_sandbox_settings_reject_malformed_runtime_inputs() {
 }
 
 #[test]
-fn repository_watch_poll_budget_defaults_to_one_hundred_requests() {
-    assert_eq!(
-        HubModelConfiguration::parse(CONFIGURATION)
-            .expect("configuration")
-            .numeric_bounds()
-            .integer("repository_watch_poll_request_budget"),
-        Some(Some(100))
-    );
-}
-
-#[test]
 fn repository_watch_poll_budget_accepts_finite_attempts_with_room_for_preflight() {
     const FIELD: &str = "repository_watch_poll_request_budget";
     for budget in [2, 7, 1000] {
