@@ -820,17 +820,6 @@ impl fmt::Display for RejectionDisplay {
                 max_length_bytes.value(),
                 requested_length_bytes.value()
             ),
-            RejectionDetail::BlobReadRangeOutOfBounds {
-                offset_bytes,
-                length_bytes,
-                blob_length_bytes,
-            } => write!(
-                formatter,
-                "blob_read_range_out_of_bounds offset_bytes={} length_bytes={} blob_length_bytes={}",
-                offset_bytes.value(),
-                length_bytes.value(),
-                blob_length_bytes.value()
-            ),
         }
     }
 }
