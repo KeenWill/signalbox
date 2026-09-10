@@ -1,9 +1,10 @@
 # Checkout publication by rename design
 
-This design is not built. It scopes a possible extension to the
-[Git authority threat model](../spec/git-authority-threat-model.md).
-Implementation requires owner review of the ownership and filesystem limitations
-below.
+This committed design is not built. It extends the
+[Git authority threat model](../spec/git-authority-threat-model.md) with a
+publication primitive for an exclusively owned, prepared directory. The
+[integration questions](../open-questions.md) own the unresolved choices for
+applying that primitive to checkout.
 
 ## Goal
 
@@ -12,19 +13,19 @@ operation, removing recursive quarantine snapshots where exclusive ownership
 makes them unnecessary. Preserve foreign data, safe-checkout refusal, and
 ambiguous-result reporting.
 
-**Scoping result:** a directory descriptor plus atomic rename is insufficient to
-replace the present interference checks in a shared writable checkout. The
-rename checks destination absence or exchanges two names; it does not compare an
-expected inode or freeze directory contents. The proposed deletion is
-conditional on exclusive control of the prepared tree and publication names.
-This document adds no implementation, isolation service, configuration gate, or
-filesystem fallback.
+A directory descriptor plus atomic rename is insufficient to replace the present
+interference checks in a shared writable checkout. The rename checks destination
+absence or exchanges two names; it does not compare an expected inode or freeze
+directory contents. Snapshot deletion requires exclusive control of the prepared
+tree and publication names. This design commits the primitive's preconditions,
+transition, failure behavior, and acceptance criteria; it does not select an
+isolation service or platform fallback.
 
 ## Design
 
 ### Required semantics and ownership
 
-A publication unit is one prepared subtree and its live directory entry. The
+The primitive publishes one prepared directory at its destination entry. The
 process creates the prepared tree exclusively, retains descriptors for it and
 both parents, and finishes writing before publication. Source and destination
 must be on the same rename-capable mount. The source name must remain bound to
@@ -53,40 +54,30 @@ source name. The ownership precondition must protect the staging parent/name as
 well as the tree. These limits follow directly from the
 [Linux rename interface](https://man7.org/linux/man-pages/man2/rename.2.html).
 
-The candidate transition is prepare → publish → finalize index/HEAD → reclaim.
-Preparation streams the target bytes into independently owned files; it must not
-hard-link writable checkout files. Publication is one syscall per unit under the
-existing cooperating-writer serialization. Failure before publication leaves the
-live entry alone. Failure after publication retains the displaced data and uses
-the existing ambiguous-result contract if restoration cannot be established.
+The transition is prepare → publish → finalize index/HEAD → reclaim. Preparation
+streams the target bytes into independently owned files; it must not hard-link
+writable checkout files. Publication is one syscall per unit under the existing
+cooperating-writer serialization. Failure before publication leaves the live
+entry alone. Failure after publication retains the displaced data and uses the
+existing ambiguous-result contract if restoration cannot be established.
 Reclamation of displaced **user** data is a separate ownership problem: an open
 writer survives rename. Do not replace its cleanup with an unconditional
 recursive delete. An inverse exchange is safe only while both names remain under
 the same exclusive control.
 
-This scopes the smallest candidate: subtree publication, not replacing the
-configured workspace root. The existing special path handles a tracked directory
-becoming a file; its prepared leaf is a file inside a staging directory.
-Renaming the staging container itself would change the Git tree shape. That
-transition needs either leaf exchange with the same ownership limits or
-preparation of a larger parent subtree. Multiple subtree exchanges do not make
-the whole checkout atomic.
-
-Replacing the entire root would additionally require its writable parent,
-relocation of embedded `.git` administration, preservation of untracked and
-ignored entries, and rebinding every workspace authority. A bind-mounted root
-cannot simply be exchanged. Existing cwd and open directory handles continue
-using the displaced tree. Root exchange is outside the deletion estimate and is
-not an implicit way around these constraints.
+The primitive preserves the prepared tree's shape. Multiple directory exchanges
+do not make the whole checkout atomic. Selecting the checkout paths represented
+by each prepared directory belongs to the
+[integration questions](../open-questions.md).
 
 ### Platform and filesystem contract
 
-| Platform / filesystem                                                      | Available guarantee                                                                                                                                                       | Consequence for this design                                                                                                                                                                                                                                       |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Linux with a supporting filesystem                                         | `renameat2(..., RENAME_NOREPLACE)` rejects an occupied destination. `RENAME_EXCHANGE` atomically swaps existing entries, including nonempty directories and unlike types. | Use descriptor-relative single-component names. Both operations require filesystem support; a Linux build alone is insufficient. Neither provides inode compare-and-swap or content isolation.                                                                    |
-| macOS with supporting volume capabilities                                  | `renamex_np` and descriptor-relative `renameatx_np` expose `RENAME_EXCL` and `RENAME_SWAP`.                                                                               | A macOS backend needs the corresponding exclusive/swap capabilities and support for renaming open directories. Prefer `renameatx_np` to avoid ambient path resolution.                                                                                            |
-| Other platforms, or a Linux-only `cfg(target_os = "linux")` implementation | No equivalent guarantee follows from compiling an ordinary `rename` fallback.                                                                                             | Keep the current checkout path on supported existing platforms if availability is preserved. This retains its snapshot implementation and tests globally. Disabling checkout there instead is an owner-visible behavior change, not an automatic cfg consequence. |
-| Linux NFS client                                                           | The inspected `nfs_rename` rejects nonzero flags with `EINVAL`.                                                                                                           | The proposed exchange/no-replace path is unavailable on this implementation. Do not emulate it with check-then-rename or two/three ordinary renames.                                                                                                              |
+| Platform / filesystem                                                      | Available guarantee                                                                                                                                                       | Consequence for this design                                                                                                                                                                    |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linux with a supporting filesystem                                         | `renameat2(..., RENAME_NOREPLACE)` rejects an occupied destination. `RENAME_EXCHANGE` atomically swaps existing entries, including nonempty directories and unlike types. | Use descriptor-relative single-component names. Both operations require filesystem support; a Linux build alone is insufficient. Neither provides inode compare-and-swap or content isolation. |
+| macOS with supporting volume capabilities                                  | `renamex_np` and descriptor-relative `renameatx_np` expose `RENAME_EXCL` and `RENAME_SWAP`.                                                                               | A macOS backend needs the corresponding exclusive/swap capabilities and support for renaming open directories. Prefer `renameatx_np` to avoid ambient path resolution.                         |
+| Other platforms, or a Linux-only `cfg(target_os = "linux")` implementation | No equivalent guarantee follows from compiling an ordinary `rename` fallback.                                                                                             | Platform availability and fallback policy belong to the integration questions. A cfg gate alone cannot establish runtime filesystem support.                                                   |
+| Linux NFS client                                                           | The inspected `nfs_rename` rejects nonzero flags with `EINVAL`.                                                                                                           | The exchange/no-replace primitive is unavailable on this implementation. Do not emulate it with check-then-rename or two/three ordinary renames.                                               |
 
 Linux documents filesystem-dependent no-replace support, `EXDEV` across mounts,
 and possible `EBUSY` for mount points. Runtime unsupported errors must leave
@@ -105,11 +96,11 @@ presence does not guarantee this design on every mounted volume.
 Atomic visibility is not crash durability. A durability promise would need file
 flushes and the filesystem's directory persistence protocol around the rename;
 Linux `fsync` of a file alone does not persist its parent directory entry. This
-proposal does not claim an atomic durable transaction spanning checkout, index,
+design does not claim an atomic durable transaction spanning checkout, index,
 HEAD, and reflog.
 [Linux fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)
 
-### NFS and deployment evidence
+### NFS constraints
 
 NFSv4.0 `RENAME` takes two directory handles and two names; it has no exchange
 or no-replace flag. It atomically renames compatible entries and may replace an
@@ -131,15 +122,10 @@ proof that publication did not occur or blindly retry an exchange. Cross-client
 caching and the server's open-handle behavior also require deployment tests.
 [Linux rename(2), NFS caveat](https://man7.org/linux/man-pages/man2/rename.2.html)
 
-The deployment requirement includes NFS-backed storage. The scoping session's
-`findmnt -T /home/wkg/worktrees/wt-lane139` reports an **ext4 bind mount** in
-its visible mount namespace. That observation is not an NFS test and does not
-establish the storage presented to the daemon. No NFS or macOS runtime test has
-been performed for this document. Before implementation, identify the actual
-client mount, kernel, NFS protocol/server and both publication parents. If they
-use the Linux NFS path described above, this candidate cannot supply the
-required operations there; a different publication contract needs owner
-acceptance.
+Filesystem support depends on the client mount, kernel, NFS protocol/server, and
+both publication parents. A local-filesystem result cannot establish NFS
+support. The Linux NFS implementation above cannot supply the required flagged
+operations.
 
 ### Quarantine disposition and line estimate
 
@@ -151,11 +137,10 @@ within one helper or explicitly named plumbing region. Counts are matching
 source lines, not identifier occurrences. The old/new estimates count affected
 lines, including delimiters; they are not the number of matching lines.
 
-**Delete and Replace are conditional future dispositions**, requiring the
-ownership contract above. Keep means zero changed lines, not removal of that
-site's behavior. With the current shared staging namespace, all these deletions
-remain unapproved. Retaining the old path as a platform fallback also prevents
-global removal of the snapshot helpers.
+**Delete and Replace require the primitive's ownership preconditions.** Keep
+means zero changed lines, not removal of that site's behavior. The inventory
+estimates the changes where those preconditions hold; it does not select the
+integration policies tracked in [open questions](../open-questions.md).
 
 #### executor.rs
 
@@ -234,10 +219,10 @@ New owned-stage preparation, filesystem capability/error handling, and retention
 plumbing would add roughly **100–200 production lines** outside those
 replacements. Allow roughly **150–300 test lines** for the new publication
 cases, excluding platform integration infrastructure. These are scoping ranges,
-not a promised net saving: enforcing exclusive ownership in the present same-UID
-workspace has no implementation in this proposal, so its cost and safe
-reclamation remain unestimated. A portable dual path may increase total code
-instead.
+not a promised net saving. They exclude the integration work tracked in
+[open questions](../open-questions.md), including enforcement of staging
+exclusion, displaced-data reclamation, publication-unit selection, and platform
+availability.
 
 Outside the four-file inventory, snapshot deletion also touches the depth helper
 in `tests/branch_switch.rs` and `tests/reference.rs`'s
@@ -253,8 +238,8 @@ Preserve the built
 integrity, retention of foreign data, and failure classification must not be
 weakened by silently declaring the interleavings exercised by current tests out
 of scope. Same-UID residual risk in the threat model does not establish
-exclusive ownership of the current staging directory. The owner must accept the
-specific enforceable writer boundary before snapshot deletion.
+exclusive ownership of the current staging directory. Snapshot deletion requires
+the primitive's ownership preconditions to hold.
 
 Keep exact blob bytes, literal filenames, staged-change preservation, supported
 index flags, symlink/gitlink refusals, and existing bounds. A full-directory
@@ -262,7 +247,7 @@ replacement must account for unchanged, untracked and ignored content rather
 than synthesizing only the target Git tree. Do not move or copy common Git
 administration as part of a subtree exchange.
 
-The risks requiring owner review are:
+The implementation risks are:
 
 - **Loss of concurrent data:** exchange retains the displaced inode but later
   cleanup can destroy edits through old handles. Retention without a safe
@@ -277,8 +262,8 @@ The risks requiring owner review are:
   identities, mount boundaries can forbid rename, and native readers/writers do
   not automatically participate in daemon serialization.
 - **Availability:** Linux NFS lacks the required flags on the inspected client;
-  macOS volume capabilities and non-Linux fallback behavior need explicit
-  acceptance. An ext4 success cannot justify enabling NFS.
+  macOS volume capabilities also constrain support. An ext4 success cannot
+  justify enabling NFS. Platform policy belongs to the integration questions.
 - **Scale:** preparing larger parent subtrees adds streaming I/O and temporary
   disk proportional to the affected tree, possibly the whole checkout. It must
   not duplicate repository packs or allocate memory per blob byte. Measure wall
@@ -344,11 +329,12 @@ independent path opens.
 Include deterministic cases for a destination created just before no-replace
 (expect refusal and untouched foreign bytes), source-name substitution, and
 in-place writes through a pre-opened prepared-file descriptor. **An FD-only
-implementation must fail this test**: under the proposed ownership model those
-mutations must be prevented for the allowed writer, or publication must be
-refused with all foreign bytes retained. Also write through an old live-file FD
-after exchange and prove recovery/cleanup retains that edit. This distinguishes
-namespace atomicity from both source integrity and safe reclamation.
+implementation must fail this test**: under the primitive's ownership
+preconditions those mutations must be prevented for the allowed writer, or
+publication must be refused with all foreign bytes retained. Also write through
+an old live-file FD after exchange and prove recovery/cleanup retains that edit.
+This distinguishes namespace atomicity from both source integrity and safe
+reclamation.
 
 Run the same directory operation cases on a Linux local filesystem and a macOS
 volume supporting swap/exclusive rename, with an open directory and descendant.
@@ -360,6 +346,6 @@ uncertain-reply recovery evidence; this document does not authorize one.
 
 Implementation acceptance additionally requires fault injection after directory
 publication but before index/HEAD finalization, preservation of the existing
-failure classifications, and the scale measurements above. The owner review must
-settle staging exclusion, displaced-data reclamation, publication unit, and
-unsupported-platform behavior before any deletion is implemented.
+failure classifications, and the scale measurements above. Checkout integration
+is blocked by the [open questions](../open-questions.md); these primitive-level
+criteria do not close them.
