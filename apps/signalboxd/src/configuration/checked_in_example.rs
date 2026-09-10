@@ -1,4 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::{
+    num::NonZeroU64,
+    path::{Path, PathBuf},
+};
+
+use signalbox_domain::{
+    BranchName, CommitSha, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
+    PullRequestNumber, PullRequestTitle, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1,
+    RepositorySlug,
+};
+use signalbox_module_repo_watch_v2::matching_rules;
+use uuid::Uuid;
 
 use super::{
     EXAMPLE_EXEC_SUPERVISOR, HubModelConfiguration, ModelAdapter, checked_in_example_configuration,
@@ -54,6 +65,87 @@ credential_file = "/run/credentials/repository-watch-token"
     .replace(EXAMPLE_EXEC_SUPERVISOR, &executable);
     HubModelConfiguration::parse(&repository_watch)
         .expect("the repository-watch rules example is valid daemon configuration");
+}
+
+fn example_watch_configuration() -> HubModelConfiguration {
+    let executable = std::env::current_exe().expect("test executable");
+    let catalog = std::fs::read_to_string(example_path()).expect("example catalog");
+    let rules = include_str!("../../../../config/repository-watch-rules.example.toml");
+    let source = format!(
+        r#"{catalog}
+[repository_watch]
+version = 1
+workflows_enabled = true
+signal_reviewers = []
+[[repository_watch.repositories]]
+repository = "KeenWill/signalbox"
+poll_interval_seconds = 60
+credential_file = "/run/credentials/repository-watch-token"
+{rules}"#
+    )
+    .replace(EXAMPLE_EXEC_SUPERVISOR, &executable.to_string_lossy());
+    HubModelConfiguration::parse(&source).expect("example repository watch configuration")
+}
+
+/// An unlabeled, non-draft opening against a stacked base. Event identity,
+/// pull-request number, head content and title are arbitrary fixture values.
+fn unlabeled_stacked_opening(head_branch: &str) -> RepoWatchEvent {
+    const ANY_EVENT_ID: u128 = 1;
+    const ANY_HEAD: &str = "1111111111111111111111111111111111111111";
+    const ANY_TITLE: &str = "Rule example fixture";
+    let repository = RepositorySlug::try_new("KeenWill/signalbox".to_owned()).expect("repository");
+    RepoWatchEvent::try_pull_request(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(ANY_EVENT_ID)),
+        repository.clone(),
+        PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(NonZeroU64::MIN),
+            head_sha: CommitSha::try_new(ANY_HEAD.to_owned()).expect("head"),
+            head_repository: repository,
+            base_branch: BranchName::try_new("agent/stack-base".to_owned()).expect("stack base"),
+            head_branch: BranchName::try_new(head_branch.to_owned()).expect("head branch"),
+            title: PullRequestTitle::try_new(ANY_TITLE.to_owned()).expect("title"),
+            body: PullRequestBody::try_new(String::new()).expect("body"),
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        }),
+        RepoWatchEventKindV1::PullRequestOpened,
+    )
+    .expect("opened pull request")
+}
+
+#[test]
+fn example_watch_rules_dispatch_unlabeled_agent_and_renovate_openings() {
+    let configuration = example_watch_configuration();
+    let rules = configuration
+        .repository_watch()
+        .expect("repository watch")
+        .rules();
+    for branch in ["agent/stack-child", "renovate/dependency"] {
+        let event = unlabeled_stacked_opening(branch);
+        let matched = matching_rules(rules, &event);
+        assert_eq!(
+            matched
+                .iter()
+                .map(|rule| rule.id().as_str())
+                .collect::<Vec<_>>(),
+            ["renovate-merge-forward", "labeled-review-response"],
+            "opening {branch}",
+        );
+    }
+}
+
+#[test]
+fn example_watch_rules_ignore_openings_outside_the_branch_prefixes() {
+    let configuration = example_watch_configuration();
+    let rules = configuration
+        .repository_watch()
+        .expect("repository watch")
+        .rules();
+    for branch in ["feature/change", "agentish/change", "renovated/change"] {
+        let event = unlabeled_stacked_opening(branch);
+        assert!(matching_rules(rules, &event).is_empty(), "opening {branch}");
+    }
 }
 
 /// Whether one line is commented-out configuration rather than active TOML.

@@ -40,6 +40,12 @@ mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
 
+The example rules dispatch non-draft `agent/*` and `renovate/*` pull requests on
+opening without a label, including stacked branches, and also match reviews,
+completed checks and mergeability changes. The example `merge-forward` template
+instructs the session to reply without editing unless the current pull request
+is conflicting.
+
 The example `merge-forward` template instructs the session to stop on a
 `git_push_configured` `MergeDroppedBaseChanges` refusal, leave the conflict
 visible, and reply once naming the files reported by the base-hunk preservation
