@@ -301,10 +301,12 @@ failure entry is appended, preceded in the tool branch by one correlated result
 entry per request in proposal order. Identity collisions are retried with fresh
 candidates. The startup inventory covers every session. A session that fails
 reconstitution receives a durable operator item and is skipped; non-terminal
-sessions are parked, while terminal sessions retain their outcome. Operator
-status exposes both kinds of pending supervision item. Other sessions continue.
-Infrastructure failures stop initial startup visibly. During guard recovery,
-database failures throughout incarnation reconstruction, including
+sessions with valid lifecycle projections are parked, while terminal sessions
+retain their outcome. Missing or undecodable lifecycle projections retain
+independent operator evidence and remain suspended without automatic repair.
+Operator status exposes both kinds of pending supervision item. Other sessions
+continue. Infrastructure failures stop initial startup visibly. During guard
+recovery, database failures throughout incarnation reconstruction, including
 repository-watch startup, continue reacquisition with the same capped backoff
 and elapsed bound, after closing the failed incarnation’s fenced pool. Recovery
 is idempotent, and a stale observation rolls back.

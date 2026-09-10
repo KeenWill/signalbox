@@ -154,20 +154,22 @@ An absent configured bound leaves a deadline unbounded. An owned session in a
 deadline-bearing state with no deadline row is a violation.
 
 Execution supervision parks either ownership state without changing ownership.
-The operator queue retains the failure classification, sanitized cause, and
-whether reconciliation remains pending. Session resume and goal resume
-reconstitute supervised evidence in their transaction before lifting the park; a
-failed reconstitution leaves the park pending. Successful resume retains the
-cause. Clearing the final module park authority leaves an operator park when
-supervision is pending; only an operator resume reconciles that evidence. An
-ambiguous park commit is retried once as an idempotent write before retaining
-local suspension; an acknowledged park releases that suspension so a later
-durable resume is honored. A failed write retains the local suspension and
-reports its cause. A corrupt terminal session retains its terminal outcome and
-receives a pending supervision item instead of a park. Operator status lists
-every pending supervision item with its session, terminal flag, failure
-classification, and sanitized cause, including terminal sessions skipped at
-startup.
+Supervision evidence is independent of the lifecycle projection. A missing or
+undecodable projection remains unchanged; its pending operator item suspends
+scheduling until repair and explicit resume. The operator queue retains the
+failure classification, sanitized cause, and whether reconciliation remains
+pending. Session resume and goal resume reconstitute supervised evidence in
+their transaction before lifting the park; a failed reconstitution leaves the
+park pending. Successful resume retains the cause. Clearing the final module
+park authority leaves an operator park when supervision is pending; only an
+operator resume reconciles that evidence. An ambiguous park commit is retried
+once as an idempotent write before retaining local suspension; an acknowledged
+park releases that suspension so a later durable resume is honored. A failed
+write retains the local suspension and reports its cause. A corrupt terminal
+session retains its terminal outcome and receives a pending supervision item
+instead of a park. Operator status lists every pending supervision item with its
+session, terminal flag, failure classification, and sanitized cause, including
+terminal sessions skipped at startup.
 
 A park suspends an in-flight scheduler pass at its next durable operation
 boundary. The current operation settles, and the turn resumes only after the

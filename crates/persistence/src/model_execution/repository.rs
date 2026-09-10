@@ -58,13 +58,18 @@ impl PostgresModelCallRepository {
         }
     }
 
-    /// Observes whether the session's park suspends further scheduler operations.
+    /// Observes whether a park or pending supervision suspends further scheduler operations.
     pub async fn session_is_parked(
         &self,
         session: SessionId,
     ) -> Result<bool, ModelCallRepositoryError> {
         Ok(sqlx::query_scalar(
-            "SELECT state_kind = 'parked' FROM session_lifecycle WHERE session_id = $1",
+            "SELECT COALESCE(lifecycle.state_kind = 'parked', true)
+                    OR COALESCE(supervision.supervision_pending, false)
+               FROM session
+               LEFT JOIN session_lifecycle AS lifecycle USING (session_id)
+               LEFT JOIN session_supervision AS supervision USING (session_id)
+              WHERE session_id = $1",
         )
         .bind(session_id_to_uuid(session))
         .fetch_one(&self.pool)

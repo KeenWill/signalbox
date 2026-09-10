@@ -204,9 +204,10 @@ async fn declare_status_cursors(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "DECLARE operator_status_session_supervision NO SCROLL CURSOR FOR
-        SELECT session_id, state_kind = 'terminal' AS terminal, supervision_failure_class,
+        SELECT session_id, COALESCE(state_kind = 'terminal', false) AS terminal, supervision_failure_class,
                supervision_cause_code, supervision_pending
-        FROM session_lifecycle WHERE supervision_pending ORDER BY session_id",
+        FROM session_supervision LEFT JOIN session_lifecycle USING (session_id)
+        WHERE supervision_pending ORDER BY session_id",
     )
     .execute(&mut **transaction)
     .await?;

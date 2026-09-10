@@ -309,16 +309,31 @@ impl SessionLifecycleRepository {
         Ok(parked)
     }
 
-    /// Records a pending operator item and parks a non-terminal failed session.
-    /// Terminal sessions retain their outcome and remain visible through operator status.
+    /// Records operator evidence independently of lifecycle decoding and parks valid non-terminal sessions.
+    /// Missing or corrupt lifecycle projections remain unchanged and visible through operator status.
     pub async fn record_supervision_failure(
         &self,
         session: SessionId,
         failure: &(impl ClassifyOperatorFailure + Sync),
     ) -> Result<(), SessionLifecycleRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let held = load_locked(&mut transaction, session).await?;
-        if !held.state.is_parked() && !matches!(held.state, SessionLifecycleState::Terminal { .. })
+        sqlx::query(lock_inventory::SESSION_LIFECYCLE_SESSION)
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(SessionLifecycleRepositoryError::UnknownSession(session))?;
+        sqlx::query(lock_inventory::SESSION_LIFECYCLE_SATELLITE)
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let held = match load_optional(&mut transaction, session).await {
+            Ok(held) => held,
+            Err(SessionLifecycleRepositoryError::Corruption(_)) => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(held) = held
+            && !held.state.is_parked()
+            && !matches!(held.state, SessionLifecycleState::Terminal { .. })
         {
             write_state(
                 &mut transaction,
@@ -346,8 +361,13 @@ impl SessionLifecycleRepository {
             OperatorFailureClass::CallerOrHubBug => "bug",
         };
         sqlx::query(
-            "UPDATE session_lifecycle SET supervision_failure_class = $2,
-            supervision_cause_code = $3, supervision_pending = true WHERE session_id = $1",
+            "INSERT INTO session_supervision
+                (session_id, supervision_failure_class, supervision_cause_code, supervision_pending)
+             VALUES ($1, $2, $3, true)
+             ON CONFLICT (session_id) DO UPDATE
+                 SET supervision_failure_class = EXCLUDED.supervision_failure_class,
+                     supervision_cause_code = EXCLUDED.supervision_cause_code,
+                     supervision_pending = true",
         )
         .bind(session_id_to_uuid(session))
         .bind(class)
@@ -523,7 +543,7 @@ pub(crate) async fn lock_supervision_frontier(
         "SELECT turn_id FROM turn_lifecycle
          WHERE session_id = $1 AND state_kind = 'active'
            AND NOT delegation_runtime_terminal
-           AND EXISTS (SELECT 1 FROM session_lifecycle
+           AND EXISTS (SELECT 1 FROM session_supervision
                        WHERE session_id = $1 AND supervision_pending)",
     )
     .bind(session_id_to_uuid(session))
@@ -558,7 +578,7 @@ pub(crate) async fn reconcile_supervision_in_transaction(
     session: SessionId,
 ) -> Result<(), SessionLifecycleRepositoryError> {
     let pending: Option<bool> = sqlx::query_scalar(
-        "SELECT supervision_pending FROM session_lifecycle WHERE session_id = $1",
+        "SELECT supervision_pending FROM session_supervision WHERE session_id = $1",
     )
     .bind(session_id_to_uuid(session))
     .fetch_optional(&mut *connection)
@@ -581,7 +601,7 @@ pub(crate) async fn reconcile_supervision_in_transaction(
                 SessionLifecycleCorruption::Inconsistent("supervised session reconstitution").into()
             }
         })?;
-    sqlx::query("UPDATE session_lifecycle SET supervision_pending = false WHERE session_id = $1")
+    sqlx::query("UPDATE session_supervision SET supervision_pending = false WHERE session_id = $1")
         .bind(session_id_to_uuid(session))
         .execute(&mut *connection)
         .await?;
@@ -662,7 +682,22 @@ async fn lift_park_in_transaction(
     actor: LifecycleActor,
     project_blocked_goal: bool,
 ) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
-    let held = load_locked(connection, session).await?;
+    let mut held = load_locked(connection, session).await?;
+    if !held.state.is_parked()
+        && !matches!(held.state, SessionLifecycleState::Terminal { .. })
+        && held
+            .supervision_failure
+            .as_ref()
+            .is_some_and(|failure| failure.pending)
+    {
+        let parked = SessionLifecycleState::Parked {
+            cause: SessionParkCause::UnknownFailure,
+            responder: SessionParkResponder::Operator,
+            standing: None,
+        };
+        write_state(connection, &held, parked, actor).await?;
+        held.state = parked;
+    }
     lift_park_from_held(connection, held, actor, project_blocked_goal).await
 }
 
@@ -1568,7 +1603,7 @@ pub(crate) async fn load_optional(
                 pending_terminal_actor_module, pending_terminal_actor_turn_id,
                 pending_terminal_actor_tool_request_id, finish_condition_kind,
                 finish_condition, supervision_failure_class, supervision_cause_code, supervision_pending
-           FROM session_lifecycle
+           FROM session_lifecycle LEFT JOIN session_supervision USING (session_id)
           WHERE session_id = $1",
     )
     .bind(session_id_to_uuid(session))

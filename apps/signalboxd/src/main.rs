@@ -1883,7 +1883,7 @@ async fn run_hub_incarnation(
                 .refresh(None)
                 .await
                 .map_err(|_| {
-                    erase_startup_cause(
+                    erase_startup_database_cause(
                         RuntimePhase::StartupScan,
                         SanitizedStartupCause::Static("approval_wait_deadline_restore_failed"),
                     )
@@ -3405,6 +3405,10 @@ mod tests {
                 RuntimePhase::Configuration,
                 super::SanitizedStartupCause::Static("repository_watch_startup_failed"),
             )),
+            Err(super::erase_startup_database_cause(
+                RuntimePhase::StartupScan,
+                super::SanitizedStartupCause::Static("approval_wait_deadline_restore_failed"),
+            )),
             Ok(ShutdownOutcome::Clean),
         ]));
         let attempts = RefCell::new(Vec::new());
@@ -3421,7 +3425,7 @@ mod tests {
                 let result = failures
                     .borrow_mut()
                     .pop_front()
-                    .expect("five reconstruction attempts");
+                    .expect("six reconstruction attempts");
                 ready(super::recovery_incarnation_outcome(
                     result,
                     observer.is_recovering(),
@@ -3438,7 +3442,8 @@ mod tests {
                 Duration::from_secs(1),
                 Duration::from_secs(3),
                 Duration::from_secs(5),
-                Duration::from_secs(7)
+                Duration::from_secs(7),
+                Duration::from_secs(9)
             ]
         );
     }

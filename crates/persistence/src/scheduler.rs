@@ -218,6 +218,11 @@ impl PostgresEligibilitySweep {
                                 OR (lifecycle.state_kind = 'created'
                                     AND lifecycle.start_gate_held))
                  )
+                   AND NOT EXISTS (
+                        SELECT 1 FROM session_supervision AS supervision
+                         WHERE supervision.session_id = swept.session_id
+                           AND supervision.supervision_pending
+                   )
              ), bounded AS (
                 SELECT COALESCE(
                     $2::uuid,

@@ -178,7 +178,7 @@ impl PostgresStartupScanRepository {
         Self { pool }
     }
 
-    /// Reads the finite active-session inventory in deterministic order.
+    /// Reads the finite session inventory in deterministic order.
     pub async fn sessions(&self) -> Result<Box<[SessionId]>, StartupScanRepositoryError> {
         let rows =
             sqlx::query_scalar::<_, Uuid>("SELECT session_id FROM session ORDER BY session_id")
@@ -494,6 +494,17 @@ where
         return Ok(TransactionDecision::Rollback(
             StartupScanSessionOutcome::NoActiveTurn,
         ));
+    }
+
+    match crate::session_lifecycle::load_optional(connection, requested_session).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(StartupScanCorruption::Missing("session lifecycle row").into()),
+        Err(crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source)) => {
+            return Err(source.into());
+        }
+        Err(_) => {
+            return Err(StartupScanCorruption::Inconsistent("session lifecycle projection").into());
+        }
     }
 
     if let Some(recovered) =

@@ -3356,3 +3356,147 @@ async fn startup_skips_corrupt_session_while_healthy_turn_reconstitutes()
     drop(container);
     Ok(())
 }
+
+/// Corrupt lifecycle satellites do not prevent independent operator reporting or healthy recovery.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_reports_missing_and_undecodable_lifecycle_without_repair()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let create = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
+    let missing = creation_session(111);
+    let corrupt = creation_session(112);
+    let corrupt_terminal = creation_session(113);
+    let healthy = creation_session(114);
+    for seed in [111, 112, 114] {
+        create.handle(interactive_creation(seed)).await?;
+    }
+    create.handle(dispatched_creation(113)).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    lifecycle
+        .close(
+            corrupt_terminal,
+            SessionTerminalOutcome::Retired {
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
+            },
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+    let missing_turn = queue_first_turn(&pool, missing, 111).await?;
+    let corrupt_turn = activate_first_turn(&pool, corrupt, 112).await?;
+    let healthy_turn = activate_first_turn(&pool, healthy, 114).await?;
+    let original_actor: String =
+        sqlx::query_scalar("SELECT actor_kind FROM session_lifecycle WHERE session_id = $1")
+            .bind(corrupt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    let mut corruption = pool.begin().await?;
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query("ALTER TABLE session_lifecycle DROP CONSTRAINT session_lifecycle_actor_closed, DROP CONSTRAINT session_lifecycle_actor_shape")
+        .execute(&mut *corruption).await?;
+    sqlx::query("DELETE FROM session_lifecycle WHERE session_id = $1")
+        .bind(missing.into_uuid())
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query(
+        "UPDATE session_lifecycle SET actor_kind = 'corrupt_fixture' WHERE session_id = ANY($1)",
+    )
+    .bind(vec![corrupt.into_uuid(), corrupt_terminal.into_uuid()])
+    .execute(&mut *corruption)
+    .await?;
+    corruption.commit().await?;
+    let before: Vec<serde_json::Value> = sqlx::query_scalar("SELECT to_jsonb(session_lifecycle) FROM session_lifecycle WHERE session_id = ANY($1) ORDER BY session_id")
+        .bind(vec![corrupt.into_uuid(), corrupt_terminal.into_uuid()]).fetch_all(&pool).await?;
+    let mut scan = signalbox_application::StartupScanService::new(
+        signalbox_application::UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    let outcome = scan.execute().await?;
+    assert_eq!(
+        outcome.skipped_corrupt_sessions(),
+        &[missing, corrupt, corrupt_terminal]
+    );
+    assert_eq!(outcome.recovered_turn_count(), 1);
+    let after: Vec<serde_json::Value> = sqlx::query_scalar("SELECT to_jsonb(session_lifecycle) FROM session_lifecycle WHERE session_id = ANY($1) ORDER BY session_id")
+        .bind(vec![corrupt.into_uuid(), corrupt_terminal.into_uuid()]).fetch_all(&pool).await?;
+    assert_eq!(after, before);
+    assert!(lifecycle.load(missing).await?.is_none());
+    assert!(lifecycle.load(corrupt).await.is_err());
+    let turns: Vec<(Uuid, bool)> = sqlx::query_as("SELECT turn_id, state_kind = 'terminal' FROM turn_lifecycle WHERE turn_id = ANY($1) ORDER BY turn_id")
+        .bind(vec![missing_turn.into_uuid(), corrupt_turn.into_uuid(), healthy_turn.into_uuid()]).fetch_all(&pool).await?;
+    for (turn, terminal) in turns {
+        assert_eq!(terminal, turn == healthy_turn.into_uuid());
+    }
+    let mut status =
+        signalbox_persistence::operator_status::ProcessOperatorStatusRepository::new(pool.clone())
+            .open()
+            .await?;
+    let mut reported = Vec::new();
+    while let Some(item) = status.next_item().await? {
+        if let signalbox_persistence::operator_status::ProcessOperatorStatusItem::SessionSupervision { session, terminal, failure } = item {
+            assert_eq!(failure.class, OperatorFailureClass::FailClosedCorruption);
+            assert!(failure.pending);
+            reported.push((session, terminal));
+        }
+    }
+    assert_eq!(
+        reported,
+        vec![(missing, false), (corrupt, false), (corrupt_terminal, true)]
+    );
+    assert_eq!(status.counts().unwrap().session_supervision(), 3);
+    let candidates = signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts()
+        .0;
+    assert!(!candidates.contains(&missing));
+    assert!(!candidates.contains(&corrupt));
+    let mut activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                LIFECYCLE_SEED + 111 + 0x700,
+            ))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(
+                LIFECYCLE_SEED + 111 + 0x800,
+            ))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(
+                LIFECYCLE_SEED + 111 + 0x900,
+            ))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        activation.execute(missing).await?,
+        StartEligibleTurnOutcome::NoEligibleTurn
+    ));
+    let model = signalbox_persistence::model_execution::PostgresModelCallRepository::new(
+        pool.clone(),
+        ModelTargetCatalog::try_from_definitions([])
+            .expect("park observation does not require model targets"),
+        model_credential_reference(),
+    );
+    assert!(model.session_is_parked(missing).await?);
+    assert!(model.session_is_parked(corrupt).await?);
+    assert!(lifecycle.resume(corrupt).await.is_err());
+    sqlx::query("UPDATE session_lifecycle SET actor_kind = $2 WHERE session_id = $1")
+        .bind(corrupt.into_uuid())
+        .bind(original_actor)
+        .execute(&pool)
+        .await?;
+    lifecycle.resume(corrupt).await?;
+    let resumed = lifecycle.load(corrupt).await?.unwrap();
+    assert!(!resumed.state().is_parked());
+    assert!(!resumed.supervision_failure().unwrap().pending);
+    assert!(!model.session_is_parked(corrupt).await?);
+    let terminal: bool =
+        sqlx::query_scalar("SELECT state_kind = 'terminal' FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(corrupt_turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(terminal);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
