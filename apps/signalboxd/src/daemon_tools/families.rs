@@ -190,7 +190,11 @@ where
                 let (catalog, executor) = git.into_parts();
                 (catalog, Some(SharedToolExecutor::new(executor)))
             }
-            None => (CompiledToolCatalog::default(), None),
+            None => (
+                signalbox_tools_git::local_git_catalog()
+                    .map_err(|_| DaemonToolsConstructionError::LocalGit)?,
+                None,
+            ),
         };
         let (sandboxed_exec_catalog, sandboxed_exec) = sandboxed_exec.into_parts();
         let (unsandboxed_exec_catalog, unsandboxed_exec) = unsandboxed_exec.into_parts();

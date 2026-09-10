@@ -453,7 +453,7 @@ fn production_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
 }
 
 #[test]
-fn production_constructor_accepts_a_plain_root_without_git_tools() {
+fn production_constructor_registers_git_declarations_for_derived_repositories() {
     let workspace = tempfile::tempdir().expect("plain workspace");
     let definitions = production_daemon_catalog(workspace.path()).definitions();
     let names = definition_names(&definitions);
@@ -464,7 +464,7 @@ fn production_constructor_accepts_a_plain_root_without_git_tools() {
     assert!(
         signalbox_tools_git::LOCAL_GIT_TOOL_NAMES
             .iter()
-            .all(|name| !names.contains(name))
+            .all(|name| names.contains(name))
     );
 }
 
@@ -6963,16 +6963,115 @@ fn linked_worktrees_sharing_common_administration_cannot_bind_separate_sessions(
 
 #[tokio::test]
 async fn a_plain_configured_root_serves_a_repository_bound_session() {
-    let parent = tempfile::tempdir().expect("fixture parent");
-    let configured = parent.path().join("plain");
-    fs::create_dir(&configured).expect("plain configured root");
-    fs::write(configured.join(SESSION_MARKER_PATH), CONFIGURED_ROOT_MARKER)
-        .expect("configured marker");
-    let first = session(FIRST_SESSION_IDENTITY);
-    provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
-    let (catalog, executor) = offline_daemon_composition(&configured);
-    let evidence = daemon_evidence(catalog, executor, first, read_marker_proposal()).await;
-    assert_eq!(read_content(evidence), FIRST_SESSION_MARKER);
+    for format in [git2::ObjectFormat::Sha1, git2::ObjectFormat::Sha256] {
+        let parent = tempfile::tempdir().expect("fixture parent");
+        let configured = parent.path().join("plain");
+        fs::create_dir(&configured).expect("plain configured root");
+        fs::write(configured.join(SESSION_MARKER_PATH), CONFIGURED_ROOT_MARKER)
+            .expect("configured marker");
+        let first = session(FIRST_SESSION_IDENTITY);
+        let derived = derivation(&configured).derived_path(first);
+        fs::create_dir_all(&derived).expect("derived workspace");
+        let mut options = git2::RepositoryInitOptions::new();
+        options
+            .external_template(false)
+            .initial_head("main")
+            .object_format(format);
+        let repository =
+            git2::Repository::init_opts(&derived, &options).expect("derived repository");
+        fs::write(derived.join(SESSION_MARKER_PATH), FIRST_SESSION_MARKER).expect("derived marker");
+        let (catalog, executor) = offline_daemon_composition(&configured);
+        let evidence = daemon_evidence(
+            catalog.clone(),
+            executor.clone(),
+            first,
+            read_marker_proposal(),
+        )
+        .await;
+        assert_eq!(read_content(evidence), FIRST_SESSION_MARKER);
+        for (name, value, effect_class) in [
+            (
+                "git_status",
+                serde_json::json!({}),
+                ToolEffectClass::EffectFree,
+            ),
+            (
+                "git_stage",
+                serde_json::json!({"paths": [SESSION_MARKER_PATH]}),
+                ToolEffectClass::ExternalEffect,
+            ),
+            (
+                "git_create_commit",
+                serde_json::json!({"message": "derived repository commit"}),
+                ToolEffectClass::ExternalEffect,
+            ),
+        ] {
+            let proposal = PreparedAttemptProposal {
+                name: ToolName::try_new(name.to_owned()).expect("Git tool name"),
+                arguments: arguments(&value.to_string()),
+                effect_class,
+                approval: PreparedAttemptApproval::PolicyAuto,
+            };
+            let result = completed_text(
+                daemon_evidence(catalog.clone(), executor.clone(), first, proposal).await,
+            );
+            if name == "git_status" {
+                assert!(result.contains(SESSION_MARKER_PATH), "{result}");
+            }
+        }
+        let commit = repository
+            .head()
+            .expect("derived HEAD")
+            .peel_to_commit()
+            .expect("derived commit");
+        assert_eq!(
+            commit.message().expect("commit message"),
+            "derived repository commit"
+        );
+        let proposal = PreparedAttemptProposal {
+            name: ToolName::try_new("git_log".to_owned()).expect("Git log name"),
+            arguments: arguments(
+                &serde_json::json!({"revision": commit.id().to_string()}).to_string(),
+            ),
+            effect_class: ToolEffectClass::EffectFree,
+            approval: PreparedAttemptApproval::PolicyAuto,
+        };
+        let result = completed_text(
+            daemon_evidence(catalog.clone(), executor.clone(), first, proposal).await,
+        );
+        assert!(result.contains("derived repository commit"), "{result}");
+        let other_format_width = if format == git2::ObjectFormat::Sha1 {
+            64
+        } else {
+            40
+        };
+        let proposal = PreparedAttemptProposal {
+            name: ToolName::try_new("git_log".to_owned()).expect("Git log name"),
+            arguments: arguments(
+                &serde_json::json!({"revision": "1".repeat(other_format_width)}).to_string(),
+            ),
+            effect_class: ToolEffectClass::EffectFree,
+            approval: PreparedAttemptApproval::PolicyAuto,
+        };
+        let failure = daemon_evidence(catalog.clone(), executor.clone(), first, proposal).await;
+        assert_eq!(
+            known_failure_detail(failure),
+            "invalid bounded Git tool arguments"
+        );
+        let plain_session = session(SECOND_SESSION_IDENTITY);
+        let proposal = PreparedAttemptProposal {
+            name: ToolName::try_new("git_status".to_owned()).expect("Git status name"),
+            arguments: arguments("{}"),
+            effect_class: ToolEffectClass::EffectFree,
+            approval: PreparedAttemptApproval::PolicyAuto,
+        };
+        let failure = daemon_evidence(catalog, executor, plain_session, proposal).await;
+        assert_eq!(
+            known_failure_detail(failure),
+            "local Git is unavailable for this session"
+        );
+        assert!(!configured.join(".git").exists());
+    }
 }
 
 #[tokio::test]
