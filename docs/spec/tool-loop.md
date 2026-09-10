@@ -155,13 +155,14 @@ not a per-tool cost.
 
 The daemon registers `git_push_configured` when mapped workspace tools are
 composed and a watched repository configures `push_credential_file`; execution
-resolves that session's retained dispatch and current repository configuration
-on every call. The transport pushes without force to the configured repository
-URL and confirms the remote branch equals the resolved commit before
-acknowledging success. For a two-parent merge, exactly one parent must equal or
-descend from the retained-head fence; it is the branch parent, regardless of
-parent order. A missing or ambiguous fence binding refuses the push with
-`UnprovenMergeParents`. Multiple merge bases refuse it with
+resolves the session's retained commissioned or repository-dispatched branch and
+head fences and current repository configuration on every call; the judge or CLI
+approval authorizes execution. The transport pushes without force to the
+configured repository URL and confirms the remote branch equals the resolved
+commit before acknowledging success. For a two-parent merge, exactly one parent
+must equal or descend from the retained-head fence; it is the branch parent,
+regardless of parent order. A missing or ambiguous fence binding refuses the
+push with `UnprovenMergeParents`. Multiple merge bases refuse it with
 `AmbiguousMergeBases`, listing base object IDs and an omitted count when the
 detail cannot fit them all; verification does not construct a virtual merge
 base. Before pushing a merge, the executor compares additions and removals
@@ -370,7 +371,8 @@ retained set a request still holds is never released. Every declaration a
 workspace-root-bound family advertises is a property of the family's code, not
 of the repository it binds. Local Git is the exception: it compiles the pinned
 repository's object format into its argument validators, and session composition
-refuses an object-format disagreement.
+refuses an object-format disagreement. Configured pushes use the same bound
+workspace.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
