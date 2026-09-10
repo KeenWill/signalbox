@@ -333,13 +333,21 @@ pub(super) fn render_frontier_messages_with_placements<'a>(
                     );
                 }
                 let content = match ended.end() {
-                    ToolAttemptEnd::Completed { .. } => {
+                    ToolAttemptEnd::Completed { result } => {
                         let text = context_text.as_ref().ok_or(
                             ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
                                 entry: source,
                             },
                         )?;
-                        ModelToolResultContent::Success(ToolResultContent::Text(text.clone()))
+                        ModelToolResultContent::Success(match result {
+                            ToolResultContent::Text(_) => ToolResultContent::Text(text.clone()),
+                            ToolResultContent::Media { reference, .. } => {
+                                ToolResultContent::Media {
+                                    text: text.clone(),
+                                    reference: reference.clone(),
+                                }
+                            }
+                        })
                     }
                     ToolAttemptEnd::KnownFailed { error } => {
                         ModelToolResultContent::ExecutionError(

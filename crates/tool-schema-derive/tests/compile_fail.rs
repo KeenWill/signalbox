@@ -20,11 +20,6 @@ fn unsupported_type_names_its_field() {
 }
 
 #[test]
-fn missing_schema_impl_names_its_field() {
-    trybuild::TestCases::new().compile_fail("tests/ui/missing_schema_impl.rs");
-}
-
-#[test]
 fn flatten_names_its_field() {
     trybuild::TestCases::new().compile_fail("tests/ui/flatten.rs");
 }

@@ -317,3 +317,8 @@ and checks the pinned SHA-256 digest before decoding case data.
   [blob storage design](../design/blob-storage.md).
 - A modality-unsupported attachment preparation failure for typed media results;
   see [blob storage design](../design/blob-storage.md).
+
+Generated image views publish and verify their independently validated bytes,
+register their generated-artifact replica, then commit the durable tool result.
+Model preparation authenticates that result's presented identity before bounded
+blob reads; catalog presence alone does not authorize image presentation.
