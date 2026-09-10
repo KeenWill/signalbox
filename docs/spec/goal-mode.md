@@ -97,11 +97,10 @@ A goal stop awaiting tool approval is rejected without changing the goal or
 deciding the request; the rejection names the pending request to deny first.
 
 When an execution failure blocks a session that has an owner, the daemon
-automatically resumes the session within a bound. The execution-failure class
-that requires an operator is excluded. The daemon derives the command identity
-of that resumption from the session and the blocked event it responds to; it
-never generates a new identity. A retry therefore cannot resume the session
-twice.
+automatically resumes the session within a bound. The daemon derives the command
+identity of that resumption from the session and the blocked event it responds
+to; it never generates a new identity. A retry therefore cannot resume the
+session twice.
 
 The current state is derived only by replaying the session's append-only goal
 event stream; no mutable goal-state column is authoritative.

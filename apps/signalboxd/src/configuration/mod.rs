@@ -119,7 +119,6 @@ pub struct HubModelConfiguration {
     numeric_bounds: NumericBoundsConfiguration,
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
-    tool_continuation_usage_limits: Vec<ToolContinuationUsageLimit>,
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
@@ -550,29 +549,6 @@ impl HubModelConfiguration {
         )?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
-        let mut tool_continuation_usage_limits = Vec::with_capacity(routes.len().saturating_mul(2));
-        for route in routes.values() {
-            let definition = runtime_models
-                .resolve(route.target)
-                .ok_or(HubModelConfigurationError::ConflictingTarget)?;
-            for fast_mode in [FastMode::Disabled, FastMode::Enabled] {
-                let effective = runtime_models
-                    .effective_definition(definition, fast_mode)
-                    .ok_or(HubModelConfigurationError::ConflictingTarget)?;
-                let limit = ToolContinuationUsageLimit::new(
-                    route.target,
-                    fast_mode,
-                    u64::from(effective.max_output_tokens()),
-                    u64::from(effective.context_window_tokens()),
-                )
-                .with_compaction_prompt_bytes(compaction_prompt.len() as u64);
-                tool_continuation_usage_limits.push(if effective.provider_compaction_supported() {
-                    limit.with_provider_compaction_replay()
-                } else {
-                    limit
-                });
-            }
-        }
         let billing_rates = target_billing_rates
             .into_iter()
             .filter_map(|(target, rates)| rates.map(|rates| (target, rates)))
@@ -592,7 +568,6 @@ impl HubModelConfiguration {
             numeric_bounds,
             targets,
             runtime_models,
-            tool_continuation_usage_limits,
             direct_selections,
             aliases,
             routes,
@@ -702,8 +677,103 @@ impl HubModelConfiguration {
 
     /// Returns configured output reservations and context ceilings for every
     /// same-turn continuation mode.
-    pub fn tool_continuation_usage_limits(&self) -> Vec<ToolContinuationUsageLimit> {
-        self.tool_continuation_usage_limits.clone()
+    pub fn tool_continuation_usage_limits(
+        &self,
+        tools: &[signalbox_application::ToolDefinition],
+    ) -> Result<Vec<ToolContinuationUsageLimit>, HubModelConfigurationError> {
+        let tools = signalbox_model_provider_runtime::runtime_tool_definitions(tools)
+            .map_err(|_| HubModelConfigurationError::InvalidField)?;
+        let mut limits = Vec::with_capacity(self.routes.len().saturating_mul(2));
+        for route in self.routes.values() {
+            let selected = self
+                .runtime_models
+                .resolve(route.target)
+                .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+            for fast_mode in [FastMode::Disabled, FastMode::Enabled] {
+                let definition = self
+                    .runtime_models
+                    .effective_definition(selected, fast_mode)
+                    .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+                let mut operation = signalbox_model_runtime::ModelOperation::new(
+                    (),
+                    CredentialReference::new("continuation-measurement"),
+                    signalbox_model_runtime::RequestedTarget::new(definition.provider_model()),
+                    signalbox_model_runtime::ResolvedTarget::new(definition.provider_model()),
+                    vec![signalbox_model_runtime::ConversationMessage::user_text(
+                        format!(
+                            "{}\n",
+                            signalbox_model_provider_runtime::CONTEXT_SUMMARY_MESSAGE
+                        ),
+                    )],
+                    signalbox_model_runtime::ModelSettings::new(definition.max_output_tokens()),
+                );
+                // A nonempty placeholder retains the system envelope on every adapter.
+                operation.system = Some("x".to_owned());
+                operation.tools = tools.clone();
+                operation.settings.fast_mode = match fast_mode {
+                    FastMode::Disabled => signalbox_model_runtime::FastMode::Disabled,
+                    FastMode::Enabled => signalbox_model_runtime::FastMode::Enabled,
+                };
+                operation.provider_compaction_supported =
+                    definition.provider_compaction_supported();
+                let adapter = self
+                    .adapter_for_provider_model(definition.provider_model())
+                    .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+                let fixed = match adapter {
+                    ModelAdapter::Anthropic => {
+                        signalbox_model_runtime_anthropic::serialized_request_bytes(&operation)
+                    }
+                    ModelAdapter::OpenAi => {
+                        signalbox_model_runtime_openai::serialized_request_bytes(&operation)
+                    }
+                    ModelAdapter::CodexCli => {
+                        signalbox_model_runtime_codex_cli::serialized_request_bytes(&operation)
+                    }
+                    ModelAdapter::ClaudeCli => {
+                        signalbox_model_runtime_claude_cli::serialized_request_bytes(&operation)
+                    }
+                }
+                .ok_or(HubModelConfigurationError::InvalidField)?;
+                let framing_sample = signalbox_model_runtime::ConversationMessage::user_text("x");
+                let framing = match adapter {
+                    ModelAdapter::Anthropic => {
+                        signalbox_model_runtime_anthropic::serialized_message_bytes(
+                            &framing_sample,
+                            definition.provider_compaction_supported(),
+                        )
+                    }
+                    ModelAdapter::OpenAi => {
+                        signalbox_model_runtime_openai::serialized_message_bytes(&framing_sample)
+                    }
+                    ModelAdapter::CodexCli => {
+                        signalbox_model_runtime_codex_cli::serialized_message_bytes(&framing_sample)
+                    }
+                    ModelAdapter::ClaudeCli => {
+                        signalbox_model_runtime_claude_cli::serialized_message_bytes(
+                            &framing_sample,
+                        )
+                    }
+                }
+                .ok_or(HubModelConfigurationError::InvalidField)?;
+                let limit = ToolContinuationUsageLimit::new(
+                    route.target,
+                    fast_mode,
+                    u64::from(definition.max_output_tokens()),
+                    u64::from(definition.context_window_tokens()),
+                )
+                .with_compaction_prompt_bytes(self.compaction_prompt.len() as u64)
+                .with_request_overhead(
+                    fixed.saturating_sub(1) as u64,
+                    framing.saturating_sub(1) as u64,
+                );
+                limits.push(if definition.provider_compaction_supported() {
+                    limit.with_provider_compaction_replay()
+                } else {
+                    limit
+                });
+            }
+        }
+        Ok(limits)
     }
 
     /// Returns the adapter route for one configured direct selection.

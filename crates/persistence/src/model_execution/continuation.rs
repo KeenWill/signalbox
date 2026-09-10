@@ -132,9 +132,31 @@ pub(crate) async fn prepare_tool_continuation_call(
             .find_map(|entry| match entry.payload() {
                 signalbox_domain::SemanticTranscriptEntryPayload::ContextSummary {
                     value, ..
-                } => Some(u64::try_from(value.as_str().len()).unwrap_or(u64::MAX)),
+                } => Some(value.as_str()),
                 _ => None,
             });
+    let compacted_request_content_bytes = if let Some(summary) = compacted_input_bytes {
+        let system = super::prepared::load_frozen_epoch_system_prompt(
+            connection,
+            session,
+            execution
+                .active_turn()
+                .configuration()
+                .session_defaults_version(),
+        )
+        .await?;
+        // Adapter envelopes are reserved separately; content includes JSON escaping.
+        let encoded_bytes = |text: &str| -> Result<u64, ModelCallRepositoryError> {
+            serde_json::to_vec(text)
+                .map(|bytes| bytes.len().saturating_sub(2) as u64)
+                .map_err(|_| ModelCallCorruption::Inconsistent("continuation text encoding").into())
+        };
+        Some(encoded_bytes(summary)?.saturating_add(encoded_bytes(
+            system.as_ref().map_or("", |prompt| prompt.as_str()),
+        )?))
+    } else {
+        None
+    };
     let headroom_exhausted = if let Ok(resolved) = resolved_target
         && let Some(limit) = continuation_usage_limits.get(&(resolved.target(), fast_mode))
     {
@@ -151,13 +173,15 @@ pub(crate) async fn prepare_tool_continuation_call(
                 .collect(),
             serving_pool_target(credential_families, resolved.target(), fast_mode),
             *limit,
-            compacted_input_bytes,
+            compacted_request_content_bytes,
         )
         .await?
     } else {
         false
     };
-    if compaction_failed || (headroom_exhausted && compacted_input_bytes == Some(1)) {
+    if compaction_failed
+        || (headroom_exhausted && compacted_input_bytes.is_some_and(|summary| summary.len() == 1))
+    {
         let reclassifications = steering_identities
             .into_iter()
             .map(|(_, identity)| identity)
@@ -477,7 +501,13 @@ async fn load_tool_continuation_headroom_evidence(
                      ELSE COALESCE(octet_length(part.text_value), 0)
                  END), 0)::numeric
                    FROM accepted_input_content_part AS part
-                  WHERE part.accepted_input_id = ANY($4)) AS pending_steering_content_bytes
+                  WHERE part.accepted_input_id = ANY($4)) AS pending_steering_content_bytes,
+                (SELECT COALESCE(SUM(CASE part.part_kind
+                     WHEN 'attachment' THEN $5::bigint
+                     ELSE COALESCE(octet_length(to_json(part.text_value)::text), 2) - 2
+                 END + $6::bigint), 0)::numeric
+                   FROM accepted_input_content_part AS part
+                  WHERE part.accepted_input_id = ANY($4)) AS pending_steering_rendered_bytes
            FROM model_call
           WHERE model_call_id = $1
             AND session_id = $2
@@ -491,6 +521,7 @@ async fn load_tool_continuation_headroom_evidence(
     .bind(&pending_steering)
     .bind(i64::try_from(signalbox_application::MAX_RENDERED_ATTACHMENT_STUB_BYTES)
         .unwrap_or(i64::MAX))
+    .bind(i64::try_from(limit.steering_part_framing_bytes).unwrap_or(i64::MAX))
     .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else {
@@ -531,8 +562,12 @@ async fn load_tool_continuation_headroom_evidence(
         ModelCallCorruption::Missing("pending steering content byte count"),
     )?;
     if let Some(compacted_input_bytes) = compacted_input_bytes {
+        let steering_bytes = decode("pending_steering_rendered_bytes")?.ok_or(
+            ModelCallCorruption::Missing("pending steering rendered byte count"),
+        )?;
         return Ok(compacted_input_bytes
-            .saturating_add(pending_steering_content_bytes)
+            .saturating_add(limit.request_overhead_bytes)
+            .saturating_add(steering_bytes)
             .saturating_add(limit.max_output_tokens())
             > limit.context_window_tokens());
     }

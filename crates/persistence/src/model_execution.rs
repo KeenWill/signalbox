@@ -96,6 +96,8 @@ pub struct ToolContinuationUsageLimit {
     context_window_tokens: u64,
     replays_provider_compaction: bool,
     compaction_prompt_bytes: u64,
+    request_overhead_bytes: u64,
+    steering_part_framing_bytes: u64,
 }
 
 impl ToolContinuationUsageLimit {
@@ -113,7 +115,21 @@ impl ToolContinuationUsageLimit {
             context_window_tokens,
             replays_provider_compaction: false,
             compaction_prompt_bytes: 0,
+            request_overhead_bytes: 0,
+            steering_part_framing_bytes: 0,
         }
+    }
+
+    /// Reserves adapter-rendered fixed request material and each steering part's framing.
+    #[must_use]
+    pub const fn with_request_overhead(
+        mut self,
+        fixed_bytes: u64,
+        steering_part_bytes: u64,
+    ) -> Self {
+        self.request_overhead_bytes = fixed_bytes;
+        self.steering_part_framing_bytes = steering_part_bytes;
+        self
     }
 
     /// Reserves the configured summary prompt when bounding a tool-result batch.

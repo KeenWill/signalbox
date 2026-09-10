@@ -1,7 +1,7 @@
 //! Tool-result compaction preserves active turns and their commissioned goals.
 
 use super::*;
-use signalbox_application::EligibilityWorkSource;
+use signalbox_application::{EligibilityWorkSource, ToolCatalog};
 use signalbox_domain::{
     CreateSession, ModuleDispatch, ProviderReportedTokenUsage, RepoWatchDispatchId,
     SessionCreationCause, SessionCreationProvenance, SessionOwnership, StartGate,
@@ -448,14 +448,16 @@ async fn read_heavy_automatic_compaction_completes_the_active_turn() -> Result<(
     );
     let ordinary_probe = ordinary.clone();
     let provider = RuntimeModelCallProvider::new(ordinary, runtime_models.clone(), None);
+    let (catalog, executor) = signalboxd::goal_declaration_test_tools(runtime.pool.clone())?;
     let calls = PostgresModelCallRepository::new(
         runtime.pool.clone(),
         configuration.target_catalog(),
         ModelCallCredentialReference::new("continuation-fixture"),
     )
     .with_session_credentials(configuration.credential_family_catalog())
-    .with_continuation_usage_limits(configuration.tool_continuation_usage_limits());
-    let (catalog, executor) = signalboxd::goal_declaration_test_tools(runtime.pool.clone())?;
+    .with_continuation_usage_limits(
+        configuration.tool_continuation_usage_limits(&catalog.definitions())?,
+    );
     let execution = signalboxd::WorkspaceInstructionPreparedExecution::new(
         PostgresProviderModelExecution::new(
             calls.clone(),
@@ -606,14 +608,16 @@ async fn commissioned_compaction_completes_goal(
     );
     let ordinary_probe = ordinary.clone();
     let provider = RuntimeModelCallProvider::new(ordinary, runtime_models.clone(), None);
+    let (catalog, executor) = signalboxd::goal_declaration_test_tools(runtime.pool.clone())?;
     let calls = PostgresModelCallRepository::new(
         runtime.pool.clone(),
         configuration.target_catalog(),
         ModelCallCredentialReference::new("continuation-fixture"),
     )
     .with_session_credentials(configuration.credential_family_catalog())
-    .with_continuation_usage_limits(configuration.tool_continuation_usage_limits());
-    let (catalog, executor) = signalboxd::goal_declaration_test_tools(runtime.pool.clone())?;
+    .with_continuation_usage_limits(
+        configuration.tool_continuation_usage_limits(&catalog.definitions())?,
+    );
     let execution = signalboxd::WorkspaceInstructionPreparedExecution::new(
         PostgresProviderModelExecution::new(
             calls.clone(),
@@ -778,7 +782,11 @@ async fn resume_compaction_checkpoint(
     turn: TurnId,
     window: u64,
 ) -> Result<signalbox_application::PrepareToolContinuationOutcome, Box<dyn Error>> {
-    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let configuration = support::parse_model_configuration(&MODEL_CONFIGURATION.replace(
+        "context_window_tokens = 200000",
+        &format!("context_window_tokens = {window}"),
+    ))?;
+    let (catalog, _) = signalboxd::goal_declaration_test_tools(runtime.pool.clone())?;
     let producing: Uuid = sqlx::query_scalar(
         "SELECT active_tool_round_call_id FROM turn_lifecycle WHERE turn_id = $1",
     )
@@ -791,12 +799,9 @@ async fn resume_compaction_checkpoint(
         ModelCallCredentialReference::new("continuation-fixture"),
     )
     .with_session_credentials(configuration.credential_family_catalog())
-    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
-        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(3))),
-        signalbox_domain::FastMode::Disabled,
-        256,
-        window,
-    )]);
+    .with_continuation_usage_limits(
+        configuration.tool_continuation_usage_limits(&catalog.definitions())?,
+    );
     Ok(calls
         .tool_loop_repository()
         .prepare_continuation(
@@ -897,18 +902,22 @@ async fn assert_post_compaction_headroom(irreducible: bool) -> Result<(), Box<dy
     let runtime = RunningRuntime::start().await?;
     let (session, turn) =
         exhausted_continuation(&runtime, ContinuationSession::Interactive).await?;
-    // The first summary and steering exceed 600 bytes with the 256-byte output
-    // reservation; the replacement summary restores headroom.
+    // Forty summary bytes, 300 steering bytes and 256 output tokens leave four
+    // tokens at a 600-token boundary. The complete request still cannot fit.
     let summary = ScriptedModel::following(
-        (if irreducible { vec![1] } else { vec![80, 40] })
-            .into_iter()
-            .map(|bytes| {
-                completed_script(
-                    "fixture-model",
-                    &"s".repeat(bytes),
-                    TokenUsage::unreported(),
-                )
-            }),
+        (if irreducible {
+            vec![1]
+        } else {
+            vec![80, 40, 20]
+        })
+        .into_iter()
+        .map(|bytes| {
+            completed_script(
+                "fixture-model",
+                &"s".repeat(bytes),
+                TokenUsage::unreported(),
+            )
+        }),
     );
     let probe = summary.clone();
     let compaction = continuation_compaction(&runtime, summary)?;
@@ -928,12 +937,17 @@ async fn assert_post_compaction_headroom(irreducible: bool) -> Result<(), Box<dy
         compaction.compact_if_needed(session, None).await?;
         assert!(matches!(
             resume_compaction_checkpoint(&runtime, session, turn, 600).await?,
+            signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(_)
+        ));
+        compaction.compact_if_needed(session, None).await?;
+        assert!(matches!(
+            resume_compaction_checkpoint(&runtime, session, turn, 200_000).await?,
             signalbox_application::PrepareToolContinuationOutcome::Checkpointed(_)
         ));
     }
     assert_eq!(
         probe.received_operations().len(),
-        if irreducible { 1 } else { 2 }
+        if irreducible { 1 } else { 3 }
     );
     let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input WHERE session_id = $1 AND disposition_kind = 'pending_steering'")
         .bind(session.into_uuid()).fetch_one(&runtime.pool).await?;
