@@ -2312,6 +2312,18 @@ async fn successive_foreground_results_resume_the_same_tool_batch_and_emit_trans
             .resume_child_wait(fixture.session, fixture.turn, continuation)
             .await?
     );
+    let resumed_storage_version: i16 = sqlx::query_scalar(
+        "SELECT storage_version
+           FROM tool_batch_transition_outbox_event
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND transition_kind = 'child_wait_resumed'",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(resumed_storage_version, 2);
     assert!(matches!(
         OutboxDispatcher::new(pool.clone())
             .dispatch_next(|event| {

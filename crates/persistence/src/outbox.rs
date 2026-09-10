@@ -63,10 +63,13 @@ use crate::runner_protocol::RunnerConnectionEpoch;
 const STORAGE_VERSION: i16 = 1;
 /// Session creation records include workflow provenance.
 const SESSION_CREATED_STORAGE_VERSION: i16 = 3;
+/// Tool-batch transitions include child-wait resumption.
+const TOOL_BATCH_TRANSITION_STORAGE_VERSION: i16 = 2;
 
 const fn storage_version_for(discriminator: OutboxEventDiscriminator) -> i16 {
     match discriminator {
         OutboxEventDiscriminator::SessionCreated => SESSION_CREATED_STORAGE_VERSION,
+        OutboxEventDiscriminator::ToolBatchTransition => TOOL_BATCH_TRANSITION_STORAGE_VERSION,
         OutboxEventDiscriminator::SessionStateChanged
         | OutboxEventDiscriminator::SessionTerminal
         | OutboxEventDiscriminator::AutomaticReconciliationExhausted
@@ -81,7 +84,6 @@ const fn storage_version_for(discriminator: OutboxEventDiscriminator) -> i16 {
         | OutboxEventDiscriminator::InputAccepted
         | OutboxEventDiscriminator::TurnActivated
         | OutboxEventDiscriminator::ModelCallTransition
-        | OutboxEventDiscriminator::ToolBatchTransition
         | OutboxEventDiscriminator::ToolApprovalDecided
         | OutboxEventDiscriminator::ContextCompacted
         | OutboxEventDiscriminator::RunnerStateTransition
@@ -1180,6 +1182,8 @@ pub(crate) async fn load_event_header(
     if storage_version != storage_version_for(discriminator)
         && !(matches!(discriminator, OutboxEventDiscriminator::SessionCreated)
             && storage_version == 2)
+        && !(matches!(discriminator, OutboxEventDiscriminator::ToolBatchTransition)
+            && storage_version == STORAGE_VERSION)
     {
         return Err(OutboxCorruption::UnsupportedStorageVersion.into());
     }
@@ -4141,7 +4145,7 @@ async fn append_tool_batch_transition(
          RETURNING event_sequence",
     )
     .bind(TOOL_BATCH_TRANSITION)
-    .bind(STORAGE_VERSION)
+    .bind(TOOL_BATCH_TRANSITION_STORAGE_VERSION)
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
     .bind(producing_call.into_uuid())
