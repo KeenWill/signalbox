@@ -206,8 +206,8 @@ absence, or raw records. It creates nothing, seeds no session, performs no
 durable write, validates the immutable entry inventory once, and pages stored
 positions, identities, speaker evidence, and byte-bounded content projections
 fail-closed from PostgreSQL. The client resolves `latest` against this read's
-entry count before constructing the durable command, prints the resolved ordinal,
-and sends a concrete position.
+entry count before constructing the durable command, prints the resolved
+ordinal, and sends a concrete position.
 
 Ingestion publishes and verifies each raw blob with no database transaction
 open, then records its catalog evidence in a short transaction. Connection-local
