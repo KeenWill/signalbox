@@ -225,17 +225,20 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
         } else {
             None
         };
-        if let (Some((old_oid, old_mode)), Some((_, new_mode))) =
-            (head_files.get(&path), new_buffer.as_ref())
-            && *old_mode == *new_mode
-            && (worktree_oid == Some(*old_oid)
+        let content_unchanged = head_files.get(&path).is_some_and(|(old_oid, _)| {
+            worktree_oid == Some(*old_oid)
                 || index_backed_worktree_files
                     .get(&path)
-                    .is_some_and(|(oid, _)| oid == old_oid))
+                    .is_some_and(|(oid, _)| oid == old_oid)
+        });
+        if let (Some((_, old_mode)), Some((_, new_mode))) =
+            (head_files.get(&path), new_buffer.as_ref())
+            && *old_mode == *new_mode
+            && content_unchanged
         {
             continue;
         }
-        truncated |= content_truncated;
+        truncated |= content_truncated && !content_unchanged;
         let mut options = DiffOptions::new();
         options.force_text(true);
         let patch = match (old_buffer.as_ref(), new_buffer.as_ref()) {
