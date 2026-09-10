@@ -1311,6 +1311,32 @@ fn recovery_incarnation_outcome(
     }
 }
 
+fn startup_goal_resumption_result(
+    result: Result<usize, signalboxd::PostgresGoalPassDispositionError>,
+    recovering: bool,
+) -> Result<(), HubRuntimeError> {
+    match result {
+        Ok(rearmed) => tracing::info!(
+            phase = ?RuntimePhase::StartupScan,
+            rearmed_goal_resumption_count = rearmed,
+            "daemon startup reconciled automatic goal resumptions"
+        ),
+        Err(error) => {
+            tracing::error!(
+                phase = ?RuntimePhase::StartupScan,
+                cause_code = error.operator_failure_cause_code(),
+                cause = %error,
+                "daemon startup exhausted automatic goal-resumption reconciliation"
+            );
+            let failure_class = error.operator_failure_class();
+            if recovering && matches!(failure_class, OperatorFailureClass::Infrastructure { .. }) {
+                return Err(HubRuntimeError::startup_scan(failure_class, None, None));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_hub_incarnation(
     telemetry_configuration: &TelemetryConfiguration,
     guard_recovery: signalboxd::guard_recovery::GuardRecoveryObserver,
@@ -2222,15 +2248,25 @@ async fn run_hub_incarnation(
         Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
         None => None,
     };
-    let recovery_failure =
-        match await_while_guarded(&mut database, configuration_reload.recover()).await {
-            GuardedAwait::Completed(Ok(())) => None,
-            GuardedAwait::Completed(Err(_)) => Some(Err(erase_startup_database_cause(
+    let reconstruct = async {
+        configuration_reload.recover().await.map_err(|_| {
+            erase_startup_database_cause(
                 RuntimePhase::StartupScan,
                 SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
-            ))),
-            GuardedAwait::GuardLost => Some(Ok(ShutdownOutcome::GuardLost)),
-        };
+            )
+        })?;
+        startup_goal_resumption_result(
+            goal_disposition
+                .reconcile_automatic_resumptions_after_restart()
+                .await,
+            guard_recovery.is_recovering(),
+        )
+    };
+    let recovery_failure = match await_while_guarded(&mut database, reconstruct).await {
+        GuardedAwait::Completed(Ok(())) => None,
+        GuardedAwait::Completed(Err(error)) => Some(Err(error)),
+        GuardedAwait::GuardLost => Some(Ok(ShutdownOutcome::GuardLost)),
+    };
     if let Some(outcome) = recovery_failure {
         if matches!(outcome, Ok(ShutdownOutcome::GuardLost)) {
             if let Some(registry) = blob_store_registry.as_ref() {
@@ -2445,22 +2481,6 @@ async fn run_hub_incarnation(
         SessionDeadlineBounds::new(session_admission_deadline, session_waiting_deadline),
     );
     let process_runtime = process_runtime.with_goal_resumption(goal_disposition.clone());
-    match goal_disposition
-        .reconcile_automatic_resumptions_after_restart()
-        .await
-    {
-        Ok(rearmed) => tracing::info!(
-            phase = ?RuntimePhase::StartupScan,
-            rearmed_goal_resumption_count = rearmed,
-            "daemon startup reconciled automatic goal resumptions"
-        ),
-        Err(error) => tracing::error!(
-            phase = ?RuntimePhase::StartupScan,
-            cause_code = error.operator_failure_cause_code(),
-            cause = %error,
-            "daemon startup exhausted automatic goal-resumption reconciliation"
-        ),
-    }
     let pass = GoalAwareEligibilityPass::new(activated_pass, goal_disposition);
     let scheduler_max_in_flight_passes = scheduler_pass_admission_cap;
     let mut scheduler = match scheduler_max_in_flight_passes {
@@ -3473,6 +3493,94 @@ mod tests {
                 Duration::from_secs(9)
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn automatic_resumption_inventory_failure_keeps_guard_recovery_pending() {
+        use signalbox_persistence::goal::GoalRepositoryError;
+        use signalboxd::PostgresGoalPassDispositionError;
+        use signalboxd::guard_recovery::{GuardRecoveryPolicy, run_guarded_incarnations};
+        let database_failure = super::startup_goal_resumption_result(
+            Err(PostgresGoalPassDispositionError::Repository(
+                GoalRepositoryError::Database(sqlx::Error::PoolClosed),
+            )),
+            true,
+        )
+        .expect_err("unrestored goal timers prevent recovery admission");
+        let ambiguous = super::startup_goal_resumption_result(
+            Err(PostgresGoalPassDispositionError::Repository(
+                GoalRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+            )),
+            true,
+        )
+        .expect_err("an ambiguous inventory failure prevents recovery admission");
+        assert_eq!(
+            ambiguous.failure_class,
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
+        let failures = RefCell::new(VecDeque::from([
+            Ok(ShutdownOutcome::GuardLost),
+            Err(database_failure),
+            Err(ambiguous),
+            Ok(ShutdownOutcome::Clean),
+        ]));
+        let started = tokio::time::Instant::now();
+        let attempts = RefCell::new(Vec::new());
+        let result = run_guarded_incarnations(
+            GuardRecoveryPolicy::new(
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Some(Duration::from_secs(10)),
+            )
+            .unwrap(),
+            |observer| {
+                attempts.borrow_mut().push(started.elapsed());
+                ready(super::recovery_incarnation_outcome(
+                    failures
+                        .borrow_mut()
+                        .pop_front()
+                        .expect("four reconstruction attempts"),
+                    observer.is_recovering(),
+                ))
+            },
+            pending(),
+        )
+        .await;
+        assert_eq!(result, Ok(Ok(ShutdownOutcome::Clean)));
+        assert_eq!(
+            *attempts.borrow(),
+            [
+                Duration::ZERO,
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+                Duration::from_secs(5)
+            ]
+        );
+    }
+
+    #[test]
+    fn automatic_resumption_inventory_preserves_initial_and_non_database_reporting() {
+        use signalbox_persistence::goal::GoalRepositoryError;
+        use signalboxd::PostgresGoalPassDispositionError;
+        assert_eq!(
+            super::startup_goal_resumption_result(
+                Err(PostgresGoalPassDispositionError::Repository(
+                    GoalRepositoryError::Database(sqlx::Error::PoolClosed),
+                )),
+                false,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            super::startup_goal_resumption_result(
+                Err(PostgresGoalPassDispositionError::InvalidStaticNeed),
+                true,
+            ),
+            Ok(())
+        );
+        assert_eq!(super::startup_goal_resumption_result(Ok(1), true), Ok(()));
     }
 
     #[tokio::test(start_paused = true)]
