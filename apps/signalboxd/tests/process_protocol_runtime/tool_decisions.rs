@@ -471,47 +471,81 @@ async fn decide_tool_request_refuses_a_misrouted_session_without_recording()
     runtime.stop().await
 }
 
-/// a denial reason outside the domain contract is refused as an invalid request before any durable
-/// command is recorded.
+/// multiline denial reasons above 1,024 bytes are recorded, while an oversized reason reports the
+/// current bound and observed byte count before any durable command is recorded.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn decide_tool_request_refuses_an_unsafe_denial_reason_before_recording()
+async fn decide_tool_request_admits_multiline_reason_and_reports_oversized_reason()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     submit_first_input(&mut connection, session_id, String::from("first request")).await?;
-    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
-    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+    let first_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    let second_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE2));
+    park_turn_on_tool_approval(
+        &runtime.pool,
+        session_id,
+        &[first_request_id, second_request_id],
+    )
+    .await?;
 
-    let unsafe_reason_command = command()?;
+    let multiline_reason = format!("first line\n{}", "x".repeat(1_024));
+    let multiline_decision = ToolDecision::Deny {
+        reason: multiline_reason,
+    };
     connection
         .request_version(
             ProtocolVersion::One,
             3,
             ClientRequest::DecideToolRequest {
-                command_id: unsafe_reason_command,
+                command_id: command()?,
                 session_id,
-                tool_request_id: pending_request_id,
+                tool_request_id: first_request_id,
+                decision: multiline_decision.clone(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (first_request_id, multiline_decision)
+    );
+
+    let maximum_bytes = signalbox_domain::ToolDenialReason::MAX_UTF8_BYTES;
+    let oversized_reason = "x".repeat(maximum_bytes + 1);
+    let oversized_command = command()?;
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            4,
+            ClientRequest::DecideToolRequest {
+                command_id: oversized_command,
+                session_id,
+                tool_request_id: second_request_id,
                 decision: ToolDecision::Deny {
-                    reason: String::from(" padded "),
+                    reason: oversized_reason.clone(),
                 },
             },
         )
         .await?;
-    assert!(matches!(
-        response_within(&mut connection).await?.message(),
-        ServerMessage::Error {
-            code: ErrorCode::InvalidRequest,
-            ..
-        }
-    ));
-    let unsafe_claim_count: i64 =
+    let response = response_within(&mut connection).await?;
+    let ServerMessage::Error { code, detail, .. } = response.message() else {
+        panic!("oversized denial reason must return a protocol error");
+    };
+    assert_eq!(*code, ErrorCode::InvalidRequest);
+    assert_eq!(
+        detail.value(),
+        Some(RejectionDetail::ToolDenialReasonTooLong {
+            maximum_bytes: CanonicalU64::new(u64::try_from(maximum_bytes)?),
+            actual_bytes: CanonicalU64::new(u64::try_from(oversized_reason.len())?),
+        })
+    );
+    let oversized_claim_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
-            .bind(unsafe_reason_command.into_uuid())
+            .bind(oversized_command.into_uuid())
             .fetch_one(&runtime.pool)
             .await?;
-    assert_eq!(unsafe_claim_count, 0);
+    assert_eq!(oversized_claim_count, 0);
 
     drop(connection);
     runtime.stop().await

@@ -107,6 +107,7 @@ pub(crate) struct OperatorStatusPresentationCounts {
     pub(crate) lifecycle_weeks: u64,
     pub(crate) lifecycle_deadline_violations: u64,
     pub(crate) session_supervision: u64,
+    pub(crate) outbox_quarantines: u64,
 }
 
 pub(crate) enum BlobUploadPresentation {

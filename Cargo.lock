@@ -4652,6 +4652,7 @@ dependencies = [
  "testcontainers-modules",
  "tokio",
  "toml",
+ "tracing",
  "url",
  "uuid",
 ]

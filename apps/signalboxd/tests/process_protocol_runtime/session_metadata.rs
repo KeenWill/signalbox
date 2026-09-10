@@ -70,6 +70,7 @@ async fn process_runtime_reads_an_empty_operator_status_snapshot() -> Result<(),
                 repository_ingestion_count: CanonicalU64::new(0),
                 lifecycle_week_count: CanonicalU64::new(0),
                 lifecycle_deadline_violation_count: CanonicalU64::new(0),
+                outbox_quarantine_count: CanonicalU64::new(0),
             },
         ))))
     );

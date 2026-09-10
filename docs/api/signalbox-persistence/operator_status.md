@@ -26,6 +26,7 @@ impl operator_status::ProcessOperatorStatusCounts {
     pub const fn lifecycle_weeks(self) -> u64;
     pub const fn lifecycle_deadline_violations(self) -> u64;
     pub const fn session_supervision(self) -> u64;
+    pub const fn outbox_quarantines(self) -> u64;
 }
 ```
 

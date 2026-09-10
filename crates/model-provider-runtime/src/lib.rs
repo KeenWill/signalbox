@@ -54,7 +54,8 @@ use signalbox_model_runtime::{
 };
 
 const MODEL_IDENTITY_CHANGE_MESSAGE: &str = "Signalbox session event: your model identity is now";
-const CONTEXT_SUMMARY_MESSAGE: &str = "Signalbox prior-conversation summary:";
+/// Prefix included in every model-visible context summary.
+pub const CONTEXT_SUMMARY_MESSAGE: &str = "Signalbox prior-conversation summary:";
 
 /// One already-redacted provider text fragment for ephemeral presentation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -949,6 +950,7 @@ pub struct RuntimeModelCallProvider<R> {
     models: RuntimeModelCatalog,
     text_deltas: Arc<dyn ProviderTextDeltaSink>,
     diagnostic_model_identity_limit: Option<usize>,
+    proposal_limits: signalbox_application::ToolProposalLimits,
     invocation_processes: Option<Arc<dyn InvocationProcessObserver>>,
 }
 
@@ -1062,7 +1064,17 @@ impl<R> RuntimeModelCallProvider<R> {
             text_deltas: Arc::new(DiscardProviderTextDeltas),
             invocation_processes: None,
             diagnostic_model_identity_limit,
+            proposal_limits: Default::default(),
         }
+    }
+
+    /// Applies per-response request and argument admission caps.
+    pub const fn with_tool_proposal_limits(
+        mut self,
+        limits: signalbox_application::ToolProposalLimits,
+    ) -> Self {
+        self.proposal_limits = limits;
+        self
     }
 
     /// Connects spawned invocations to their durable capacity reservations.
@@ -1093,6 +1105,7 @@ impl<R> Clone for RuntimeModelCallProvider<R> {
             text_deltas: Arc::clone(&self.text_deltas),
             invocation_processes: self.invocation_processes.clone(),
             diagnostic_model_identity_limit: self.diagnostic_model_identity_limit,
+            proposal_limits: self.proposal_limits,
         }
     }
 }
@@ -1537,6 +1550,7 @@ where
             &observations.observations,
             &capability.resolved_target,
             self.diagnostic_model_identity_limit,
+            self.proposal_limits,
         )
         .map_err(|failure| {
             fail_closed(telemetry, failure.error, failure.served_target.as_deref())
@@ -2241,11 +2255,23 @@ impl ClassificationFailure {
     }
 }
 
+const MAX_REJECTED_ARGUMENT_PREVIEW_BYTES: usize = 1024;
+
+fn rejected_argument_preview(
+    value: &str,
+) -> Result<NormalizedToolArguments, ClassificationFailure> {
+    let retained = value.floor_char_boundary(value.len().min(MAX_REJECTED_ARGUMENT_PREVIEW_BYTES));
+    NormalizedToolArguments::try_from_provider_text(serde_json::json!({
+        "preview": &value[..retained], "retained_bytes": retained, "dropped_bytes": value.len() - retained,
+    }).to_string()).map_err(|_| ClassificationFailure::bare(RuntimeModelCallProviderError::UnsupportedCompletionMaterial))
+}
+
 fn classify_terminal(
     evidence: TerminalEvidence,
     observations: &[Observation<ModelCallId>],
     configured_target: &ResolvedTarget,
     diagnostic_model_identity_limit: Option<usize>,
+    proposal_limits: signalbox_application::ToolProposalLimits,
 ) -> Result<TerminalClassification, ClassificationFailure> {
     // docs/spec/model-call-execution.md: an alias resolved to its own
     // canonical dated form is the same logical target and is accepted with
@@ -2349,17 +2375,50 @@ fn classify_terminal(
                                 ModelCallCauseCode::UnrepresentableToolMaterial,
                             );
                         };
-                        let Ok(arguments) = NormalizedToolArguments::try_from_provider_text(
-                            proposal.arguments_json,
-                        ) else {
+                        let raw_arguments = proposal.arguments_json;
+                        let Ok(arguments) =
+                            NormalizedToolArguments::try_from_provider_text(raw_arguments.clone())
+                        else {
                             return classify(
                                 ModelCallTerminalObservation::KnownFailed,
                                 ModelCallCauseCode::UnrepresentableToolMaterial,
                             );
                         };
-                        response_parts.push(AssistantResponsePart::ToolCall(
-                            DomainToolCallProposal::new(name, arguments),
-                        ));
+                        let oversized = proposal_limits.max_argument_bytes.and_then(|limit| {
+                            if raw_arguments.len() as u64 > limit {
+                                Some((limit, raw_arguments.as_str()))
+                            } else if arguments.as_str().len() as u64 > limit {
+                                Some((limit, arguments.as_str()))
+                            } else {
+                                None
+                            }
+                        });
+                        let rejected = proposal_limits
+                            .max_requests
+                            .filter(|limit| tool_count as u64 > *limit)
+                            .map(|limit| {
+                                signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded {
+                                    limit,
+                                }
+                            })
+                            .or_else(|| {
+                                oversized.map(|(limit, value)| {
+                                signalbox_domain::ToolInadmissibleReason::ArgumentBytesExceeded {
+                                    limit, bytes: value.len() as u64,
+                                }
+                            })
+                            });
+                        let arguments = if let Some((_, value)) = oversized {
+                            rejected_argument_preview(value)?
+                        } else {
+                            arguments
+                        };
+                        let proposal = if let Some(reason) = rejected {
+                            DomainToolCallProposal::inadmissible(name, arguments, reason)
+                        } else {
+                            DomainToolCallProposal::new(name, arguments)
+                        };
+                        response_parts.push(AssistantResponsePart::ToolCall(proposal));
                     }
                     AssistantPart::SuppressedToolCall(name) => {
                         tool_count += 1;
@@ -2369,9 +2428,22 @@ fn classify_terminal(
                                 ModelCallCauseCode::UnrepresentableToolMaterial,
                             );
                         };
-                        response_parts.push(AssistantResponsePart::ToolCall(
-                            DomainToolCallProposal::suppressed(name),
-                        ));
+                        let proposal = DomainToolCallProposal::suppressed(name.clone());
+                        let proposal = if let Some(limit) = proposal_limits
+                            .max_requests
+                            .filter(|limit| tool_count as u64 > *limit)
+                        {
+                            DomainToolCallProposal::inadmissible(
+                                name,
+                                proposal.arguments().clone(),
+                                signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded {
+                                    limit,
+                                },
+                            )
+                        } else {
+                            proposal
+                        };
+                        response_parts.push(AssistantResponsePart::ToolCall(proposal));
                     }
                     // Claude 5-family models run adaptive thinking by
                     // default and, with the default omitted display, return
@@ -2823,7 +2895,13 @@ mod tests {
         observations: &[Observation<ModelCallId>],
         configured_target: &signalbox_model_runtime::ResolvedTarget,
     ) -> Result<super::TerminalClassification, super::ClassificationFailure> {
-        classify_terminal_with_limit(evidence, observations, configured_target, None)
+        classify_terminal_with_limit(
+            evidence,
+            observations,
+            configured_target,
+            None,
+            Default::default(),
+        )
     }
 
     /// One provider-reported identity, exactly as observed.
@@ -4222,18 +4300,6 @@ mod tests {
             })],
             usage: TokenUsage::unreported(),
         });
-        let oversized_arguments = TerminalEvidence::Completed(CompletionEvidence {
-            exchange: ExchangeFacts::default(),
-            message_id: None,
-            reported_model: Some(ProviderReportedModel::new("model-exact")),
-            finish: CompletionFinish::ToolUse,
-            content: vec![AssistantPart::ToolCall(ToolCallProposal {
-                id: ToolCallId::new("provider-call-opaque"),
-                name: ToolName::new("current_time"),
-                arguments_json: "x".repeat(1024 * 1024 + 1),
-            })],
-            usage: TokenUsage::unreported(),
-        });
         let nul_arguments = TerminalEvidence::Completed(CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
@@ -4260,9 +4326,134 @@ mod tests {
         });
 
         assert_invalid_tool_proposal_closes(invalid_name);
-        assert_invalid_tool_proposal_closes(oversized_arguments);
         assert_invalid_tool_proposal_closes(nul_arguments);
         assert_invalid_tool_proposal_closes(mismatched_finish);
+    }
+
+    #[test]
+    fn proposal_cap_preserves_the_first_thirty_two_of_forty_requests() {
+        let content = (0..40)
+            .map(|index| {
+                AssistantPart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new(format!("call-{index}")),
+                    name: ToolName::new("current_time"),
+                    arguments_json: String::from(r#" { "b": 2, "a": 1 } "#),
+                })
+            })
+            .collect();
+        let classified = classify_terminal(
+            completion_with_finish("model-exact", CompletionFinish::ToolUse, content),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("over-cap proposals remain a completed model response");
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+            classified.observation
+        else {
+            panic!("the response retains its tool round");
+        };
+        assert_eq!(response.parts().len(), 40);
+        for (index, part) in response.parts().iter().enumerate() {
+            let signalbox_domain::AssistantResponsePart::ToolCall(proposal) = part else {
+                panic!("fixture contains only proposals");
+            };
+            assert_eq!(proposal.arguments().as_str(), r#"{"a":1,"b":2}"#);
+            assert_eq!(
+                proposal.inadmissible_reason(),
+                if index < 32 {
+                    None
+                } else {
+                    Some(
+                        signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded {
+                            limit: 32,
+                        },
+                    )
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn over_cap_proposals_still_reject_unrepresentable_argument_text() {
+        let mut content = (0..32)
+            .map(|index| {
+                AssistantPart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new(format!("call-{index}")),
+                    name: ToolName::new("current_time"),
+                    arguments_json: String::from("{}"),
+                })
+            })
+            .collect::<Vec<_>>();
+        content.push(AssistantPart::ToolCall(ToolCallProposal {
+            id: ToolCallId::new("over-cap-call"),
+            name: ToolName::new("current_time"),
+            arguments_json: String::from("\0"),
+        }));
+        assert_invalid_tool_proposal_closes(completion_with_finish(
+            "model-exact",
+            CompletionFinish::ToolUse,
+            content,
+        ));
+    }
+
+    #[test]
+    fn oversized_write_file_arguments_preserve_a_bounded_rejection_preview() {
+        let arguments =
+            serde_json::json!({"path":"large.txt","content":"x".repeat(2 * 1024 * 1024)})
+                .to_string();
+        let bytes = arguments.len() as u64;
+        let classified = classify_terminal(
+            completion_with_finish(
+                "model-exact",
+                CompletionFinish::ToolUse,
+                vec![
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("large-write"),
+                        name: ToolName::new("write_file"),
+                        arguments_json: arguments,
+                    }),
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("ordinary-read"),
+                        name: ToolName::new("current_time"),
+                        arguments_json: String::from("{}"),
+                    }),
+                ],
+            ),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("oversized arguments remain a completed model response");
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+            classified.observation
+        else {
+            panic!("the response retains its tool round");
+        };
+        let signalbox_domain::AssistantResponsePart::ToolCall(rejected) = &response.parts()[0]
+        else {
+            panic!("write proposal");
+        };
+        assert_eq!(
+            rejected.inadmissible_reason(),
+            Some(
+                signalbox_domain::ToolInadmissibleReason::ArgumentBytesExceeded {
+                    limit: 1024 * 1024,
+                    bytes
+                }
+            )
+        );
+        let preview: serde_json::Value =
+            serde_json::from_str(rejected.arguments().as_str()).expect("valid preview metadata");
+        assert!(rejected.arguments().as_str().len() < 2048);
+        assert_eq!(
+            preview["retained_bytes"].as_u64().unwrap()
+                + preview["dropped_bytes"].as_u64().unwrap(),
+            bytes
+        );
+        let signalbox_domain::AssistantResponsePart::ToolCall(admitted) = &response.parts()[1]
+        else {
+            panic!("ordinary proposal");
+        };
+        assert_eq!(admitted.inadmissible_reason(), None);
     }
 
     /// either early or terminal evidence of a *different lineage*

@@ -253,7 +253,7 @@ export const commandRegistry = [
   {
     id: 'palette.open',
     title: 'Open command palette',
-    description: 'Browse every available application command.',
+    description: 'Choose a command.',
     category: 'Surface',
     bindings: [{ label: 'Mod+K', registration: { kind: 'hotkey', hotkey: 'Mod+K' } }],
     available: always,
@@ -280,7 +280,7 @@ export const commandRegistry = [
   {
     id: 'search.focus',
     title: 'Focus search',
-    description: 'Jump to the search box.',
+    description: 'Focus the search field.',
     category: 'Navigate',
     bindings: [{ label: 'Mod+Shift+F', registration: { kind: 'hotkey', hotkey: 'Mod+Shift+F' } }],
     available: (context) => context.searchAvailable === true,
