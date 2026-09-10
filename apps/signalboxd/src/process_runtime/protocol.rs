@@ -33,7 +33,7 @@ pub(super) enum InternalDiagnostic {
     ReviewOrchestrationWorkflowCorruption,
     ReviewOrchestrationSessionCorruption,
     ReviewOrchestrationServiceContract,
-    ConversationImportAllocationFailure,
+    ConversationImportSpoolUnavailable,
     ConversationImportContractDefect,
     ConversationImportWorkerTerminated,
     ImportedSessionDatabase,
@@ -113,7 +113,7 @@ impl InternalDiagnostic {
             | Self::SessionDefaultsCommitAmbiguous => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true,
             },
-            Self::ConversationImportAllocationFailure => OperatorFailureClass::Infrastructure {
+            Self::ConversationImportSpoolUnavailable => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
             Self::ReviewOrchestrationServiceContract
@@ -183,7 +183,7 @@ impl InternalDiagnostic {
             }
             Self::ReviewOrchestrationSessionCorruption => "review_orchestration_session_corruption",
             Self::ReviewOrchestrationServiceContract => "review_orchestration_service_contract",
-            Self::ConversationImportAllocationFailure => "conversation_import_allocation_failure",
+            Self::ConversationImportSpoolUnavailable => "conversation_import_spool_unavailable",
             Self::ConversationImportContractDefect => "conversation_import_contract_defect",
             Self::ConversationImportWorkerTerminated => "conversation_import_worker_terminated",
             Self::ImportedSessionDatabase => "imported_session_database",

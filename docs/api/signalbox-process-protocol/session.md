@@ -162,7 +162,9 @@ impl ConversationCursor {
 pub enum ImportedConversationSourceFormat {
     ClaudeCodeSessionJsonlV1,
     ClaudeCodeSessionJsonlV2,
+    ClaudeCodeSessionJsonlV3,
     CodexRolloutJsonlV1,
+    CodexRolloutJsonlV2,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```

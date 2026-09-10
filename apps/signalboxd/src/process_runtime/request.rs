@@ -1418,20 +1418,6 @@ where
                     .await;
                 }
                 let source = source.into_bytes();
-                let source_size = u64::try_from(source.len())
-                    .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
-                let limit = services
-                    .model_configuration
-                    .conversation_import_max_source_bytes();
-                if source.len() > limit {
-                    let detail = RejectionDetail::ConversationImportSourceTooLarge {
-                        limit_bytes: wire_size(limit)?,
-                        declared_size_bytes: CanonicalU64::new(source_size),
-                        actual_size_bytes: Some(CanonicalU64::new(source_size)),
-                    };
-                    drop(source);
-                    return write_import_rejection(writer, version, request_id, detail).await;
-                }
                 let import_permit =
                     import_permit.ok_or(ProcessConnectionError::ImportBudgetClosed)?;
                 handle_import_conversation(
@@ -1439,7 +1425,7 @@ where
                     version,
                     request_id,
                     format,
-                    source,
+                    ConversationImportSource::Inline(source),
                     services.imported_conversations.clone(),
                     import_permit,
                 )
@@ -1458,9 +1444,6 @@ where
                     request_id,
                     format,
                     declared_size_bytes,
-                    services
-                        .model_configuration
-                        .conversation_import_max_source_bytes(),
                     import_permit,
                     acquired_bulk_ingest_at,
                     pending_import,
@@ -1476,9 +1459,6 @@ where
                     version,
                     request_id,
                     chunk.into_bytes(),
-                    services
-                        .model_configuration
-                        .conversation_import_max_source_bytes(),
                     pending_import,
                 )
                 .await
@@ -1491,9 +1471,6 @@ where
                     writer,
                     version,
                     request_id,
-                    services
-                        .model_configuration
-                        .conversation_import_max_source_bytes(),
                     services.imported_conversations.clone(),
                     pending_import,
                 )

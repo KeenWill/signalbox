@@ -91,6 +91,7 @@ pub type ImportedRawBlobReadFuture<'storage> = pin::Pin<
 
 ```rust
 pub trait ImportedRawBlobStorage: fmt::Debug + marker::Send + marker::Sync {
+    fn maximum_blob_bytes(&self) -> u64;
     fn publish(
         &self,
         blobs: boxed::Box<[conversation_import::ImportedRawBlobInput]>,
@@ -98,7 +99,6 @@ pub trait ImportedRawBlobStorage: fmt::Debug + marker::Send + marker::Sync {
     fn read(
         &self,
         blobs: boxed::Box<[signalbox_blob_store::ExpectedBlob]>,
-        total_source_bytes: u64,
     ) -> conversation_import::ImportedRawBlobReadFuture<'_>;
 }
 ```
@@ -215,6 +215,34 @@ impl convert::From<blob::BlobCatalogRepositoryError>
 }
 ```
 
+## StreamingImportedConversationReport
+
+```rust
+pub enum StreamingImportedConversationReport<Failure> {
+    Imported {
+        outcome: signalbox_application::ImportedConversationStoreOutcome,
+        dropped_records: signalbox_application::ImportedConversationDropFacts,
+    },
+    NoValidRecords {
+        dropped_records: signalbox_application::ImportedConversationDropFacts,
+        first_failure: Failure,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## StreamingImportedConversationError
+
+```rust
+pub enum StreamingImportedConversationError<ConverterError> {
+    SourceRead,
+    Conversion(ConverterError),
+    ConverterContract,
+    Repository(conversation_import::ImportedConversationRepositoryError),
+}
+// derives: fmt::Debug
+```
+
 ## ImportedConversationRepository
 
 ```rust
@@ -225,6 +253,7 @@ impl conversation_import::ImportedConversationRepository {
         pool: sqlx_postgres::PgPool,
         blob_storage: sync::Arc<dyn conversation_import::ImportedRawBlobStorage>,
     ) -> Self;
+    pub fn maximum_raw_record_bytes(&self) -> u64;
     #[cfg(feature = "postgres-integration")]
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn resolve_or_insert(
@@ -234,6 +263,30 @@ impl conversation_import::ImportedConversationRepository {
         signalbox_application::ImportedConversationStoreOutcome,
         conversation_import::ImportedConversationRepositoryError,
     >;
+    pub async fn resolve_or_insert_with_drop_facts(
+        &self,
+        conversation: signalbox_domain::ImportedConversation,
+        dropped_records: signalbox_application::ImportedConversationDropFacts,
+    ) -> result::Result<
+        signalbox_application::ImportedConversationStoreOutcome,
+        conversation_import::ImportedConversationRepositoryError,
+    >;
+    pub async fn resolve_or_insert_stream<Records, Failure, ConverterError>(
+        &self,
+        candidate: signalbox_domain::ImportedConversationId,
+        format: signalbox_domain::ImportedConversationFormat,
+        records: Records,
+    ) -> result::Result<
+        conversation_import::StreamingImportedConversationReport<Failure>,
+        conversation_import::StreamingImportedConversationError<ConverterError>,
+    >
+    where
+        Records: iterator::Iterator<
+            Item = result::Result<
+                signalbox_application::ImportedConversationStreamItem<Failure>,
+                signalbox_application::StreamConversionError<ConverterError>,
+            >,
+        >;
     pub async fn load(
         &self,
         conversation: signalbox_domain::ImportedConversationId,
@@ -241,14 +294,23 @@ impl conversation_import::ImportedConversationRepository {
         option::Option<signalbox_domain::ImportedConversation>,
         conversation_import::ImportedConversationRepositoryError,
     >;
+    pub async fn lookup_frontier(
+        &self,
+        conversation: signalbox_domain::ImportedConversationId,
+        position: signalbox_domain::ImportedTranscriptPosition,
+    ) -> result::Result<
+        option::Option<conversation_import::ImportedConversationFrontierLookup>,
+        conversation_import::ImportedConversationRepositoryError,
+    >;
 }
 impl signalbox_application::ImportedConversationStore
     for conversation_import::ImportedConversationRepository
 {
     type Error = conversation_import::ImportedConversationRepositoryError;
-    async fn resolve_or_insert(
+    async fn resolve_or_insert_with_drop_facts(
         &mut self,
         conversation: signalbox_domain::ImportedConversation,
+        dropped_records: signalbox_application::ImportedConversationDropFacts,
     ) -> result::Result<
         signalbox_application::ImportedConversationStoreOutcome,
         <Self as signalbox_application::ImportedConversationStore>::Error,
@@ -256,14 +318,50 @@ impl signalbox_application::ImportedConversationStore
 }
 ```
 
-## load_normalized_entries
+## ImportedConversationFrontierLookup
 
 ```rust
-pub async fn load_normalized_entries(
+pub struct ImportedConversationFrontierLookup {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl conversation_import::ImportedConversationFrontierLookup {
+    pub const fn frontier(self) -> option::Option<signalbox_domain::ImportedTranscriptFrontier>;
+    pub const fn last_position(self) -> signalbox_domain::ImportedTranscriptPosition;
+}
+```
+
+## load_import_drop_facts
+
+```rust
+pub async fn load_import_drop_facts(
     pool: &sqlx_postgres::PgPool,
     conversation: signalbox_domain::ImportedConversationId,
 ) -> result::Result<
-    option::Option<boxed::Box<[signalbox_domain::ImportedTranscriptEntryInput]>>,
+    option::Option<signalbox_application::ImportedConversationDropFacts>,
+    conversation_import::ImportedConversationRepositoryError,
+>;
+```
+
+## ImportedConversationEntryPage
+
+```rust
+pub struct ImportedConversationEntryPage {/* private */}
+// derives: fmt::Debug
+impl conversation_import::ImportedConversationEntryPage {
+    pub const fn entries(&self) -> &[signalbox_domain::ImportedTranscriptEntryInput];
+    pub const fn has_more(&self) -> bool;
+}
+```
+
+## load_normalized_entry_page
+
+```rust
+pub async fn load_normalized_entry_page(
+    pool: &sqlx_postgres::PgPool,
+    conversation: signalbox_domain::ImportedConversationId,
+    after_position: u64,
+    limit: nonzero::NonZeroUsize,
+) -> result::Result<
+    option::Option<conversation_import::ImportedConversationEntryPage>,
     conversation_import::ImportedConversationRepositoryError,
 >;
 ```
