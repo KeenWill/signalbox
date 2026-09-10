@@ -1121,6 +1121,7 @@ service_tiers = ["priority"]
             codex_cli: None,
             codex_cli_unavailable_cause: Some("codex_cli_pin_mismatch"),
             routes: HashMap::from([(String::from("codex-example"), ModelAdapter::CodexCli)]),
+            media: None,
         };
         let mut operation = openai_operation();
         operation.resolved_target = ResolvedTarget::new("codex-example");

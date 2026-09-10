@@ -669,9 +669,9 @@ never paginated or truncated; configuration admission bounds each profile and
 pool name to 256 UTF-8 bytes and each pool to 1,024 members so the duplicated
 evidence fits one frame under worst-case JSON escaping. The non-null
 `record_generation` is zero, the oldest generation, for an active action without
-a projection generation. OAuth quarantine writes retain a profile-quarantine
-exclusion tied to the authorization generation; reauthorization retires its
-active state.
+a projection generation or for a member unavailable in the frozen policy. OAuth
+quarantine writes retain a profile-quarantine exclusion tied to the
+authorization generation; reauthorization retires its active state.
 
 In the exhaustion projection, `members` and `policy_members` are equal in length
 and order, the snapshot state and the live event carry identical `members`, the

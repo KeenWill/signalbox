@@ -108,7 +108,13 @@ pub async fn load_policy(
     let mut profiles = Vec::with_capacity(records.len());
     for (ordinal, row) in records.into_iter().enumerate() {
         let profile: String = row.try_get("profile")?;
-        let value = serde_json::json!({"profile": profile, "priority": row.try_get::<i64,_>("priority")?, "headroom_reserve_percent": row.try_get::<Option<i16>,_>("headroom_reserve_percent")?});
+        let mut value = serde_json::json!({"profile": profile, "priority": row.try_get::<i64,_>("priority")?, "headroom_reserve_percent": row.try_get::<Option<i16>,_>("headroom_reserve_percent")?});
+        if let Some(available) = expected[ordinal].get("available") {
+            if !available.is_boolean() {
+                return Err(CredentialPoolEvidenceError::Corruption);
+            }
+            value["available"] = available.clone();
+        }
         if row.try_get::<i32, _>("ordinal")?
             != i32::try_from(ordinal).map_err(|_| CredentialPoolEvidenceError::Corruption)?
             || expected[ordinal] != value

@@ -202,6 +202,8 @@ impl model_execution::CredentialPoolRuntimeMember {
         priority: nonzero::NonZeroU32,
     ) -> Self;
     pub fn with_headroom_reserve(self, percent: option::Option<u8>) -> Self;
+    pub fn with_availability(self, available: bool) -> Self;
+    pub const fn is_available(&self) -> bool;
     pub const fn priority(&self) -> nonzero::NonZeroU32;
 }
 ```

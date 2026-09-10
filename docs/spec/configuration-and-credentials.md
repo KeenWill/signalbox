@@ -182,7 +182,9 @@ independently metered account, then lists those profile names as pool members.
 Equal member priorities let `least_used` compare their headroom under the pool's
 reserve and headroom action;
 [the configuration example](../../config/signalboxd.example.toml) provides a
-three-home pool that replaces its ambient profile and pool.
+three-home pool that replaces its ambient profile and pool. Pool selection skips
+a member whose home is empty. If every member is skipped, the pool applies its
+configured exhaustion policy before any adapter preparation.
 
 A credential pool is the set of profiles that may substitute for one another for
 one model family. An `[[adapter_mappings]]` entry maps each family to exactly

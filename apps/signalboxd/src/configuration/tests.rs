@@ -3654,19 +3654,39 @@ fn configuration_marks_an_empty_credential_home_unavailable() {
     let temporary = tempfile::tempdir().expect("synthetic home root is created");
     let empty = temporary.path().join("empty-account");
     std::fs::create_dir(&empty).expect("empty synthetic home is created");
-    let credential_home = CONFIGURATION.replace(
+    let executable = std::env::current_exe().expect("test executable has a path");
+    let credential_home = configuration_with_codex_paths(&executable, temporary.path()).replace(
         "delivery = \"ambient\"",
         &format!(
             "delivery = \"codex_home\"\ncodex_home = {:?}",
             empty.to_string_lossy()
         ),
     );
-
+    let credential_home = format!(
+        r#"{credential_home}
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000002"
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "codex"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#
+    );
     let configuration = HubModelConfiguration::parse(&credential_home)
         .expect("an empty home does not reject the pool");
     assert_eq!(
         configuration.empty_codex_home_profiles(),
         vec![CODEX_SUBSCRIPTION_PROFILE]
+    );
+    let runtime_policy = configuration
+        .credential_pool_runtime_catalog()
+        .into_values()
+        .find(|policy| policy.name() == "codex-main")
+        .expect("the Codex pool is projected");
+    assert!(
+        !runtime_policy.members()[0].is_available(),
+        "the empty home is excluded before pool selection"
     );
 }
 

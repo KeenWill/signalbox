@@ -31,6 +31,152 @@ async fn fail_before_call(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn unavailable_pool_members_are_skipped_before_preparation_and_can_exhaust_the_pool()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::model_execution::CredentialPoolRuntimeExhaustion;
+
+    let (container, pool, _) = migrated_postgres().await?;
+    let selectable_seed = 0x4604_0000;
+    let (selectable_session, _, selectable_repository) = active_credential_pool_fixture(
+        &pool,
+        selectable_seed,
+        "home-selection-pool",
+        &["empty-home", "provisioned-home"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .await?;
+    let selectable_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(selectable_seed + 4),
+    ));
+    let selectable_policy = CredentialPoolRuntimePolicy::new(
+        "home-selection-pool",
+        vec![
+            CredentialPoolRuntimeMember::new("empty-home", nonzero_priority(1))
+                .with_availability(false),
+            CredentialPoolRuntimeMember::new("provisioned-home", nonzero_priority(2)),
+        ],
+        CredentialPoolRuntimeExhaustion::Fail,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    );
+    let selectable_repository = selectable_repository
+        .with_credential_pools(HashMap::from([(selectable_target, selectable_policy)]));
+    let (_, selected) = prepare_and_authorize_pool_call(
+        &selectable_repository,
+        selectable_session,
+        selectable_seed + 100,
+    )
+    .await
+    .expect("the provisioned co-member prepares and authorizes");
+    assert_eq!(selected, "provisioned-home");
+
+    let exhausted_seed = 0x4604_1000;
+    let (exhausted_session, exhausted_turn, exhausted_repository) = active_credential_pool_fixture(
+        &pool,
+        exhausted_seed,
+        "empty-home-pool",
+        &["empty-home-a", "empty-home-b"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .await?;
+    let exhausted_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(exhausted_seed + 4),
+    ));
+    let exhausted_policy = CredentialPoolRuntimePolicy::new(
+        "empty-home-pool",
+        vec![
+            CredentialPoolRuntimeMember::new("empty-home-a", nonzero_priority(1))
+                .with_availability(false),
+            CredentialPoolRuntimeMember::new("empty-home-b", nonzero_priority(2))
+                .with_availability(false),
+        ],
+        CredentialPoolRuntimeExhaustion::Fail,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    );
+    let exhausted_repository = exhausted_repository
+        .with_credential_pools(HashMap::from([(exhausted_target, exhausted_policy)]));
+    fail_before_call(
+        &exhausted_repository,
+        exhausted_session,
+        exhausted_seed + 100,
+    )
+    .await
+    .expect("the all-unavailable pool applies its fail policy");
+    let mut connection = pool.acquire().await?;
+    let captured = evidence::load(
+        &mut connection,
+        exhausted_session.into_uuid(),
+        exhausted_turn.into_uuid(),
+    )
+    .await
+    .expect("the exhaustion evidence remains authentic")
+    .expect("the all-unavailable pool retains exhaustion evidence");
+    assert_eq!(captured.members.len(), 2);
+    assert!(captured.members.iter().all(|member| matches!(
+        member.exclusion,
+        evidence::CredentialPoolExclusion::MembershipExclusion {
+            record_generation: None
+        }
+    )));
+
+    let parked_seed = 0x4604_2000;
+    let (parked_session, _, parked_repository) = active_credential_pool_fixture(
+        &pool,
+        parked_seed,
+        "parked-empty-home-pool",
+        &["parked-empty-home"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .await?;
+    let parked_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(parked_seed + 4),
+    ));
+    let parked_policy = CredentialPoolRuntimePolicy::new(
+        "parked-empty-home-pool",
+        vec![
+            CredentialPoolRuntimeMember::new("parked-empty-home", nonzero_priority(1))
+                .with_availability(false),
+        ],
+        CredentialPoolRuntimeExhaustion::Park,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    );
+    let parked_repository =
+        parked_repository.with_credential_pools(HashMap::from([(parked_target, parked_policy)]));
+    let PrepareInitialModelCallOutcome::CredentialWait(wait) =
+        super::credential_wait::prepare_wait_admission(
+            &parked_repository,
+            parked_session,
+            parked_seed + 100,
+        )
+        .await
+        .expect("the all-unavailable pool applies its park policy")
+    else {
+        panic!("an unavailable-only pool must apply its park policy")
+    };
+    assert_eq!(
+        wait.cause(),
+        signalbox_domain::CredentialAvailabilityWaitCause::Exhausted
+    );
+
+    drop(connection);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn pool_projection_freezes_generation_and_unprojected_action_evidence()
 -> Result<(), Box<dyn Error>> {
     use signalbox_persistence::credential_exclusions::{

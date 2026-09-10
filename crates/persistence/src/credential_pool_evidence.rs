@@ -37,6 +37,16 @@ pub(super) async fn snapshot(
     for member in policy.members() {
         let profile = member.credential_reference();
         let mut candidates = Vec::new();
+        if !member.is_available() {
+            candidates.push(Candidate {
+                exclusion: Exclusion::MembershipExclusion {
+                    record_generation: None,
+                },
+                rank: 1,
+                action: None,
+                reset: None,
+            });
+        }
         for row in &quarantines {
             if row.try_get::<String, _>("profile")? == profile {
                 candidates.push(Candidate {

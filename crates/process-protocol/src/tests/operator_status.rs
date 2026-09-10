@@ -138,6 +138,22 @@ fn operator_status_admits_the_longest_configured_credential_component()
     Ok(())
 }
 
+#[test]
+fn operator_status_admits_digit_bearing_unavailable_causes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let admitted = ServerFrame::try_new(
+        request(1)?,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::UnavailableComponent(
+            Box::new(OperatorStatusUnavailableComponentMessage {
+                component: "blob_store:archive".to_owned(),
+                cause: "s3_configuration_unavailable".to_owned(),
+            }),
+        ))),
+    );
+    assert!(admitted.is_ok());
+    Ok(())
+}
+
 /// A session with no armed record has no expiry to be past, so the two
 /// fields cannot both speak.
 #[test]

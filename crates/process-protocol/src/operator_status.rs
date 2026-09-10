@@ -159,7 +159,7 @@ pub(crate) fn validate_operator_status_message(
                 && item
                     .cause
                     .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         }
         OperatorStatusMessage::Start {}
         | OperatorStatusMessage::End(_)

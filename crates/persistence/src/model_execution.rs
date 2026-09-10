@@ -467,6 +467,7 @@ pub struct CredentialPoolRuntimeMember {
     credential_reference: Arc<str>,
     priority: NonZeroU32,
     headroom_reserve_percent: Option<u8>,
+    available: bool,
 }
 
 impl CredentialPoolRuntimeMember {
@@ -480,6 +481,7 @@ impl CredentialPoolRuntimeMember {
             credential_reference: credential_reference.into(),
             priority,
             headroom_reserve_percent: None,
+            available: true,
         }
     }
 
@@ -487,6 +489,17 @@ impl CredentialPoolRuntimeMember {
     pub fn with_headroom_reserve(mut self, percent: Option<u8>) -> Self {
         self.headroom_reserve_percent = percent;
         self
+    }
+
+    /// Marks whether this member may be selected for a model call.
+    pub fn with_availability(mut self, available: bool) -> Self {
+        self.available = available;
+        self
+    }
+
+    /// Returns whether this member may be selected for a model call.
+    pub const fn is_available(&self) -> bool {
+        self.available
     }
 
     /// Returns the membership priority.

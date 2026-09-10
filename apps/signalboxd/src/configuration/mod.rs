@@ -835,6 +835,10 @@ impl HubModelConfiguration {
 
     /// Projects admitted pool policy into the persistence-owned runtime form.
     pub fn credential_pool_runtime_catalog(&self) -> CredentialPoolRuntimeCatalog {
+        let unavailable = self
+            .empty_codex_home_profiles()
+            .into_iter()
+            .collect::<HashSet<_>>();
         self.target_credential_pools
             .iter()
             .filter_map(|(target, pool_name)| {
@@ -846,6 +850,7 @@ impl HubModelConfiguration {
                     .map(|member| {
                         CredentialPoolRuntimeMember::new(member.profile(), member.priority())
                             .with_headroom_reserve(member.headroom_reserve_percent())
+                            .with_availability(!unavailable.contains(member.profile()))
                     })
                     .collect::<Vec<_>>();
                 Some((
