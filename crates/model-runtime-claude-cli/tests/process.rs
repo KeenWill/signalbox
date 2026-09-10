@@ -367,6 +367,17 @@ async fn tool_acknowledgement_tail_returns_only_the_original_proposal() {
     assert_eq!(proposal.arguments_json, fixtures::TOOL_ARGUMENTS);
     assert_eq!(observation_text(&result.observations), "");
     assert_eq!(completion.usage, expected_usage());
+    let finishes = result
+        .observations
+        .iter()
+        .filter_map(|observation| match &observation.fact {
+            signalbox_model_runtime::ObservationFact::FinishReported(reason) => {
+                Some(reason.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finishes, vec![FinishReason::EndTurn]);
     assert_eq!(result.spawns, 1);
 }
 
@@ -374,6 +385,7 @@ async fn tool_acknowledgement_tail_returns_only_the_original_proposal() {
 async fn tool_acknowledgement_tail_rejects_incomplete_or_conflicting_evidence() {
     for scenario in [
         "tool_acknowledgement_tail_without_result",
+        "tool_acknowledgement_tail_is_empty",
         "tool_acknowledgement_tail_changes_model",
         "tool_acknowledgement_tail_proposes_tool",
     ] {

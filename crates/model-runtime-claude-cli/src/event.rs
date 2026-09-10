@@ -365,6 +365,7 @@ impl<C: Clone> EventDecoder<C> {
                 .acknowledgement_message_id
                 .as_ref()
                 .is_some_and(|id| id != &message.id)
+            || message.content.is_empty()
             || !message
                 .content
                 .iter()
@@ -533,12 +534,6 @@ impl<C: Clone> EventDecoder<C> {
                     "Claude success lacks the completed terminal reason",
                 ));
             }
-            let stop_reason =
-                if stop_reason == "end_turn" && self.acknowledgement_message_id.is_some() {
-                    "tool_use".to_string()
-                } else {
-                    stop_reason
-                };
             let finish = finish_reason(&stop_reason);
 
             self.finish_reported = Some(finish.clone());
@@ -600,6 +595,12 @@ impl<C: Clone> EventDecoder<C> {
                 });
             }
             CliTerminal::Success { stop_reason } => stop_reason,
+        };
+        let stop_reason = if stop_reason == "end_turn" && self.acknowledgement_message_id.is_some()
+        {
+            "tool_use".to_string()
+        } else {
+            stop_reason
         };
         if self.proposal_indexes.len() != self.result_ids.len() {
             self.report_usage(sink);
