@@ -466,17 +466,16 @@ tool-call parts. A provider-compaction part must be a complete validated
 representation is replayed unchanged while only a non-text marker crosses the
 process protocol. A buffered object retains the provider's exact bytes; a
 streamed object is reconstructed structurally from its validated start and delta
-fields before those complete durable bytes are fixed. Empty text and empty
-thinking blocks are dropped, while thinking with text and redacted thinking fail
-the adapter stage closed as unsupported material, because no durable semantic
-representation exists for either. Tool content and a tool-use finish must agree;
-either one without the other is a known failure. An Anthropic response that
-contains provider compaction carries the final physical iteration's retained
-input count, including cache axes, and output count, and persists both on the
-model call separately from the all-iteration usage retained for billing. A
-completed response retains compaction among its ordered assistant parts; a
-refused response retains only its compaction parts and omits ordinary refusal
-text. The context guard uses those retained-iteration measures as its
+fields before those complete durable bytes are fixed. Empty text, thinking, and
+redacted-thinking blocks are dropped by the ordinary and dedicated compaction
+bridges; their presence does not fail a call. Tool content and a tool-use finish
+must agree; either one without the other is a known failure. An Anthropic
+response that contains provider compaction carries the final physical
+iteration's retained input count, including cache axes, and output count, and
+persists both on the model call separately from the all-iteration usage retained
+for billing. A completed response retains compaction among its ordered assistant
+parts; a refused response retains only its compaction parts and omits ordinary
+refusal text. The context guard uses those retained-iteration measures as its
 post-compaction baseline; it never treats billed iteration input or aggregate
 multi-iteration output as model-visible retained usage. A retained baseline is
 eligible only when its call used the same effective target the next request will

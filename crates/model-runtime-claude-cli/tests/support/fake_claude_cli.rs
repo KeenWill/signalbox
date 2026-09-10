@@ -69,6 +69,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     system_init(&arguments)?;
     match scenario.as_str() {
+        "thinking_completion" => {
+            emit_json(&serde_json::json!({
+                "type": "assistant", "parent_tool_use_id": null,
+                "message": {"model": fixtures::MODEL, "id": fixtures::MESSAGE_ID, "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "visible fixture reasoning", "signature": null},
+                        {"type": "redacted_thinking", "data": "opaque fixture reasoning"},
+                        {"type": "text", "text": fixtures::ANSWER}
+                    ],
+                    "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}}
+            }))?;
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
         "normal_completion" => {
             assistant_text(fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;

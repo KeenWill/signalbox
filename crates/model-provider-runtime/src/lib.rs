@@ -2441,26 +2441,7 @@ fn classify_terminal(
                         };
                         response_parts.push(AssistantResponsePart::ToolCall(proposal));
                     }
-                    // Claude 5-family models run adaptive thinking by
-                    // default and, with the default omitted display, return
-                    // thinking blocks whose text is empty: the block carries
-                    // only the provider's replay signature. Signalbox has no
-                    // durable thinking representation to replay from, so the
-                    // signature is unusable either way and an empty part
-                    // carries no transcript content — it is dropped exactly
-                    // like an empty text block. The provider documents the
-                    // resulting tool continuation as graceful degradation:
-                    // a tool-use turn replayed without its thinking block
-                    // silently disables thinking for that request instead of
-                    // erroring. Thinking with actual text and redacted
-                    // thinking still fail closed: discarding them would
-                    // silently erase response material.
-                    AssistantPart::Thinking { text, .. } if text.is_empty() => {}
-                    AssistantPart::Thinking { .. } | AssistantPart::RedactedThinking { .. } => {
-                        return Err(ClassificationFailure::bare(
-                            RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
-                        ));
-                    }
+                    AssistantPart::Thinking { .. } | AssistantPart::RedactedThinking { .. } => {}
                 }
             }
             if tool_count == 0 {
@@ -2743,8 +2724,8 @@ mod tests {
     use super::{
         AcceptanceObservations, InvalidRuntimeToolSchema, ModelCallCauseCode, ModelCallTelemetry,
         ProviderTextDelta, ProviderTextDeltaContext, ProviderTextDeltaSink,
-        RuntimeInputTokenCountError, RuntimeModelCallProviderError, RuntimeModelCatalog,
-        RuntimeModelCatalogError, RuntimeModelDefinition, RuntimeModelDefinitionError,
+        RuntimeInputTokenCountError, RuntimeModelCatalog, RuntimeModelCatalogError,
+        RuntimeModelDefinition, RuntimeModelDefinitionError,
         classify_terminal as classify_terminal_with_limit, decode_checked_raw_json,
         provider_reported_token_usage,
         render_runtime_messages as render_runtime_messages_with_provenance,
@@ -4168,29 +4149,59 @@ mod tests {
         ));
     }
 
-    /// thinking with actual text still fails the bridge closed — dropping it would silently erase
-    /// response material for which no durable semantic representation exists.
     #[test]
-    fn nonempty_thinking_part_still_fails_closed() {
-        let outcome = classify_terminal(
-            completion(
-                "model-exact",
-                vec![AssistantPart::Thinking {
-                    text: String::from("visible reasoning"),
-                    signature: Some(String::from("sig_synthetic_1")),
-                }],
-            ),
-            &[],
-            &configured("model-exact"),
-        );
-        assert!(matches!(
-            outcome,
-            Err(failure)
-                if matches!(
-                    failure.error,
-                    RuntimeModelCallProviderError::UnsupportedCompletionMaterial
-                )
-        ));
+    fn thinking_parts_do_not_fail_text_or_tool_completions() {
+        for thinking in [
+            AssistantPart::Thinking {
+                text: String::from("visible reasoning"),
+                signature: None,
+            },
+            AssistantPart::Thinking {
+                text: String::from("visible reasoning"),
+                signature: Some(String::from("fixture-signature")),
+            },
+            AssistantPart::RedactedThinking {
+                data: String::from("opaque reasoning"),
+            },
+        ] {
+            let text = classify_terminal(
+                completion(
+                    "model-exact",
+                    vec![
+                        thinking.clone(),
+                        AssistantPart::Text(String::from("answer")),
+                    ],
+                ),
+                &[],
+                &configured("model-exact"),
+            )
+            .expect("thinking is omitted from ordinary completion material");
+            assert!(
+                matches!(text.observation, ModelCallTerminalObservation::Completed { assistant_text }
+                if assistant_text.len() == 1 && assistant_text[0].as_str() == "answer")
+            );
+            let tools = classify_terminal(
+                completion_with_finish(
+                    "model-exact",
+                    CompletionFinish::ToolUse,
+                    vec![
+                        thinking,
+                        AssistantPart::ToolCall(ToolCallProposal {
+                            id: ToolCallId::new("provider-call"),
+                            name: ToolName::new("current_time"),
+                            arguments_json: String::from("{}"),
+                        }),
+                    ],
+                ),
+                &[],
+                &configured("model-exact"),
+            )
+            .expect("thinking does not discard a tool response");
+            assert!(
+                matches!(tools.observation, ModelCallTerminalObservation::CompletedWithTools { response, .. }
+                if response.tool_count() == 1 && response.parts().len() == 1)
+            );
+        }
     }
 
     /// tool-call content and the `ToolUse` finish reason must agree before either terminal

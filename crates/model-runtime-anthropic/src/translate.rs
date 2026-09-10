@@ -554,9 +554,10 @@ fn wire_message(
     let content = message
         .parts
         .iter()
-        .filter(|part| {
-            replay_provider_compaction
-                || !matches!(part, MessagePart::ProviderCompaction { .. })
+        .filter(|part| match part {
+            MessagePart::ProviderCompaction { .. } => replay_provider_compaction,
+            MessagePart::Thinking { signature, .. } => signature.as_ref().is_some_and(|value| !value.is_empty()),
+            _ => true,
         })
         .map(|part| match part {
             MessagePart::Image(_) | MessagePart::ImageReference(_) => Err(PreparationFailure::UnsupportedOperation { detail:String::from("this adapter does not present images") }),
@@ -597,27 +598,9 @@ fn wire_message(
                     cache_control: None,
                 }))
             }
-            MessagePart::Thinking { text, signature } => match signature {
-                // The provider requires replayed thinking blocks to carry
-                // their integrity signature; sending one without it would
-                // only be rejected after the acceptance boundary.
-                None => Err(PreparationFailure::UnsupportedOperation {
-                    detail: "a replayed thinking block without its integrity signature \
-                             cannot be sent"
-                        .to_string(),
-                }),
-                Some(signature) if signature.is_empty() => {
-                    Err(PreparationFailure::UnsupportedOperation {
-                        detail: "a replayed thinking block with an empty integrity signature \
-                                 cannot be sent"
-                            .to_string(),
-                    })
-                }
-                Some(signature) => Ok(WireRequestBlock::Known(WireKnownRequestBlock::Thinking {
-                    thinking: text.clone(),
-                    signature: signature.clone(),
-                })),
-            },
+            MessagePart::Thinking { text, signature } => Ok(WireRequestBlock::Known(WireKnownRequestBlock::Thinking {
+                thinking: text.clone(), signature: signature.clone().unwrap_or_default(),
+            })),
             MessagePart::RedactedThinking { data } => Ok(WireRequestBlock::Known(
                 WireKnownRequestBlock::RedactedThinking { data: data.clone() },
             )),
@@ -1563,32 +1546,26 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_replayed_thinking_is_rejected_before_any_send() {
-        let mut operation = operation("call-9");
-        operation.messages = vec![ConversationMessage {
+    fn unsigned_replayed_thinking_is_dropped_while_text_is_preserved() {
+        let mut operation = operation("unsigned-replay");
+        operation.messages.push(ConversationMessage {
             role: ConversationRole::Assistant,
-            parts: vec![MessagePart::Thinking {
-                text: "step one".to_string(),
-                signature: None,
-            }],
-        }];
-
-        let failure = build_request(&operation)
-            .expect_err("an unsigned thinking block would only be rejected after the boundary");
-
-        assert!(matches!(
-            failure,
-            PreparationFailure::UnsupportedOperation { .. }
-        ));
-
-        operation.messages[0].parts[0] = MessagePart::Thinking {
-            text: "step one".to_string(),
-            signature: Some(String::new()),
-        };
-        assert!(matches!(
-            build_request(&operation),
-            Err(PreparationFailure::UnsupportedOperation { .. })
-        ));
+            parts: vec![
+                MessagePart::Thinking {
+                    text: "step one".to_owned(),
+                    signature: None,
+                },
+                MessagePart::Thinking {
+                    text: "step two".to_owned(),
+                    signature: Some(String::new()),
+                },
+                MessagePart::Text("Answer".to_owned()),
+            ],
+        });
+        let request = build_request(&operation).expect("unsigned thinking does not prevent replay");
+        let wire = serde_json::to_value(request).expect("wire request serializes");
+        assert_eq!(wire["messages"][1]["content"][0]["text"], "Answer");
+        assert_eq!(wire["messages"][1]["content"].as_array().unwrap().len(), 1);
     }
 
     #[test]

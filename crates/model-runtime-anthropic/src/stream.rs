@@ -656,13 +656,7 @@ impl StreamDecoder {
                 BlockBuilder::Thinking { signature, .. },
                 WireDelta::Signature { signature: value },
             ) => {
-                if value.is_empty() {
-                    return self.violation("thinking block carries an empty signature delta");
-                }
-                if signature.is_some() {
-                    return self.violation("thinking block carries more than one signature");
-                }
-                *signature = Some(value);
+                signature.get_or_insert_with(String::new).push_str(&value);
                 StreamStep::Continue
             }
             (
@@ -731,19 +725,7 @@ impl StreamDecoder {
         let part = match builder {
             BlockBuilder::Text(text) => AssistantPart::Text(text),
             BlockBuilder::Thinking { text, signature } => {
-                let Some(signature) = signature.filter(|value| !value.is_empty()) else {
-                    // The provider requires the integrity signature for any
-                    // replay; a thinking block closing without one is not
-                    // trustworthy completion material.
-                    return self.violation(format!(
-                        "thinking block {} closed without its integrity signature",
-                        event.index
-                    ));
-                };
-                AssistantPart::Thinking {
-                    text,
-                    signature: Some(signature),
-                }
+                AssistantPart::Thinking { text, signature }
             }
             BlockBuilder::RedactedThinking { data } => AssistantPart::RedactedThinking { data },
             BlockBuilder::Compaction { delta } => {
@@ -2399,7 +2381,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_thinking_signature_delta_is_a_protocol_violation() {
+    fn empty_thinking_signature_delta_preserves_completion() {
         let (terminal, _) = drive(&[
             message_start(),
             b"event: content_block_start\n\
@@ -2408,9 +2390,12 @@ mod tests {
             b"event: content_block_delta\n\
               data: {\"type\":\"content_block_delta\",\"index\":0,\
               \"delta\":{\"type\":\"signature_delta\",\"signature\":\"\"}}\n\n",
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
 
-        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+        assert!(matches!(terminal, Some(TerminalEvidence::Completed(_))));
     }
 
     /// The Claude 5-family streamed tool-turn shape the provider's public
@@ -2472,11 +2457,8 @@ mod tests {
         );
     }
 
-    /// The duplicate-signature law survives the placeholder tolerance: a
-    /// non-empty opening signature is a delivered first signature, so a
-    /// later `signature_delta` is still one signature too many.
     #[test]
-    fn signature_delta_after_a_nonempty_start_signature_is_a_protocol_violation() {
+    fn signature_delta_after_a_nonempty_start_signature_preserves_completion() {
         let (terminal, _) = drive(&[
             message_start(),
             b"event: content_block_start\n\
@@ -2486,15 +2468,21 @@ mod tests {
             b"event: content_block_delta\n\
               data: {\"type\":\"content_block_delta\",\"index\":0,\
               \"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_synthetic_2\"}}\n\n",
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
 
-        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
-            panic!("a second signature must remain a protocol violation");
+        let Some(TerminalEvidence::Completed(completion)) = terminal else {
+            panic!("thinking signature deltas preserve completion");
         };
-        assert!(matches!(
-            loss.cause,
-            LossCause::StreamProtocolViolation { .. }
-        ));
+        assert_eq!(
+            completion.content,
+            vec![AssistantPart::Thinking {
+                text: String::new(),
+                signature: Some("sig_synthetic_1sig_synthetic_2".to_owned()),
+            }]
+        );
     }
 
     #[test]

@@ -95,6 +95,25 @@ fn cancellation_finishes_preparation_while_support_io_is_queued() {
 }
 
 #[tokio::test]
+async fn thinking_and_redacted_thinking_preserve_the_cli_completion() {
+    let result = execute_scenario("thinking_completion", OperationShape::Text).await;
+    let completion = completed(&result.evidence);
+    assert_eq!(completion.finish, CompletionFinish::EndTurn);
+    assert!(
+        matches!(&completion.content[0], AssistantPart::Thinking { text, signature: None }
+        if text == "visible fixture reasoning")
+    );
+    assert!(
+        matches!(&completion.content[1], AssistantPart::RedactedThinking { data }
+        if data == "opaque fixture reasoning")
+    );
+    assert_eq!(
+        completion.content[2],
+        AssistantPart::Text(fixtures::ANSWER.to_owned())
+    );
+}
+
+#[tokio::test]
 async fn normal_completion_requires_typed_terminal_result() {
     let result = execute_scenario("normal_completion", OperationShape::Text).await;
     let completion = completed(&result.evidence);

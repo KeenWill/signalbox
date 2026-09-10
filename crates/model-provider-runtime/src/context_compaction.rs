@@ -209,19 +209,8 @@ where
             for part in completed.content {
                 match part {
                     AssistantPart::Text(text) => summary.push_str(&text),
-                    // The dedicated compaction request configures no thinking
-                    // display, so a Claude 5-family completion carries the
-                    // omitted-display empty thinking block by default: it holds
-                    // only a provider replay signature and no summary material.
-                    // It is dropped exactly as this crate's ordinary bridge
-                    // drops it, since rejecting it would fail compaction on the
-                    // default path. Thinking with actual text, redacted
-                    // thinking, and tool calls still fail closed, because a
-                    // summary must never silently omit returned material.
-                    AssistantPart::Thinking { text, .. } if text.is_empty() => {}
-                    AssistantPart::Thinking { .. }
-                    | AssistantPart::RedactedThinking { .. }
-                    | AssistantPart::ProviderCompaction { .. }
+                    AssistantPart::Thinking { .. } | AssistantPart::RedactedThinking { .. } => {}
+                    AssistantPart::ProviderCompaction { .. }
                     | AssistantPart::ProviderReasoning { .. }
                     | AssistantPart::ToolCall(_)
                     | AssistantPart::SuppressedToolCall(_) => {
@@ -316,8 +305,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
-        RuntimeContextCompactionModel,
+        ContextCompactionModel, ContextCompactionModelRequest, RuntimeContextCompactionModel,
     };
     use crate::{RuntimeModelCatalog, RuntimeModelDefinition};
 
@@ -393,10 +381,8 @@ mod tests {
         assert_eq!(result.summary, "compacted fixture summary");
     }
 
-    /// thinking with actual text still fails the summary closed, because accepting it would publish
-    /// a summary that silently omits response material no durable representation can carry.
     #[tokio::test]
-    async fn nonempty_thinking_part_still_fails_the_summary_closed() {
+    async fn nonempty_thinking_part_is_dropped_from_the_summary() {
         let model = compaction_model(vec![
             AssistantPart::Thinking {
                 text: String::from("visible reasoning"),
@@ -406,15 +392,17 @@ mod tests {
         ]);
 
         assert_eq!(
-            model.execute(request()).await,
-            Err(ContextCompactionModelError::NonTextSummary)
+            model
+                .execute(request())
+                .await
+                .expect("thinking is omitted")
+                .summary,
+            "compacted fixture summary"
         );
     }
 
-    /// redacted thinking carries withheld reasoning in opaque form and fails the summary closed for
-    /// the same reason.
     #[tokio::test]
-    async fn redacted_thinking_part_still_fails_the_summary_closed() {
+    async fn redacted_thinking_part_is_dropped_from_the_summary() {
         let model = compaction_model(vec![
             AssistantPart::RedactedThinking {
                 data: String::from("opaque-fixture-payload"),
@@ -423,8 +411,12 @@ mod tests {
         ]);
 
         assert_eq!(
-            model.execute(request()).await,
-            Err(ContextCompactionModelError::NonTextSummary)
+            model
+                .execute(request())
+                .await
+                .expect("thinking is omitted")
+                .summary,
+            "compacted fixture summary"
         );
     }
 }
