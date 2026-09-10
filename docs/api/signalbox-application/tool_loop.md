@@ -2,6 +2,23 @@
 
 # tool_loop
 
+## ToolProposalLimits
+
+```rust
+pub struct ToolProposalLimits {
+    pub max_requests: option::Option<u64>,
+    pub max_argument_bytes: option::Option<u64>,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ToolProposalLimits {
+    pub const DEFAULT_MAX_REQUESTS: u64;
+    pub const DEFAULT_MAX_ARGUMENT_BYTES: u64;
+}
+impl default::Default for ToolProposalLimits {
+    fn default() -> Self;
+}
+```
+
 ## ToolInputSchema
 
 ```rust

@@ -106,6 +106,18 @@ pub enum ToolRequestResolution {
 /// The closed reason for a request resolved before dispatch.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ToolInadmissibleReason {
+    /// The proposal followed the configured number admitted from this response.
+    ProposalLimitExceeded {
+        /// Maximum admitted proposals in this response.
+        limit: u64,
+    },
+    /// The provider argument payload exceeded its configured byte limit.
+    ArgumentBytesExceeded {
+        /// Maximum admitted argument bytes.
+        limit: u64,
+        /// Observed argument bytes before the preview was bounded.
+        bytes: u64,
+    },
     /// The runner placement was lost before any lease offer or executor dispatch.
     PlacementLost,
 }

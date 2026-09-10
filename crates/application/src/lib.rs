@@ -228,7 +228,7 @@ pub use tool_loop::{
     ToolDefinition, ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
     ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorDisposition,
     ToolExecutorEvidence, ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure,
-    ToolPreauthorization, UuidV7ToolLoopIdGenerator,
+    ToolPreauthorization, ToolProposalLimits, UuidV7ToolLoopIdGenerator,
 };
 pub use tool_loop_ports::{
     DecideToolRequestTransaction, OverrideDeniedToolRequestTransaction,

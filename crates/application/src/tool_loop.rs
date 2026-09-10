@@ -4,6 +4,31 @@
 //! catalog policy, mints every durable identity candidate, keeps executor work
 //! outside transactions, and submits only correlated evidence to persistence.
 
+/// Admission limits for proposals in one provider response; `None` disables a cap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolProposalLimits {
+    /// Maximum requests admitted from the start of the response.
+    pub max_requests: Option<u64>,
+    /// Maximum provider or canonical argument payload bytes.
+    pub max_argument_bytes: Option<u64>,
+}
+
+impl ToolProposalLimits {
+    /// Default number of requests admitted from one response.
+    pub const DEFAULT_MAX_REQUESTS: u64 = 32;
+    /// Default maximum bytes in one argument payload.
+    pub const DEFAULT_MAX_ARGUMENT_BYTES: u64 = 1024 * 1024;
+}
+
+impl Default for ToolProposalLimits {
+    fn default() -> Self {
+        Self {
+            max_requests: Some(Self::DEFAULT_MAX_REQUESTS),
+            max_argument_bytes: Some(Self::DEFAULT_MAX_ARGUMENT_BYTES),
+        }
+    }
+}
+
 use std::{collections::BTreeMap, fmt, future::Future, num::NonZeroU64, sync::Arc};
 
 use crate::{

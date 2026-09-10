@@ -5521,7 +5521,8 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     const INPUT_TOKENS: u64 = 141_000;
     const FIRST_OUTPUT_TOKENS: u64 = 117;
     const OUTPUT_CEILING: u64 = 8_192;
-    let next_tool_count = signalbox_domain::ToolUsingAssistantResponse::MAX_TOOL_COUNT;
+    let next_tool_count =
+        usize::try_from(signalbox_application::ToolProposalLimits::DEFAULT_MAX_REQUESTS)?;
     let (container, pool, _) = migrated_postgres().await?;
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
         FIXTURE_SEED + 6,

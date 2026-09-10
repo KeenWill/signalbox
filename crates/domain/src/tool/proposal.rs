@@ -4,7 +4,6 @@ use super::arguments::{NormalizedToolArguments, ToolArgumentsKind};
 use super::name::ToolName;
 use crate::{AssistantText, ProviderCompactionBlock, ProviderReasoningItem};
 
-pub(crate) const MAX_TOOL_REQUESTS_PER_RESPONSE: usize = 32;
 pub(super) const SUPPRESSED_TOOL_ARGUMENTS: &str = r#"{"redacted":"[redacted]"}"#;
 
 /// Zero-based proposal order among tool calls in one model response.
@@ -34,6 +33,7 @@ pub struct ToolCallProposal {
     pub(super) name: ToolName,
     pub(super) arguments: NormalizedToolArguments,
     suppressed: bool,
+    inadmissible_reason: Option<super::ToolInadmissibleReason>,
 }
 
 impl ToolCallProposal {
@@ -43,6 +43,7 @@ impl ToolCallProposal {
             name,
             arguments,
             suppressed: false,
+            inadmissible_reason: None,
         }
     }
 
@@ -56,7 +57,27 @@ impl ToolCallProposal {
                 value: String::from(SUPPRESSED_TOOL_ARGUMENTS),
             },
             suppressed: true,
+            inadmissible_reason: None,
         }
+    }
+
+    /// Constructs a request rejected during response admission, retaining its argument preview.
+    pub const fn inadmissible(
+        name: ToolName,
+        arguments: NormalizedToolArguments,
+        reason: super::ToolInadmissibleReason,
+    ) -> Self {
+        Self {
+            name,
+            arguments,
+            suppressed: false,
+            inadmissible_reason: Some(reason),
+        }
+    }
+
+    /// Returns the request-level admission failure, when present.
+    pub const fn inadmissible_reason(&self) -> Option<super::ToolInadmissibleReason> {
+        self.inadmissible_reason
     }
 
     /// Borrows the checked tool name.
@@ -96,10 +117,7 @@ pub struct ToolUsingAssistantResponse {
 }
 
 impl ToolUsingAssistantResponse {
-    /// Maximum admitted tool proposals in one response.
-    pub const MAX_TOOL_COUNT: usize = MAX_TOOL_REQUESTS_PER_RESPONSE;
-
-    /// Checks the positive bounded tool-count requirement while preserving
+    /// Checks the positive tool-count requirement while preserving
     /// part order.
     pub fn try_from_parts(
         parts: Vec<AssistantResponsePart>,
@@ -108,7 +126,7 @@ impl ToolUsingAssistantResponse {
             .iter()
             .filter(|part| matches!(part, AssistantResponsePart::ToolCall(_)))
             .count();
-        if tool_count == 0 || tool_count > MAX_TOOL_REQUESTS_PER_RESPONSE {
+        if tool_count == 0 {
             return Err(ToolUsingAssistantResponseError { parts });
         }
         Ok(Self {
@@ -128,8 +146,7 @@ impl ToolUsingAssistantResponse {
     }
 }
 
-/// A response rejected because its tool-proposal count was zero or exceeded
-/// the per-response bound.
+/// A response rejected because it contains no tool proposals.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolUsingAssistantResponseError {
     parts: Vec<AssistantResponsePart>,

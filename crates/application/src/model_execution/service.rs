@@ -1026,6 +1026,9 @@ where
                 | AssistantResponsePart::ProviderCompaction(_)
                 | AssistantResponsePart::ProviderReasoning(_) => None,
                 AssistantResponsePart::ToolCall(proposal) => {
+                    if proposal.inadmissible_reason().is_some() {
+                        return Some(InitialToolApproval::Inadmissible);
+                    }
                     if proposal.is_suppressed() {
                         return Some(InitialToolApproval::RuntimeSafetyDeny);
                     }

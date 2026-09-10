@@ -100,7 +100,8 @@ pub use tool_settings::{
 };
 use tool_settings::{
     parse_approval_judge, parse_daemon_tool_settings, parse_git_identity,
-    parse_tool_approval_postures, parse_tool_mappings, parse_workspace_instruction_configuration,
+    parse_tool_approval_postures, parse_tool_mappings, parse_tool_proposal_limits,
+    parse_workspace_instruction_configuration,
 };
 
 #[derive(Clone)]
@@ -156,6 +157,7 @@ pub struct HubModelConfiguration {
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
     workspace_instructions: WorkspaceInstructionConfiguration,
+    tool_proposal_limits: signalbox_application::ToolProposalLimits,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -201,6 +203,7 @@ impl HubModelConfiguration {
             approval_judge_selection,
             convergence,
             workspace_instructions,
+            tool_proposal_limits,
             mappings,
             session_credential_pin,
             fallback_credential_profile,
@@ -563,7 +566,8 @@ impl HubModelConfiguration {
                     u64::from(effective.max_output_tokens()),
                     u64::from(effective.context_window_tokens()),
                 )
-                .with_compaction_prompt_bytes(compaction_prompt.len() as u64);
+                .with_compaction_prompt_bytes(compaction_prompt.len() as u64)
+                .with_max_tool_requests(tool_proposal_limits.max_requests);
                 tool_continuation_usage_limits.push(if effective.provider_compaction_supported() {
                     limit.with_provider_compaction_replay()
                 } else {
@@ -621,6 +625,7 @@ impl HubModelConfiguration {
             repository_watch,
             blob_storage,
             workspace_instructions,
+            tool_proposal_limits,
         })
     }
 
@@ -1178,6 +1183,11 @@ impl HubModelConfiguration {
     /// Returns explicitly configured daemon tool dependencies, when present.
     pub const fn daemon_tools(&self) -> Option<&DaemonToolConfiguration> {
         self.daemon_tools.as_ref()
+    }
+
+    /// Configured admission caps for each model response's tool proposals.
+    pub const fn tool_proposal_limits(&self) -> signalbox_application::ToolProposalLimits {
+        self.tool_proposal_limits
     }
 
     /// Returns explicit roots whose content is discoverable but not eligible by default.

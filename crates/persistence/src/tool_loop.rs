@@ -2665,7 +2665,7 @@ async fn load_requests(
 ) -> Result<Vec<signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text, approval_posture, inadmissible_reason
+                arguments_kind, arguments_text, approval_posture, inadmissible_reason, inadmissible_limit, inadmissible_argument_bytes
            FROM tool_request
           WHERE producing_model_call_id = $1
           ORDER BY request_ordinal",
@@ -2714,6 +2714,10 @@ pub(crate) fn decode_request(
             .into());
         }
     };
+    let rejection_number = |field: &'static str| -> Result<u64, ToolLoopRepositoryError> {
+        u64::try_from(required::<Decimal>(&row, field)?)
+            .map_err(|_| ToolLoopCorruption::Inconsistent(field).into())
+    };
     Ok(ToolRequestReconstitutionInput::new(
         tool_request_id_from_uuid(required(&row, "request_id")?),
         session,
@@ -2731,6 +2735,17 @@ pub(crate) fn decode_request(
         {
             None => None,
             Some("placement_lost") => Some(signalbox_domain::ToolInadmissibleReason::PlacementLost),
+            Some("proposal_limit_exceeded") => Some(
+                signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded {
+                    limit: rejection_number("inadmissible_limit")?,
+                },
+            ),
+            Some("argument_bytes_exceeded") => Some(
+                signalbox_domain::ToolInadmissibleReason::ArgumentBytesExceeded {
+                    limit: rejection_number("inadmissible_limit")?,
+                    bytes: rejection_number("inadmissible_argument_bytes")?,
+                },
+            ),
             Some(_) => return Err(ToolLoopCorruption::Inconsistent("inadmissible reason").into()),
         },
     )
@@ -3026,7 +3041,7 @@ async fn load_user_decision_receipts(
                 approval.decision_source,
                 request.request_ordinal, request.tool_name,
                 request.arguments_kind, request.arguments_text,
-                request.approval_posture, request.inadmissible_reason,
+                request.approval_posture, request.inadmissible_reason, request.inadmissible_limit, request.inadmissible_argument_bytes,
                 request.producing_model_call_id, request.session_id,
                 request.turn_id
            FROM decide_tool_request_command AS command
@@ -4314,7 +4329,7 @@ pub(crate) async fn load_request_by_id(
 ) -> Result<Option<signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
     let row = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text, approval_posture, inadmissible_reason,
+                arguments_kind, arguments_text, approval_posture, inadmissible_reason, inadmissible_limit, inadmissible_argument_bytes,
                 producing_model_call_id, session_id, turn_id
            FROM tool_request
           WHERE request_id = $1",
@@ -4345,7 +4360,7 @@ pub(crate) async fn load_requests_by_id(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text, approval_posture, inadmissible_reason,
+                arguments_kind, arguments_text, approval_posture, inadmissible_reason, inadmissible_limit, inadmissible_argument_bytes,
                 producing_model_call_id, session_id, turn_id
            FROM tool_request
           WHERE request_id = ANY($1)",

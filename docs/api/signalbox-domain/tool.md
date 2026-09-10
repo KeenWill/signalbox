@@ -79,6 +79,7 @@ impl error::Error for ToolApprovalResolutionReconstitutionError {}
 
 ```rust
 pub enum InitialToolApproval {
+    Inadmissible,
     Confirm,
     AlwaysConfirm,
     Human,
@@ -130,8 +131,6 @@ impl NormalizedToolArguments {
 
 ```rust
 pub enum ToolArgumentsFailure {
-    TooLarge { bytes: usize },
-    CanonicalTooLarge { bytes: usize },
     ContainsNull,
     CanonicalizationFailed,
     StoredKindMismatch,
@@ -654,6 +653,12 @@ pub struct ToolCallProposal {/* private */}
 impl ToolCallProposal {
     pub const fn new(name: ToolName, arguments: NormalizedToolArguments) -> Self;
     pub fn suppressed(name: ToolName) -> Self;
+    pub const fn inadmissible(
+        name: ToolName,
+        arguments: NormalizedToolArguments,
+        reason: ToolInadmissibleReason,
+    ) -> Self;
+    pub const fn inadmissible_reason(&self) -> option::Option<ToolInadmissibleReason>;
     pub const fn name(&self) -> &ToolName;
     pub const fn arguments(&self) -> &NormalizedToolArguments;
     pub const fn is_suppressed(&self) -> bool;
@@ -678,7 +683,6 @@ pub enum AssistantResponsePart {
 pub struct ToolUsingAssistantResponse {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl ToolUsingAssistantResponse {
-    pub const MAX_TOOL_COUNT: usize;
     pub fn try_from_parts(
         parts: vec::Vec<AssistantResponsePart>,
     ) -> result::Result<Self, ToolUsingAssistantResponseError>;
@@ -798,6 +802,8 @@ pub enum ToolRequestResolution {
 
 ```rust
 pub enum ToolInadmissibleReason {
+    ProposalLimitExceeded { limit: u64 },
+    ArgumentBytesExceeded { limit: u64, bytes: u64 },
     PlacementLost,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
