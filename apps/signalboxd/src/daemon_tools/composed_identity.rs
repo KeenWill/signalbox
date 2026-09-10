@@ -126,6 +126,9 @@ fn directory_ancestors(
             .map_err(|_| DaemonToolsConstructionError::LocalGit)?,
         );
         let parent_identity = directory_identity(&parent)?;
+        if parent_identity.device != identity.device || crosses_mount(&directory, &parent)? {
+            return Err(DaemonToolsConstructionError::LocalGit);
+        }
         if parent_identity == identity {
             return Ok(ancestors);
         }
@@ -135,6 +138,31 @@ fn directory_ancestors(
         ancestors.push(parent_identity);
         directory = parent;
     }
+}
+
+#[cfg(target_os = "linux")]
+fn crosses_mount(
+    directory: &std::fs::File,
+    parent: &std::fs::File,
+) -> Result<bool, DaemonToolsConstructionError> {
+    use rustix::fs::{AtFlags, StatxFlags, statx};
+    let mount = |file: &std::fs::File| {
+        let identity = statx(file, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID)
+            .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
+        if identity.stx_mask & StatxFlags::MNT_ID.bits() == 0 {
+            return Err(DaemonToolsConstructionError::LocalGit);
+        }
+        Ok(identity.stx_mnt_id)
+    };
+    Ok(mount(directory)? != mount(parent)?)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn crosses_mount(
+    _directory: &std::fs::File,
+    _parent: &std::fs::File,
+) -> Result<bool, DaemonToolsConstructionError> {
+    Ok(false)
 }
 
 fn directory_identity(
@@ -147,4 +175,62 @@ fn directory_identity(
         device: metadata.dev(),
         inode: metadata.ino(),
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod mount_tests {
+    use super::*;
+
+    #[test]
+    fn administration_ancestry_rejects_a_device_boundary() {
+        let directory = std::fs::File::open("/proc").expect("proc mount");
+        assert!(directory_ancestors(&directory).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires local Bubblewrap user and mount namespaces"]
+    fn administration_ancestry_rejects_a_same_device_bind_mount() {
+        const CHILD_ROOT: &str = "SIGNALBOX_BIND_ADMINISTRATION_FIXTURE";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            assert!(matches!(
+                ComposedWorkspaceIdentity::capture(Path::new(&root)),
+                Err(DaemonToolsConstructionError::LocalGit)
+            ));
+            return;
+        }
+        let fixture = tempfile::tempdir().expect("bind fixture");
+        let outer = fixture.path().join("outer");
+        let inner = fixture.path().join("inner");
+        let source = outer.join(".git/nested");
+        let target = fixture.path().join("presented");
+        git2::Repository::init(&outer).expect("outer repository");
+        git2::Repository::init(&inner).expect("inner repository");
+        std::fs::rename(inner.join(".git"), &source).expect("nested administration");
+        std::fs::create_dir(&target).expect("mount target");
+        std::fs::write(
+            inner.join(".git"),
+            format!("gitdir: {}\n", target.display()),
+        )
+        .expect("gitdir marker");
+        assert_eq!(
+            source.metadata().expect("source").dev(),
+            target.metadata().expect("target").dev()
+        );
+        let output = std::process::Command::new("/usr/bin/bwrap")
+            .args(["--unshare-user", "--unshare-pid", "--die-with-parent", "--ro-bind", "/", "/", "--bind"])
+            .arg(&source)
+            .arg(&target)
+            .arg(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "daemon_tools::composed_identity::mount_tests::administration_ancestry_rejects_a_same_device_bind_mount", "--ignored", "--nocapture"])
+            .env(CHILD_ROOT, &inner)
+            .output()
+            .expect("bind-mounted fixture child");
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "bind-mounted administration must be rejected: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
