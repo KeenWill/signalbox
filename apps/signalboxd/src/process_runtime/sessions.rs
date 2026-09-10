@@ -638,7 +638,7 @@ where
     }
 }
 
-/// Classifies one commission failure as a database outage, or none for the
+/// Classifies one commission failure as unavailable, or none for the
 /// fail-closed remainder.
 pub(super) fn commission_failure_ambiguity(
     error: &CommissionedDispatchRepositoryError,
@@ -655,7 +655,8 @@ pub(super) fn commission_failure_ambiguity(
         },
         CommissionedDispatchRepositoryError::InitialInput(error) => match error {
             SubmitInputRepositoryError::Database(_)
-            | SubmitInputRepositoryError::CheckoutProvisioningPending => Some(false),
+            | SubmitInputRepositoryError::CheckoutProvisioningPending
+            | SubmitInputRepositoryError::BlobStorageUnavailable => Some(false),
             SubmitInputRepositoryError::CommitAmbiguous(_) => Some(true),
             SubmitInputRepositoryError::DifferentCommandKind { .. }
             | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }
