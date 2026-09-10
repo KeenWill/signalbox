@@ -683,6 +683,19 @@ impl ObjectSource {
                 None => break,
             }
         }
+        if let [(kind, content)] = entries.as_slice() {
+            let kind = match kind {
+                1 => ObjectType::Commit,
+                2 => ObjectType::Tree,
+                3 => ObjectType::Blob,
+                4 => ObjectType::Tag,
+                _ => return Err(LocalGitFailure::Repository),
+            };
+            if database.write(kind, content).map_err(rejected)? != oid {
+                return Err(LocalGitFailure::Repository);
+            }
+            return Ok(());
+        }
         // Emit the selected dependency chain base-first with new OFS_DELTA offsets.
         let mut pack = b"PACK\0\0\0\x02".to_vec();
         pack.extend_from_slice(&(entries.len() as u32).to_be_bytes());
@@ -718,10 +731,30 @@ impl ObjectSource {
             ObjectFormat::Sha256 => Sha256::digest(&pack).to_vec(),
         };
         pack.extend_from_slice(&checksum);
-        let mut writer = database.packwriter().map_err(rejected)?;
-        writer.write_all(&pack).map_err(rejected)?;
-        writer.commit().map_err(rejected)?;
-        if !database.exists(oid) {
+        // Decode the selected chain in a disposable database. Retaining one pack
+        // per captured object makes later object lookups scan an expanding pack set.
+        let directory = tempfile::tempdir().map_err(rejected)?;
+        let pack_directory = directory.path().join("pack");
+        fs::create_dir(&pack_directory).map_err(rejected)?;
+        let mut indexer = git2::Indexer::new_ext(None, &pack_directory, 0o600, false, self.format)
+            .map_err(rejected)?;
+        indexer.write_all(&pack).map_err(rejected)?;
+        indexer.commit().map_err(rejected)?;
+        let decoded = Odb::new_ext(self.format).map_err(rejected)?;
+        decoded
+            .add_disk_alternate(
+                directory
+                    .path()
+                    .to_str()
+                    .ok_or(LocalGitFailure::Repository)?,
+            )
+            .map_err(rejected)?;
+        let object = decoded.read(oid).map_err(rejected)?;
+        if database
+            .write(object.kind(), object.data())
+            .map_err(rejected)?
+            != oid
+        {
             return Err(LocalGitFailure::Repository);
         }
         Ok(())
