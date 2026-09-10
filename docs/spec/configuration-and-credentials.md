@@ -757,15 +757,16 @@ repositories. An optional absolute `push_credential_file` on
 SSH private key. Optional `push_remote_url` selects an exact HTTPS, `ssh://`, or
 `git@host:` destination; its default is the watched repository's GitHub HTTPS
 URL. HTTPS requires the push token. SSH uses the configured key when present, or
-the host SSH agent exposed through `SSH_AUTH_SOCK` in the sandbox. Each push
-rereads the credential through `FileCredentialAccess`; HTTPS passes
-authorization in the child environment, and SSH retains a private temporary key
-file through push and remote confirmation. Push credential files participate in
-the repository-watch credential isolation checks, including symlink and
-hard-link aliases of polling, push, and webhook credentials. The push family is
-registered from the configuration installed by durable reload recovery at
-startup; a repository-watch reload that changes push registration takes effect
-at the next boot.
+the host SSH agent exposed through `SSH_AUTH_SOCK` in the sandbox. Agent-backed
+push authority is derived only when that socket accepts a connection. Each
+configured credential file is reread through `FileCredentialAccess` on every
+push; HTTPS passes authorization in the child environment, and SSH retains a
+private temporary key file through push and remote confirmation. Push credential
+files participate in the repository-watch credential isolation checks, including
+symlink and hard-link aliases of polling, push, and webhook credentials. The
+push family is registered from the configuration installed by durable reload
+recovery at startup; a repository-watch reload that changes push registration
+takes effect at the next boot.
 
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to

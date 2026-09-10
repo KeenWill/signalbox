@@ -190,6 +190,50 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
             .await
     }
 
+    async fn account_home(
+        &mut self,
+        request: &GitPushRequest,
+    ) -> Result<PathBuf, GitPushTransportFailure> {
+        use std::os::unix::ffi::OsStrExt;
+        let failure = || GitPushTransportFailure::PreDispatchInfrastructure;
+        let mut environment = BTreeMap::new();
+        if let Some(path) = std::env::var_os("PATH") {
+            environment.insert("PATH".into(), path);
+        }
+        let result = self
+            .runner
+            .run(ProcessRequest {
+                program: "getent".into(),
+                arguments: vec![
+                    "passwd".into(),
+                    rustix::process::getuid().as_raw().to_string().into(),
+                ],
+                working_directory: request.repository_root().to_owned(),
+                timeout: Duration::from_secs(300),
+                capture_bytes: 64 * 1024,
+                environment,
+                environment_inheritance: ProcessEnvironment::Clear,
+                status_protocol: ProcessStatusProtocol::Direct,
+            })
+            .await;
+        if !matches!(result.outcome, ProcessOutcome::Exited { code: Some(0) })
+            || result.stdout.completeness != CaptureCompleteness::Complete
+        {
+            return Err(failure());
+        }
+        let home = result
+            .stdout
+            .bytes
+            .split(|byte| *byte == b':')
+            .nth(5)
+            .ok_or_else(failure)?;
+        let home = PathBuf::from(std::ffi::OsStr::from_bytes(home));
+        if !home.is_absolute() {
+            return Err(failure());
+        }
+        Ok(home)
+    }
+
     async fn run_agent_sandbox(
         &mut self,
         request: &GitPushRequest,
@@ -198,19 +242,25 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
     ) -> Result<ProcessRunResult, GitPushTransportFailure> {
         use signalbox_tools_exec::{ExecArguments, SandboxNetwork, SandboxedCommandRunner};
         let failure = || GitPushTransportFailure::PreDispatchInfrastructure;
-        let socket = self.ssh_agent_socket.as_ref().ok_or_else(failure)?;
+        let socket = self.ssh_agent_socket.clone().ok_or_else(failure)?;
+        let account_home = self.account_home(request).await?;
         let mut configuration = self.sandbox.clone();
         configuration.network = SandboxNetwork::Host;
         configuration.read_only_binds.push(PathBuf::from(socket));
         // OpenSSH resolves the invoking account and the host's known-host trust stores.
-        for path in ["/etc/passwd", "/etc/group", "/etc/ssh/ssh_known_hosts"] {
+        for path in [
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/ssh/ssh_known_hosts",
+            "/etc/ssh/ssh_known_hosts2",
+        ] {
             let path = PathBuf::from(path);
             if path.is_file() {
                 configuration.read_only_binds.push(path);
             }
         }
-        if let Some(home) = std::env::var_os("HOME") {
-            let known_hosts = PathBuf::from(home).join(".ssh/known_hosts");
+        for name in ["known_hosts", "known_hosts2"] {
+            let known_hosts = account_home.join(".ssh").join(name);
             if known_hosts.is_file() {
                 configuration.read_only_binds.push(known_hosts);
             }

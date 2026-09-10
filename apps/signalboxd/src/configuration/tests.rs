@@ -6276,7 +6276,15 @@ fn checked_in_example_parses_unbounded_git_object_content() {
 }
 
 #[test]
-fn repository_ssh_push_accepts_a_key_or_agent_and_redacts_the_destination() {
+fn repository_ssh_push_requires_a_key_or_available_agent_and_redacts_the_destination() {
+    let directory = tempfile::tempdir().expect("agent fixture");
+    let socket = directory.path().join("agent.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("available agent");
+    let unavailable = directory.path().join("unavailable.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&unavailable).expect("temporary agent");
+    drop(listener);
+    let regular = directory.path().join("regular");
+    std::fs::write(&regular, b"not a socket").expect("regular file");
     for remote in [
         "ssh://git@example.test/project.git",
         "git@example.test:project.git",
@@ -6297,7 +6305,13 @@ fn repository_ssh_push_accepts_a_key_or_agent_and_redacts_the_destination() {
             let parsed =
                 HubModelConfiguration::parse(&document.to_string()).expect("SSH configuration");
             let repository = &parsed.repository_watch().expect("watch").repositories()[0];
-            assert!(repository.git_push_enabled());
+            assert!(repository.git_push_enabled_with_agent(Some(&socket)));
+            for absent in [None, Some(unavailable.as_path()), Some(regular.as_path())] {
+                assert_eq!(
+                    repository.git_push_enabled_with_agent(absent),
+                    key.is_some()
+                );
+            }
             assert_eq!(
                 repository.push_remote_url().expect("remote").as_str(),
                 remote

@@ -87,7 +87,11 @@ approval, branch and commit fences, captured object authority, non-forced
 updates, and remote confirmation apply to both transports. SSH runs in batch
 mode with user SSH configuration disabled. Agent-backed pushes run through the
 execution sandbox with the private captured repository as its workspace, host
-networking, and read-only binds for the agent socket and host trust stores.
+networking, and read-only binds for the agent socket and host trust stores. User
+trust files are `known_hosts` and `known_hosts2` under the account home returned
+by the host account database; the `HOME` environment variable does not select
+them. Agent-backed push authority requires a socket that accepts a connection
+when authority is derived.
 
 Workspace roots are globally unique by canonical spelling, and the key carries
 no runner or location dimension. Why: the single-runner rule means no two

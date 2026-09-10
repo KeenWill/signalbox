@@ -143,7 +143,7 @@ async fn ssh_push_uses_configured_key_with_both_destination_forms() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn ssh_push_uses_agent_inside_sandbox_with_both_destination_forms() {
+async fn ssh_push_uses_agent_and_account_trust_files_inside_sandbox_for_both_destination_forms() {
     for scp_style in [false, true] {
         exercise_ssh_push(false, scp_style, 1024).await;
     }
@@ -194,6 +194,21 @@ async fn exercise_ssh_push(use_key: bool, scp_style: bool, blob_bytes: u64) {
     let agent = fixture.path().join("agent.sock");
     let outside = fixture.path().join("outside-sandbox");
     fs::write(&outside, b"host-only fixture sentinel").expect("outside sentinel");
+    let account_home = fixture.path().join("account-home");
+    let ssh_directory = account_home.join(".ssh");
+    fs::create_dir_all(&ssh_directory).expect("account SSH directory");
+    let first_trust = ssh_directory.join("known_hosts");
+    let second_trust = ssh_directory.join("known_hosts2");
+    fs::write(&first_trust, b"fixture primary trust\n").expect("primary known hosts");
+    fs::write(&second_trust, b"fixture fallback trust\n").expect("fallback known hosts");
+    let getent = bin.join("getent");
+    let account_lookup = format!(
+        "#!/usr/bin/python3\nimport sys\nassert sys.argv[1] == 'passwd'\nprint('fixture:x:' + sys.argv[2] + ':0:Fixture:' + {} + ':/bin/sh')\n",
+        serde_json::to_string(&account_home).expect("account path literal")
+    );
+    fs::write(&getent, account_lookup).expect("account lookup fixture");
+    fs::set_permissions(&getent, fs::Permissions::from_mode(0o700))
+        .expect("account lookup executable");
     let server = start_ssh_proxy(&agent, remote.clone(), log.clone());
     let script = r###"#!/usr/bin/python3
 import json
@@ -215,6 +230,8 @@ assert has_key or agent
 if agent:
     assert os.getcwd() == '/workspace'
     assert not Path(FIXTURE_OUTSIDE).exists()
+    assert Path(FIRST_TRUST_FILE).read_text() == 'fixture primary trust\n'
+    assert Path(SECOND_TRUST_FILE).read_text() == 'fixture fallback trust\n'
 connection = socket.socket(socket.AF_UNIX)
 connection.connect(agent or FIXTURE_SOCKET)
 connection.sendall((json.dumps({'arguments': arguments, 'agent': agent, 'confined': bool(agent)}) + '\n').encode())
@@ -237,6 +254,15 @@ while True:
 "###
         .replace("FIXTURE_OUTSIDE", &serde_json::to_string(&outside).expect("outside path literal"))
         .replace("FIXTURE_SOCKET", &serde_json::to_string(&agent).expect("socket path literal"));
+    let script = script
+        .replace(
+            "FIRST_TRUST_FILE",
+            &serde_json::to_string(&first_trust).expect("first trust path"),
+        )
+        .replace(
+            "SECOND_TRUST_FILE",
+            &serde_json::to_string(&second_trust).expect("second trust path"),
+        );
     fs::write(&shim, script).expect("SSH shim");
     fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).expect("executable shim");
     let key = fixture.path().join("key");

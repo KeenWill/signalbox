@@ -314,10 +314,13 @@ interruption of a live turn whose session is closing. Synchronous
 command-identity conflicts settle as rejected before submission continues to the
 next action.
 
-Dispatched pull-request sessions whose watched repository configures
-`push_credential_file` can use `git_push_configured` for their retained head
-branch on `origin` at `https://github.com/<owner>/<repo>.git`; fork heads are
-unavailable because that destination is the watched repository.
+Dispatched pull-request sessions can use `git_push_configured` for their
+retained head branch when the watched repository configures
+`push_credential_file`, or an SSH `push_remote_url` with an available host SSH
+agent. The destination is `push_remote_url` when configured, otherwise `origin`
+at `https://github.com/<owner>/<repo>.git`. SSH destinations accept a configured
+key file or the host agent exposed to the push sandbox. Fork heads are
+unavailable because push authority requires a head in the watched repository.
 
 ## Boundary contracts
 
@@ -400,11 +403,12 @@ instead requests a one-turn mergeability and gating-check convergence check, a
 plain pull request reply, and a clean finish. `renovate-merge-forward` requests
 merging the base forward, resolving only conflicts, validating, committing,
 pushing, and reporting the result. Push instructions require the same configured
-authority as `git_push_configured`: a push credential and a head in the watched
-repository. Without that authority, kickoff states that push is unavailable and
-requests a reviewable diff in a plain pull request reply, leaving unresolved
-threads open for the owner to apply the diff. The publication instruction is
-retained with the kickoff command identity and remains unchanged on replay.
+authority as `git_push_configured`: a configured push credential file, or an SSH
+destination with an available host agent, and a head in the watched repository.
+Without that authority, kickoff states that push is unavailable and requests a
+reviewable diff in a plain pull request reply, leaving unresolved threads open
+for the owner to apply the diff. The publication instruction is retained with
+the kickoff command identity and remains unchanged on replay.
 
 During checkout provisioning, non-repository-watch input admission is deferred
 without claiming its command identity, so the kickoff is the first queued input.

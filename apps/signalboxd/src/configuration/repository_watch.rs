@@ -138,11 +138,17 @@ impl WatchedRepositoryConfiguration {
     }
 
     pub(crate) fn git_push_enabled(&self) -> bool {
+        let socket = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
+        self.git_push_enabled_with_agent(socket.as_deref())
+    }
+
+    pub(super) fn git_push_enabled_with_agent(&self, socket: Option<&Path>) -> bool {
         self.push_credential_file.is_some()
-            || self
+            || (self
                 .push_remote_url
                 .as_ref()
                 .is_some_and(|remote| !remote.as_str().starts_with("https://"))
+                && socket.is_some_and(agent_socket_available))
     }
 
     /// Returns the non-secret request credential reference for this repository.
@@ -1019,4 +1025,27 @@ fn parse_repository_watch_actions(
             Ok(RepoWatchRuleActionV1::DispatchSession { template })
         })
         .collect()
+}
+
+fn agent_socket_available(path: &Path) -> bool {
+    use rustix::{
+        fs::{OFlags, fcntl_getfl, fcntl_setfl},
+        io::{FdFlags, fcntl_setfd},
+        net::{AddressFamily, SocketAddrUnix, SocketType, connect, socket},
+    };
+    let Ok(address) = SocketAddrUnix::new(path) else {
+        return false;
+    };
+    let Ok(probe) = socket(AddressFamily::UNIX, SocketType::STREAM, None) else {
+        return false;
+    };
+    let Ok(flags) = fcntl_getfl(&probe) else {
+        return false;
+    };
+    if fcntl_setfd(&probe, FdFlags::CLOEXEC).is_err()
+        || fcntl_setfl(&probe, flags | OFlags::NONBLOCK).is_err()
+    {
+        return false;
+    }
+    connect(&probe, &address).is_ok()
 }
