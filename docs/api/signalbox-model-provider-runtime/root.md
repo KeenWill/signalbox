@@ -2,6 +2,12 @@
 
 # root
 
+## CONTEXT_SUMMARY_MESSAGE
+
+```rust
+pub const CONTEXT_SUMMARY_MESSAGE: &str;
+```
+
 ## ProviderTextDelta
 
 ```rust

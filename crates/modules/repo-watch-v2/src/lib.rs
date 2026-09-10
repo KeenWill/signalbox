@@ -37,6 +37,7 @@ pub mod ingest;
 mod kickoff;
 pub mod measurements;
 mod observation_decode;
+pub mod observation_workflow;
 pub mod poll_cache;
 pub mod provider;
 mod retry;
@@ -563,6 +564,8 @@ impl WebhookDisposition {
 /// Module-local storage failure.
 #[derive(Debug)]
 pub enum StoreError {
+    /// An observation receipt is malformed, conflicting, or awaiting journal adoption.
+    InvalidObservationReceipt,
     /// Core terminal facts could not be read through the ownership seam.
     Lifecycle(signalbox_session_ownership::OutboxDispatchError),
     /// Persisted poll transport state is malformed or belongs to another reviewer set.
@@ -604,6 +607,9 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::InvalidObservationReceipt => {
+                "repository-watch observation receipt conflicts or awaits adoption"
+            }
             Self::Lifecycle(_) => "repository-watch core terminal lookup failed",
             Self::InvalidPollCache => "repository-watch poll cache is invalid",
             Self::InvalidReloadIntent => "repository-watch reload intent is invalid",
@@ -644,7 +650,8 @@ impl Error for StoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Lifecycle(error) => Some(error),
-            Self::InvalidPollCache
+            Self::InvalidObservationReceipt
+            | Self::InvalidPollCache
             | Self::InvalidReloadIntent
             | Self::InvalidComparisonBaseline
             | Self::InvalidRetainedEvent => None,
@@ -676,6 +683,7 @@ impl From<sqlx::Error> for StoreError {
 pub struct RepoWatchStore {
     pool: PgPool,
     measurements: measurements::Measurements,
+    observation_invocation: Option<std::sync::Arc<observation_workflow::ObservationInvocation>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -690,6 +698,7 @@ impl RepoWatchStore {
         Self {
             pool: module_pool,
             measurements: measurements::Measurements::default(),
+            observation_invocation: None,
         }
     }
 
@@ -884,6 +893,28 @@ impl RepoWatchStore {
             &comparison_baseline,
         )
         .await?;
+        let observation_receipt = observation_workflow::checked_receipt(
+            &mut transaction,
+            repository,
+            self.observation_invocation.as_deref(),
+        )
+        .await?;
+        let observation_after = if self.observation_invocation.is_some() {
+            Some(match observation_receipt {
+                Some(receipt) => {
+                    observation_workflow::ObservationResult::decode(&receipt.result)
+                        .ok_or(StoreError::InvalidObservationReceipt)?
+                        .after
+                }
+                None => {
+                    observation_workflow::observation_position(&mut transaction, repository)
+                        .await?
+                        .through
+                }
+            })
+        } else {
+            None
+        };
         upsert_repository(&mut transaction, repository_state, &comparison_baseline).await?;
         replace_pull_requests(&mut transaction, repository, pull_request_states).await?;
         let candidate_identity = frontier_candidate_identity(
@@ -978,7 +1009,27 @@ impl RepoWatchStore {
         .await?;
         if unchanged && projections_match {
             if events.is_empty() {
-                transaction.rollback().await?;
+                if let (Some(invocation), Some(after)) =
+                    (&self.observation_invocation, observation_after)
+                {
+                    let position =
+                        observation_workflow::observation_position(&mut transaction, repository)
+                            .await?;
+                    observation_workflow::retain_stage(
+                        &mut transaction,
+                        invocation,
+                        observation_workflow::ObservationResult {
+                            generation: position.generation,
+                            after,
+                            through: position.through,
+                            outcome: observation_workflow::ObservationOutcome::Partial,
+                        },
+                    )
+                    .await?;
+                    transaction.commit().await?;
+                } else {
+                    transaction.rollback().await?;
+                }
                 return Ok(FrontierEventAdmission::Unchanged);
             }
             if !events.is_empty() {
@@ -1085,6 +1136,19 @@ impl RepoWatchStore {
         if advanced.rows_affected() != 1 {
             transaction.rollback().await?;
             return Ok(FrontierEventAdmission::Stale);
+        }
+        if let (Some(invocation), Some(after)) = (&self.observation_invocation, observation_after) {
+            observation_workflow::retain_stage(
+                &mut transaction,
+                invocation,
+                observation_workflow::ObservationResult {
+                    generation: next_generation,
+                    after,
+                    through: repository_event_ordinal,
+                    outcome: observation_workflow::ObservationOutcome::Partial,
+                },
+            )
+            .await?;
         }
         transaction.commit().await?;
         Ok(FrontierEventAdmission::Committed {

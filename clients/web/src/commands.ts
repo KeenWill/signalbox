@@ -163,7 +163,7 @@ export const commandRegistry = [
   {
     id: 'navigate.attention',
     title: 'Go to Attention',
-    description: 'Open Attention.',
+    description: '',
     category: 'Navigate',
     bindings: [{ label: 'g a', registration: { kind: 'sequence', sequence: ['G', 'A'] } }],
     available: productNavigation,
@@ -172,7 +172,7 @@ export const commandRegistry = [
   {
     id: 'navigate.sessions',
     title: 'Go to Sessions',
-    description: 'Open Sessions.',
+    description: '',
     category: 'Navigate',
     bindings: [{ label: 'g s', registration: { kind: 'sequence', sequence: ['G', 'S'] } }],
     available: productNavigation,
@@ -181,7 +181,7 @@ export const commandRegistry = [
   {
     id: 'navigate.imports',
     title: 'Go to Imports',
-    description: 'Open Imports.',
+    description: '',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -190,7 +190,7 @@ export const commandRegistry = [
   {
     id: 'navigate.reviews',
     title: 'Go to Reviews',
-    description: 'Open Reviews.',
+    description: '',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -199,7 +199,7 @@ export const commandRegistry = [
   {
     id: 'navigate.runners',
     title: 'Go to Runners',
-    description: 'Open Runners.',
+    description: '',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -217,7 +217,7 @@ export const commandRegistry = [
   {
     id: 'navigate.usage',
     title: 'Go to Usage',
-    description: 'Open Usage.',
+    description: '',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -226,7 +226,7 @@ export const commandRegistry = [
   {
     id: 'navigate.settings',
     title: 'Go to Settings',
-    description: 'Open Settings.',
+    description: '',
     category: 'Navigate',
     bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
     available: productNavigation,
@@ -235,7 +235,7 @@ export const commandRegistry = [
   {
     id: 'navigate.scenario',
     title: 'Go to Scenario studio',
-    description: 'Open Scenario studio.',
+    description: '',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -253,7 +253,7 @@ export const commandRegistry = [
   {
     id: 'palette.open',
     title: 'Open command palette',
-    description: 'Browse every available application command.',
+    description: 'Choose a command.',
     category: 'Surface',
     bindings: [{ label: 'Mod+K', registration: { kind: 'hotkey', hotkey: 'Mod+K' } }],
     available: always,
@@ -280,7 +280,7 @@ export const commandRegistry = [
   {
     id: 'search.focus',
     title: 'Focus search',
-    description: 'Jump to the search box.',
+    description: 'Focus the search field.',
     category: 'Navigate',
     bindings: [{ label: 'Mod+Shift+F', registration: { kind: 'hotkey', hotkey: 'Mod+Shift+F' } }],
     available: (context) => context.searchAvailable === true,

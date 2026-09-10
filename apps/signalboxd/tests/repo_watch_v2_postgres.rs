@@ -55,6 +55,8 @@ use uuid::Uuid;
 
 #[path = "repo_watch_v2/checkout.rs"]
 mod checkout;
+#[path = "repo_watch_v2/observations.rs"]
+mod observations;
 #[path = "repo_watch_v2/provider_identity.rs"]
 mod provider_identity;
 #[path = "repo_watch_v2/retirement.rs"]
@@ -3888,9 +3890,9 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     let push_credential = files.path().join("push-token");
     write_private_credential(&push_credential, b"")?;
     let replacement_source = runtime_configuration_source(&hook)?.replace(
-        "credential_file =",
+        "\ncredential_file =",
         &format!(
-            "push_credential_file = \"{}\"\ncredential_file =",
+            "\npush_credential_file = \"{}\"\ncredential_file =",
             push_credential.display()
         ),
     );
