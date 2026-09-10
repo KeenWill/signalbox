@@ -263,6 +263,7 @@ impl ReportedUsageCompaction {
         session: SessionId,
         observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
     ) -> Result<(), ReportedUsageCompactionError> {
+        self.enqueue_continuation(session).await?;
         let checkpoint = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, uuid::Uuid, uuid::Uuid)>(
             "SELECT turn.turn_id, COALESCE(call.direct_model_selection_id, call.frozen_alias_selected_direct_id),
                     turn.compaction_frontier_id, turn.active_tool_round_call_id
@@ -281,7 +282,6 @@ impl ReportedUsageCompaction {
             ContinuationCompactionError::Database(error),
         ))?;
         if let Some((turn, selection, checkpoint, producing_call)) = checkpoint {
-            self.enqueue_continuation(session).await?;
             let turn = TurnId::from_uuid(turn);
             let result = compact_automatically(
                 &self.model_calls,
