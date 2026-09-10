@@ -19,7 +19,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.attention',
     title: 'Go to Attention',
-    description: '',
+    description: 'Open Attention.',
     category: 'Navigate',
     bindings: [
       {
@@ -33,7 +33,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.sessions',
     title: 'Go to Sessions',
-    description: '',
+    description: 'Open Sessions.',
     category: 'Navigate',
     bindings: [
       {
@@ -47,7 +47,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.imports',
     title: 'Go to Imports',
-    description: '',
+    description: 'Open Imports.',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
@@ -56,7 +56,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.reviews',
     title: 'Go to Reviews',
-    description: '',
+    description: 'Open Reviews.',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
@@ -65,7 +65,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.runners',
     title: 'Go to Runners',
-    description: '',
+    description: 'Open Runners.',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
@@ -83,7 +83,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.usage',
     title: 'Go to Usage',
-    description: '',
+    description: 'Open Usage.',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
@@ -92,7 +92,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.settings',
     title: 'Go to Settings',
-    description: '',
+    description: 'Open Settings.',
     category: 'Navigate',
     bindings: [
       {
@@ -106,7 +106,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.scenario',
     title: 'Go to Scenario studio',
-    description: '',
+    description: 'Open Scenario studio.',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
