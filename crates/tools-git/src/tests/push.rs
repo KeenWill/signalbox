@@ -482,6 +482,46 @@ fn plant_push_pack_with_unrelated_objects(
     directory.join(format!("pack-{name}.pack"))
 }
 
+#[test]
+fn packed_commit_range_is_captured_before_the_preparation_deadline() {
+    use crate::tests::support::commit_with_parents;
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let mut commits = Vec::new();
+    let mut tip = fixture.initial;
+    for _ in 0..8000 {
+        tip = commit_with_parents(&repository, &[tip], "packed history");
+        commits.push(tip);
+    }
+    plant_push_pack_with_unrelated_objects(&repository, &commits, 0..0);
+    let authority = fixture.executor().repository_authority;
+    // Leave a generous minute for this bounded range, below the tool's five-minute deadline.
+    let snapshot = crate::push_objects::PushObjectSnapshot::capture_before_deadline(
+        &authority,
+        tip,
+        Some(fixture.initial),
+        Instant::now() + Duration::from_secs(60),
+    )
+    .expect("packed history captures without a growing set of per-object packs");
+    assert_eq!(
+        snapshot
+            .repository
+            .find_commit(tip)
+            .expect("captured tip")
+            .id(),
+        tip
+    );
+    assert!(
+        snapshot
+            .repository
+            .odb()
+            .expect("captured objects")
+            .exists(fixture.initial)
+    );
+}
+
 #[tokio::test]
 async fn push_range_ignores_large_history_in_the_pack_containing_its_tip() {
     use crate::limits::MAX_OBJECT_DATABASE_BYTES;
