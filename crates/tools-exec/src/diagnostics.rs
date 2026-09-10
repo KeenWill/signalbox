@@ -856,6 +856,7 @@ mod tests {
         ExecResult {
             confinement: ExecutionConfinement::FilesystemConfined,
             outcome: ProcessOutcome::Exited { code: Some(0) },
+            diagnostic: None,
             stdout: crate::OutputCapture {
                 text: stdout,
                 completeness: CaptureCompleteness::Complete,
@@ -1062,6 +1063,7 @@ mod tests {
             ExecResult {
                 confinement: ExecutionConfinement::FilesystemConfined,
                 outcome: ProcessOutcome::Exited { code: Some(1) },
+                diagnostic: None,
                 stdout: crate::OutputCapture {
                     text: stdout,
                     completeness: CaptureCompleteness::Complete,
@@ -1097,6 +1099,7 @@ mod tests {
             ExecResult {
                 confinement: ExecutionConfinement::FilesystemConfined,
                 outcome: ProcessOutcome::Exited { code: Some(1) },
+                diagnostic: None,
                 stdout: crate::OutputCapture {
                     text: String::new(),
                     completeness: CaptureCompleteness::Complete,
@@ -1152,6 +1155,7 @@ mod tests {
             ExecResult {
                 confinement: ExecutionConfinement::FilesystemConfined,
                 outcome: ProcessOutcome::Exited { code: Some(0) },
+                diagnostic: None,
                 stdout: crate::OutputCapture {
                     text: stdout,
                     completeness: CaptureCompleteness::Complete,
@@ -1175,6 +1179,7 @@ mod tests {
             ExecResult {
                 confinement: ExecutionConfinement::FilesystemConfined,
                 outcome: ProcessOutcome::Exited { code: Some(101) },
+                diagnostic: None,
                 stdout: crate::OutputCapture {
                     text: String::new(),
                     completeness: CaptureCompleteness::Complete,
@@ -1205,6 +1210,7 @@ mod tests {
             ExecResult {
                 confinement: ExecutionConfinement::FilesystemConfined,
                 outcome: ProcessOutcome::Exited { code: Some(101) },
+                diagnostic: None,
                 stdout: crate::OutputCapture {
                     text: compiler_message_at_level(WARNING_LEVEL),
                     completeness: CaptureCompleteness::Complete,
@@ -1258,6 +1264,7 @@ mod tests {
             ExecResult {
                 confinement: expected_confinement,
                 outcome: expected_outcome,
+                diagnostic: None,
                 stdout: crate::OutputCapture {
                     text: String::new(),
                     completeness: CaptureCompleteness::Complete,

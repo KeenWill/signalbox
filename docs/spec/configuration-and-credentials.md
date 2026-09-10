@@ -57,8 +57,13 @@ TOML, whose checked-in example is `config/signalbox-runner.example.toml`. Its
 owner-only permissions, held under an exclusive lock for the process lifetime,
 and its `bubblewrap_path` must resolve to an executable regular file. Its
 `allowed_network_hosts` narrows a fixed host list and cannot add a hostname.
-Runner credential profiles are non-secret checked names the daemon grants and
-only the runner resolves.
+`sandboxed_exec` uses an isolated network namespace by default. A dispatched
+command that times out under that policy includes the `network_fence_active`
+diagnostic; this reports the configured fence without inferring network intent
+from the command or its arguments. Sandbox setup failures emit a categorical
+warning before command dispatch without logging argv or captured output. Runner
+credential profiles are non-secret checked names the daemon grants and only the
+runner resolves.
 
 The model catalog declares what the four adapters can serve; the daemon provides
 exactly `anthropic`, `openai`, `claude_cli`, and `codex_cli`, no adapter pins a
