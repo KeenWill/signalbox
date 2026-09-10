@@ -596,8 +596,13 @@ impl<C: Clone> EventDecoder<C> {
             }
             CliTerminal::Success { stop_reason } => stop_reason,
         };
-        let stop_reason = if stop_reason == "end_turn" && self.acknowledgement_message_id.is_some()
-        {
+        let stop_reason = if self.acknowledgement_message_id.is_some() {
+            if stop_reason != "end_turn" {
+                self.report_usage(sink);
+                return self.loss(LossCause::StreamProtocolViolation {
+                    detail: "Claude acknowledgement must finish with end_turn".to_string(),
+                });
+            }
             "tool_use".to_string()
         } else {
             stop_reason
