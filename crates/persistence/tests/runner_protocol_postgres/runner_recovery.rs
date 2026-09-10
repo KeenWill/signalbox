@@ -3941,7 +3941,7 @@ async fn same_epoch_established_event_cannot_publish_recovery() -> Result<(), Bo
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn delegated_runner_recovery_admits_attachments_within_the_per_blob_limit()
+async fn delegated_runner_recovery_rejects_an_oversized_retained_attachment()
 -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{
         AttachmentKind, BlobDigest, DeclaredMediaType, SubmitInputAppliedResult, SubmitInputResult,
@@ -3970,9 +3970,10 @@ async fn delegated_runner_recovery_admits_attachments_within_the_per_blob_limit(
     sqlx::query("INSERT INTO blob_store_binding (store_name, namespace_id) VALUES ('runner_attachments', $1)")
         .bind(Uuid::now_v7()).execute(&pool).await?;
     let mut catalog = pool.begin().await?;
-    for (digest, object) in [(retained, "retained"), (later, "later")] {
-        sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7)")
+    for (digest, object, byte_length) in [(retained, "retained", 11_u64), (later, "later", 7)] {
+        sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2)")
             .bind(digest.as_bytes().as_slice())
+            .bind(Decimal::from(byte_length))
             .execute(&mut *catalog)
             .await?;
         sqlx::query("INSERT INTO blob_replica (digest, store_name, object_key) VALUES ($1, 'runner_attachments', $2)")
@@ -3989,7 +3990,7 @@ async fn delegated_runner_recovery_admits_attachments_within_the_per_blob_limit(
         }])
         .expect("fixture content is valid")
     };
-    let repository = SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(10);
+    let repository = SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(11);
     let retained_outcome = repository
         .handle_with_candidates(
             SubmitInput::new(
@@ -4017,8 +4018,9 @@ async fn delegated_runner_recovery_admits_attachments_within_the_per_blob_limit(
                 SubmitInputAppliedResult::PendingSteering(_)
             ))
         ),
-        "one seven-byte attachment fits the ten-byte bound"
+        "the retained eleven-byte attachment fits the initial per-blob bound"
     );
+    let repository = SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(10);
     let later_outcome = repository
         .handle_with_candidates(
             SubmitInput::new(
@@ -4039,11 +4041,13 @@ async fn delegated_runner_recovery_admits_attachments_within_the_per_blob_limit(
             |_| panic!("safe-point steering does not cancel tools"),
         )
         .await?;
-    assert!(matches!(
+    assert_eq!(
         later_outcome,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::PendingSteering(_)
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            signalbox_domain::SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: 10
+            }
         ))
-    ));
+    );
     Ok(())
 }
