@@ -690,7 +690,7 @@ impl ObjectSource {
         let (pack_index, mut offset) = location.ok_or(LocalGitFailure::Repository)?;
         let mut selected = HashSet::new();
         let mut entries = Vec::new();
-        loop {
+        let mut content = loop {
             self.check_deadline()?;
             if !selected.insert(offset) || selected.len() > MAX_REPOSITORY_INSPECTIONS {
                 return Err(LocalGitFailure::Repository);
@@ -760,24 +760,28 @@ impl ObjectSource {
                 }
                 _ => return Err(LocalGitFailure::Repository),
             };
-            let mut decoder = ZlibDecoder::new(std::io::BufReader::new(remaining));
-            let content =
-                ObjectContent::decode(&mut decoder, size, ObjectType::Blob, self.deadline)?;
-            entries.push((kind, content));
-            match base {
-                Some(base) => offset = base,
-                None => break,
+            if let Some(base) = base {
+                entries.push((pack.end as u64 - remaining.limit(), size));
+                offset = base;
+            } else {
+                let mut decoder = ZlibDecoder::new(std::io::BufReader::new(remaining));
+                break ObjectContent::decode(&mut decoder, size, object_kind, self.deadline)?;
             }
-        }
-        let (kind, mut content) = entries.pop().ok_or(LocalGitFailure::Repository)?;
-        content.kind = match kind {
-            1 => ObjectType::Commit,
-            2 => ObjectType::Tree,
-            3 => ObjectType::Blob,
-            4 => ObjectType::Tag,
-            _ => return Err(LocalGitFailure::Repository),
         };
-        while let Some((_, delta)) = entries.pop() {
+        let pack = &self.packs[pack_index];
+        while let Some((offset, size)) = entries.pop() {
+            self.check_deadline()?;
+            let mut file = self.files[pack.source]
+                .file
+                .as_ref()
+                .ok_or(LocalGitFailure::Repository)?
+                .try_clone()
+                .map_err(rejected)?;
+            file.seek(SeekFrom::Start(offset)).map_err(rejected)?;
+            let mut decoder =
+                ZlibDecoder::new(std::io::BufReader::new(file.take(pack.end as u64 - offset)));
+            let delta = ObjectContent::decode(&mut decoder, size, ObjectType::Blob, self.deadline)?;
+            drop(decoder);
             let limit = crate::limits::object_byte_limit(self.max_object_bytes, content.kind);
             content = content.apply_delta(delta.file, Some(limit), self.deadline)?;
         }
