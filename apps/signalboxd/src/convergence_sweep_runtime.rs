@@ -169,10 +169,11 @@ impl ConvergenceSweepRuntime {
                     .map(|pull_request| SweepTarget {
                         repository: repository.repository().clone(),
                         pull_request: *pull_request,
-                        credentials: FileCredentialAccess::new(
-                            repository.credential_file().to_path_buf(),
+                        credentials: FileCredentialAccess::from_github(
+                            repository.credential(),
                             repository.credential_reference(),
-                        ),
+                        )
+                        .with_request_timeout(numeric_bounds.request_timeout),
                         credential_reference: repository.credential_reference(),
                     })
             })
@@ -750,22 +751,6 @@ impl ConvergenceSweepRuntime {
     }
 
     async fn fetch(&self, target: &SweepTarget) -> Result<FetchedPullRequest, CensusError> {
-        let credential = target
-            .credentials
-            .resolve(&target.credential_reference)
-            .await
-            .map_err(|_| CensusError::Credential)?;
-        if credential.expose_bytes().is_empty()
-            || credential.expose_bytes().len() > MAX_CREDENTIAL_BYTES
-        {
-            return Err(CensusError::Credential);
-        }
-        let mut authorization = Vec::with_capacity(7 + credential.expose_bytes().len());
-        authorization.extend_from_slice(b"Bearer ");
-        authorization.extend_from_slice(credential.expose_bytes());
-        let mut authorization =
-            HeaderValue::from_bytes(&authorization).map_err(|_| CensusError::Credential)?;
-        authorization.set_sensitive(true);
         let mut policy = self.convergence_policy.clone().ok_or(CensusError::Shape)?;
         if let Some(ceiling) = self.numeric_bounds.connection_pages {
             policy.page_limit = policy.page_limit.min(ceiling);
@@ -782,14 +767,15 @@ impl ConvergenceSweepRuntime {
             .get(&key)
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let app = target.credentials.github_app();
         let mut send = |request| -> RequestFuture<'_> {
-            let authorization = &authorization;
+            let app = app.as_deref();
             Box::pin(async move {
                 let result = match request {
                     GitHubRequest::GraphQl { query, variables } => {
-                        self.graphql(&query, variables, authorization).await
+                        self.graphql(&query, variables, target, app).await
                     }
-                    GitHubRequest::Rest { path } => self.rest(&path, authorization).await,
+                    GitHubRequest::Rest { path } => self.rest(&path, target, app).await,
                 };
                 result.map_err(|_| {
                     signalbox_convergence::Error::Evidence(
@@ -836,22 +822,31 @@ impl ConvergenceSweepRuntime {
         })
     }
 
-    async fn rest(&self, path: &str, authorization: &HeaderValue) -> Result<Value, CensusError> {
-        let mut response = self
+    async fn rest(
+        &self,
+        path: &str,
+        target: &SweepTarget,
+        app: Option<&signalbox_github_transport::AppAuthentication>,
+    ) -> Result<Value, CensusError> {
+        let request = self
             .client
             .get(format!("{}{path}", self.rest_base))
-            .header(AUTHORIZATION, authorization.clone())
             .header(ACCEPT, "application/vnd.github+json")
-            .header(USER_AGENT, USER_AGENT_VALUE)
-            .send()
-            .await
-            .map_err(|_| CensusError::Request)?;
+            .header(USER_AGENT, USER_AGENT_VALUE);
+        let mut response = send_census_request(
+            request,
+            self.numeric_bounds.request_timeout,
+            target.credentials.resolve(&target.credential_reference),
+            app,
+        )
+        .await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(Value::Null);
         }
         if response.status() != StatusCode::OK {
             return Err(CensusError::Response);
         }
+        let credential = signalbox_github_transport::response_credential(&response).map(Vec::from);
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| CensusError::Response)? {
             if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
@@ -859,14 +854,15 @@ impl ConvergenceSweepRuntime {
             }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(|_| CensusError::Decode)
+        decode_response(&bytes, credential.as_deref())
     }
 
     async fn graphql(
         &self,
         query: &str,
         variables: Value,
-        authorization: &HeaderValue,
+        target: &SweepTarget,
+        app: Option<&signalbox_github_transport::AppAuthentication>,
     ) -> Result<Value, CensusError> {
         let body = serde_json::to_vec(&json!({"query": query, "variables": variables}))
             .map_err(|_| CensusError::Decode)?;
@@ -874,18 +870,22 @@ impl ConvergenceSweepRuntime {
         if self.numeric_bounds.request_attempts == Some(0) {
             return Err(CensusError::Request);
         }
-        let bytes = 'attempts: loop {
+        let (bytes, credential) = 'attempts: loop {
             attempt += 1;
-            let sent = self
+            let request = self
                 .client
                 .post(&self.graphql_url)
-                .header(AUTHORIZATION, authorization.clone())
                 .header(ACCEPT, "application/vnd.github+json")
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, USER_AGENT_VALUE)
-                .body(body.clone())
-                .send()
-                .await;
+                .body(body.clone());
+            let sent = send_census_request(
+                request,
+                self.numeric_bounds.request_timeout,
+                target.credentials.resolve(&target.credential_reference),
+                app,
+            )
+            .await;
             match sent {
                 Ok(response)
                     if self
@@ -901,6 +901,8 @@ impl ConvergenceSweepRuntime {
                     if response.status() != StatusCode::OK {
                         return Err(CensusError::Response);
                     }
+                    let credential =
+                        signalbox_github_transport::response_credential(&response).map(Vec::from);
                     let mut bytes = Vec::new();
                     loop {
                         match response.chunk().await {
@@ -914,7 +916,7 @@ impl ConvergenceSweepRuntime {
                                 }
                                 bytes.extend_from_slice(&chunk);
                             }
-                            Ok(None) => break 'attempts bytes,
+                            Ok(None) => break 'attempts (bytes, credential),
                             Err(_)
                                 if self
                                     .numeric_bounds
@@ -928,6 +930,7 @@ impl ConvergenceSweepRuntime {
                         }
                     }
                 }
+                Err(CensusError::Credential) => return Err(CensusError::Credential),
                 Err(_)
                     if self
                         .numeric_bounds
@@ -939,12 +942,93 @@ impl ConvergenceSweepRuntime {
                 Err(_) => return Err(CensusError::Request),
             }
         };
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| CensusError::Decode)?;
+        let value = decode_response(&bytes, credential.as_deref())?;
         if value.get("errors").is_some() {
             return Err(CensusError::Response);
         }
         Ok(value)
     }
+}
+
+async fn send_census_request(
+    request: reqwest::RequestBuilder,
+    timeout: Option<Duration>,
+    resolution: impl std::future::Future<
+        Output = Result<
+            signalbox_model_runtime::CredentialValue,
+            signalbox_model_runtime::CredentialAccessError,
+        >,
+    >,
+    app: Option<&signalbox_github_transport::AppAuthentication>,
+) -> Result<reqwest::Response, CensusError> {
+    let deadline = timeout
+        .map(|timeout| {
+            Instant::now()
+                .checked_add(timeout)
+                .ok_or(CensusError::Request)
+        })
+        .transpose()?;
+    let credential = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, resolution)
+            .await
+            .map_err(|_| CensusError::Credential)?,
+        None => resolution.await,
+    }
+    .map_err(|_| CensusError::Credential)?;
+    if credential.expose_bytes().is_empty()
+        || credential.expose_bytes().len() > MAX_CREDENTIAL_BYTES
+    {
+        return Err(CensusError::Credential);
+    }
+    let mut authorization = Vec::with_capacity(7 + credential.expose_bytes().len());
+    authorization.extend_from_slice(b"Bearer ");
+    authorization.extend_from_slice(credential.expose_bytes());
+    let mut authorization =
+        HeaderValue::from_bytes(&authorization).map_err(|_| CensusError::Credential)?;
+    authorization.set_sensitive(true);
+    let mut request = request.header(AUTHORIZATION, authorization);
+    let remaining = deadline
+        .map(|deadline| {
+            deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or(CensusError::Request)
+        })
+        .transpose()?;
+    if let Some(app) = app {
+        app.send(request, remaining)
+            .await
+            .map_err(census_app_failure)
+    } else {
+        if let Some(remaining) = remaining {
+            request = request.timeout(remaining);
+        }
+        request.send().await.map_err(|_| CensusError::Request)
+    }
+}
+
+fn census_app_failure(failure: signalbox_github_transport::AppRequestFailure) -> CensusError {
+    match failure {
+        signalbox_github_transport::AppRequestFailure::Credential(_) => CensusError::Credential,
+        signalbox_github_transport::AppRequestFailure::Request(_) => CensusError::Request,
+    }
+}
+
+fn decode_response(bytes: &[u8], credential: Option<&[u8]>) -> Result<Value, CensusError> {
+    let mut value = serde_json::from_slice(bytes).map_err(|_| CensusError::Decode)?;
+    if let Some(credential) = credential {
+        let token = std::str::from_utf8(credential)
+            .ok()
+            .filter(|token| !token.is_empty())
+            .ok_or(CensusError::Credential)?;
+        let encoded = Value::String(token.to_owned()).to_string();
+        crate::repo_watch_credentials::scrub_app_json(
+            &mut value,
+            token,
+            &encoded[1..encoded.len() - 1],
+        );
+    }
+    Ok(value)
 }
 
 struct FetchedPullRequest {
@@ -1047,6 +1131,132 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn app_transport_failures_remain_request_failures_for_convergence_retries() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let source = Client::new().get("invalid-url").build().unwrap_err();
+        assert!(matches!(
+            census_app_failure(signalbox_github_transport::AppRequestFailure::Request(
+                source
+            )),
+            CensusError::Request,
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn census_credential_preparation_leaves_only_the_remaining_dispatch_budget() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        // Arbitrary App identities; a pending key reader prevents network dispatch.
+        let app = signalbox_github_transport::AppAuthentication::new(
+            42,
+            73,
+            Arc::new(|| Box::pin(std::future::pending())),
+        );
+        let resolution = async {
+            sleep(Duration::from_secs(20)).await;
+            Ok(signalbox_model_runtime::CredentialValue::new(
+                "synthetic-installation-token",
+            ))
+        };
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(31),
+            send_census_request(
+                Client::new().get(GRAPHQL_URL),
+                Some(Duration::from_secs(30)),
+                resolution,
+                Some(&app),
+            ),
+        )
+        .await
+        .expect("preparation and stalled App dispatch must share one deadline");
+        assert!(matches!(result, Err(CensusError::Credential)));
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn census_expired_credential_preparation_does_not_dispatch() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(31),
+            send_census_request(
+                Client::new().get(GRAPHQL_URL),
+                Some(Duration::from_secs(30)),
+                std::future::pending(),
+                None,
+            ),
+        )
+        .await
+        .expect("a stalled credential lookup expires before any network request");
+        assert!(matches!(result, Err(CensusError::Credential)));
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn response_tokens_are_scrubbed_before_convergence_commission_content() {
+        const RESPONSE_TOKEN: &str = "response-installation-secret\"with\\escapes";
+        let encoded = Value::String(RESPONSE_TOKEN.to_owned()).to_string();
+        let escaped = &encoded[1..encoded.len() - 1];
+        let response = json!({"data": {"repository": {"pullRequest": {
+            "state": "OPEN", "isDraft": false, "body": "", "headRefOid": FIXTURE_HEAD_SHA,
+            "headRef": {"target": {"oid": FIXTURE_HEAD_SHA, "statusCheckRollup": {
+                "state": "FAILURE", "contexts": {"nodes": [
+                    {"__typename": "CheckRun", "name": format!("exact {RESPONSE_TOKEN}"), "conclusion": "FAILURE"},
+                    {"__typename": "CheckRun", "name": format!("escaped {escaped}"), "conclusion": "FAILURE"},
+                ]},
+            }}},
+        }}}});
+        let value = decode_response(
+            &serde_json::to_vec(&response).unwrap(),
+            Some(RESPONSE_TOKEN.as_bytes()),
+        )
+        .expect("response decodes with its current token scrubbed");
+        let node = value["data"]["repository"]["pullRequest"].clone();
+        let snapshot = signalbox_convergence::Snapshot {
+            initial: node.clone(),
+            current: node,
+            comparisons: Default::default(),
+            blobs: Default::default(),
+            previous: json!({}),
+            observed_at: None,
+        };
+        let policy_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/convergence/examples/repository.toml");
+        let mut policy =
+            ConvergencePolicy::read(&policy_path).expect("shared convergence policy loads");
+        policy.non_gating_check_patterns.clear();
+        let evaluation =
+            signalbox_convergence::evaluate(&snapshot, &policy).expect("fixture evaluates");
+        let fetched = FetchedPullRequest {
+            base_branch: BranchName::try_new(FIXTURE_BASE_BRANCH.to_owned()).unwrap(),
+            head_branch: BranchName::try_new(FIXTURE_HEAD_BRANCH.to_owned()).unwrap(),
+            head_repository: RepositorySlug::try_new(FIXTURE_HEAD_REPOSITORY.to_owned()).unwrap(),
+            head_sha: CommitSha::try_new(FIXTURE_HEAD_SHA.to_owned()).unwrap(),
+            evaluation,
+        };
+        let content =
+            commission_content(&fixture_target(), &fetched, &fetched.evaluation.verdict).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            value["gating_checks"],
+            json!([
+                {"name": "exact [redacted]", "state": "FAILURE"},
+                {"name": "escaped [redacted]", "state": "FAILURE"},
+            ])
+        );
+        assert!(!content.contains("response-installation-secret"));
+    }
+
+    #[test]
+    fn responses_without_app_credentials_retain_their_observation_fields() {
+        let response = json!({"name": "check without an App token"});
+        assert_eq!(
+            decode_response(&serde_json::to_vec(&response).unwrap(), None).unwrap(),
+            response
+        );
+    }
 
     fn example_numeric_bounds() -> ConvergenceSweepNumericBounds {
         let configured = crate::configuration::checked_in_example_configuration()

@@ -7,6 +7,7 @@
 //! deployment configuration, and migration policy at this executable
 //! boundary.
 
+#[cfg(test)]
 use signalboxd::credential_files_conflict;
 use signalboxd::repo_watch_runtime::{
     RepositoryWatchRuntime, RepositoryWatchRuntimeError, RepositoryWatchServices,
@@ -284,7 +285,7 @@ impl HubConfiguration {
             template_configuration_file,
         )?;
         let brave_api_key_file = required_path(BRAVE_API_KEY_FILE_ENVIRONMENT, brave_api_key_file)?;
-        let github_token_file = required_path(GITHUB_TOKEN_FILE_ENVIRONMENT, github_token_file)?;
+        let github_token_file = github_token_file.map(PathBuf::from).unwrap_or_default();
         let process_socket_path =
             required_path(PROCESS_SOCKET_PATH_ENVIRONMENT, process_socket_path)?;
         let runner_socket_path = match runner_socket_path {
@@ -326,11 +327,7 @@ impl HubConfiguration {
     }
 
     fn repository_watch_credential_conflicts(&self, configuration: &HubModelConfiguration) -> bool {
-        configuration.repository_watch().is_some_and(|watch| {
-            watch.repositories().iter().any(|repository| {
-                credential_files_conflict(&self.github_token_file, repository.credential_file())
-            })
-        })
+        configuration.github_tool_credential_conflicts(&self.github_token_file)
     }
 
     fn brave_api_key_file(&self) -> PathBuf {
@@ -1486,16 +1483,10 @@ async fn run_hub(
                 SanitizedStartupCause::Credential(&error),
             )
         })?;
-    let integration_credentials = FileCredentialAccess::from_files([
-        (
-            CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
-            configuration.github_token_file(),
-        ),
-        (
-            CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
-            configuration.brave_api_key_file(),
-        ),
-    ]);
+    let integration_credentials = FileCredentialAccess::from_files([(
+        CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
+        configuration.brave_api_key_file(),
+    )]);
     integration_credentials.validate().map_err(|error| {
         erase_startup_cause(
             RuntimePhase::Configuration,
@@ -1563,10 +1554,20 @@ async fn run_hub(
         })?;
     let credential_reference =
         ModelCallCredentialReference::new(model_configuration.fallback_credential_profile());
-    let code_host_credentials = FileCredentialAccess::new(
-        configuration.github_token_file(),
-        CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
-    );
+    let code_host_reference = CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE);
+    let code_host_credentials = match model_configuration
+        .github_credential_profile(CODE_HOST_CREDENTIAL_REFERENCE)
+    {
+        Some(profile) => FileCredentialAccess::from_github(profile, code_host_reference)
+            .with_request_timeout(configured_duration("code_host_request_timeout")),
+        None => FileCredentialAccess::new(configuration.github_token_file(), code_host_reference),
+    };
+    code_host_credentials.validate().map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Credential(&error),
+        )
+    })?;
     let web_search_credentials = FileCredentialAccess::new(
         configuration.brave_api_key_file(),
         CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
@@ -1578,7 +1579,8 @@ async fn run_hub(
                 SanitizedStartupCause::Static("github_transport_construction_failed"),
             )
         })?
-        .with_convergence_policy(model_configuration.convergence().cloned());
+        .with_convergence_policy(model_configuration.convergence().cloned())
+        .with_app(code_host_credentials.github_app());
     let oauth_registrations = model_configuration.oauth_registrations();
     let root_path = oauth_credential_root(configuration.process_socket_path());
     let retained_root = match root_path.symlink_metadata() {
@@ -2110,6 +2112,7 @@ async fn run_hub(
     };
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let approval_judge_repository_watch = repository_watch_runtime.clone();
+    let workflow_repository_watch = repository_watch_runtime.clone();
     let repository_watch_worker = match repository_watch_runtime {
         Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
         None => None,
@@ -2390,7 +2393,13 @@ async fn run_hub(
         );
     }
     let (workflow_shutdown, workflow_shutdown_receiver) = oneshot::channel();
-    let workflows = signalboxd::workflows::WorkflowRuntime::new(pool.clone());
+    let workflows =
+        signalboxd::workflows::WorkflowRuntime::new(pool.clone()).map(|(service, runtime)| {
+            (
+                service,
+                runtime.with_repository_watch(workflow_repository_watch),
+            )
+        });
     let process_runtime = match &workflows {
         Ok((service, _)) => process_runtime.with_workflows(service.clone()),
         Err(_) => process_runtime,
@@ -2956,18 +2965,18 @@ mod tests {
 
     use super::{
         AnthropicConstructionError, BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT,
-        FENCED_POOL_MAX_CONNECTIONS, FencedPoolFloorReconciliationPolicy,
-        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError,
-        HubConfigurationValues, HubRuntimeError, MODEL_CONFIGURATION_FILE_ENVIRONMENT,
-        OpenAiConstructionError, OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT,
-        ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RequiredSettingFailure,
-        RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
-        RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
-        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, combine_runtime_stop_cause,
-        completed_runtime_outcome, credential_files_conflict, database_close_failure_outcome,
-        drain_runtime_tasks, erase_startup_cause, fenced_pool_floor_reconciliation_policy,
-        graceful_shutdown_window, migrate_scan_then_schedule, operator_filter,
-        process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
+        FENCED_POOL_MAX_CONNECTIONS, FencedPoolFloorReconciliationPolicy, HubConfiguration,
+        HubConfigurationError, HubConfigurationValues, HubRuntimeError,
+        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OpenAiConstructionError, OperatorFilterDisposition,
+        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
+        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
+        RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
+        ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
+        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
+        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
+        fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
+        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
+        report_database_close_failure, run_scheduler_until_shutdown,
         runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
         validate_fenced_pool_min_connections,
     };
@@ -3401,16 +3410,12 @@ mod tests {
                 RequiredSettingFailure::Missing,
             ))
         );
-        assert_eq!(
+        assert!(
             HubConfiguration::from_values(HubConfigurationValues {
                 github_token_file: None,
                 ..hub_configuration_values()
             })
-            .err(),
-            Some(HubConfigurationError::new(
-                GITHUB_TOKEN_FILE_ENVIRONMENT,
-                RequiredSettingFailure::Missing,
-            ))
+            .is_ok()
         );
         assert_eq!(
             HubConfiguration::from_values(HubConfigurationValues {

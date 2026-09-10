@@ -34,6 +34,83 @@ fn payload(value: &'static [u8]) -> InlineFramePayload {
     InlineFramePayload::new(value)
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn effect_answer_lookup_requires_exact_request_and_correlated_answer_in_terminal_runs()
+-> Result<(), Box<dyn Error>> {
+    let (_database, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool);
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let request = EffectRequest::new(
+        ProgramCapability::RepoWatch,
+        "repo.commitEvaluation".into(),
+        payload(b"evaluation"),
+    );
+    let frame = repository
+        .append_request(run, None, RequestKind::Effect(request.clone()))
+        .await?;
+    assert!(
+        !repository
+            .has_effect_answer(&request, &payload(b"committed"))
+            .await?
+    );
+    let other = EffectRequest::new(
+        ProgramCapability::RepoWatch,
+        "repo.submitPending".into(),
+        payload(b"evaluation"),
+    );
+    repository
+        .append_request(run, None, RequestKind::Effect(other.clone()))
+        .await?;
+    repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: frame.ordinal(),
+                payload: payload(b"committed"),
+            },
+        )
+        .await?;
+    repository
+        .append_delivery(run, DeliveryKind::RunCancel(payload(b"cancelled")))
+        .await?;
+    assert!(
+        repository
+            .has_effect_answer(&request, &payload(b"committed"))
+            .await?
+    );
+    assert!(
+        !repository
+            .has_effect_answer(&other, &payload(b"committed"))
+            .await?
+    );
+    assert!(
+        !repository
+            .has_effect_answer(&request, &payload(b"different answer"))
+            .await?
+    );
+    for different in [
+        EffectRequest::new(
+            ProgramCapability::Session,
+            request.method().into(),
+            request.payload().clone(),
+        ),
+        EffectRequest::new(
+            request.capability(),
+            request.method().into(),
+            payload(b"different input"),
+        ),
+    ] {
+        assert!(
+            !repository
+                .has_effect_answer(&different, &payload(b"committed"))
+                .await?
+        );
+    }
+    Ok(())
+}
+
 fn assert_constraint_error(error: sqlx::Error, expected_constraint: &str) {
     let sqlx::Error::Database(database) = error else {
         panic!("expected a PostgreSQL constraint error, got {error:?}");

@@ -74,7 +74,7 @@ async fn submit_with_checkout<Runner: signalbox_tools_exec::ProcessRunner>(
             &mut RepositoryWatchCommandCodec,
             &mut CheckoutCommandSink {
                 store,
-                configuration,
+                configuration: Some(configuration),
                 core: sink,
                 runner,
             },
@@ -145,11 +145,11 @@ pub async fn scavenge_checkouts(
     Ok(())
 }
 
-struct CheckoutCommandSink<'a, Runner> {
-    store: &'a signalbox_module_repo_watch_v2::RepoWatchStore,
-    configuration: &'a crate::RepositoryWatchConfiguration,
-    core: &'a mut RepositoryWatchCommandSink,
-    runner: Option<Runner>,
+pub(crate) struct CheckoutCommandSink<'a, Runner> {
+    pub(crate) store: &'a signalbox_module_repo_watch_v2::RepoWatchStore,
+    pub(crate) configuration: Option<&'a crate::RepositoryWatchConfiguration>,
+    pub(crate) core: &'a mut RepositoryWatchCommandSink,
+    pub(crate) runner: Option<Runner>,
 }
 
 impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
@@ -200,12 +200,12 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
             Some((stop, sticky))
         } else if checkout.removed || checkout.head.as_ref() == Some(context.head_sha()) {
             None
-        } else if let Some(repository) = self
-            .configuration
-            .repositories()
-            .iter()
-            .find(|repository| repository.repository() == checkout.event.repository())
-        {
+        } else if let Some(repository) = self.configuration.and_then(|configuration| {
+            configuration
+                .repositories()
+                .iter()
+                .find(|repository| repository.repository() == checkout.event.repository())
+        }) {
             let location = match checkout.location {
                 Some(location) => Some(location),
                 None => match self.core.models.daemon_tools() {
@@ -319,10 +319,9 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
             }
         } else if !checkout.removed {
             use signalbox_module_repo_watch_v2::checkout::KickoffPushAuthority;
-            let push_authority = match crate::repo_watch_runtime::git_push_repository(
-                self.configuration,
-                &checkout.event,
-            ) {
+            let push_authority = match self.configuration.and_then(|configuration| {
+                crate::repo_watch_runtime::git_push_repository(configuration, &checkout.event)
+            }) {
                 Some(_) => KickoffPushAuthority::Available,
                 None => KickoffPushAuthority::Unavailable,
             };

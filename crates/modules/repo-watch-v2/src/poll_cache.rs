@@ -23,6 +23,8 @@ use crate::{
 
 /// Conditional transport for complete repository observations.
 pub trait ConditionalObservationRead: Send + Sync {
+    /// Reads the authenticated principal's REST quota from response headers.
+    fn rest_remaining(&self) -> impl Future<Output = Result<u64, ObservationError>> + Send;
     fn conditional_page(
         &self,
         path: &str,
@@ -35,6 +37,13 @@ pub trait ConditionalObservationRead: Send + Sync {
 }
 
 impl ConditionalObservationRead for GitHubClient {
+    async fn rest_remaining(&self) -> Result<u64, ObservationError> {
+        let response = self
+            .rest_quota()
+            .await
+            .map_err(ObservationError::Transport)?;
+        response.ok_or(ObservationError::InvalidResponse)
+    }
     async fn conditional_page(
         &self,
         path: &str,
