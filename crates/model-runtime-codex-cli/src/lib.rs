@@ -12,6 +12,8 @@
 
 mod app_server;
 mod config;
+mod image;
+pub use image::image_presentation_capability;
 mod event;
 mod executable_pin;
 mod oauth;
@@ -24,7 +26,7 @@ mod wire;
 pub use config::CodexCliConfig;
 pub use oauth::{
     OauthCredentialInstaller, OauthCredentialMaterial, OauthCredentialProvider,
-    OauthCredentialRoot, OauthDeliveryFuture, OauthDeliveryOutcome,
+    OauthCredentialRoot, OauthDeliveryFuture, OauthDeliveryOutcome, OauthRecoveryFuture,
 };
 pub use runtime::{
     CodexCliConstructionError, CodexCliPreparedRequest, CodexCliRuntime, CodexCliVersionProbe,

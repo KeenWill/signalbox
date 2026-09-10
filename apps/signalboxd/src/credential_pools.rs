@@ -20,8 +20,8 @@ use toml_edit::{InlineTable, Item, Table};
 use url::Url;
 
 use crate::configuration::{
-    AvailabilityCause, BillingKind, HubModelConfigurationError, ModelAdapter,
-    reject_unknown_fields, required_string, validated_name,
+    BillingKind, HubModelConfigurationError, ModelAdapter, reject_unknown_fields, required_string,
+    validated_name,
 };
 
 /// Maximum UTF-8 byte length admitted for a credential-delivery path.
@@ -845,7 +845,6 @@ pub(crate) fn parse_credential_pools(
             headroom_low: parse_trigger_action(pool, CredentialPoolTrigger::HeadroomLow)?,
         };
         reject_unobserved_capacity_policy(&parsed)?;
-        reject_unprovable_substitution(&parsed)?;
         if pools.insert(Arc::clone(&name), parsed).is_some() {
             return Err(HubModelConfigurationError::DuplicateCredentialPool {
                 credential_pool: name,
@@ -1000,32 +999,6 @@ fn parse_pool_headroom_reserve_percent(
                 .ok_or(HubModelConfigurationError::InvalidField)?,
         )),
     }
-}
-
-/// Rejects `switch_now` for any trigger whose cause this pool's adapter cannot
-/// prove the provider refused before accepting.
-///
-/// Only a decoded native error envelope supplies that proof, and each adapter
-/// names native tokens for only some causes, so the check is per adapter *and*
-/// per trigger. A pool's members already agree on one adapter, so it is exact
-/// per pool. Left admitted, the action would read as failover the deployment
-/// does not have while every matching response terminalized exactly as `stay`.
-fn reject_unprovable_substitution(pool: &CredentialPool) -> Result<(), HubModelConfigurationError> {
-    let unprovable = [
-        (pool.quota_exhausted, AvailabilityCause::QuotaExhausted),
-        (pool.rate_limited, AvailabilityCause::RateLimited),
-        (pool.overloaded, AvailabilityCause::Overloaded),
-    ]
-    .into_iter()
-    .any(|(action, cause)| {
-        action == CredentialPoolAction::SwitchNow && !pool.adapter.proves_non_acceptance(cause)
-    });
-    if unprovable {
-        return Err(HubModelConfigurationError::UnprovableSubstitutionPolicy {
-            credential_pool: Arc::clone(&pool.name),
-        });
-    }
-    Ok(())
 }
 
 /// Refuses configuration whose effect depends on remaining provider capacity

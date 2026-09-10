@@ -308,11 +308,6 @@ impl FileMediaRegistry {
         }
 
         if let Some(reader) = self.streaming_text_reader.as_ref() {
-            if request.source.byte_length().get() > self.ceilings.validation_source_bytes {
-                return Ok(FileInspection::Unknown {
-                    source: request.source,
-                });
-            }
             let declaration = self
                 .readers
                 .get(reader)
@@ -569,6 +564,38 @@ impl FileMediaRegistry {
         source: &dyn VerifiedBlobSource,
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
+        self.read_with_reader(processor, request, source, cancellation, None)
+            .await
+            .map(|(_, result)| result)
+    }
+
+    /// Returns completed reads, refusing generated output without artifact publication.
+    pub async fn read_with_reader(
+        &self,
+        processor: &dyn FileMediaProcessor,
+        request: FileReadRequest,
+        source: &dyn VerifiedBlobSource,
+        cancellation: &dyn crate::CancellationSignal,
+        expected_reader: Option<&ReaderIdentity>,
+    ) -> Result<(ReaderIdentity, FileReadResult), FileMediaFailure> {
+        let (reader, prepared) = self
+            .prepare_read_with_reader(processor, request, source, cancellation, expected_reader)
+            .await?;
+        match prepared {
+            crate::PreparedFileRead::Result(result) => Ok((reader, result)),
+            crate::PreparedFileRead::Generated(_) => Err(FileMediaFailure::UnsupportedView),
+        }
+    }
+
+    /// Repeats inspection and binds a continuation to the reader selected on its first page.
+    pub async fn prepare_read_with_reader(
+        &self,
+        processor: &dyn FileMediaProcessor,
+        request: FileReadRequest,
+        source: &dyn VerifiedBlobSource,
+        cancellation: &dyn crate::CancellationSignal,
+        expected_reader: Option<&ReaderIdentity>,
+    ) -> Result<(ReaderIdentity, crate::PreparedFileRead), FileMediaFailure> {
         let initial_request = match &request.input {
             crate::FileReadInput::Initial { options } if read_options_fit(options) => true,
             crate::FileReadInput::Initial { .. } => {
@@ -602,6 +629,9 @@ impl FileMediaRegistry {
                 return Err(FileMediaFailure::EncryptedOrLocked { media_type });
             }
         };
+        if expected_reader.is_some_and(|expected| expected != validated.reader()) {
+            return Err(FileMediaFailure::InvalidViewArguments);
+        }
         let view = validated
             .views()
             .iter()
@@ -644,14 +674,193 @@ impl FileMediaRegistry {
                 cancellation,
             )
             .await?;
-        sanitize_read(
+        if let ProcessorReadOutput::GeneratedImage {
+            media_type,
+            provider,
+            reader: output_reader,
+            revision,
+            byte_length,
+            bytes,
+        } = raw
+        {
+            let invalid = || FileMediaFailure::ProcessorFailed;
+            let crate::ReadViewBounds::Image { output_bytes, .. } = view.bounds() else {
+                return Err(invalid());
+            };
+            let media_type = media_type
+                .parse::<crate::CanonicalMediaType>()
+                .map_err(|_| invalid())?;
+            if !initial_request
+                || view.image_kind() != Some(crate::ImageViewKind::Generated)
+                || !view.output_media_types().contains(&media_type)
+                || bytes.len() as u64 != byte_length
+                || byte_length > output_bytes.min(self.ceilings.presented_image_bytes)
+            {
+                return Err(invalid());
+            }
+            let expected_reader = ReaderIdentity::new(
+                crate::FileReaderProviderName::try_new(provider).map_err(|_| invalid())?,
+                crate::FileReaderName::try_new(output_reader).map_err(|_| invalid())?,
+                crate::FileReaderRevision::try_new(revision).map_err(|_| invalid())?,
+            );
+            if !self.readers.contains_key(&expected_reader) {
+                return Err(invalid());
+            }
+            let bounds = view.bounds();
+            let prepared = crate::GeneratedMediaView {
+                source: validated.clone(),
+                expected_reader,
+                media_type,
+                bounds,
+                bytes: crate::artifact::ArtifactBytes::new(bytes).ok_or_else(invalid)?,
+            };
+            return Ok((
+                validated.reader().clone(),
+                crate::PreparedFileRead::Generated(prepared),
+            ));
+        }
+        let result = sanitize_read(
             reader,
             view,
             self.ceilings,
             provider_container_entries,
             initial_request,
             raw,
-        )
+            &validated,
+        )?;
+        Ok((
+            validated.reader().clone(),
+            crate::PreparedFileRead::Result(result),
+        ))
+    }
+    /// Re-runs ordinary detection and validation over completed generated bytes before publication.
+    pub async fn validate_generated(
+        &self,
+        processor: &dyn FileMediaProcessor,
+        generated: crate::GeneratedMediaView,
+        cancellation: &dyn crate::CancellationSignal,
+    ) -> Result<crate::ValidatedMediaArtifact, FileMediaFailure> {
+        let invalid = || FileMediaFailure::ProcessorFailed;
+        let file_use = crate::FileUse::new(
+            generated.bytes.digest(),
+            generated.bytes.byte_length(),
+            crate::AttachmentKind::Image,
+            crate::DeclaredMediaType::try_new(generated.media_type.as_str())
+                .map_err(|_| invalid())?,
+            None,
+        );
+        let inspection = self
+            .inspect(
+                processor,
+                InspectionRequest {
+                    source: file_use,
+                    visible_part: None,
+                },
+                &generated.bytes,
+                cancellation,
+            )
+            .await?;
+        let FileInspection::Validated(presented) = inspection else {
+            return Err(invalid());
+        };
+        if presented.reader() != &generated.expected_reader
+            || presented.detected_media_type() != &generated.media_type
+            || !matches!(
+                presented.validation(),
+                ValidationEvidence::StrongSignature | ValidationEvidence::StructuralValidation
+            )
+        {
+            return Err(invalid());
+        }
+        let width = presented
+            .metadata()
+            .value()
+            .get("width")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(invalid)?;
+        let height = presented
+            .metadata()
+            .value()
+            .get("height")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(invalid)?;
+        let crate::ReadViewBounds::Image {
+            width: max_width,
+            height: max_height,
+            pixels,
+            ..
+        } = generated.bounds
+        else {
+            return Err(invalid());
+        };
+        if width == 0
+            || height == 0
+            || width > max_width.min(self.ceilings.image_axis)
+            || height > max_height.min(self.ceilings.image_axis)
+            || u64::from(width) * u64::from(height) > pixels.min(self.ceilings.decoded_image_pixels)
+        {
+            return Err(invalid());
+        }
+        let direct = presented
+            .views()
+            .iter()
+            .find(|view| {
+                view.image_kind() == Some(crate::ImageViewKind::Direct)
+                    && view
+                        .output_media_types()
+                        .contains(presented.detected_media_type())
+            })
+            .ok_or_else(invalid)?;
+        let reader = self.readers.get(presented.reader()).ok_or_else(invalid)?;
+        let decoded = processor
+            .read(
+                presented.reader(),
+                FileMediaProviderReadRequest {
+                    source: presented.source().clone(),
+                    detected_media_type: presented.detected_media_type().clone(),
+                    validation: presented.validation(),
+                    metadata: presented.metadata().clone(),
+                    maximum_source_bytes: self
+                        .ceilings
+                        .validation_source_bytes
+                        .min(reader.validation().source_bytes()),
+                    view: direct.name().clone(),
+                    input: crate::FileReadInput::Initial {
+                        options: serde_json::json!({}),
+                    },
+                    maximum_image_axis: self.ceilings.image_axis,
+                    maximum_decoded_image_pixels: self.ceilings.decoded_image_pixels,
+                    maximum_container_entries: self.ceilings.observed_container_entries,
+                },
+                &generated.bytes,
+                cancellation,
+            )
+            .await?;
+        if !matches!(
+            sanitize_read(
+                reader,
+                direct,
+                self.ceilings,
+                None,
+                true,
+                decoded,
+                &presented
+            )?,
+            FileReadResult::Reference(_)
+        ) {
+            return Err(invalid());
+        }
+        let reference = crate::FileMediaReference::derived_image(
+            &generated.source,
+            &presented,
+            crate::reference::ImageDimensions { width, height },
+        );
+        Ok(crate::ValidatedMediaArtifact {
+            reference,
+            bytes: generated.bytes,
+        })
     }
 }
 
@@ -881,8 +1090,90 @@ fn sanitize_read(
     provider_container_entries: Option<u64>,
     initial_request: bool,
     raw: ProcessorReadOutput,
+    validated: &ValidatedFile,
 ) -> Result<FileReadResult, FileMediaFailure> {
     match raw {
+        ProcessorReadOutput::ImageDescription => {
+            if !initial_request || view.image_kind() != Some(crate::ImageViewKind::Direct) {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            let metadata = validated.metadata().value();
+            let width = metadata
+                .get("width")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|value| *value > 0)
+                .ok_or(FileMediaFailure::ProcessorFailed)?;
+            let height = metadata
+                .get("height")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|value| *value > 0)
+                .ok_or(FileMediaFailure::ProcessorFailed)?;
+            Ok(FileReadResult::Structured {
+                body: serde_json::json!({
+                    "status":"large_image", "width":width, "height":height,
+                    "byte_length":validated.source().byte_length().get(),
+                    "available_views":validated.views().iter().filter(|view| view.image_kind() == Some(crate::ImageViewKind::Generated)).map(|view| view.name().as_str()).collect::<Vec<_>>()
+                }),
+                continuation: crate::ReadContinuation::Complete,
+            })
+        }
+        ProcessorReadOutput::GeneratedImage { .. } => Err(FileMediaFailure::ProcessorFailed),
+        ProcessorReadOutput::DirectReference { media_type } => {
+            let ReadViewBounds::Image {
+                source_bytes,
+                output_bytes,
+                width,
+                height,
+                pixels,
+            } = view.bounds()
+            else {
+                return Err(FileMediaFailure::ProcessorFailed);
+            };
+            if !initial_request
+                || view.image_kind() != Some(crate::ImageViewKind::Direct)
+                || media_type != validated.detected_media_type().as_str()
+                || !view
+                    .output_media_types()
+                    .contains(validated.detected_media_type())
+                || !matches!(
+                    validated.validation(),
+                    ValidationEvidence::StrongSignature | ValidationEvidence::StructuralValidation
+                )
+            {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            let metadata = validated.metadata().value();
+            let w = metadata
+                .get("width")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or(FileMediaFailure::ProcessorFailed)?;
+            let h = metadata
+                .get("height")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or(FileMediaFailure::ProcessorFailed)?;
+            if w == 0
+                || h == 0
+                || w > u64::from(width.min(ceilings.image_axis))
+                || h > u64::from(height.min(ceilings.image_axis))
+                || w.checked_mul(h)
+                    .is_none_or(|value| value > pixels.min(ceilings.decoded_image_pixels))
+                || validated.source().byte_length().get()
+                    > source_bytes
+                        .min(output_bytes)
+                        .min(ceilings.presented_image_bytes)
+            {
+                return Err(FileMediaFailure::OutputUnitTooLarge);
+            }
+            Ok(FileReadResult::Reference(
+                crate::FileMediaReference::direct_image(
+                    validated,
+                    crate::reference::ImageDimensions {
+                        width: w as u32,
+                        height: h as u32,
+                    },
+                ),
+            ))
+        }
         ProcessorReadOutput::Text {
             body,
             truncated,
@@ -1105,6 +1396,22 @@ fn validate_reader(
     }
     for view in reader.views() {
         validate_view(view.access(), view.bounds(), ceilings)?;
+        if matches!(view.bounds(), ReadViewBounds::Image { .. }) {
+            if view.image_kind().is_none()
+                || view.output_media_types().is_empty()
+                || view.output_media_types().len() > MAX_REGISTRY_READERS
+                || view
+                    .output_media_types()
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != view.output_media_types().len()
+            {
+                return Err(FileMediaRegistryConstructionError::ViewBounds);
+            }
+        } else if view.image_kind().is_some() || !view.output_media_types().is_empty() {
+            return Err(FileMediaRegistryConstructionError::ViewBounds);
+        }
     }
     Ok(())
 }
@@ -1301,9 +1608,23 @@ fn validate_view(
                 && string_bytes > 0
                 && string_bytes <= output_bytes
         }
-        ReadViewBounds::Image { .. }
-        | ReadViewBounds::Audio { .. }
-        | ReadViewBounds::File { .. } => false,
+        ReadViewBounds::Image {
+            width,
+            height,
+            pixels,
+            output_bytes,
+            ..
+        } => {
+            width > 0
+                && width <= crate::MAX_IMAGE_AXIS
+                && height > 0
+                && height <= crate::MAX_IMAGE_AXIS
+                && pixels > 0
+                && pixels <= crate::MAX_DECODED_IMAGE_PIXELS
+                && output_bytes > 0
+                && output_bytes <= crate::MAX_PRESENTED_IMAGE_BYTES
+        }
+        ReadViewBounds::Audio { .. } | ReadViewBounds::File { .. } => false,
     };
     if valid {
         Ok(())

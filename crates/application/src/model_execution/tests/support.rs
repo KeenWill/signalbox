@@ -88,8 +88,12 @@ pub(super) fn credential_reference() -> ModelCallCredentialReference {
 }
 
 pub(super) fn rendered_text(content: UserContent) -> ModelUserContent {
-    render_model_user_content(content, |_| None)
-        .expect("text-only fixture needs no attachment catalog facts")
+    render_model_user_content(
+        identity(1, SemanticTranscriptEntryId::from_uuid),
+        content,
+        |_| None,
+    )
+    .expect("text-only fixture needs no attachment catalog facts")
 }
 
 pub(super) fn ready(request: PreparedModelCallRequest) -> PrepareModelCallOutcome {
@@ -1521,9 +1525,9 @@ pub(super) fn rendered_content_bytes(messages: &[ModelConversationMessage]) -> u
                 request.arguments().as_str().len()
             }
             ModelConversationMessage::ToolResult { content, .. } => match content {
-                ModelToolResultContent::Success(ToolResultContent::Text(text)) => {
-                    text.as_str().len()
-                }
+                ModelToolResultContent::Success(
+                    ToolResultContent::Text(text) | ToolResultContent::Media { text, .. },
+                ) => text.as_str().len(),
                 ModelToolResultContent::ExecutionError(error) => {
                     error.detail().map_or(0, |detail| detail.as_str().len())
                 }

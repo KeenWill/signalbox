@@ -28,6 +28,9 @@ pub enum PreparationOutcome<C, P> {
 pub enum PreparationFailure {
     AdapterUnavailable { cause: &'static str },
     UnsupportedOperation { detail: string::String },
+    ImageUnavailable,
+    ImageMissing,
+    ImageCorrupt,
     CredentialUnavailable { error: CredentialAccessError },
     CredentialUnusable { detail: string::String },
 }
@@ -38,6 +41,7 @@ pub enum PreparationFailure {
 
 ```rust
 pub enum PreparationDefect {
+    ImageIntegrity,
     SerializationFailed { detail: string::String },
     RequestConstructionFailed { detail: string::String },
 }

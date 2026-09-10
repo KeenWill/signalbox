@@ -87,6 +87,19 @@ pub enum FileReadServiceInput {
 }
 
 impl FileReadServiceRequest {
+    /// Composes checked identities and one input mode; the registry validates view options.
+    pub const fn from_parts(
+        target: FileInspectServiceRequest,
+        view: ReadViewName,
+        input: FileReadServiceInput,
+    ) -> Self {
+        Self {
+            target,
+            view,
+            input,
+        }
+    }
+
     /// Borrows the visibility target.
     pub const fn target(&self) -> &FileInspectServiceRequest {
         &self.target
@@ -126,7 +139,22 @@ impl FileReadServiceRequest {
 
 /// Boxed future returned by the agent-facing file/media service.
 pub type FileMediaAgentServiceFuture<'a, Output> =
-    Pin<Box<dyn Future<Output = Result<Output, FileMediaFailure>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<Output, FileMediaServiceFailure>> + Send + 'a>>;
+
+/// Separates ordinary file failures from failures of the tool's authority infrastructure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileMediaServiceFailure {
+    /// Content-silent failure that may be committed as an ordinary tool result.
+    File(FileMediaFailure),
+    /// Operator failure that must retain its infrastructure or fail-closed class.
+    Operator(FileMediaExecutorError),
+}
+
+impl From<FileMediaFailure> for FileMediaServiceFailure {
+    fn from(failure: FileMediaFailure) -> Self {
+        Self::File(failure)
+    }
+}
 
 /// Visibility-authorized registry service consumed by both stable tools.
 pub trait FileMediaAgentService: Send {
@@ -148,7 +176,7 @@ pub trait FileMediaAgentService: Send {
 struct FileInspectArguments {
     /// Canonical sha256: digest of a visible attachment.
     digest: String,
-    /// Visible-part selector returned by attachment inspection.
+    /// Visible-part selector carried by the rendered attachment stub.
     visible_part: Option<String>,
 }
 
@@ -171,7 +199,7 @@ struct FileReadArguments {
     options: Option<BTreeMap<String, Value>>,
     /// Opaque cursor returned by the preceding file_read result.
     continuation: Option<String>,
-    /// Visible-part selector returned by attachment inspection.
+    /// Visible-part selector carried by the rendered attachment stub.
     visible_part: Option<String>,
 }
 
@@ -200,12 +228,12 @@ impl<Service> FileMediaTools<Service> {
             .map_err(|_| FileMediaToolConstructionError::ErrorDetail)?;
         let inspect = compile_contract_definition::<FileInspectContract>(
             ToolPermissionDefault::Auto,
-            ToolEffectClass::EffectFree,
+            ToolEffectClass::ExternalEffect,
         )
         .map_err(map_contract_error)?;
         let read = compile_contract_definition::<FileReadContract>(
             ToolPermissionDefault::Auto,
-            ToolEffectClass::EffectFree,
+            ToolEffectClass::ExternalEffect,
         )
         .map_err(map_contract_error)?;
         let catalog = CompiledToolCatalog::try_new([
@@ -401,14 +429,35 @@ pub struct FileMediaExecutor<Service> {
 }
 
 #[derive(signalbox_derive::OperatorError)]
-#[error("file media argument validation drifted")]
-/// A checked catalog/executor assumption drifted.
+#[error("file media tool infrastructure failed")]
+/// Sanitized authority or executor failure preserving its operator classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FileMediaExecutorError;
+pub struct FileMediaExecutorError {
+    class: OperatorFailureClass,
+}
+
+impl FileMediaExecutorError {
+    /// Carries an already classified, content-silent operator failure.
+    pub const fn from_class(class: OperatorFailureClass) -> Self {
+        Self { class }
+    }
+    /// Preserves the source failure's classification without retaining its content.
+    pub fn from_error(error: &impl ClassifyOperatorFailure) -> Self {
+        Self {
+            class: error.operator_failure_class(),
+        }
+    }
+
+    fn invalid_arguments() -> Self {
+        Self {
+            class: OperatorFailureClass::CallerOrHubBug,
+        }
+    }
+}
 
 impl ClassifyOperatorFailure for FileMediaExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
-        OperatorFailureClass::CallerOrHubBug
+        self.class
     }
 }
 
@@ -427,27 +476,38 @@ where
         let operation = if name == FILE_INSPECT_NAME {
             decode_inspect(arguments)
                 .map(FileMediaOperation::Inspect)
-                .map_err(|_| FileMediaExecutorError)
+                .map_err(|_| FileMediaExecutorError::invalid_arguments())
         } else if name == FILE_READ_NAME {
             decode_read(arguments)
                 .map(FileMediaOperation::Read)
-                .map_err(|_| FileMediaExecutorError)
+                .map_err(|_| FileMediaExecutorError::invalid_arguments())
         } else {
-            Err(FileMediaExecutorError)
+            Err(FileMediaExecutorError::invalid_arguments())
         };
         async move {
             let evidence = match operation? {
-                FileMediaOperation::Inspect(request) => match self.service.inspect(request).await {
-                    Ok(inspection) => inspection_evidence(inspection),
-                    Err(failure) => failure_evidence(failure),
-                },
-                FileMediaOperation::Read(request) => match self.service.read(request).await {
-                    Ok(result) => read_evidence(result),
-                    Err(failure) => failure_evidence(failure),
-                },
+                FileMediaOperation::Inspect(request) => {
+                    service_evidence(self.service.inspect(request).await, |value| {
+                        Ok(inspection_evidence(value))
+                    })?
+                }
+                FileMediaOperation::Read(request) => {
+                    service_evidence(self.service.read(request).await, read_evidence)?
+                }
             };
             Ok(invocation.bind(evidence))
         }
+    }
+}
+
+fn service_evidence<T>(
+    result: Result<T, FileMediaServiceFailure>,
+    completed: impl FnOnce(T) -> Result<ToolExecutorEvidence, FileMediaExecutorError>,
+) -> Result<ToolExecutorEvidence, FileMediaExecutorError> {
+    match result {
+        Ok(value) => completed(value),
+        Err(FileMediaServiceFailure::File(failure)) => failure_evidence(failure),
+        Err(FileMediaServiceFailure::Operator(error)) => Err(error),
     }
 }
 
@@ -545,8 +605,9 @@ fn ambiguous_failure(media_types: &[CanonicalMediaType]) -> ToolExecutorEvidence
     }))
 }
 
-fn read_evidence(result: FileReadResult) -> ToolExecutorEvidence {
-    match result {
+fn read_evidence(result: FileReadResult) -> Result<ToolExecutorEvidence, FileMediaExecutorError> {
+    Ok(match result {
+        FileReadResult::Reference(reference) => return reference_evidence(reference),
         FileReadResult::Text { body, continuation } => completed_json(json!({
             "status": "text",
             "body": body,
@@ -559,6 +620,50 @@ fn read_evidence(result: FileReadResult) -> ToolExecutorEvidence {
             "truncated": matches!(&continuation, signalbox_file_media_runtime::ReadContinuation::More { .. }),
             "cursor": continuation_cursor(continuation),
         })),
+    })
+}
+
+fn reference_evidence(
+    reference: signalbox_file_media_runtime::FileMediaReference,
+) -> Result<ToolExecutorEvidence, FileMediaExecutorError> {
+    fn domain_identity(
+        identity: &signalbox_file_media_runtime::MediaValidationIdentity,
+    ) -> Option<signalbox_domain::MediaValidationIdentity> {
+        let evidence = match identity.evidence() {
+            signalbox_file_media_runtime::ValidationEvidence::StrongSignature => {
+                signalbox_domain::MediaValidationEvidence::StrongSignature
+            }
+            signalbox_file_media_runtime::ValidationEvidence::StructuralValidation => {
+                signalbox_domain::MediaValidationEvidence::StructuralValidation
+            }
+            _ => return None,
+        };
+        signalbox_domain::MediaValidationIdentity::try_new(
+            signalbox_domain::BlobDigest::from_bytes(*identity.digest().as_bytes()),
+            identity.media_type().as_str().to_owned(),
+            identity.reader().provider().as_str().to_owned(),
+            identity.reader().reader().as_str().to_owned(),
+            identity.reader().revision().as_str().to_owned(),
+            evidence,
+        )
+    }
+    let (Some(identity), Some(source)) = (
+        domain_identity(reference.presented()),
+        domain_identity(reference.source()),
+    ) else {
+        return Err(FileMediaExecutorError::from_class(
+            OperatorFailureClass::FailClosedCorruption,
+        ));
+    };
+    let text = json!({"status":"read", "output":"image", "digest":identity.digest().to_string(), "media_type":identity.media_type(), "byte_length":reference.byte_length().get().to_string()});
+    let Some(reference) =
+        signalbox_domain::ToolMediaReference::image(identity, source, reference.byte_length())
+    else {
+        return failure_evidence(FileMediaFailure::OutputUnitTooLarge);
+    };
+    match ToolResultText::try_new(text.to_string()) {
+        Ok(text) => Ok(ToolExecutorEvidence::CompletedMedia { text, reference }),
+        Err(_) => failure_evidence(FileMediaFailure::OutputUnitTooLarge),
     }
 }
 
@@ -573,8 +678,15 @@ fn continuation_cursor(
     }
 }
 
-fn failure_evidence(failure: FileMediaFailure) -> ToolExecutorEvidence {
+fn failure_evidence(
+    failure: FileMediaFailure,
+) -> Result<ToolExecutorEvidence, FileMediaExecutorError> {
     let value = match failure {
+        FileMediaFailure::SourceIntegrity => {
+            return Err(FileMediaExecutorError::from_class(
+                OperatorFailureClass::FailClosedCorruption,
+            ));
+        }
         FileMediaFailure::BlobNotVisible => json!({"status": "blob_not_visible"}),
         FileMediaFailure::BlobMissing => json!({"status": "blob_missing"}),
         FileMediaFailure::BlobCorrupt => json!({"status": "blob_corrupt"}),
@@ -614,7 +726,7 @@ fn failure_evidence(failure: FileMediaFailure) -> ToolExecutorEvidence {
         FileMediaFailure::ProcessorTimedOut => json!({"status": "processor_timed_out"}),
         FileMediaFailure::Cancelled => json!({"status": "cancelled"}),
     };
-    known_failure(value)
+    Ok(known_failure(value))
 }
 
 fn completed_json(value: Value) -> ToolExecutorEvidence {
@@ -655,6 +767,56 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn authority_failures_escape_without_committing_ordinary_tool_failure_evidence() {
+        for class in [
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            OperatorFailureClass::FailClosedCorruption,
+            OperatorFailureClass::IdentityCollision,
+            OperatorFailureClass::CallerOrHubBug,
+        ] {
+            let failure = FileMediaExecutorError::from_class(class);
+            let outcome = service_evidence(
+                Err(FileMediaServiceFailure::Operator(failure)),
+                read_evidence,
+            );
+            assert_eq!(outcome.unwrap_err().operator_failure_class(), class);
+        }
+        let unavailable =
+            service_evidence(Err(FileMediaFailure::BlobUnavailable.into()), read_evidence).unwrap();
+        assert!(matches!(
+            unavailable,
+            ToolExecutorEvidence::KnownFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn source_integrity_failure_cannot_commit_an_ordinary_failed_tool_result() {
+        let failure = FileMediaFailure::from(
+            signalbox_file_media_runtime::ProcessorBoundaryFailure::Source(
+                signalbox_file_media_runtime::SourceReadError::Integrity,
+            ),
+        );
+        let inspected = service_evidence(Err(failure.clone().into()), |value| {
+            Ok(inspection_evidence(value))
+        });
+        let read = service_evidence(Err(failure.into()), read_evidence);
+
+        assert_eq!(
+            inspected.unwrap_err().operator_failure_class(),
+            OperatorFailureClass::FailClosedCorruption
+        );
+        assert_eq!(
+            read.unwrap_err().operator_failure_class(),
+            OperatorFailureClass::FailClosedCorruption
+        );
+    }
+
     struct UnusedService;
 
     impl FileMediaAgentService for UnusedService {
@@ -662,14 +824,14 @@ mod tests {
             &mut self,
             _request: FileInspectServiceRequest,
         ) -> FileMediaAgentServiceFuture<'_, FileInspection> {
-            Box::pin(async { Err(FileMediaFailure::BlobNotVisible) })
+            Box::pin(async { Err(FileMediaFailure::BlobNotVisible.into()) })
         }
 
         fn read(
             &mut self,
             _request: FileReadServiceRequest,
         ) -> FileMediaAgentServiceFuture<'_, FileReadResult> {
-            Box::pin(async { Err(FileMediaFailure::BlobNotVisible) })
+            Box::pin(async { Err(FileMediaFailure::BlobNotVisible.into()) })
         }
     }
 
@@ -724,6 +886,12 @@ mod tests {
 
         assert_eq!(catalog.definitions()[0].name().as_str(), FILE_INSPECT_NAME);
         assert_eq!(catalog.definitions()[1].name().as_str(), FILE_READ_NAME);
+        assert!(
+            catalog
+                .definitions()
+                .iter()
+                .all(|definition| definition.effect_class() == ToolEffectClass::ExternalEffect)
+        );
     }
 
     #[test]
@@ -836,7 +1004,7 @@ mod tests {
             continuation: signalbox_file_media_runtime::ReadContinuation::Complete,
         };
 
-        let evidence = read_evidence(result);
+        let evidence = read_evidence(result).unwrap();
 
         let ToolExecutorEvidence::CompletedText(text) = evidence else {
             panic!("the maximum admitted worst-case text must fit the tool result");

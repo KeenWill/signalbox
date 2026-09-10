@@ -40,13 +40,27 @@ daemon for byte ranges, which the daemon checks against the declared envelope
 before serving them from a `VerifiedBlobSource`. A worker's response is
 untrusted until the registry has reparsed and cross-checked it.
 
-Two effect-free tool declarations are compiled, and no daemon catalog registers
-either one. `file_inspect` takes a canonical digest and an optional selector for
-a repeated visible use. `file_read` adds an exact provider-owned view and
-exactly one input: object options for a first read, or the cursor a truncated
-result returned. `signalbox-file-media-provider-runtime` supplies the
-registry-backed service behind both and authorizes each request through an
-injected `FileUseResolver`.
+With `file_media = true` and blob storage configured, the daemon registers
+`file_inspect` and `file_read` as external-effect tools. Startup verifies the
+compiled text and image workers beside the daemon executable through
+`/usr/bin/bwrap` and the delegated `SIGNALBOX_FILE_MEDIA_CGROUP_ROOT`. The
+resolver reuses `blob_read`'s projected-frontier attachment proof and completes
+catalog work before source or worker I/O. A digest outside that frontier is
+unauthorized; a repeated digest requires its rendered selector, the semantic
+entry identity and zero-based part ordinal. The registry recognizes no format in
+the daemon. Authorization and catalog repository failures retain their operator
+failure class through tool execution. Verified-source integrity violations take
+the fail-closed operator path.
+
+`file_read` takes an exact provider-owned view and either object options or an
+authenticated restart-ephemeral continuation. Continuations bind the original
+digest, selector, reader, view, options, and provider section state; each page
+reauthorizes the selected use against its issuing frontier and repeats
+inspection. Text inspection validates a bounded prefix, and text reads return
+bounded UTF-8 sections without splitting scalars. JSON and CSV views retain
+bounded structured results and reject sources outside their whole-decode
+envelopes. Sources are range capabilities; their total length never sizes a
+materialization.
 
 PDF preflight charges recursive length-carrier decoding against the aggregate
 object-stream budget. Text reads charge page content and font CMaps against one
@@ -61,8 +75,9 @@ central vocabulary change.
 Format adapters add no MIME branch to the tool executor, the bridge, or the
 daemon, for the same reason.
 
-Registry construction rejects a view whose output kind is image, audio, or
-general file. Why: no durable result path can carry such output.
+Registry construction admits image views with a declared direct or generated
+kind and a finite set of output media types. Audio and general-file views are
+rejected.
 
 An empty registry is valid, so the daemon boots with no adapters.
 
@@ -78,7 +93,7 @@ answer for any adapter set and any probe completion order.
 The service repeats inspection for every read, and `file_read` accepts no
 model-supplied media type or reader identity. Why: no classification from an
 earlier call is trusted. A registered streaming-text reader is selected through
-streaming validation even for declared `text/plain`. JSON container-entry
+bounded prefix validation even for declared `text/plain`. JSON container-entry
 ceilings are enforced while parsing, before constructing an excessive tree.
 Image metadata views use the canonical metadata from that inspection; absent
 image fields fail without a second decode.
@@ -102,7 +117,8 @@ never receives a store locator, a source path, the catalog, a database
 connection or open transaction, the daemon socket, configuration, a credential,
 a home directory, or a network namespace.
 
-Bounded worker stderr is drained and discarded; it is never parser evidence,
+Image output bytes use a separate bounded binary channel on worker stderr; other
+stderr is drained and discarded. Diagnostics are never parser evidence,
 telemetry content, or model-visible output.
 
 No adapter renders, executes active content, follows links, extracts embedded
@@ -152,10 +168,48 @@ recovery is registered as part of the reader's validation.
 
 ## Planned
 
-- Daemon composition of `file_inspect` and `file_read` behind a
-  `FileUseResolver` that reuses the rendered-frontier visibility proof; the
-  daemon registry recognizes no format. See the
+- Audio and general-file views, whose derived bytes publish and register before
+  the read's result commits and leave no dangling result on failure. See the
   [design](../design/file-and-media.md).
-- Image, audio, and general-file views, whose derived bytes publish and register
-  before the read's result commits and leave no dangling result on failure. See
-  the [design](../design/file-and-media.md).
+
+## Image presentation
+
+PNG, JPEG and WebP readers offer direct image, downscale/compress and crop
+views. Inspection reads at most a 64 KiB prefix. A presentation read validates
+the raster through bounded source ranges inside the worker. Crop coordinates
+`x`, `y`, `width`, `height` address the full-resolution source; optional `scale`
+is in `(0, 1]`. Downscale preserves aspect ratio and never upscales. Both
+transformations produce deterministic PNG bytes under the decoded-pixel and
+allocation ceilings.
+
+The reference result retains distinct presented and source digests, canonical
+types, validating reader revisions and content-silent evidence. Direct image
+presentation requires equal identities and an encoded source fitting the view,
+process and target bounds. An oversized direct image returns dimensions, source
+bytes and available derived views as bounded structured data.
+
+Generated output is limited to the view's declared type set and eight MiB. The
+registry computes its identity and independently detects and fully validates its
+bytes through the ordinary sandboxed worker before publication. It rejects an
+ambiguous result, wrong type, wrong output reader or exceeded bound. Valid
+output publishes and verifies, registers as a generated artifact, then commits
+its durable tool result. A failure before commit leaves no rich result; an
+unreferenced blob may remain after publication. Direct reads publish and
+register nothing.
+
+Codex CLI presents image parts through `turn/start` RPC inputs; Claude Code CLI
+uses base64 image blocks in stream-JSON input. Adapters encode authenticated
+bytes without format detection. Their capability records bound accepted types,
+one image and the complete encoded request. Daemon
+`max_image_presentation_bytes` and `max_image_request_bytes` lower these limits;
+`"none"` leaves the adapter limits. The process admits at most 16 image
+references, eight MiB each and 32 MiB in aggregate. Encoding and request framing
+count against the request bound.
+
+Preparation authenticates each rendered reference against its terminal tool
+attempt and catalog length before source I/O. It materializes only admitted
+bounded images and runs no reader. Unsupported presentations fail before send
+authorization. Database unavailability retains infrastructure failure, absent
+replicas retain missing-blob failure, and inconsistent authority or blob-store
+integrity remains fail-closed corruption. Ordinary JSON cannot issue image
+authority.

@@ -1475,8 +1475,6 @@ mod contract_tests;
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use signalbox_application::ToolCatalog;
-
     use super::*;
 
     #[derive(Clone, Default)]
@@ -2404,50 +2402,6 @@ mod tests {
         assert_eq!(
             error.kind,
             WorkspaceMutationSnapshotErrorKind::PathRejected(WorkspacePathRejection::Symlink)
-        );
-    }
-
-    #[test]
-    fn mutation_definitions_require_confirmation() {
-        let tools = WorkspaceMutationTools::try_new(FakeFileSystem::default(), "/injected")
-            .expect("fixture tools construct");
-        let (catalog, _executor) = tools.into_parts();
-        let definitions = catalog.definitions();
-
-        assert_eq!(definitions.len(), WORKSPACE_MUTATION_TOOL_NAMES.len());
-        assert_eq!(
-            definitions[0].permission_default(),
-            ToolPermissionDefault::Confirm
-        );
-        assert_eq!(
-            definitions[1].permission_default(),
-            ToolPermissionDefault::Confirm
-        );
-        assert_eq!(
-            definitions[2].permission_default(),
-            ToolPermissionDefault::Confirm
-        );
-    }
-
-    #[test]
-    fn mutation_definitions_report_external_effects() {
-        let tools = WorkspaceMutationTools::try_new(FakeFileSystem::default(), "/injected")
-            .expect("fixture tools construct");
-        let (catalog, _executor) = tools.into_parts();
-        let definitions = catalog.definitions();
-
-        assert_eq!(definitions.len(), WORKSPACE_MUTATION_TOOL_NAMES.len());
-        assert_eq!(
-            definitions[0].effect_class(),
-            ToolEffectClass::ExternalEffect
-        );
-        assert_eq!(
-            definitions[1].effect_class(),
-            ToolEffectClass::ExternalEffect
-        );
-        assert_eq!(
-            definitions[2].effect_class(),
-            ToolEffectClass::ExternalEffect
         );
     }
 

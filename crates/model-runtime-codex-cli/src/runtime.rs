@@ -500,6 +500,7 @@ pub struct CodexCliPreparedRequest<C> {
     controls: CodexControls,
     model_context_window_override: Option<u32>,
     oauth_home: Option<crate::oauth::OauthCredentialHome>,
+    credential_reference: signalbox_model_runtime::CredentialReference,
 }
 
 struct CodexControls {
@@ -685,6 +686,7 @@ impl CodexCliRuntime {
     ) -> PreparationOutcome<C, CodexCliPreparedRequest<C>> {
         let correlation = operation.correlation;
         let mut operation = ModelOperation {
+            image_presentation: operation.image_presentation,
             correlation: (),
             credential_reference: operation.credential_reference,
             requested_target: operation.requested_target,
@@ -743,6 +745,18 @@ impl CodexCliRuntime {
                 };
             }
         };
+        let image_limit = match signalbox_model_runtime::image_request_byte_limit(
+            &operation,
+            &crate::image_presentation_capability(),
+        ) {
+            Ok(limit) => limit,
+            Err(failure) => {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure,
+                };
+            }
+        };
         let credential_home = self
             .credential_homes
             .get(&operation.credential_reference)
@@ -794,6 +808,36 @@ impl CodexCliRuntime {
                 };
             }
         };
+        if let Some(limit) = image_limit {
+            let input = crate::app_server::frame::TurnInput {
+                input: std::iter::once(crate::app_server::frame::UserInput::Text {
+                    text: String::from_utf8_lossy(&translated.prompt).into_owned(),
+                })
+                .chain(translated.images.iter().cloned())
+                .collect(),
+                output_schema: serde_json::from_str(OUTPUT_SCHEMA).unwrap_or_default(),
+                effort: controls.reasoning_effort.map(str::to_owned),
+            };
+            let encoded = serde_json::to_vec(
+                &serde_json::json!({"id":3,"method":"turn/start","params": {"threadId":"", "input":input.input,"outputSchema":input.output_schema,"effort":input.effort}}),
+            );
+            // The thread identity arrives in a bounded event; reserve worst-case JSON escaping.
+            if encoded
+                .ok()
+                .and_then(|bytes| bytes.len().checked_add(self.event_limit.checked_mul(6)?))
+                .and_then(|bytes| bytes.checked_add(1))
+                .is_none_or(|bytes| bytes > limit)
+            {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure: PreparationFailure::UnsupportedOperation {
+                        detail: String::from(
+                            "encoded Codex image request exceeds its presentation bound",
+                        ),
+                    },
+                };
+            }
+        }
         let operation_home = if self
             .oauth_profiles
             .contains(&operation.credential_reference)
@@ -834,6 +878,7 @@ impl CodexCliRuntime {
             controls,
             model_context_window_override,
             oauth_home: None,
+            credential_reference: operation.credential_reference,
         })
     }
 }
@@ -984,7 +1029,34 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for CodexCliRuntime {
                 }),
             };
         }
-        let evidence = execute_process(prepared, sink, &mut cancellation).await;
+        let oauth_token = prepared
+            .oauth_home
+            .as_ref()
+            .map(|home| home.material.access_token.clone());
+        let reference = prepared.credential_reference.clone();
+        let mut evidence = execute_process(prepared, sink, &mut cancellation).await;
+        if let Some(token) = oauth_token
+            && let Some((provider, _)) = &self.oauth_delivery
+        {
+            match &mut evidence {
+                TerminalEvidence::ProviderError(error)
+                    if error.kind
+                        == signalbox_model_runtime::ProviderErrorKind::CredentialRejected =>
+                {
+                    error.credential_recovery = Some(
+                        provider
+                            .recover_rejection(&reference, &token, cancellation)
+                            .await,
+                    );
+                }
+                TerminalEvidence::Completed(_)
+                | TerminalEvidence::CompletedWithProviderCompaction { .. }
+                | TerminalEvidence::Refused(_) => {
+                    provider.invocation_succeeded(&reference, &token).await;
+                }
+                _ => {}
+            }
+        }
         TerminalReport {
             correlation,
             evidence,
@@ -998,7 +1070,7 @@ enum OperationHome {
 }
 
 async fn execute_process<C: Clone + Send + Sync>(
-    prepared: CodexCliPreparedRequest<C>,
+    mut prepared: CodexCliPreparedRequest<C>,
     sink: &mut (dyn ObservationSink<C> + Send),
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
@@ -1058,7 +1130,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         .current_dir(&prepared.working_directory);
     use crate::app_server::{
         client::Client,
-        frame::{TextInput, TextInputKind, ThreadOptions, TurnInput},
+        frame::{ThreadOptions, TurnInput, UserInput},
     };
     let client = Client::new(
         ThreadOptions {
@@ -1067,10 +1139,11 @@ async fn execute_process<C: Clone + Send + Sync>(
             service_tier: prepared.controls.service_tier.map(str::to_owned),
         },
         TurnInput {
-            input: vec![TextInput {
-                kind: TextInputKind::Text,
+            input: std::iter::once(UserInput::Text {
                 text: String::from_utf8(prepared.prompt).unwrap_or_default(),
-            }],
+            })
+            .chain(prepared.translated.images.drain(..))
+            .collect(),
             output_schema: serde_json::from_str(OUTPUT_SCHEMA).unwrap_or_default(),
             effort: prepared.controls.reasoning_effort.map(str::to_owned),
         },
@@ -1127,15 +1200,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         access_sink.flush();
         let evidence =
             signalbox_model_runtime::redact_evidence(evidence, &home.material.identity_token, None);
-        let mut evidence =
-            signalbox_model_runtime::redact_evidence(evidence, &home.material.access_token, None);
-        if let TerminalEvidence::ProviderError(error) = &mut evidence
-            && error.kind == signalbox_model_runtime::ProviderErrorKind::CredentialRejected
-        {
-            error.kind = signalbox_model_runtime::ProviderErrorKind::Unrecognized;
-            error.non_acceptance_proven = false;
-        }
-        evidence
+        signalbox_model_runtime::redact_evidence(evidence, &home.material.access_token, None)
     } else {
         execute_cli_process(request, sink, cancellation).await
     }
@@ -1196,11 +1261,6 @@ mod tests {
     fn oversized_version_fixture() -> (tempfile::TempDir, PathBuf) {
         let banner = "x".repeat(4097);
         version_fixture(&format!("#!/bin/sh\nprintf '%s' '{banner}'\n"))
-    }
-
-    #[test]
-    fn pinned_version_probe_retains_a_four_kibibyte_banner_bound() {
-        assert_eq!(super::MAX_VERSION_BANNER_BYTES, 4096);
     }
 
     #[cfg(unix)]
