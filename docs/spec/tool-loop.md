@@ -337,7 +337,9 @@ and the interrupt remains the proof-bearing authority for ending the turn. An
 interrupt alone against an approval wait is not a denial and does not bypass the
 decision command. A committed session closure first records core-issued
 lifecycle-closure denials for the outstanding approval waits, then applies its
-interrupt.
+interrupt. A cancelled judge call discards late provider completions and
+failures, retaining its cancellation and unreported usage without changing the
+decision.
 
 Recorded overrides are frozen into each prepared model call in the same
 transaction as the blanket posture. Two things retire an override: the consuming
