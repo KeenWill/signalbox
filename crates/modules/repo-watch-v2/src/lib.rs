@@ -2522,7 +2522,7 @@ impl RepoWatchStore {
                  ON retained_rule.repository = ledger.repository
                 AND retained_rule.rule_id = ledger.rule_id
                 AND retained_rule.revision = ledger.rule_revision
-               JOIN gh_readable_event AS retained_event
+               JOIN gh_event AS retained_event
                  ON retained_event.event_id = ledger.event_id
                 AND retained_event.repository = ledger.repository
               WHERE ledger.command_id = $1 AND ledger.dispatch_ref = $2

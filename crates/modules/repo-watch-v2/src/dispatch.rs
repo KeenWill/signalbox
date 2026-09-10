@@ -262,7 +262,7 @@ impl RepoWatchStore {
                     terminal.event_id AS terminal_event_id, terminal.event_kind AS reason,
                     terminal.recorded_at
              FROM dispatch_ledger AS origin
-             JOIN gh_readable_event AS dispatched ON dispatched.event_id = origin.event_id
+             JOIN gh_event AS dispatched ON dispatched.event_id = origin.event_id
              JOIN LATERAL (
                  SELECT fact.event_id, fact.event_kind, fact.recorded_at
                  FROM gh_readable_event AS fact
