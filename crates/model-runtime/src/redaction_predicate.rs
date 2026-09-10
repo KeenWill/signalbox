@@ -8,6 +8,8 @@
 //! Text, thinking, and argument deltas additionally reconstruct separate streams
 //! by (kind, part index), retaining their tails across intervening observations.
 //! Argument streams decode JSON escapes, including escapes split across deltas.
+//! Proposed arguments also decode when malformed and join the following fields
+//! in canonical order; their decoded tail survives the proposal boundary.
 //! One sink belongs to one physical request; its correlation is not provider data.
 //!
 //! This deliberately checks cross-field joins beyond consumer stream joins.
@@ -169,7 +171,7 @@ impl ObservationPredicate {
             return true;
         };
         let mut found = self.serialized.inspect(&serialized, credential);
-        visit_strings(&value, &mut |text| {
+        visit_strings(&value, None, &mut |field, text| {
             found |= self.content.inspect(text.as_bytes(), credential);
             let json = serde_json::from_str::<serde_json::Value>(text)
                 .ok()
@@ -178,7 +180,12 @@ impl ObservationPredicate {
                     value
                 });
             if !matches!(fact, ObservationFact::ToolArgumentsDelta { .. }) {
-                if json.is_some() {
+                // The proposed-argument field retains its JSON role even when
+                // incomplete or malformed. Decode it at its projection position
+                // so its tail can join later fields and observations.
+                let proposed_arguments = matches!(fact, ObservationFact::ToolCallProposed(_))
+                    && field == Some("arguments_json");
+                if proposed_arguments {
                     JsonEscapes::default().push(text, |unit| {
                         found |= self.escaped_content.inspect(unit.as_bytes(), credential);
                     });
@@ -210,29 +217,25 @@ impl ObservationPredicate {
                 });
             }
         }
-        if let ObservationFact::ToolCallProposed(proposal) = fact {
-            // Proposed arguments can be malformed or unfinished JSON. Their
-            // typed role admits escape decoding even when Value rejects them.
-            let mut decoded = Window::default();
-            JsonEscapes::default().push(&proposal.arguments_json, |unit| {
-                found |= decoded.inspect(unit.as_bytes(), credential);
-            });
-        }
         found
     }
 }
 
-fn visit_strings(value: &serde_json::Value, inspect: &mut impl FnMut(&str)) {
+fn visit_strings(
+    value: &serde_json::Value,
+    field: Option<&str>,
+    inspect: &mut impl FnMut(Option<&str>, &str),
+) {
     match value {
-        serde_json::Value::String(text) => inspect(text),
+        serde_json::Value::String(text) => inspect(field, text),
         serde_json::Value::Array(values) => {
             for value in values {
-                visit_strings(value, inspect);
+                visit_strings(value, field, inspect);
             }
         }
         serde_json::Value::Object(values) => {
-            for value in values.values() {
-                visit_strings(value, inspect);
+            for (key, value) in values {
+                visit_strings(value, Some(key), inspect);
             }
         }
         _ => {}
@@ -395,7 +398,7 @@ mod tests {
                 &(
                     credentials(),
                     prop::collection::vec(any::<bool>(), 1..96),
-                    prop::collection::vec(0usize..4, 1..96),
+                    prop::collection::vec(0usize..9, 1..96),
                 ),
                 |(secret, cuts, kinds)| {
                     let mut predicate = ObservationPredicate::default();
@@ -405,9 +408,31 @@ mod tests {
                             0 => delta(Kind::Text, ordinal as u32, fragment),
                             1 => delta(Kind::Thinking, ordinal as u32, fragment),
                             2 => delta(Kind::Arguments, ordinal as u32, escaped(&fragment)),
-                            _ => ObservationFact::ProviderModelReported(
+                            3 => ObservationFact::ProviderModelReported(
                                 ProviderReportedModel::new(fragment),
                             ),
+                            4 => ObservationFact::ExchangeEstablished(crate::ExchangeFacts {
+                                provider_request_id: Some(crate::ProviderRequestId::new(fragment)),
+                                ..crate::ExchangeFacts::default()
+                            }),
+                            5 => {
+                                ObservationFact::FinishReported(crate::FinishReason::Unrecognized {
+                                    provider_token: fragment,
+                                })
+                            }
+                            slot => {
+                                let mut proposal = crate::ToolCallProposal {
+                                    id: crate::ToolCallId::new(""),
+                                    name: crate::ToolName::new(""),
+                                    arguments_json: String::new(),
+                                };
+                                match slot {
+                                    6 => proposal.id = crate::ToolCallId::new(fragment),
+                                    7 => proposal.name = crate::ToolName::new(fragment),
+                                    _ => proposal.arguments_json = escaped(&fragment),
+                                }
+                                ObservationFact::ToolCallProposed(proposal)
+                            }
                         };
                         detected |= predicate.inspect(&fact, secret.as_bytes());
                     }
@@ -457,6 +482,31 @@ mod tests {
                 "malformed argument fixture: {arguments}"
             );
         }
+    }
+
+    #[test]
+    fn malformed_argument_prefix_joins_following_proposal_fields() {
+        let mut predicate = ObservationPredicate::default();
+        let fact = ObservationFact::ToolCallProposed(crate::ToolCallProposal {
+            arguments_json: r#"{"token":"\u0066ixture_"#.to_owned(),
+            id: crate::ToolCallId::new("sec"),
+            name: crate::ToolName::new("ret"),
+        });
+        assert!(predicate.inspect(&fact, b"fixture_secret"));
+    }
+
+    #[test]
+    fn plain_json_shaped_text_keeps_its_bytes_when_joining_decoded_arguments() {
+        let mut predicate = ObservationPredicate::default();
+        let mut found = false;
+        for fact in [
+            delta(Kind::Text, 0, "fixture_".to_owned()),
+            delta(Kind::Text, 0, r#""\\""#.to_owned()),
+            delta(Kind::Arguments, 1, r"\u0073ecret".to_owned()),
+        ] {
+            found |= predicate.inspect(&fact, br#"fixture_"\\"secret"#);
+        }
+        assert!(found);
     }
 
     #[test]
