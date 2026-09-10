@@ -34,7 +34,9 @@ SHA-256 digest, input format, ordered case positions, repeats and non-secret
 judge binding in its immutable run input. Trials follow case order, then repeat
 order, with a maximum of 1,000 calls. Offline scoring requires one repeat.
 `corpus.load` reads and preflights every selected case before provider work;
-`judge.evaluate` addresses a trial ordinal in that retained manifest.
+`judge.evaluate` addresses a trial ordinal in that retained manifest. The
+attempt reuses its decoded, preflighted corpus across trials; recovery reloads
+it once when needed.
 
 The host adapters reuse the catalog's verified blob reads and `judge_eval_case`.
 Judge answers retain call identity, rendered-request digest, binding and
@@ -43,12 +45,13 @@ usage. Failed trials retain observed model identity, including a substituted
 lineage. Configured usage limits apply. The common host journals requests and
 answers; an admitted unanswered judge call without durable proof becomes
 ambiguous without provider retry. Invalid requests and unavailable pinned
-bindings retain their rejection on recovery; infrastructure failures leave the
-request unanswered. The native program computes the existing offline or live
-scorecard through the pure library and returns it as the workflow result. Live
-scoring counts failed and ambiguous repeats as unsuccessful; an offline trial
-without a verdict faults without a scorecard. Missing blobs and inadmissible
-cases fail before provider work. No evaluation snapshot is sealed.
+bindings retain their rejection on recovery. Adoption applies corpus preflight;
+infrastructure failures leave the request unanswered. The native program
+computes the existing offline or live scorecard through the pure library and
+returns it as the workflow result. Live scoring counts failed and ambiguous
+repeats as unsuccessful; an offline trial without a verdict faults without a
+scorecard. Missing blobs and inadmissible cases fail before provider work. No
+evaluation snapshot is sealed.
 
 `WorkflowRuntime::with_eval` supplies the runner's host services and enables
 native eval registration; the default daemon rejects that registration. Operator

@@ -72,6 +72,10 @@ impl Fixture {
             provider,
         }
     }
+    async fn judge(&self, trial: TrialRequest) -> Result<JudgeAnswer, EvalFailure> {
+        let corpus = self.services.corpus(&self.manifest).await?;
+        self.services.judge(&self.manifest, trial, &corpus).await
+    }
     fn lazy() -> Self {
         Self::new(
             sqlx::postgres::PgPoolOptions::new()
@@ -119,13 +123,7 @@ async fn every_selected_case_is_preflighted_before_a_provider_call() {
     let bytes = serde_json::to_vec(&corpus).unwrap();
     fixture.manifest.corpus = BlobDigest::digest(&bytes).to_string();
     fixture.services.blobs = Arc::new(MemoryBlobs(bytes));
-    assert!(
-        fixture
-            .services
-            .judge(&fixture.manifest, TrialRequest { trial: 0 })
-            .await
-            .is_err()
-    );
+    assert!(fixture.judge(TrialRequest { trial: 0 }).await.is_err());
     assert!(fixture.provider.received_operations().is_empty());
 }
 
@@ -134,16 +132,8 @@ async fn selected_case_order_controls_trial_mapping_and_scoring() {
     let mut fixture = Fixture::lazy();
     fixture.manifest.cases = vec![1, 0];
     let corpus = fixture.services.corpus(&fixture.manifest).await.unwrap();
-    let first = fixture
-        .services
-        .judge(&fixture.manifest, TrialRequest { trial: 0 })
-        .await
-        .unwrap();
-    let second = fixture
-        .services
-        .judge(&fixture.manifest, TrialRequest { trial: 1 })
-        .await
-        .unwrap();
+    let first = fixture.judge(TrialRequest { trial: 0 }).await.unwrap();
+    let second = fixture.judge(TrialRequest { trial: 1 }).await.unwrap();
     let score = score(&fixture.manifest, &corpus, &[first, second]).unwrap();
     assert_eq!(score["accuracy"]["numerator"], 0);
     assert_eq!(score["verdicts"][0]["case_id"], "denied");
@@ -164,11 +154,7 @@ async fn manifest_refuses_repeats_that_exceed_the_paid_call_ceiling() {
 #[tokio::test]
 async fn judge_answer_preserves_call_identity_rationale_and_usage() {
     let fixture = Fixture::lazy();
-    let answer = fixture
-        .services
-        .judge(&fixture.manifest, TrialRequest { trial: 0 })
-        .await
-        .unwrap();
+    let answer = fixture.judge(TrialRequest { trial: 0 }).await.unwrap();
     let JudgeAnswer::Verdict {
         call,
         binding,
@@ -554,19 +540,14 @@ mod postgres {
             .await
             .unwrap();
         const TEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+        let mut completed = None;
         tokio::time::timeout(
             TEST_DEADLINE,
             runner.run(async {
                 loop {
-                    if run
-                        .journal
-                        .load(run.run)
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .terminal_delivery()
-                        .is_some()
-                    {
+                    let journal = run.journal.load(run.run).await.unwrap().unwrap();
+                    if journal.terminal_delivery().is_some() {
+                        completed = Some(journal);
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -576,7 +557,7 @@ mod postgres {
         .await
         .unwrap()
         .unwrap();
-        let journal = run.journal.load(run.run).await.unwrap().unwrap();
+        let journal = completed.unwrap();
         let score: serde_json::Value = decode(journal.result().unwrap().as_bytes()).unwrap();
         assert_eq!(score["accuracy"]["numerator"], 2);
         assert_eq!(run.fixture.provider.received_operations().len(), 2);
@@ -699,6 +680,169 @@ mod postgres {
         assert!(run.fixture.provider.received_operations().is_empty());
     }
 
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn invalid_corpus_judge_requests_keep_their_rejection_after_recovery() {
+        for malformed_case in [false, true] {
+            let mut run = RunFixture::configured(|fixture| {
+                if malformed_case {
+                    let mut corpus: serde_json::Value = serde_json::from_slice(CORPUS).unwrap();
+                    corpus["cases"][0]["request"]["tool"] = "".into();
+                    let bytes = serde_json::to_vec(&corpus).unwrap();
+                    fixture.manifest.corpus = BlobDigest::digest(&bytes).to_string();
+                    fixture.services.blobs = Arc::new(MemoryBlobs(bytes));
+                } else {
+                    fixture.manifest.cases = vec![2];
+                }
+            })
+            .await;
+            run.javascript(&format!(
+                "import {{ effect }} from '@signalbox/program-sdk/v1'; await effect('judge', 'evaluate', new Uint8Array({:?}));",
+                encode(&TrialRequest { trial: 0 }).unwrap(),
+            )).await;
+            let mut failures = Vec::new();
+            for _ in 0..2 {
+                let mut effects = EvaluationEffects::new(run.fixture.services.clone());
+                let error = run
+                    .host
+                    .execute_registered(run.run, &mut ClockSource, &mut effects)
+                    .await
+                    .unwrap_err();
+                assert!(effects.rejected());
+                failures.push(error.to_string());
+            }
+            assert_eq!(failures[0], failures[1]);
+            let journal = run.journal.load(run.run).await.unwrap().unwrap();
+            assert_eq!(journal.entries().len(), 1);
+            assert!(run.fixture.provider.received_operations().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn recovery_corpus_outage_leaves_the_judge_request_unanswered() {
+        let run = RunFixture::new().await;
+        run.record(
+            ProgramCapability::Corpus,
+            "load",
+            encode(&Empty {}).unwrap(),
+        )
+        .await;
+        run.journal
+            .append_request(
+                run.run,
+                None,
+                RequestKind::Effect(EffectRequest::new(
+                    ProgramCapability::Judge,
+                    "evaluate".into(),
+                    InlineFramePayload::new(encode(&TrialRequest { trial: 0 }).unwrap()),
+                )),
+            )
+            .await
+            .unwrap();
+        let mut services = run.fixture.services.clone();
+        services.blobs = Arc::new(UnavailableBlobs);
+        let (_, runner) = crate::workflows::WorkflowRuntime::new(run.pool.clone()).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            runner.with_eval(services).run(std::future::pending()),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        let journal = run.journal.load(run.run).await.unwrap().unwrap();
+        assert_eq!(journal.entries().len(), 3);
+        assert!(journal.terminal_delivery().is_none());
+        assert!(run.fixture.provider.received_operations().is_empty());
+    }
+
+    struct CountingBlobs {
+        inner: Arc<dyn CorpusBlobs>,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl CorpusBlobs for CountingBlobs {
+        fn read(
+            &self,
+            digest: BlobDigest,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, EvalFailure>> + Send + '_>> {
+            Box::pin(async move {
+                self.reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.inner.read(digest).await
+            })
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn trials_reuse_one_corpus_load_per_attempt_including_recovery() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let run = RunFixture::configured(|fixture| {
+            fixture.services.blobs = Arc::new(CountingBlobs {
+                inner: fixture.services.blobs.clone(),
+                reads: reads.clone(),
+            });
+        })
+        .await;
+        assert!(matches!(
+            run.execute().await,
+            ProgramExecutionOutcome::Completed(_)
+        ));
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        assert_eq!(run.fixture.provider.received_operations().len(), 2);
+        assert!(matches!(
+            run.execute().await,
+            ProgramExecutionOutcome::Completed(_)
+        ));
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        assert_eq!(run.fixture.provider.received_operations().len(), 2);
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let run = RunFixture::configured(|fixture| {
+            let bytes = br#"{"name":"live-case","category":"workspace_benign","tool":"current_time","arguments":"{}","expected":"approve"}"#.to_vec();
+            fixture.manifest.corpus = BlobDigest::digest(&bytes).to_string();
+            fixture.manifest.format = CorpusFormat::Live;
+            fixture.manifest.cases = vec![0];
+            fixture.manifest.repeats = 3;
+            fixture.services.blobs = Arc::new(CountingBlobs {
+                inner: Arc::new(MemoryBlobs(bytes)), reads: reads.clone(),
+            });
+        }).await;
+        run.record(
+            ProgramCapability::Corpus,
+            "load",
+            encode(&Empty {}).unwrap(),
+        )
+        .await;
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        run.journal
+            .append_request(
+                run.run,
+                None,
+                RequestKind::Effect(EffectRequest::new(
+                    ProgramCapability::Judge,
+                    "evaluate".into(),
+                    InlineFramePayload::new(encode(&TrialRequest { trial: 0 }).unwrap()),
+                )),
+            )
+            .await
+            .unwrap();
+        let ProgramExecutionOutcome::Completed(bytes) = run.execute().await else {
+            panic!("live scorecard");
+        };
+        let score: serde_json::Value = decode(bytes.as_bytes()).unwrap();
+        assert_eq!(score["failed_calls"], 1);
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+        assert_eq!(run.fixture.provider.received_operations().len(), 2);
+        assert!(matches!(
+            run.execute().await,
+            ProgramExecutionOutcome::Completed(_)
+        ));
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+        assert_eq!(run.fixture.provider.received_operations().len(), 2);
+    }
+
     #[derive(Debug)]
     struct NoProvider;
     impl ApprovalJudgeModel for NoProvider {
@@ -727,11 +871,7 @@ async fn live_scoring_counts_failed_and_ambiguous_requested_repeats() {
     fixture.manifest.repeats = 3;
     fixture.services.blobs = Arc::new(MemoryBlobs(bytes));
     let corpus = fixture.services.corpus(&fixture.manifest).await.unwrap();
-    let verdict = fixture
-        .services
-        .judge(&fixture.manifest, TrialRequest { trial: 0 })
-        .await
-        .unwrap();
+    let verdict = fixture.judge(TrialRequest { trial: 0 }).await.unwrap();
     let failed = JudgeAnswer::Failed {
         call: None,
         request_digest: BlobDigest::digest(b"fixture").to_string(),
@@ -791,11 +931,7 @@ async fn invalid_provider_decision_retains_failure_classification_and_usage() {
         provider.clone(),
         fixture.services.configuration.runtime_model_catalog(),
     ));
-    let answer = fixture
-        .services
-        .judge(&fixture.manifest, TrialRequest { trial: 0 })
-        .await
-        .unwrap();
+    let answer = fixture.judge(TrialRequest { trial: 0 }).await.unwrap();
     let JudgeAnswer::Failed {
         call, cause, usage, ..
     } = answer
@@ -911,11 +1047,7 @@ async fn failed_judge_trials_preserve_observed_model_identity_and_usage() {
             provider.clone(),
             fixture.services.configuration.runtime_model_catalog(),
         ));
-        let answer = fixture
-            .services
-            .judge(&fixture.manifest, TrialRequest { trial: 0 })
-            .await
-            .unwrap();
+        let answer = fixture.judge(TrialRequest { trial: 0 }).await.unwrap();
         let encoded = encode(&answer).unwrap();
         let JudgeAnswer::Failed {
             call,

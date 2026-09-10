@@ -135,9 +135,9 @@ impl EvalServices {
         &self,
         manifest: &EvalManifest,
         trial: TrialRequest,
+        corpus: &CorpusAnswer,
     ) -> Result<JudgeAnswer, EvalFailure> {
         self.validate_binding(manifest)?;
-        let corpus = self.corpus(manifest).await?;
         let case = eval_case(&corpus.cases[(trial.trial / manifest.repeats) as usize]);
         let request_digest =
             BlobDigest::digest(render_eval_case(&case).map_err(failure)?.as_bytes()).to_string();
@@ -208,12 +208,14 @@ impl EvalServices {
 /// An attempt's effect adapter; each answer is persisted by the common host.
 pub struct EvaluationEffects {
     services: EvalServices,
+    corpus: tokio::sync::OnceCell<CorpusAnswer>,
     rejected: bool,
 }
 impl EvaluationEffects {
     pub fn new(services: EvalServices) -> Self {
         Self {
             services,
+            corpus: tokio::sync::OnceCell::new(),
             rejected: false,
         }
     }
@@ -227,6 +229,12 @@ impl EvaluationEffects {
         result.map_err(|error| match error {
             EvalFailure::Rejected(error) | EvalFailure::Infrastructure(error) => error,
         })
+    }
+
+    async fn corpus(&self, manifest: &EvalManifest) -> Result<&CorpusAnswer, EvalFailure> {
+        self.corpus
+            .get_or_try_init(|| self.services.corpus(manifest))
+            .await
     }
 
     async fn judge_trial(
@@ -257,6 +265,7 @@ impl EvaluationEffects {
             ));
         }
         self.services.validate_binding(&manifest)?;
+        self.corpus(&manifest).await?;
         Ok((manifest, trial))
     }
 
@@ -269,11 +278,12 @@ impl EvaluationEffects {
             (ProgramCapability::Corpus, "load") => {
                 let _: Empty = decode(bytes).map_err(failure)?;
                 let manifest = self.services.manifest(invocation.run).await?;
-                encode(&self.services.corpus(&manifest).await?).map_err(failure)?
+                encode(self.corpus(&manifest).await?).map_err(failure)?
             }
             (ProgramCapability::Judge, "evaluate") => {
                 let (manifest, trial) = self.judge_trial(invocation).await?;
-                encode(&self.services.judge(&manifest, trial).await?).map_err(failure)?
+                let corpus = self.corpus(&manifest).await?;
+                encode(&self.services.judge(&manifest, trial, corpus).await?).map_err(failure)?
             }
             (ProgramCapability::Blob, "read") => {
                 let input: BlobReadRequest = decode(bytes).map_err(failure)?;
