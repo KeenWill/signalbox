@@ -241,6 +241,15 @@ async fn every_git_tool_operates_on_a_linked_worktree() {
 
 #[test]
 fn branch_switch_preserves_sibling_worktree_branch_occupancy() {
+    exercise_branch_occupancy(false);
+}
+
+#[test]
+fn branch_switch_resolves_sibling_symbolic_head_chains() {
+    exercise_branch_occupancy(true);
+}
+
+fn exercise_branch_occupancy(indirect: bool) {
     let fixture = super::support::Fixture::new();
     let repository = git2::Repository::open(fixture.root()).expect("main repository");
     let main_branch = repository
@@ -258,6 +267,36 @@ fn branch_switch_preserves_sibling_worktree_branch_occupancy() {
     repository
         .worktree("second", &second, None)
         .expect("second worktree");
+    if indirect {
+        for (root, name) in [
+            (fixture.root(), main_branch.as_str()),
+            (first.as_path(), "first"),
+            (second.as_path(), "second"),
+        ] {
+            repository
+                .reference_symbolic(
+                    &format!("refs/heads/alias-{name}"),
+                    &format!("refs/heads/{name}"),
+                    true,
+                    "occupancy fixture",
+                )
+                .expect("branch alias");
+            repository
+                .reference_symbolic(
+                    &format!("refs/heads/indirect-{name}"),
+                    &format!("refs/heads/alias-{name}"),
+                    true,
+                    "occupancy fixture",
+                )
+                .expect("second alias");
+            let worktree = git2::Repository::open(root).expect("worktree");
+            fs::write(
+                worktree.path().join("HEAD"),
+                format!("ref: refs/heads/indirect-{name}\n"),
+            )
+            .expect("indirect HEAD");
+        }
+    }
     let snapshot = |root: &std::path::Path| {
         let repository = git2::Repository::open(root).expect("repository");
         (
@@ -276,6 +315,16 @@ fn branch_switch_preserves_sibling_worktree_branch_occupancy() {
         (first.as_path(), "second"),
         (fixture.root(), "first"),
     ] {
+        let native = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["switch", target])
+            .output()
+            .expect("native switch");
+        assert!(
+            !native.status.success(),
+            "native Git must refuse occupied branch"
+        );
         let (_, executor) = LocalGitTools::try_new(LocalWorkspaceFileSystem, root, identity())
             .expect("tool family")
             .into_parts();
