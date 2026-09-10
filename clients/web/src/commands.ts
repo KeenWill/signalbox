@@ -302,7 +302,7 @@ export const commandRegistry = [
   {
     id: 'selection.next',
     title: 'Select next timeline item',
-    description: 'Select the next item.',
+    description: '',
     category: 'Navigate',
     bindings: [
       { label: 'j', registration: { kind: 'hotkey', hotkey: 'J' } },
@@ -320,7 +320,7 @@ export const commandRegistry = [
   {
     id: 'selection.previous',
     title: 'Select previous timeline item',
-    description: 'Select the previous item.',
+    description: '',
     category: 'Navigate',
     bindings: [{ label: 'k', registration: { kind: 'hotkey', hotkey: 'K' } }, { label: 'ArrowUp' }],
     available: (context) => context.timelineIds.length > 0,
