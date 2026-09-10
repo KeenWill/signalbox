@@ -1525,9 +1525,9 @@ pub(super) fn rendered_content_bytes(messages: &[ModelConversationMessage]) -> u
                 request.arguments().as_str().len()
             }
             ModelConversationMessage::ToolResult { content, .. } => match content {
-                ModelToolResultContent::Success(ToolResultContent::Text(text)) => {
-                    text.as_str().len()
-                }
+                ModelToolResultContent::Success(
+                    ToolResultContent::Text(text) | ToolResultContent::Media { text, .. },
+                ) => text.as_str().len(),
                 ModelToolResultContent::ExecutionError(error) => {
                     error.detail().map_or(0, |detail| detail.as_str().len())
                 }

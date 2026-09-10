@@ -597,6 +597,9 @@ in
       cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
         "$DEVENV_ROOT/Cargo.toml" \
         signalbox-file-media-adapters-text signalbox-file-media-text-worker > /dev/null
+      cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
+        "$DEVENV_ROOT/Cargo.toml" \
+        signalbox-file-media-adapters-image signalbox-file-media-image-worker > /dev/null
       supervisor_executable="$(
         cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
           "$DEVENV_ROOT/Cargo.toml" \

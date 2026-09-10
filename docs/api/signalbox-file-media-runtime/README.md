@@ -4,9 +4,11 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
-| declaration | 17 | 1 | 0 | [declaration](declaration.md) |
+| artifact | 3 | 0 | 0 | [artifact](artifact.md) |
+| declaration | 18 | 1 | 0 | [declaration](declaration.md) |
 | detection | 19 | 3 | 0 | [detection](detection.md) |
 | limits | 3 | 0 | 0 | [limits](limits.md) |
+| reference | 3 | 0 | 0 | [reference](reference.md) |
 | registry | 3 | 0 | 2 | [registry](registry.md) |
 | value | 20 | 0 | 2 | [value](value.md) |
 | root | 0 | 0 | 0 | [root](root.md) |

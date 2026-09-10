@@ -27,6 +27,9 @@ pub enum PreparationOutcome<C, P> {
 ```rust
 pub enum PreparationFailure {
     UnsupportedOperation { detail: string::String },
+    ImageUnavailable,
+    ImageMissing,
+    ImageCorrupt,
     CredentialUnavailable { error: CredentialAccessError },
     CredentialUnusable { detail: string::String },
 }
@@ -37,6 +40,7 @@ pub enum PreparationFailure {
 
 ```rust
 pub enum PreparationDefect {
+    ImageIntegrity,
     SerializationFailed { detail: string::String },
     RequestConstructionFailed { detail: string::String },
 }

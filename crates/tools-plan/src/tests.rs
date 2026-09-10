@@ -223,7 +223,7 @@ fn catalog() -> CompiledToolCatalog {
 fn completed_text(evidence: ToolExecutorEvidence) -> String {
     match evidence {
         ToolExecutorEvidence::CompletedText(result) => result,
-        ToolExecutorEvidence::KnownFailed { .. } => {
+        ToolExecutorEvidence::KnownFailed { .. } | ToolExecutorEvidence::CompletedMedia { .. } => {
             panic!("fixture execution unexpectedly returned a known failure")
         }
         ToolExecutorEvidence::Ambiguous => {
@@ -273,6 +273,7 @@ fn known_failure_has_detail(evidence: &ToolExecutorEvidence) -> bool {
     match evidence {
         ToolExecutorEvidence::KnownFailed { detail: Some(_) } => true,
         ToolExecutorEvidence::CompletedText(_)
+        | ToolExecutorEvidence::CompletedMedia { .. }
         | ToolExecutorEvidence::KnownFailed { detail: None }
         | ToolExecutorEvidence::Ambiguous => false,
     }

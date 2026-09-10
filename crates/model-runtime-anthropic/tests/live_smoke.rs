@@ -42,7 +42,8 @@
 #[cfg(test)]
 use signalbox_model_runtime::{
     BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
-    LossCause, ProvenUnsentEvidence, ProviderErrorEvidence, RefusalEvidence, UnsentCause,
+    LossCause, PreparationDefect, PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence,
+    RefusalEvidence, UnsentCause,
 };
 use std::time::Duration;
 
@@ -381,6 +382,7 @@ mod require_decoded_response_tests {
     fn downgraded_refusal_shape_without_an_observed_refusal_panics() {
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: exchange(200),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,
@@ -408,6 +410,7 @@ mod require_decoded_response_tests {
 
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: exchange(200),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,
@@ -424,6 +427,7 @@ mod require_decoded_response_tests {
     fn unrecognized_provider_error_from_a_non_200_status_panics() {
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: exchange(500),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,
@@ -445,6 +449,7 @@ mod require_decoded_response_tests {
         // a refusal it never was.
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: exchange(200),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,
@@ -461,6 +466,7 @@ mod require_decoded_response_tests {
     fn recognized_provider_error_panics() {
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: exchange(401),
                 reported_model: None,
                 kind: ProviderErrorKind::CredentialRejected,
@@ -501,6 +507,7 @@ mod require_decoded_response_tests {
     fn boundary_loss_panics() {
         let _ = require_decoded_response(
             TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: true,
                 cause: LossCause::UnexpectedHttpStatus,
                 exchange: exchange(200),
                 reported_model: None,
@@ -552,12 +559,36 @@ mod assert_well_formed_response_tests {
     }
 
     #[test]
+    #[should_panic(expected = "documented success status")]
+    fn non_200_status_panics() {
+        let mut decoded = well_formed();
+        decoded.exchange.http_status = Some(500);
+        assert_well_formed_response(&decoded);
+    }
+
+    #[test]
+    #[should_panic(expected = "input usage")]
+    fn missing_input_tokens_panics() {
+        let mut decoded = well_formed();
+        decoded.usage.input_tokens = None;
+        assert_well_formed_response(&decoded);
+    }
+
+    #[test]
     #[should_panic(expected = "input usage")]
     fn zero_input_tokens_panics() {
         // Unlike output, input tokens must be positive: a request that
         // reached the model always billed at least one.
         let mut decoded = well_formed();
         decoded.usage.input_tokens = Some(0);
+        assert_well_formed_response(&decoded);
+    }
+
+    #[test]
+    #[should_panic(expected = "output usage")]
+    fn missing_output_tokens_panics() {
+        let mut decoded = well_formed();
+        decoded.usage.output_tokens = None;
         assert_well_formed_response(&decoded);
     }
 }
@@ -577,5 +608,41 @@ mod require_prepared_tests {
             PreparationOutcome::Prepared(expected_capability);
 
         assert_eq!(require_prepared(outcome), expected_capability);
+    }
+
+    #[test]
+    #[should_panic(expected = "smoke preparation was unexpectedly cancelled")]
+    fn cancelled_outcome_panics() {
+        let outcome: PreparationOutcome<String, u32> = PreparationOutcome::Cancelled {
+            correlation: "call-1".to_string(),
+        };
+
+        let _ = require_prepared(outcome);
+    }
+
+    #[test]
+    #[should_panic(expected = "smoke preparation failed")]
+    fn failed_outcome_panics() {
+        let outcome: PreparationOutcome<String, u32> = PreparationOutcome::Failed {
+            correlation: "call-1".to_string(),
+            failure: PreparationFailure::UnsupportedOperation {
+                detail: "synthetic".to_string(),
+            },
+        };
+
+        let _ = require_prepared(outcome);
+    }
+
+    #[test]
+    #[should_panic(expected = "smoke preparation found a defect")]
+    fn defect_outcome_panics() {
+        let outcome: PreparationOutcome<String, u32> = PreparationOutcome::Defect {
+            correlation: "call-1".to_string(),
+            defect: PreparationDefect::SerializationFailed {
+                detail: "synthetic".to_string(),
+            },
+        };
+
+        let _ = require_prepared(outcome);
     }
 }

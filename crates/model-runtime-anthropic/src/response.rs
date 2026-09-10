@@ -272,6 +272,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
 ) -> TerminalEvidence {
     if let Err(error) = validate_provider_json_nesting(body) {
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: false,
             cause: LossCause::ResponseUnintelligible {
                 detail: format!("success response body exceeds the provider JSON bound: {error}"),
             },
@@ -286,6 +287,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         Ok(response) => response,
         Err(error) => {
             return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: false,
                 cause: LossCause::ResponseUnintelligible {
                     detail: format!("success response body is not a message: {error}"),
                 },
@@ -301,6 +303,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         || response.role.as_deref() != Some("assistant")
     {
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: false,
             cause: LossCause::ResponseUnintelligible {
                 detail: "success response is missing its message/assistant envelope \
                          discriminators"
@@ -340,6 +343,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         // The documented completion envelope always carries id, model, and
         // usage; their absence means this is not valid completion material.
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: false,
             cause: LossCause::ResponseUnintelligible {
                 detail: "success response is missing required completion fields \
                          (id, model, usage with input/output token counts)"
@@ -374,6 +378,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             Ok(block) => block,
             Err(error) => {
                 return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    response_content_observed: false,
                     cause: LossCause::ResponseUnintelligible {
                         detail: format!(
                             "success response carries a malformed content block: {error}"
@@ -389,6 +394,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         };
         if matches!(block, WireResponseBlock::Compaction { .. }) && !provider_compaction_enabled {
             return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: false,
                 cause: LossCause::ResponseUnintelligible {
                     detail: "success response carries a compaction block, but this operation did \
                              not enable provider compaction"
@@ -415,6 +421,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 });
             }
             return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: false,
                 cause: LossCause::ResponseUnintelligible {
                     detail: "success response carries a server-side fallback block, but this \
                              operation never enabled provider fallback"
@@ -444,6 +451,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 // The provider requires the integrity signature for any
                 // replay; completion material without it is not usable.
                 return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    response_content_observed: false,
                     cause: LossCause::ResponseUnintelligible {
                         detail: "success response carries a thinking block without its \
                                  integrity signature"
@@ -460,6 +468,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 if let AssistantPart::ToolCall(proposal) = &part {
                     if !tool_call_ids.insert(proposal.id.as_str().to_string()) {
                         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            response_content_observed: false,
                             cause: LossCause::ResponseUnintelligible {
                                 detail: format!(
                                     "success response repeats tool-call identifier {:?}",
@@ -482,6 +491,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             }
             None => {
                 return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    response_content_observed: false,
                     cause: LossCause::ResponseUnintelligible {
                         detail: "success response carries an unrecognized content-block type"
                             .to_string(),
@@ -501,6 +511,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     });
     let Some(stop_reason) = response.stop_reason else {
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: false,
             cause: LossCause::ResponseUnintelligible {
                 detail: "success response carries no stop_reason".to_string(),
             },
@@ -513,6 +524,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     };
     if (stop_reason == "stop_sequence") != response.stop_sequence.is_some() {
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: false,
             cause: LossCause::ResponseUnintelligible {
                 detail: "success response stop_reason contradicts its stop_sequence metadata"
                     .to_string(),
@@ -530,6 +542,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             .any(|declared| declared == sequence)
     {
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: false,
             cause: LossCause::ResponseUnintelligible {
                 detail: "success response reports a stop sequence not declared by the request"
                     .to_string(),
@@ -544,6 +557,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     let finish = map_finish(&stop_reason, response.stop_sequence);
     if matches!(finish, FinishReason::Unrecognized { .. }) {
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: false,
             cause: LossCause::ResponseUnintelligible {
                 detail: "success response carries an unrecognized stop_reason".to_string(),
             },
@@ -566,6 +580,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         .any(|part| matches!(part, AssistantPart::ProviderCompaction { .. }));
     if matches!(finish, FinishReason::ToolUse) && !has_tool_calls {
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: false,
             cause: LossCause::ResponseUnintelligible {
                 detail: "success response content contradicts its stop_reason".to_string(),
             },
@@ -579,6 +594,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     let retained_iteration_usage = if has_provider_compaction {
         let (Some(input), Some(output)) = (retained_input_tokens, retained_output_tokens) else {
             return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: false,
                 cause: LossCause::ResponseUnintelligible {
                     detail: "provider compaction response omits final-iteration retained usage"
                         .to_string(),

@@ -880,7 +880,8 @@ fn complete_structure(result: FileReadResult) -> Result<serde_json::Value, Box<d
             body,
             continuation: ReadContinuation::Complete,
         } => Ok(body),
-        FileReadResult::Text { .. }
+        FileReadResult::Reference(_)
+        | FileReadResult::Text { .. }
         | FileReadResult::Structured {
             continuation: ReadContinuation::More { .. },
             ..
