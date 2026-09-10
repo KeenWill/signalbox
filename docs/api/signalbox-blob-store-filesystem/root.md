@@ -11,6 +11,8 @@ impl fmt::Debug for FilesystemBlobStore {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl FilesystemBlobStore {
+    #[cfg(feature = "test-support")]
+    pub fn read_bytes_for_test(&self) -> u64;
     pub fn try_new(
         root: path::PathBuf,
     ) -> result::Result<Self, FilesystemBlobStoreConstructionError>;

@@ -114,6 +114,11 @@ the final validation or after an operation returns. Descriptor pinning does not
 sandbox a hostile same-UID process, stop writes through pre-existing hard links
 or open descriptors, or survive a compromised kernel or library.
 
+Blob preparation and range reads trust ingest-verified catalog evidence and
+filesystem length and inode checks. A same-UID writer changing blob bytes in
+place after ingest is an accepted residual; explicit operator reads verify the
+complete blob's SHA-256.
+
 Scans and result text remain bounded; worktree, staging, and object-database
 content have no aggregate byte ceiling. Commits, trees, and tags retain a 1 MiB
 decoded metadata bound before libgit2 parsing; blob content streams without that
@@ -127,12 +132,13 @@ snapshot, and new files are created exclusively. Merge verification retains
 bounded previews and uses file-backed comparison scratch data with linear-space
 divide-and-conquer line matching; disjoint replacements use a linear scan.
 Private-pack writes and merge comparison check preparation deadlines between
-fixed-size pages; rename similarity streams fixed-size signatures. Unsupported
-layouts and formats, exhausted bounds, allocation failure, and host I/O failure
-are rejected, and the tool does not repair a corrupt repository. The configured
-`max_git_object_bytes` limit (`"none"` for unbounded) applies to the objects an
-operation reads, including packed delta bases, intermediate results, and delta
-instructions, not to unrelated objects retained in its history.
+fixed-size pages; rename similarity streams fixed-size signatures cached by
+object ID for each comparison pass. Unsupported layouts and formats, exhausted
+bounds, allocation failure, and host I/O failure are rejected, and the tool does
+not repair a corrupt repository. The configured `max_git_object_bytes` limit
+(`"none"` for unbounded) applies to the objects an operation reads, including
+packed delta bases, intermediate results, and delta instructions, not to
+unrelated objects retained in its history.
 
 Repository semantics outside the supported worktree layouts are unsupported, not
 partially trusted. Discovery, alternate object databases, replacement-object

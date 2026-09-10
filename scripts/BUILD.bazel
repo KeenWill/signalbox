@@ -103,6 +103,30 @@ py_test(
     data = ["//:tooling/generate-git-scale.py"],
 )
 
+py_test(
+    name = "test_ci_revision_fetch",
+    size = "small",
+    srcs = ["test_ci_revision_fetch.py"],
+    data = ["//:ci_comparison_workflows"],
+    # The fixtures exercise shallow fetches with the host Git executable.
+    tags = ["external"],
+    deps = [requirement("PyYAML")],
+)
+
+py_library(
+    name = "ci_bazel_scope",
+    srcs = ["ci_bazel_scope.py"],
+    imports = ["."],
+    deps = [":postgres_integration_suites"],
+)
+
+py_test(
+    name = "test_ci_bazel_scope",
+    size = "small",
+    srcs = ["test_ci_bazel_scope.py"],
+    deps = [":ci_bazel_scope"],
+)
+
 test_suite(
     name = "checker_tests",
     visibility = ["//visibility:public"],
