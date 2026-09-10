@@ -537,7 +537,7 @@ impl ObjectSource {
         content: &mut ObjectContent,
     ) -> Result<Oid, LocalGitFailure> {
         self.attach(database)?;
-        content.store(self.directory.path(), self.format)
+        content.store(self.directory.path(), self.format, self.deadline)
     }
 
     pub(super) fn content(&self, oid: Oid) -> Result<Option<ObjectContent>, LocalGitFailure> {
@@ -581,7 +581,7 @@ impl ObjectSource {
         if size.to_string() != declared || self.max_object_bytes.is_some_and(|limit| size > limit) {
             return Err(LocalGitFailure::Repository);
         }
-        let content = ObjectContent::decode(&mut decoder, size, kind)?;
+        let content = ObjectContent::decode(&mut decoder, size, kind, self.deadline)?;
         if decoder.total_in() != compressed_size {
             return Err(LocalGitFailure::Repository);
         }
@@ -729,7 +729,8 @@ impl ObjectSource {
                 _ => return Err(LocalGitFailure::Repository),
             };
             let mut decoder = ZlibDecoder::new(std::io::BufReader::new(remaining));
-            let content = ObjectContent::decode(&mut decoder, size, ObjectType::Blob)?;
+            let content =
+                ObjectContent::decode(&mut decoder, size, ObjectType::Blob, self.deadline)?;
             entries.push((kind, content));
             match base {
                 Some(base) => offset = base,
@@ -745,7 +746,7 @@ impl ObjectSource {
             _ => return Err(LocalGitFailure::Repository),
         };
         while let Some((_, delta)) = entries.pop() {
-            content = content.apply_delta(delta.file, self.max_object_bytes)?;
+            content = content.apply_delta(delta.file, self.max_object_bytes, self.deadline)?;
         }
         if self.store(database, &mut content)? != oid {
             return Err(LocalGitFailure::Repository);

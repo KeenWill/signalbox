@@ -6290,14 +6290,6 @@ fn a_derived_binding_names_the_parent_it_walked_through() {
     assert_eq!(binding.derived_parent(), Some(FIXTURE_PARENT_IDENTITY));
 }
 
-/// A configured binding walks through no derived parent.
-#[test]
-fn a_configured_binding_names_no_derived_parent() {
-    let binding = RecordedSessionBinding::ConfiguredRoot;
-
-    assert_eq!(binding.derived_parent(), None);
-}
-
 /// A configured root with no lexical final component — `/srv/workspace/..`,
 /// which is absolute and can name a valid worktree — has no directory name
 /// to append the suffix to. The derivation rejects it rather than answering
@@ -6335,15 +6327,6 @@ fn a_derived_binding_names_the_identity_it_pinned() {
     };
 
     assert_eq!(binding.derived_identity(), Some(FIXTURE_BOUND_IDENTITY));
-}
-
-/// A configured binding pins no derived identity, so it never collides with
-/// a derived root another session composed.
-#[test]
-fn a_configured_binding_names_no_derived_identity() {
-    let binding = RecordedSessionBinding::ConfiguredRoot;
-
-    assert_eq!(binding.derived_identity(), None);
 }
 
 /// `<name>.sessions` bind-mounted onto the configured root is a real

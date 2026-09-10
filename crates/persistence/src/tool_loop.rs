@@ -4,7 +4,9 @@
 //! scheduler lock before asking the domain aggregate for authority. Executor
 //! work remains outside database transactions.
 
+mod file_visibility;
 mod placement_loss;
+pub use file_visibility::VisibleToolAttachment;
 mod result_budget;
 pub(crate) use placement_loss::{
     close_lost_runner_requests, resolve_lost_runner_batch, resolve_lost_runner_batch_after_judge,
@@ -4626,54 +4628,16 @@ async fn admit_tool_preauthorization(
             decoded_bytes,
         } => (digest, Some(decoded_bytes)),
     };
-    let frontier: Uuid = sqlx::query_scalar(
-        "SELECT call.context_frontier_id FROM tool_request AS request
-           JOIN model_call AS call
-             ON call.model_call_id = request.producing_model_call_id
-            AND call.session_id = request.session_id
-          WHERE request.request_id = $1 AND request.session_id = $2 AND request.turn_id = $3",
-    )
-    .bind(tool_request_id_to_uuid(request))
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(ToolLoopCorruption::Missing(
-        "blob authorization producing frontier",
-    ))?;
-    let members = crate::context_compaction::projected_frontier_membership(
+    let visible = !file_visibility::visible_attachment_rows(
         transaction,
         session,
-        signalbox_domain::ContextFrontierId::from_uuid(frontier),
+        turn,
+        request,
+        digest,
+        None,
     )
-    .await
-    .map_err(crate::model_execution::map_projected_membership_error)
-    .map_err(map_model_call_error)?;
-    let sources = members
-        .iter()
-        .map(|member| member.source_session().into_uuid())
-        .collect::<Vec<_>>();
-    let entries = members
-        .iter()
-        .map(|member| member.entry().into_uuid())
-        .collect::<Vec<_>>();
-    let visible: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-            SELECT 1
-              FROM unnest($1::uuid[], $2::uuid[]) AS member(source_session_id, semantic_entry_id)
-              JOIN semantic_transcript_entry AS entry
-                ON entry.source_session_id = member.source_session_id
-               AND entry.semantic_entry_id = member.semantic_entry_id
-              JOIN accepted_input_content_part AS part
-                ON part.accepted_input_id = entry.origin_accepted_input_id
-             WHERE part.part_kind = 'attachment' AND part.blob_digest = $3
-        )",
-    )
-    .bind(&sources)
-    .bind(&entries)
-    .bind(digest.as_bytes().as_slice())
-    .fetch_one(&mut **transaction)
-    .await?;
+    .await?
+    .is_empty();
     if !visible {
         return Ok(BlobReadAdmission::NotVisible);
     }

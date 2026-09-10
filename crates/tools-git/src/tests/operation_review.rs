@@ -1477,3 +1477,51 @@ fn install_gitlink_index_entry(fixture: &Fixture) {
     index.write().expect("gitlink index publishes");
     fs::create_dir(fixture.root().join("submodule")).expect("gitlink worktree directory creates");
 }
+
+#[test]
+fn streamed_checkout_rejects_non_regular_entries_before_touching_selected_paths() {
+    for mode in [0o120000, GITLINK_MODE] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository");
+        let oid = if mode == GITLINK_MODE {
+            fixture.initial
+        } else {
+            repository.blob(b"../outside").expect("symlink blob")
+        };
+        let mut builder = repository.treebuilder(None).expect("tree builder");
+        builder
+            .insert("unsupported", oid, mode as i32)
+            .expect("non-regular entry");
+        let tree = builder.write().expect("tree");
+        let tree = repository.find_tree(tree).expect("target tree");
+        let destination = tempfile::tempdir().expect("checkout destination");
+        fs::write(
+            destination.path().join("removed"),
+            b"retain until preflight succeeds",
+        )
+        .expect("existing file");
+        let executor = fixture.executor();
+        let shell = executor
+            .repository_authority
+            .repository()
+            .expect("pinned repository");
+        let mut touched = false;
+        let result = crate::streamed_object::checkout_paths(
+            &shell,
+            &tree,
+            &BTreeSet::from(["removed".into(), "unsupported".into()]),
+            destination.path(),
+            |_| {
+                touched = true;
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(LocalGitFailure::Operation));
+        assert!(!touched);
+        assert_eq!(
+            fs::read(destination.path().join("removed")).expect("preserved file"),
+            b"retain until preflight succeeds"
+        );
+        assert!(!destination.path().join("unsupported").exists());
+    }
+}

@@ -179,7 +179,11 @@ filenames and previews explicitly when they cannot fit. Filenames use bytewise
 Git path quoting. Verification supports two-parent merges and refuses larger
 merges with `UnsupportedMergeShape` naming the parent count before capturing the
 push snapshot or traversing ancestry. It retains only the first dropped hunk per
-file. Non-merge pushes are unaffected.
+file. Merge comparison streams content into file-backed line indexes, diff
+scratch data, and effect counts; retained hunk previews remain bounded. Rename
+similarity uses fixed-size signatures of streamed content. Comparison checks the
+push-preparation deadline between I/O pages and matching steps. Non-merge pushes
+are unaffected.
 
 A rename/delete resolution may retain the branch's rename destination with its
 exact branch blob and mode while leaving the base-deleted source absent.
@@ -527,6 +531,10 @@ round; neither enters the crash-loss path nor fails the turn.
 [blob-storage](blob-storage.md) owns the budgets. `session_status_update`
 derives a durable command identity from the physical tool attempt and attributes
 the command and last-writer stamp to the exact `ToolRequestId`.
+
+Composed `file_inspect` and `file_read` declare external effect. Their resolver
+uses the same rendered-frontier attachment proof before source or worker I/O; a
+visibility refusal returns a typed known failure from the executor.
 
 Every code-host declaration, reads included, is `ExternalEffect`; read-only
 declarations default to automatic approval and mutations to confirmation, so the

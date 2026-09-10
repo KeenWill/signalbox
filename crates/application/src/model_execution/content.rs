@@ -106,6 +106,56 @@ pub struct ModelAttachmentStub {
     pub(super) display_filename: Option<signalbox_domain::AttachmentDisplayFilename>,
 }
 
+/// Identity of one attachment occurrence in a rendered semantic entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RenderedAttachmentSelector {
+    entry: signalbox_domain::SemanticTranscriptEntryId,
+    part_ordinal: u8,
+}
+
+impl RenderedAttachmentSelector {
+    /// Selects a zero-based part within one globally identified semantic entry.
+    pub const fn new(entry: signalbox_domain::SemanticTranscriptEntryId, part_ordinal: u8) -> Self {
+        Self {
+            entry,
+            part_ordinal,
+        }
+    }
+
+    /// Returns the semantic entry identity.
+    pub const fn entry(self) -> signalbox_domain::SemanticTranscriptEntryId {
+        self.entry
+    }
+
+    /// Returns the zero-based ordinal, including intervening text parts.
+    pub const fn part_ordinal(self) -> u8 {
+        self.part_ordinal
+    }
+
+    /// Parses only the canonical model-visible spelling.
+    pub fn parse(value: &str) -> Option<Self> {
+        let (entry, ordinal) = value.split_once('_')?;
+        let selector = Self::new(
+            signalbox_domain::SemanticTranscriptEntryId::from_uuid(
+                uuid::Uuid::parse_str(entry).ok()?,
+            ),
+            ordinal.parse().ok()?,
+        );
+        (selector.to_string() == value).then_some(selector)
+    }
+}
+
+impl fmt::Display for RenderedAttachmentSelector {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}_{}",
+            self.entry.into_uuid().simple(),
+            self.part_ordinal
+        )
+    }
+}
+
 impl ModelAttachmentStub {
     /// Borrows the exact compact JSON spelling.
     pub fn as_str(&self) -> &str {
@@ -298,4 +348,5 @@ pub(super) struct SerializedAttachmentStub<'a> {
     pub(super) display_filename: Option<&'a str>,
     pub(super) byte_length: String,
     pub(super) digest: String,
+    pub(super) visible_part: String,
 }
