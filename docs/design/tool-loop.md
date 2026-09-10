@@ -92,11 +92,6 @@ authenticated by the new `Prepared` model call. An idempotent replay receipt or
 an `already_admitted` receipt contributes no row and cannot duplicate a bundle
 or alter the successor manifest digest.
 
-A delivered foreground child wait appends the closed `child_wait_resumed`
-tool-batch state in the transaction that reopens the parent turn. The state
-names the awaited tool attempt and projects through persistence dispatch,
-application and process timelines, and the web and native client contracts.
-
 ## Compatibility constraints
 
 The four implemented continuation effects and the successor manifest must
@@ -109,10 +104,6 @@ by widening it.
 
 The daemon-local error kind set stays closed; the instruction family maps into
 `execution_failed` and `invalid_arguments` and adds no kind.
-
-The closed child-wait state advances tool-batch transition storage to version 2;
-current decoders retain version 1 for existing states, and older decoders reject
-version 2 before reading the state.
 
 ## Acceptance criteria
 
@@ -146,7 +137,3 @@ commits the typed failure and leaves the admitted set untouched. Replay appends
 nothing and returns the recorded receipt and link. Continuation creates exactly
 one successor manifest with the `Prepared` call, and the five effects commit or
 roll back together.
-
-A delivered foreground child wait emits one version-2 `child_wait_resumed`
-transition naming the awaited attempt, and every timeline and client projection
-renders the parent as resumed running work.
