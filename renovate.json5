@@ -60,41 +60,26 @@
     {
       "customType": "regex",
       "managerFilePatterns": ["/^tooling/codex-cli/release\\.json$/"],
-      "matchStrings": ["\"release\": \"rust-v(?<currentValue>[^\"]+)\""],
+      // Each digest dependency owns its release value inside one replacement;
+      // Renovate validates both before it accepts the updated file.
+      "matchStrings": [
+        "\"release\": \"(?<currentValue>rust-v[^\"]+)\",\\s*\"asset\": \"codex-x86_64-unknown-linux-musl\\.tar\\.gz\",\\s*\"sha256\": \"(?<currentDigest>[a-f0-9]{64})\""
+      ],
       "depNameTemplate": "KeenWill/codex",
-      "datasourceTemplate": "github-releases",
-      "extractVersionTemplate": "^rust-v(?<version>.*)$",
-      "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-signalbox\\.(?<build>\\d+)$"
+      "datasourceTemplate": "github-release-attachments",
+      "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-fork\\.(?<build>\\d+)$",
+      "autoReplaceStringTemplate": "\"release\": \"{{{newValue}}}\",\n  \"asset\": \"codex-x86_64-unknown-linux-musl.tar.gz\",\n  \"sha256\": \"{{{newDigest}}}\""
     },
     {
       "customType": "regex",
       "managerFilePatterns": ["/^tooling/codex-cli/release\\.json$/"],
-      // Release digests are commit SHAs; attachments resolves the tarball SHA-256.
-      // Replace only the checksum so the grouped tag update stays independent.
-      "matchStringsStrategy": "recursive",
       "matchStrings": [
-        "\"release\": \"(?<currentValue>rust-v[^\"]+)\"[\\s\\S]*",
-        "\"sha256\": \"(?<currentDigest>[a-f0-9]{64})\""
+        "\"executableRelease\": \"(?<currentValue>rust-v[^\"]+)\",\\s*\"executableSha256\": \"(?<currentDigest>[a-f0-9]{64})\""
       ],
       "depNameTemplate": "KeenWill/codex",
       "datasourceTemplate": "github-release-attachments",
-      "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-signalbox\\.(?<build>\\d+)$",
-      "autoReplaceStringTemplate": "\"sha256\": \"{{newDigest}}\""
-    },
-    {
-      "customType": "regex",
-      "managerFilePatterns": ["/^tooling/codex-cli/release\\.json$/"],
-      // BINARY_SHA256SUMS names the extracted codex binary.
-      // Replace only the checksum so the grouped tag update stays independent.
-      "matchStringsStrategy": "recursive",
-      "matchStrings": [
-        "\"release\": \"(?<currentValue>rust-v[^\"]+)\"[\\s\\S]*",
-        "\"executableSha256\": \"(?<currentDigest>[a-f0-9]{64})\""
-      ],
-      "depNameTemplate": "KeenWill/codex",
-      "datasourceTemplate": "github-release-attachments",
-      "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-signalbox\\.(?<build>\\d+)$",
-      "autoReplaceStringTemplate": "\"executableSha256\": \"{{newDigest}}\""
+      "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-fork\\.(?<build>\\d+)$",
+      "autoReplaceStringTemplate": "\"executableRelease\": \"{{{newValue}}}\",\n  \"executableSha256\": \"{{{newDigest}}}\""
     },
   ],
   // The cargo manager's default file pattern ((^|/)Cargo\.toml$) already
