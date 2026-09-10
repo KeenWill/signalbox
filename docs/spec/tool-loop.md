@@ -341,7 +341,9 @@ and the interrupt remains the proof-bearing authority for ending the turn. An
 interrupt alone against an approval wait is not a denial and does not bypass the
 decision command. A committed session closure first records core-issued
 lifecycle-closure denials for the outstanding approval waits, then applies its
-interrupt.
+interrupt. A cancelled judge call discards late provider completions and
+failures, retaining its cancellation and unreported usage without changing the
+decision.
 
 Recorded overrides are frozen into each prepared model call in the same
 transaction as the blanket posture. Two things retire an override: the consuming
@@ -408,7 +410,7 @@ effect-class crash-loss transition. A committed classification carrying an
 infrastructure or identity-collision failure fails or parks the affected turn
 without failing unrelated session execution. A fail-closed corruption or
 caller-or-hub bug remains an error after classification closes the attempt, so
-the fatal execution supervisor still stops scheduling;
+the execution supervisor parks that session with its cause;
 [runtime-substrate](runtime-substrate.md) owns the failure classes. If
 trustworthy evidence returns but its commit fails, the service retains that
 exact correlated observation as an opaque linear same-incarnation value and
@@ -539,6 +541,11 @@ Composed `file_inspect` and `file_read` declare external effect. Their resolver
 uses the same rendered-frontier attachment proof before source or worker I/O; a
 visibility refusal returns a typed known failure from the executor.
 
+`github_pull_request_metadata` returns GitHub's nullable `mergeable` member
+alongside the exact base and head revisions: true means mergeable, false means
+conflicting, and null means GitHub has not computed mergeability. This metadata
+read does not require a convergence policy.
+
 Every code-host declaration, reads included, is `ExternalEffect`; read-only
 declarations default to automatic approval and mutations to confirmation, so the
 approval transaction authorizes each mutation before credentials resolve.
@@ -598,8 +605,6 @@ the hint until a full nudge buffer has capacity.
 
 ## Planned
 
-- Session-scoped fatal execution parking; see
-  [daemon survival design](../design/daemon-survival.md).
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a `ToolInadmissible`

@@ -1,10 +1,13 @@
 use super::*;
 
-pub(super) fn wire_size(value: usize) -> Result<CanonicalU64, ProcessConnectionError> {
-    u64::try_from(value)
-        .map(CanonicalU64::new)
-        .map_err(|_| ProcessConnectionError::EncodeInvariant)
-}
+use std::{
+    io::Read,
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
+};
+
+#[cfg(test)]
+use signalbox_application::ImportConversationError;
 
 pub(super) async fn write_import_rejection<Writer>(
     writer: &mut Writer,
@@ -31,7 +34,6 @@ pub(super) async fn handle_begin_conversation_import<Writer>(
     request_id: RequestId,
     format: ConversationImportFormat,
     declared_size_bytes: CanonicalU64,
-    limit: usize,
     import_permit: Option<OwnedSemaphorePermit>,
     acquired_bulk_ingest_at: Option<Instant>,
     pending: &mut Option<PendingConversationImport>,
@@ -48,27 +50,26 @@ where
         )
         .await;
     }
-    let limit_bytes = wire_size(limit)?;
-    if declared_size_bytes.value() > limit_bytes.value() {
-        return write_import_rejection(
-            writer,
-            version,
-            request_id,
-            RejectionDetail::ConversationImportSourceTooLarge {
-                limit_bytes,
-                declared_size_bytes,
-                actual_size_bytes: None,
-            },
-        )
-        .await;
-    }
     let import_permit = import_permit.ok_or(ProcessConnectionError::ImportBudgetClosed)?;
     let started_at = acquired_bulk_ingest_at.ok_or(ProcessConnectionError::ImportBudgetClosed)?;
+    let source = match tempfile::tempfile() {
+        Ok(source) => tokio::fs::File::from_std(source),
+        Err(_) => {
+            drop(import_permit);
+            return write_error(
+                writer,
+                version,
+                request_id,
+                unavailable_protocol_error(InternalDiagnostic::ConversationImportSpoolUnavailable),
+            )
+            .await;
+        }
+    };
     *pending = Some(PendingConversationImport {
         format,
         declared_size_bytes: declared_size_bytes.value(),
         actual_size_bytes: 0,
-        source: Vec::new(),
+        source,
         import_permit,
         started_at,
         idle_since: started_at,
@@ -93,7 +94,6 @@ pub(super) async fn handle_append_conversation_import<Writer>(
     version: ProtocolVersion,
     request_id: RequestId,
     chunk: Vec<u8>,
-    limit: usize,
     pending: &mut Option<PendingConversationImport>,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -115,46 +115,17 @@ where
         .actual_size_bytes
         .checked_add(chunk_size)
         .ok_or(ProcessConnectionError::EncodeInvariant)?;
-    let limit_bytes = wire_size(limit)?;
-    if active_import.actual_size_bytes > limit_bytes.value() {
-        let detail = RejectionDetail::ConversationImportSourceTooLarge {
-            limit_bytes,
-            declared_size_bytes: CanonicalU64::new(active_import.declared_size_bytes),
-            actual_size_bytes: Some(CanonicalU64::new(active_import.actual_size_bytes)),
-        };
-        drop(chunk);
-        drop(pending.take());
-        return write_import_rejection(writer, version, request_id, detail).await;
-    }
-    let required_capacity = usize::try_from(active_import.actual_size_bytes)
-        .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
-    let declared_capacity = usize::try_from(active_import.declared_size_bytes)
-        .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
-    let target_capacity = conversation_import_capacity_target(
-        active_import.source.capacity(),
-        required_capacity,
-        declared_capacity,
-        limit,
-    );
-    let additional_capacity = target_capacity
-        .checked_sub(active_import.source.len())
-        .ok_or(ProcessConnectionError::EncodeInvariant)?;
-    if active_import
-        .source
-        .try_reserve_exact(additional_capacity)
-        .is_err()
-    {
+    if active_import.source.write_all(&chunk).await.is_err() {
         drop(chunk);
         drop(pending.take());
         return write_error(
             writer,
             version,
             request_id,
-            unavailable_protocol_error(InternalDiagnostic::ConversationImportAllocationFailure),
+            unavailable_protocol_error(InternalDiagnostic::ConversationImportSpoolUnavailable),
         )
         .await;
     }
-    active_import.source.extend_from_slice(&chunk);
     drop(chunk);
     write_message(
         writer,
@@ -169,31 +140,10 @@ where
     Ok(())
 }
 
-pub(super) fn conversation_import_capacity_target(
-    current_capacity: usize,
-    required_capacity: usize,
-    declared_capacity: usize,
-    limit: usize,
-) -> usize {
-    let growth_ceiling = if required_capacity <= declared_capacity {
-        declared_capacity
-    } else {
-        limit
-    };
-    if required_capacity <= current_capacity {
-        return current_capacity;
-    }
-    current_capacity
-        .saturating_mul(2)
-        .max(required_capacity)
-        .min(growth_ceiling)
-}
-
 pub(super) async fn handle_commit_conversation_import<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    limit: usize,
     repository: ImportedConversationRepository,
     pending: &mut Option<PendingConversationImport>,
 ) -> Result<(), ProcessConnectionError>
@@ -209,18 +159,8 @@ where
         )
         .await;
     };
-    let limit_bytes = wire_size(limit)?;
     let declared_size_bytes = CanonicalU64::new(pending.declared_size_bytes);
     let actual_size_bytes = CanonicalU64::new(pending.actual_size_bytes);
-    if pending.actual_size_bytes > limit_bytes.value() {
-        let detail = RejectionDetail::ConversationImportSourceTooLarge {
-            limit_bytes,
-            declared_size_bytes,
-            actual_size_bytes: Some(actual_size_bytes),
-        };
-        drop(pending);
-        return write_import_rejection(writer, version, request_id, detail).await;
-    }
     if pending.actual_size_bytes != pending.declared_size_bytes {
         let detail = RejectionDetail::ConversationImportSourceSizeMismatch {
             declared_size_bytes,
@@ -229,10 +169,37 @@ where
         drop(pending);
         return write_import_rejection(writer, version, request_id, detail).await;
     }
-    let observed_source_size =
-        u64::try_from(pending.source.len()).map_err(|_| ProcessConnectionError::EncodeInvariant)?;
-    if observed_source_size != pending.actual_size_bytes {
-        drop(pending);
+    let PendingConversationImport {
+        format,
+        declared_size_bytes: _,
+        actual_size_bytes,
+        mut source,
+        import_permit,
+        started_at: _,
+        idle_since: _,
+    } = pending;
+    if source.flush().await.is_err() {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            unavailable_protocol_error(InternalDiagnostic::ConversationImportSpoolUnavailable),
+        )
+        .await;
+    }
+    let observed_source_size = match source.metadata().await {
+        Ok(metadata) => metadata.len(),
+        Err(_) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                unavailable_protocol_error(InternalDiagnostic::ConversationImportSpoolUnavailable),
+            )
+            .await;
+        }
+    };
+    if observed_source_size != actual_size_bytes {
         return write_error(
             writer,
             version,
@@ -241,14 +208,24 @@ where
         )
         .await;
     }
+    if source.seek(SeekFrom::Start(0)).await.is_err() {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            unavailable_protocol_error(InternalDiagnostic::ConversationImportSpoolUnavailable),
+        )
+        .await;
+    }
+    let source = source.into_std().await;
     handle_import_conversation(
         writer,
         version,
         request_id,
-        pending.format,
-        pending.source,
+        format,
+        ConversationImportSource::Spooled(source),
         repository,
-        pending.import_permit,
+        import_permit,
     )
     .await
 }
@@ -814,7 +791,7 @@ pub(super) async fn handle_import_conversation<Writer>(
     version: ProtocolVersion,
     request_id: RequestId,
     format: ConversationImportFormat,
-    source: Vec<u8>,
+    source: ConversationImportSource,
     repository: ImportedConversationRepository,
     import_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
@@ -822,33 +799,58 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let outcome = match format {
-        ConversationImportFormat::ClaudeCodeSessionJsonlV2 => {
-            execute_import(ClaudeCodeJsonlConverter, source, repository).await
+        ConversationImportFormat::ClaudeCodeSessionJsonlV3 => {
+            execute_import(
+                ResilientClaudeCodeJsonlConverter,
+                source,
+                repository,
+                import_permit,
+            )
+            .await
         }
-        ConversationImportFormat::CodexRolloutJsonlV1 => {
-            execute_import(CodexRolloutJsonlConverter, source, repository).await
+        ConversationImportFormat::CodexRolloutJsonlV2 => {
+            execute_import(
+                ResilientCodexRolloutJsonlConverter,
+                source,
+                repository,
+                import_permit,
+            )
+            .await
         }
     };
-    drop(import_permit);
     match outcome {
-        Ok(ImportConversationOutcome::Inserted { conversation }) => {
+        Ok(CompletedImport {
+            outcome: ImportConversationOutcome::Inserted { conversation },
+            dropped_records,
+        }) => {
             write_message(
                 writer,
                 version,
                 request_id,
                 ServerMessage::ConversationImportInserted {
                     imported_conversation_id: wire_uuid(conversation.into_uuid()),
+                    dropped_record_count: CanonicalU64::new(dropped_records.count()),
+                    first_dropped_record_position: dropped_records
+                        .first_source_line()
+                        .map(CanonicalU64::new),
                 },
             )
             .await
         }
-        Ok(ImportConversationOutcome::AlreadyImported { conversation }) => {
+        Ok(CompletedImport {
+            outcome: ImportConversationOutcome::AlreadyImported { conversation },
+            dropped_records,
+        }) => {
             write_message(
                 writer,
                 version,
                 request_id,
                 ServerMessage::ConversationImportAlreadyImported {
                     imported_conversation_id: wire_uuid(conversation.into_uuid()),
+                    dropped_record_count: CanonicalU64::new(dropped_records.count()),
+                    first_dropped_record_position: dropped_records
+                        .first_source_line()
+                        .map(CanonicalU64::new),
                 },
             )
             .await
@@ -895,6 +897,11 @@ where
     }
 }
 
+pub(super) enum ConversationImportSource {
+    Inline(Vec<u8>),
+    Spooled(std::fs::File),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ImportRejectionEvidence {
     class: ConversationImportRejectionClass,
@@ -919,9 +926,19 @@ pub(super) trait ClassifyConversationImportError {
     fn disposition(self) -> ConversionFailureDisposition;
 }
 
+pub(super) trait ClassifyConversationImportRecordFailure {
+    fn disposition(self) -> ConversionFailureDisposition;
+}
+
 impl ClassifyConversationImportError for ClaudeCodeJsonlConversionError {
     fn disposition(self) -> ConversionFailureDisposition {
         claude_conversion_failure_disposition(self.failure())
+    }
+}
+
+impl ClassifyConversationImportRecordFailure for ClaudeCodeJsonlConversionFailure {
+    fn disposition(self) -> ConversionFailureDisposition {
+        claude_conversion_failure_disposition(self)
     }
 }
 
@@ -944,6 +961,10 @@ pub(super) fn claude_conversion_failure_disposition(
         }
         Failure::JsonDepthExceeded { line } => import_evidence(
             ConversationImportRejectionClass::JsonDepthExceeded,
+            Some(line),
+        ),
+        Failure::RawRecordTooLarge { line } => import_evidence(
+            ConversationImportRejectionClass::RawRecordTooLarge,
             Some(line),
         ),
         Failure::TopLevelNotObject { line } => import_evidence(
@@ -995,6 +1016,12 @@ impl ClassifyConversationImportError for CodexRolloutJsonlConversionError {
     }
 }
 
+impl ClassifyConversationImportRecordFailure for CodexRolloutJsonlConversionFailure {
+    fn disposition(self) -> ConversionFailureDisposition {
+        codex_conversion_failure_disposition(self)
+    }
+}
+
 pub(super) fn codex_conversion_failure_disposition(
     failure: CodexRolloutJsonlConversionFailure,
 ) -> ConversionFailureDisposition {
@@ -1014,6 +1041,10 @@ pub(super) fn codex_conversion_failure_disposition(
         }
         Failure::JsonDepthExceeded { line } => import_evidence(
             ConversationImportRejectionClass::JsonDepthExceeded,
+            Some(line),
+        ),
+        Failure::RawRecordTooLarge { line } => import_evidence(
+            ConversationImportRejectionClass::RawRecordTooLarge,
             Some(line),
         ),
         Failure::TopLevelNotObject { line } => import_evidence(
@@ -1086,6 +1117,7 @@ pub(super) const fn import_evidence(
 /// Payload-bearing converter and repository errors are consumed here without
 /// formatting. Only a fixed classification crosses into the Internal log
 /// record, so source content, durable values, and database prose remain absent.
+#[cfg(test)]
 pub(super) fn operational_import_error<ConverterError>(
     error: ImportConversationError<ConverterError, ImportedConversationRepositoryError>,
 ) -> OperationalImportError
@@ -1093,6 +1125,7 @@ where
     ConverterError: ClassifyConversationImportError,
 {
     match error {
+        ImportConversationError::SourceRead => OperationalImportError::Unavailable,
         ImportConversationError::Conversion(error) => match error.disposition() {
             ConversionFailureDisposition::Rejected(evidence) => {
                 OperationalImportError::InvalidSource(evidence)
@@ -1101,21 +1134,7 @@ where
                 InternalDiagnostic::ConversationImportContractDefect,
             ),
         },
-        ImportConversationError::Store(ImportedConversationRepositoryError::Database(_)) => {
-            OperationalImportError::Database
-        }
-        ImportConversationError::Store(ImportedConversationRepositoryError::BlobCatalog(
-            signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_),
-        )) => OperationalImportError::Database,
-        ImportConversationError::Store(ImportedConversationRepositoryError::BlobCatalog(
-            signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_),
-        )) => OperationalImportError::Unavailable,
-        ImportConversationError::Store(ImportedConversationRepositoryError::BlobStorage(
-            ImportedRawBlobStorageError::Unavailable,
-        )) => OperationalImportError::Unavailable,
-        ImportConversationError::Store(error) => {
-            OperationalImportError::Internal(imported_conversation_internal_diagnostic(&error))
-        }
+        ImportConversationError::Store(error) => operational_import_repository_error(error),
         ImportConversationError::ConverterIdentityMismatch { .. }
         | ImportConversationError::ConverterFormatMismatch { .. }
         | ImportConversationError::ConverterEntryIdentitySequenceMismatch
@@ -1126,33 +1145,222 @@ where
     }
 }
 
+fn operational_import_repository_error(
+    error: ImportedConversationRepositoryError,
+) -> OperationalImportError {
+    match error {
+        ImportedConversationRepositoryError::Database(_) => OperationalImportError::Database,
+        ImportedConversationRepositoryError::BlobCatalog(
+            signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_),
+        ) => OperationalImportError::Database,
+        ImportedConversationRepositoryError::BlobCatalog(
+            signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_),
+        ) => OperationalImportError::Unavailable,
+        ImportedConversationRepositoryError::BlobStorage(
+            ImportedRawBlobStorageError::Unavailable,
+        ) => OperationalImportError::Unavailable,
+        error => {
+            OperationalImportError::Internal(imported_conversation_internal_diagnostic(&error))
+        }
+    }
+}
+
 pub(super) async fn execute_import<Converter>(
-    converter: Converter,
-    source: Vec<u8>,
+    mut converter: Converter,
+    source: ConversationImportSource,
     repository: ImportedConversationRepository,
-) -> Result<ImportConversationOutcome, OperationalImportError>
+    import_permit: OwnedSemaphorePermit,
+) -> Result<CompletedImport, OperationalImportError>
 where
-    Converter: ImportedConversationConverter + Send + 'static,
+    Converter: StreamingResilientImportedConversationConverter + Send + 'static,
     Converter::Error: ClassifyConversationImportError,
+    Converter::RecordFailure: ClassifyConversationImportRecordFailure + Copy,
 {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (cancel_sender, mut cancel_receiver) = watch::channel(false);
+    let cancellation_guard = CancelImportWorkerOnDrop {
+        cancelled: Arc::clone(&cancelled),
+        signal: cancel_sender,
+    };
     let runtime = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
+    let worker = tokio::task::spawn_blocking(move || {
+        let _import_permit = import_permit;
         runtime.block_on(async move {
-            let mut service = ImportConversationService::new(
-                UuidV7ImportedConversationIdGenerator,
-                converter,
-                repository,
-            );
-            service
-                .execute(&source)
-                .await
-                .map_err(operational_import_error)
+            let import = async move {
+                match source {
+                    ConversationImportSource::Inline(source) => {
+                        execute_streamed_import(
+                            &mut converter,
+                            CooperativeImportReader::new(
+                                BufReader::new(Cursor::new(source)),
+                                cancelled,
+                            ),
+                            &repository,
+                        )
+                        .await
+                    }
+                    ConversationImportSource::Spooled(source) => {
+                        execute_streamed_import(
+                            &mut converter,
+                            CooperativeImportReader::new(BufReader::new(source), cancelled),
+                            &repository,
+                        )
+                        .await
+                    }
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = cancel_receiver.changed() => Err(OperationalImportError::Unavailable),
+                result = import => result,
+            }
         })
-    })
-    .await
-    .map_err(|_| {
-        OperationalImportError::Internal(InternalDiagnostic::ConversationImportWorkerTerminated)
-    })?
+    });
+    let result = worker.await.map_err(|_| {
+        OperationalImportError::Internal(InternalDiagnostic::ConversationImportContractDefect)
+    })?;
+    drop(cancellation_guard);
+    result
+}
+
+struct CancelImportWorkerOnDrop {
+    cancelled: Arc<AtomicBool>,
+    signal: watch::Sender<bool>,
+}
+
+impl Drop for CancelImportWorkerOnDrop {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        let _ = self.signal.send(true);
+    }
+}
+
+struct CooperativeImportReader<Reader> {
+    inner: Reader,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl<Reader> CooperativeImportReader<Reader> {
+    fn new(inner: Reader, cancelled: Arc<AtomicBool>) -> Self {
+        Self { inner, cancelled }
+    }
+
+    fn check_cancelled(&self) -> io::Result<()> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "conversation import cancelled",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<Reader> Read for CooperativeImportReader<Reader>
+where
+    Reader: Read,
+{
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.check_cancelled()?;
+        thread::yield_now();
+        self.inner.read(buffer)
+    }
+}
+
+impl<Reader> std::io::BufRead for CooperativeImportReader<Reader>
+where
+    Reader: std::io::BufRead,
+{
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.check_cancelled()?;
+        thread::yield_now();
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.inner.consume(amount);
+    }
+}
+
+async fn execute_streamed_import<Converter, Reader>(
+    converter: &mut Converter,
+    source: Reader,
+    repository: &ImportedConversationRepository,
+) -> Result<CompletedImport, OperationalImportError>
+where
+    Converter: StreamingResilientImportedConversationConverter,
+    Converter::Error: ClassifyConversationImportError,
+    Converter::RecordFailure: ClassifyConversationImportRecordFailure + Copy,
+    Reader: std::io::BufRead + Send,
+{
+    let mut ids = UuidV7ImportedConversationIdGenerator;
+    let candidate = ids.next_conversation_id();
+    let format = converter.format();
+    let maximum_record_bytes = repository.maximum_raw_record_bytes();
+    if maximum_record_bytes == 0 {
+        return Err(OperationalImportError::Unavailable);
+    }
+    let records =
+        converter.convert_resilient_from_reader(candidate, source, maximum_record_bytes, || {
+            ids.next_entry_id()
+        });
+    match repository
+        .resolve_or_insert_stream(candidate, format, records)
+        .await
+        .map_err(|error| match error {
+            StreamingImportedConversationError::SourceRead => OperationalImportError::Unavailable,
+            StreamingImportedConversationError::Conversion(error) => match error.disposition() {
+                ConversionFailureDisposition::Rejected(evidence) => {
+                    OperationalImportError::InvalidSource(evidence)
+                }
+                ConversionFailureDisposition::Internal => OperationalImportError::Internal(
+                    InternalDiagnostic::ConversationImportContractDefect,
+                ),
+            },
+            StreamingImportedConversationError::ConverterContract => {
+                OperationalImportError::Internal(
+                    InternalDiagnostic::ConversationImportContractDefect,
+                )
+            }
+            StreamingImportedConversationError::Repository(error) => {
+                operational_import_repository_error(error)
+            }
+        })? {
+        StreamingImportedConversationReport::Imported {
+            outcome,
+            dropped_records,
+        } => {
+            let outcome = match outcome {
+                ImportedConversationStoreOutcome::Inserted { conversation, .. } => {
+                    ImportConversationOutcome::Inserted { conversation }
+                }
+                ImportedConversationStoreOutcome::AlreadyImported { conversation, .. } => {
+                    ImportConversationOutcome::AlreadyImported { conversation }
+                }
+            };
+            Ok(CompletedImport {
+                outcome,
+                dropped_records,
+            })
+        }
+        StreamingImportedConversationReport::NoValidRecords { first_failure, .. } => {
+            match first_failure.disposition() {
+                ConversionFailureDisposition::Rejected(evidence) => {
+                    Err(OperationalImportError::InvalidSource(evidence))
+                }
+                ConversionFailureDisposition::Internal => Err(OperationalImportError::Internal(
+                    InternalDiagnostic::ConversationImportContractDefect,
+                )),
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct CompletedImport {
+    outcome: ImportConversationOutcome,
+    dropped_records: ImportedConversationDropFacts,
 }
 
 pub(super) fn domain_imported_relationship(
@@ -1192,15 +1400,11 @@ where
     let model_selection = domain_model_selection(wire_request.initial_model_selection);
     let caller_model_settings = domain_model_settings_overlay(wire_request.model_settings);
     let through_position = wire_request.through_position;
-    let repository = ImportedSessionRepository::with_imported_conversations(
-        pool.clone(),
-        model_configuration.session_credential_pin(),
-        imported_conversations.clone(),
-    );
+    let repository =
+        ImportedSessionRepository::new(pool.clone(), model_configuration.session_credential_pin());
 
-    match repository.load(command_id).await {
-        Ok(Some(recorded)) => {
-            let command = recorded.command();
+    match repository.load_applied(command_id).await {
+        Ok(Some((command, applied_result))) => {
             if command.imported_conversation() == conversation_id
                 && command.imported_frontier().through_position().as_u64()
                     == through_position.value()
@@ -1226,12 +1430,9 @@ where
                     version,
                     request_id,
                     ServerMessage::SessionCreated {
-                        session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                        session_id: wire_uuid(applied_result.session().into_uuid()),
                         model_settings: wire_model_settings(
-                            recorded
-                                .command()
-                                .initial_configuration_defaults()
-                                .model_settings(),
+                            command.initial_configuration_defaults().model_settings(),
                         ),
                     },
                 )
@@ -1317,8 +1518,11 @@ where
         )
         .await;
     };
-    let conversation = match imported_conversations.load(conversation_id).await {
-        Ok(Some(conversation)) => conversation,
+    let lookup = match imported_conversations
+        .lookup_frontier(conversation_id, position)
+        .await
+    {
+        Ok(Some(lookup)) => lookup,
         Ok(None) => {
             return write_error(
                 writer,
@@ -1360,10 +1564,7 @@ where
             .await;
         }
     };
-    let Some(frontier) = conversation
-        .frontiers()
-        .find(|frontier| frontier.through_position() == position)
-    else {
+    let Some(frontier) = lookup.frontier() else {
         return write_error(
             writer,
             version,
@@ -1371,13 +1572,12 @@ where
             imported_position_out_of_range(
                 wire_request.conversation,
                 through_position,
-                last_imported_position(&conversation),
+                lookup.last_position().as_u64(),
             ),
         )
         .await;
     };
-    let last_position = last_imported_position(&conversation);
-    let repository = repository.with_preloaded_conversation(conversation);
+    let last_position = lookup.last_position().as_u64();
 
     let model_settings = match validate_session_model_settings(
         model_configuration,
@@ -1537,17 +1737,6 @@ where
     }
 }
 
-/// Returns the greatest selectable imported position on a loaded aggregate.
-///
-/// An imported conversation's normalized entry sequence is nonempty and its
-/// positions are contiguous from one, so the entry count is that bound.
-pub(super) fn last_imported_position(conversation: &ImportedConversation) -> u64 {
-    conversation
-        .entries()
-        .last()
-        .map_or(0, |entry| entry.position().as_u64())
-}
-
 /// Names the absent target as an imported conversation rather than a session.
 pub(super) fn imported_conversation_not_found(
     imported_conversation_id: CanonicalUuid,
@@ -1591,11 +1780,13 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let conversation_id = ImportedConversationId::from_uuid(imported_conversation_id.into_uuid());
-    let load =
-        signalbox_persistence::conversation_import::load_normalized_entries(pool, conversation_id)
-            .await;
-    let entries = match load {
-        Ok(Some(entries)) => entries,
+    let dropped_records = match signalbox_persistence::conversation_import::load_import_drop_facts(
+        pool,
+        conversation_id,
+    )
+    .await
+    {
+        Ok(Some(facts)) => facts,
         Ok(None) => {
             drop(snapshot_permit);
             return write_error(
@@ -1616,12 +1807,7 @@ where
             )
             .await;
         }
-        Err(
-            error @ (ImportedConversationRepositoryError::IdentityCollision(_)
-            | ImportedConversationRepositoryError::BlobStorage(_)
-            | ImportedConversationRepositoryError::BlobCatalog(_)
-            | ImportedConversationRepositoryError::Corruption(_)),
-        ) => {
+        Err(error) => {
             let diagnostic = imported_conversation_internal_diagnostic(&error);
             drop(snapshot_permit);
             return write_error(
@@ -1634,30 +1820,87 @@ where
         }
     };
     let spool_result = spool_imported_conversation(
-        &entries,
+        pool,
+        conversation_id,
         imported_conversation_id,
+        dropped_records,
         version,
         request_id,
         configured_usize(model_configuration, "max_imported_text_preview_utf8_bytes"),
     )
     .await;
-    drop(entries);
     drop(snapshot_permit);
     let mut spool = match spool_result {
         Ok(spool) => spool,
-        Err(error) => return write_snapshot_spool_error(writer, version, request_id, error).await,
+        Err(ImportedConversationSpoolError::Missing) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(None, InternalDiagnostic::ConversationImportContractDefect),
+            )
+            .await;
+        }
+        Err(ImportedConversationSpoolError::Read(
+            ImportedConversationDiscoveryError::Database(_),
+        )) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await;
+        }
+        Err(ImportedConversationSpoolError::Read(error)) => {
+            let diagnostic = match error {
+                ImportedConversationDiscoveryError::Database(_) => {
+                    InternalDiagnostic::ImportedConversationDatabase
+                }
+                ImportedConversationDiscoveryError::Request(_)
+                | ImportedConversationDiscoveryError::Corruption(_) => {
+                    InternalDiagnostic::ImportedConversationCorruption
+                }
+            };
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(None, diagnostic),
+            )
+            .await;
+        }
+        Err(ImportedConversationSpoolError::Spool(error)) => {
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
+        }
     };
     write_spooled_file(writer, &mut spool).await
 }
 
-pub(super) async fn spool_imported_conversation(
-    entries: &[ImportedTranscriptEntryInput],
+enum ImportedConversationSpoolError {
+    Missing,
+    Read(ImportedConversationDiscoveryError),
+    Spool(SnapshotSpoolError),
+}
+
+async fn spool_imported_conversation(
+    pool: &PgPool,
+    conversation_id: ImportedConversationId,
     imported_conversation_id: CanonicalUuid,
+    dropped_records: ImportedConversationDropFacts,
     version: ProtocolVersion,
     request_id: RequestId,
     max_text_preview_utf8_bytes: Option<usize>,
-) -> Result<tokio::fs::File, SnapshotSpoolError> {
-    let standard_file = tempfile::tempfile().map_err(SnapshotSpoolError::Io)?;
+) -> Result<tokio::fs::File, ImportedConversationSpoolError> {
+    let repository = ImportedConversationDiscoveryRepository::new(pool.clone());
+    let inventory = repository
+        .entry_inventory(conversation_id)
+        .await
+        .map_err(ImportedConversationSpoolError::Read)?
+        .ok_or(ImportedConversationSpoolError::Missing)?;
+    let standard_file = tempfile::tempfile()
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(ImportedConversationSpoolError::Spool)?;
     let mut file = tokio::fs::File::from_std(standard_file);
     write_spool_message(
         &mut file,
@@ -1665,29 +1908,66 @@ pub(super) async fn spool_imported_conversation(
         request_id,
         ServerMessage::ImportedConversationStart {
             imported_conversation_id,
+            dropped_record_count: CanonicalU64::new(dropped_records.count()),
+            first_dropped_record_position: dropped_records
+                .first_source_line()
+                .map(CanonicalU64::new),
         },
     )
-    .await?;
+    .await
+    .map_err(ImportedConversationSpoolError::Spool)?;
     let mut entry_count = 0_u64;
-    for entry in entries {
-        write_spool_message(
-            &mut file,
-            version,
-            request_id,
-            ServerMessage::ImportedConversationEntry {
-                position: CanonicalU64::new(entry.position().as_u64()),
-                imported_entry_id: wire_uuid(entry.identity().into_uuid()),
-                source_speaker: wire_imported_speaker_attestation(entry.source_speaker()),
-                content_kind: wire_imported_content_kind(process_imported_content_kind(
-                    entry.content(),
-                )),
-                text_preview: imported_text_preview(entry.content(), max_text_preview_utf8_bytes),
-            },
-        )
-        .await?;
-        entry_count = entry_count
-            .checked_add(1)
-            .ok_or(SnapshotSpoolError::EncodeInvariant)?;
+    let page_limit = NonZeroUsize::new(128)
+        .ok_or(SnapshotSpoolError::EncodeInvariant)
+        .map_err(ImportedConversationSpoolError::Spool)?;
+    let maximum_preview_bytes = max_text_preview_utf8_bytes
+        .unwrap_or(MAX_CONTENT_FRAGMENT_BYTES)
+        .min(MAX_CONTENT_FRAGMENT_BYTES);
+    let maximum_projected_text_bytes = if maximum_preview_bytes == 0 {
+        0
+    } else {
+        maximum_preview_bytes + 4
+    };
+    let maximum_page_text_bytes = maximum_projected_text_bytes * page_limit.get();
+    loop {
+        let page = repository
+            .entry_page(
+                inventory,
+                entry_count,
+                page_limit,
+                maximum_projected_text_bytes,
+                maximum_page_text_bytes,
+            )
+            .await
+            .map_err(ImportedConversationSpoolError::Read)?;
+        for entry in page.items() {
+            write_spool_message(
+                &mut file,
+                version,
+                request_id,
+                ServerMessage::ImportedConversationEntry {
+                    position: CanonicalU64::new(entry.frontier.position),
+                    imported_entry_id: wire_uuid(entry.frontier.entry.into_uuid()),
+                    source_speaker: wire_imported_speaker_attestation(&entry.source_speaker),
+                    content_kind: wire_imported_content_kind(process_imported_content_kind(
+                        &entry.content,
+                    )),
+                    text_preview: imported_text_preview(
+                        &entry.content,
+                        max_text_preview_utf8_bytes,
+                    ),
+                },
+            )
+            .await
+            .map_err(ImportedConversationSpoolError::Spool)?;
+            entry_count = entry_count
+                .checked_add(1)
+                .ok_or(SnapshotSpoolError::EncodeInvariant)
+                .map_err(ImportedConversationSpoolError::Spool)?;
+        }
+        if !page.has_more() {
+            break;
+        }
     }
     write_spool_message(
         &mut file,
@@ -1698,33 +1978,38 @@ pub(super) async fn spool_imported_conversation(
             entry_count: CanonicalU64::new(entry_count),
         },
     )
-    .await?;
-    file.flush().await.map_err(SnapshotSpoolError::Io)?;
+    .await
+    .map_err(ImportedConversationSpoolError::Spool)?;
+    file.flush()
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(ImportedConversationSpoolError::Spool)?;
     file.seek(SeekFrom::Start(0))
         .await
-        .map_err(SnapshotSpoolError::Io)?;
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(ImportedConversationSpoolError::Spool)?;
     Ok(file)
 }
 
 /// Maps one entry's normalized content to the conservative wire kind through
 /// the same content-variant classification the transcript projection uses.
 pub(super) const fn process_imported_content_kind(
-    content: &ImportedTranscriptContent,
+    content: &ImportedEntryContentProjection,
 ) -> ProcessImportedContentKind {
     match content {
-        ImportedTranscriptContent::SourceEvent { .. } => ProcessImportedContentKind::SourceEvent,
-        ImportedTranscriptContent::SourceMessageBlock { .. } => {
+        ImportedEntryContentProjection::SourceEvent => ProcessImportedContentKind::SourceEvent,
+        ImportedEntryContentProjection::SourceMessageBlock => {
             ProcessImportedContentKind::SourceMessageBlock
         }
-        ImportedTranscriptContent::Text(_) => ProcessImportedContentKind::Text,
-        ImportedTranscriptContent::ToolCall { .. } => ProcessImportedContentKind::ToolCall,
-        ImportedTranscriptContent::ToolResult { .. } => ProcessImportedContentKind::ToolResult,
-        ImportedTranscriptContent::Thinking { .. } => ProcessImportedContentKind::Thinking,
-        ImportedTranscriptContent::RedactedThinking { .. } => {
+        ImportedEntryContentProjection::Text(_) => ProcessImportedContentKind::Text,
+        ImportedEntryContentProjection::ToolCall => ProcessImportedContentKind::ToolCall,
+        ImportedEntryContentProjection::ToolResult => ProcessImportedContentKind::ToolResult,
+        ImportedEntryContentProjection::Thinking => ProcessImportedContentKind::Thinking,
+        ImportedEntryContentProjection::RedactedThinking => {
             ProcessImportedContentKind::RedactedThinking
         }
-        ImportedTranscriptContent::Document { .. } => ProcessImportedContentKind::Document,
-        ImportedTranscriptContent::MessageContentAbsent(_) => {
+        ImportedEntryContentProjection::Document => ProcessImportedContentKind::Document,
+        ImportedEntryContentProjection::MessageContentAbsent => {
             ProcessImportedContentKind::MessageContentAbsent
         }
     }
@@ -1733,30 +2018,30 @@ pub(super) const fn process_imported_content_kind(
 /// Previews exactly the text the transcript projection already carries in
 /// full; every other imported content stays behind its kind alone.
 pub(super) fn imported_text_preview(
-    content: &ImportedTranscriptContent,
+    content: &ImportedEntryContentProjection,
     max_utf8_bytes: Option<usize>,
 ) -> Option<ImportedTextPreview> {
     match content {
-        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text))
+        ImportedEntryContentProjection::Text(ImportedSourceAttestation::Attested(text))
             if max_utf8_bytes != Some(0) =>
         {
             Some(ImportedTextPreview::of_exact_text_with_limit(
-                text.as_str(),
+                &text.leading_text,
                 max_utf8_bytes,
             ))
         }
-        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(_)) => None,
-        ImportedTranscriptContent::Text(
+        ImportedEntryContentProjection::Text(ImportedSourceAttestation::Attested(_)) => None,
+        ImportedEntryContentProjection::Text(
             ImportedSourceAttestation::AttestedAbsent | ImportedSourceAttestation::NotAttested,
         )
-        | ImportedTranscriptContent::SourceEvent { .. }
-        | ImportedTranscriptContent::SourceMessageBlock { .. }
-        | ImportedTranscriptContent::ToolCall { .. }
-        | ImportedTranscriptContent::ToolResult { .. }
-        | ImportedTranscriptContent::Thinking { .. }
-        | ImportedTranscriptContent::RedactedThinking { .. }
-        | ImportedTranscriptContent::Document { .. }
-        | ImportedTranscriptContent::MessageContentAbsent(_) => None,
+        | ImportedEntryContentProjection::SourceEvent
+        | ImportedEntryContentProjection::SourceMessageBlock
+        | ImportedEntryContentProjection::ToolCall
+        | ImportedEntryContentProjection::ToolResult
+        | ImportedEntryContentProjection::Thinking
+        | ImportedEntryContentProjection::RedactedThinking
+        | ImportedEntryContentProjection::Document
+        | ImportedEntryContentProjection::MessageContentAbsent => None,
     }
 }
 

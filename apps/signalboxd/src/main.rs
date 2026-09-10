@@ -151,6 +151,7 @@ enum RuntimePhase {
 struct HubRuntimeError {
     phase: RuntimePhase,
     failure_class: OperatorFailureClass,
+    database_failure: bool,
     session: Option<SessionId>,
     turn: Option<TurnId>,
 }
@@ -159,6 +160,7 @@ impl HubRuntimeError {
     const fn infrastructure(phase: RuntimePhase) -> Self {
         Self {
             phase,
+            database_failure: matches!(phase, RuntimePhase::DatabaseConnection),
             failure_class: OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
@@ -174,6 +176,7 @@ impl HubRuntimeError {
     ) -> Self {
         Self {
             phase: RuntimePhase::StartupScan,
+            database_failure: true,
             failure_class,
             session,
             turn,
@@ -404,6 +407,9 @@ enum SanitizedStartupCause<'a> {
     TemplateConfiguration(&'a SessionTemplateConfigurationError),
     TelemetryConfiguration(&'a TelemetryConfigurationError),
     Database(&'a FencedHubDatabaseError),
+    Migration(&'a sqlx::migrate::MigrateError),
+    Reload(&'a signalbox_persistence::reload_configuration::ReloadRepositoryError),
+    BlobStorage(&'a signalboxd::BlobStoreRegistryError),
     Tools(&'a DaemonToolsConstructionError),
     Socket(&'a LocalSocketError),
     WebHttpConfiguration(&'a WebHttpConfigurationError),
@@ -419,6 +425,9 @@ impl fmt::Display for SanitizedStartupCause<'_> {
             Self::TemplateConfiguration(error) => error.fmt(formatter),
             Self::TelemetryConfiguration(error) => error.fmt(formatter),
             Self::Database(error) => error.fmt(formatter),
+            Self::Migration(_) => formatter.write_str("database migration failed"),
+            Self::Reload(_) => formatter.write_str("configuration reload recovery failed"),
+            Self::BlobStorage(error) => error.fmt(formatter),
             Self::Tools(error) => error.fmt(formatter),
             Self::Socket(error) => error.fmt(formatter),
             Self::WebHttpConfiguration(error) => error.fmt(formatter),
@@ -432,13 +441,95 @@ impl fmt::Display for SanitizedStartupCause<'_> {
 /// `SanitizedStartupCause` is a closed admission boundary, so the emitted
 /// cause cannot include configuration values, paths, credentials, or content.
 fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) -> HubRuntimeError {
-    let error = HubRuntimeError::infrastructure(phase);
+    let mut error = HubRuntimeError::infrastructure(phase);
+    if let SanitizedStartupCause::Database(FencedHubDatabaseError::AdvanceFence(fence)) = &cause {
+        match fence {
+            signalbox_persistence::hub_fence::HubFenceError::Database(_) => {
+                error.database_failure = true;
+            }
+            signalbox_persistence::hub_fence::HubFenceError::Corruption(_) => {
+                error.database_failure = false;
+                error.failure_class = OperatorFailureClass::FailClosedCorruption;
+            }
+        }
+    }
+    if let SanitizedStartupCause::BlobStorage(signalboxd::BlobStoreRegistryError::Catalog(
+        catalog,
+    )) = &cause
+    {
+        error.failure_class = match catalog {
+            signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_) => {
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                }
+            }
+            signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_) => {
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                }
+            }
+            signalbox_persistence::blob::BlobCatalogRepositoryError::Corruption(_) => {
+                OperatorFailureClass::FailClosedCorruption
+            }
+        };
+        error.database_failure = matches!(
+            catalog,
+            signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_)
+                | signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_)
+        );
+    }
+    let migration = match &cause {
+        SanitizedStartupCause::Migration(migration) => Some(*migration),
+        SanitizedStartupCause::Database(FencedHubDatabaseError::InitializeFence(migration)) => {
+            Some(migration)
+        }
+        _ => None,
+    };
+    if let Some(migration) = migration {
+        error.database_failure = matches!(
+            migration,
+            sqlx::migrate::MigrateError::Execute(_)
+                | sqlx::migrate::MigrateError::ExecuteMigration(_, _)
+        );
+    }
+    if let SanitizedStartupCause::Reload(failure) = &cause {
+        use signalbox_persistence::reload_configuration::ReloadRepositoryError;
+        (error.failure_class, error.database_failure) = match failure {
+            ReloadRepositoryError::Database(_) => (
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+                true,
+            ),
+            ReloadRepositoryError::CommitAmbiguous(_) => (
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                },
+                true,
+            ),
+            ReloadRepositoryError::Corruption(_) => {
+                (OperatorFailureClass::FailClosedCorruption, false)
+            }
+            ReloadRepositoryError::InvalidCommandId => {
+                (OperatorFailureClass::CallerOrHubBug, false)
+            }
+        };
+    }
     tracing::error!(
         ?phase,
         failure_class = ?error.failure_class,
         cause = %cause,
         "daemon startup construction failed"
     );
+    error
+}
+
+fn erase_startup_database_cause(
+    phase: RuntimePhase,
+    cause: SanitizedStartupCause<'_>,
+) -> HubRuntimeError {
+    let mut error = erase_startup_cause(phase, cause);
+    error.database_failure = true;
     error
 }
 
@@ -480,6 +571,7 @@ enum ShutdownOutcome {
     ExecutionFailed,
     ExecutionFailedAfterGraceWindow,
     GuardLost,
+    GuardRecoveryExhausted,
     RuntimeFailed,
     RuntimeFailedAfterGraceWindow,
     RuntimeDefect,
@@ -524,6 +616,7 @@ enum RuntimeTaskExit {
     TurnLiveness,
     LifecycleDeadline,
     LifecycleMetrics,
+    SessionSupervision,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -569,6 +662,7 @@ enum RuntimeTaskDefect {
     TurnLivenessCompletedBeforeShutdown,
     LifecycleDeadlineCompletedBeforeShutdown,
     LifecycleMetricsCompletedBeforeShutdown,
+    SessionSupervisionCompletedBeforeShutdown,
     TaskCancelled,
     TaskPanicked,
     TaskJoinFailed,
@@ -594,6 +688,9 @@ impl RuntimeTaskDefect {
             }
             Self::LifecycleMetricsCompletedBeforeShutdown => {
                 "lifecycle_metrics_completed_before_shutdown"
+            }
+            Self::SessionSupervisionCompletedBeforeShutdown => {
+                "session_supervision_completed_before_shutdown"
             }
             Self::TaskCancelled => "runtime_task_cancelled",
             Self::TaskPanicked => "runtime_task_panicked",
@@ -650,12 +747,24 @@ fn report_database_close_failure(error: &SingleHubGuardError) {
     );
 }
 
+fn startup_failure_after_close(
+    failure: HubRuntimeError,
+    closed: Result<(), signalboxd::SingleHubGuardError>,
+) -> Result<ShutdownOutcome, HubRuntimeError> {
+    if matches!(closed, Err(signalboxd::SingleHubGuardError::GuardLost(_))) {
+        tracing::warn!("database guard lost during startup cleanup");
+        Ok(ShutdownOutcome::GuardLost)
+    } else {
+        Err(failure)
+    }
+}
+
 async fn migrate_hub_database(pool: &sqlx::PgPool) -> Result<(), HubRuntimeError> {
     migrate(pool).await.map_err(|error| {
         tracing::error!(migration_detail = %error, "database migration rejected");
         erase_startup_cause(
             RuntimePhase::Migration,
-            SanitizedStartupCause::Static("database_migration_failed"),
+            SanitizedStartupCause::Migration(&error),
         )
     })?;
     tracing::info!(phase = ?RuntimePhase::Migration, "daemon startup phase completed");
@@ -744,6 +853,14 @@ async fn wait_for_guard_loss(database: &mut FencedHubDatabase) {
         }
         sleep(GUARD_CHECK_INTERVAL).await;
     }
+}
+
+async fn monitor_runtime_guard(database: &mut FencedHubDatabase, ready: oneshot::Sender<()>) {
+    if database.check_guard().await.is_err() {
+        return;
+    }
+    let _ = ready.send(());
+    wait_for_guard_loss(database).await;
 }
 
 async fn run_fenced_pool_floor_reconciliation(
@@ -998,7 +1115,8 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::Workflows(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness)
         | Ok(RuntimeTaskExit::LifecycleDeadline)
-        | Ok(RuntimeTaskExit::LifecycleMetrics) => RuntimeTaskCompletion::Clean,
+        | Ok(RuntimeTaskExit::LifecycleMetrics)
+        | Ok(RuntimeTaskExit::SessionSupervision) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
@@ -1172,6 +1290,152 @@ async fn initialize_prometheus(
 
 async fn run_hub(
     telemetry_configuration: &TelemetryConfiguration,
+) -> Result<ShutdownOutcome, HubRuntimeError> {
+    use signalboxd::guard_recovery::GuardRecoveryPolicy;
+    let configuration = HubConfiguration::from_environment().map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Configuration(&error),
+        )
+    })?;
+    let on_disk = fs::read_to_string(configuration.model_configuration_file()).map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::ModelConfiguration(&HubModelConfigurationError::Read),
+        )
+    })?;
+    let bounds = HubModelConfiguration::startup_numeric_bounds(&on_disk).map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::ModelConfiguration(&error),
+        )
+    })?;
+    let policy = bounds
+        .duration("guard_recovery_initial_delay")
+        .flatten()
+        .zip(bounds.duration("guard_recovery_maximum_delay").flatten())
+        .and_then(|(initial, maximum)| {
+            GuardRecoveryPolicy::new(
+                initial,
+                maximum,
+                bounds.duration("guard_recovery_elapsed_bound").flatten(),
+            )
+        })
+        .ok_or_else(|| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_guard_recovery_backoff"),
+            )
+        })?;
+    run_hub_recovery(
+        policy,
+        |observer| async move {
+            recovery_incarnation_outcome(
+                run_hub_incarnation(telemetry_configuration, observer.clone()).await,
+                observer.is_recovering(),
+            )
+        },
+        TerminationSignals::new(),
+    )
+    .await
+}
+
+async fn run_hub_recovery<Run, Incarnation>(
+    policy: signalboxd::guard_recovery::GuardRecoveryPolicy,
+    run: Run,
+    mut recovery_signals: std::io::Result<TerminationSignals>,
+) -> Result<ShutdownOutcome, HubRuntimeError>
+where
+    Run: FnMut(signalboxd::guard_recovery::GuardRecoveryObserver) -> Incarnation,
+    Incarnation: std::future::Future<
+            Output = signalboxd::guard_recovery::GuardedIncarnationOutcome<
+                Result<ShutdownOutcome, HubRuntimeError>,
+            >,
+        >,
+{
+    use signalboxd::guard_recovery::{GuardRecoveryStop, run_guarded_incarnations};
+    let mut listener_failed = false;
+    match run_guarded_incarnations(policy, run, async {
+        listener_failed = shutdown_requested(&mut recovery_signals).await;
+        if listener_failed {
+            tracing::error!("termination signal listener failed during guard recovery");
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(GuardRecoveryStop::ShutdownRequested) => Ok(if listener_failed {
+            ShutdownOutcome::SignalListenerFailed
+        } else {
+            ShutdownOutcome::Clean
+        }),
+        Err(reason @ GuardRecoveryStop::ElapsedBoundExhausted) => {
+            tracing::error!(?reason, "database guard recovery bound exhausted");
+            Ok(ShutdownOutcome::GuardRecoveryExhausted)
+        }
+    }
+}
+
+fn recovery_incarnation_outcome(
+    result: Result<ShutdownOutcome, HubRuntimeError>,
+    recovering: bool,
+) -> signalboxd::guard_recovery::GuardedIncarnationOutcome<Result<ShutdownOutcome, HubRuntimeError>>
+{
+    use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+    match result {
+        Ok(ShutdownOutcome::GuardLost) => GuardedIncarnationOutcome::Reacquire,
+        Err(error)
+            if recovering
+                && error.database_failure
+                && matches!(
+                    error.failure_class,
+                    OperatorFailureClass::Infrastructure { .. }
+                ) =>
+        {
+            GuardedIncarnationOutcome::Reacquire
+        }
+        result => GuardedIncarnationOutcome::Finished(result),
+    }
+}
+
+fn reload_recovery_failure(
+    failure: &signalbox_persistence::reload_configuration::ReloadRepositoryError,
+) -> HubRuntimeError {
+    erase_startup_cause(
+        RuntimePhase::StartupScan,
+        SanitizedStartupCause::Reload(failure),
+    )
+}
+
+fn startup_goal_resumption_result(
+    result: Result<usize, signalboxd::PostgresGoalPassDispositionError>,
+    recovering: bool,
+) -> Result<(), HubRuntimeError> {
+    match result {
+        Ok(rearmed) => tracing::info!(
+            phase = ?RuntimePhase::StartupScan,
+            rearmed_goal_resumption_count = rearmed,
+            "daemon startup reconciled automatic goal resumptions"
+        ),
+        Err(error) => {
+            tracing::error!(
+                phase = ?RuntimePhase::StartupScan,
+                cause_code = error.operator_failure_cause_code(),
+                cause = %error,
+                "daemon startup exhausted automatic goal-resumption reconciliation"
+            );
+            let failure_class = error.operator_failure_class();
+            if recovering && matches!(failure_class, OperatorFailureClass::Infrastructure { .. }) {
+                return Err(HubRuntimeError::startup_scan(failure_class, None, None));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_hub_incarnation(
+    telemetry_configuration: &TelemetryConfiguration,
+    guard_recovery: signalboxd::guard_recovery::GuardRecoveryObserver,
 ) -> Result<ShutdownOutcome, HubRuntimeError> {
     let configuration = HubConfiguration::from_environment().map_err(|error| {
         erase_startup_cause(
@@ -1423,6 +1687,7 @@ async fn run_hub(
     let mut database = FencedHubDatabase::connect_production(
         configuration.database_url(),
         fenced_pool_min_connections,
+        guard_recovery.clone(),
     )
     .await
     .map_err(|error| {
@@ -1431,6 +1696,7 @@ async fn run_hub(
             FencedHubDatabaseError::ParseOptions(_)
             | FencedHubDatabaseError::ConnectBootstrap(_)
             | FencedHubDatabaseError::AcquireGuard(_)
+            | FencedHubDatabaseError::GuardLost(_)
             | FencedHubDatabaseError::AdvanceFence(_)
             | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
         };
@@ -1438,19 +1704,32 @@ async fn run_hub(
     })?;
     let pool = database.pool().clone();
     let fenced_pool_floor_pool = pool.clone();
-    migrate_hub_database(&pool).await?;
-    let pending_reload =
+    match await_while_guarded(&mut database, migrate_hub_database(&pool)).await {
+        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Err(error)) => {
+            return startup_failure_after_close(error, database.close().await);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
+    }
+    let reload_repository =
         signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
             pool.clone(),
-        )
-        .pending()
-        .await
-        .map_err(|_| {
-            erase_startup_cause(
-                RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static("configuration_reload_intent_read_failed"),
-            )
-        })?;
+        );
+    let pending_reload = match await_while_guarded(&mut database, reload_repository.pending()).await
+    {
+        GuardedAwait::Completed(Ok(pending)) => pending,
+        GuardedAwait::Completed(Err(error)) => {
+            let failure = reload_recovery_failure(&error);
+            return startup_failure_after_close(failure, database.close().await);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
+    };
     let retained_startup = pending_reload
         .first()
         .map(|(_, intent)| {
@@ -1684,8 +1963,7 @@ async fn run_hub(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Tools(&error),
             );
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let workspace_instruction_runtime = WorkspaceInstructionRuntime::new(
@@ -1706,8 +1984,7 @@ async fn run_hub(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static("runner_catalog_construction_failed"),
             );
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let scan_runner_service = runner_service.clone();
@@ -1719,7 +1996,7 @@ async fn run_hub(
         async {
             install_oauth_registrations(&pool, &migration_oauth_registrations).await?;
             invocation_processes.recover().await.map_err(|_| {
-                erase_startup_cause(
+                erase_startup_database_cause(
                     RuntimePhase::StartupScan,
                     SanitizedStartupCause::Static("credential_invocation_recovery_failed"),
                 )
@@ -1730,7 +2007,7 @@ async fn run_hub(
             )
             .await
             .map_err(|_| {
-                erase_startup_cause(
+                erase_startup_database_cause(
                     RuntimePhase::StartupScan,
                     SanitizedStartupCause::Static("credential_capacity_registration_failed"),
                 )
@@ -1741,7 +2018,7 @@ async fn run_hub(
                 .mark_orphaned_connections_lost()
                 .await
                 .map_err(|_| {
-                    erase_startup_cause(
+                    erase_startup_database_cause(
                         RuntimePhase::StartupScan,
                         SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
                     )
@@ -1762,7 +2039,7 @@ async fn run_hub(
                 .resume_runner_replacements()
                 .await
                 .map_err(|_| {
-                    erase_startup_cause(
+                    erase_startup_database_cause(
                         RuntimePhase::StartupScan,
                         SanitizedStartupCause::Static("runner_replacement_recovery_failed"),
                     )
@@ -1771,7 +2048,7 @@ async fn run_hub(
                 .refresh(None)
                 .await
                 .map_err(|_| {
-                    erase_startup_cause(
+                    erase_startup_database_cause(
                         RuntimePhase::StartupScan,
                         SanitizedStartupCause::Static("approval_wait_deadline_restore_failed"),
                     )
@@ -1783,6 +2060,13 @@ async fn run_hub(
                     outcome.awaiting_recovery_decision_sessions().len(),
                 "daemon startup phase completed"
             );
+            for session in outcome.skipped_corrupt_sessions() {
+                tracing::error!(
+                    session = %session.as_uuid(),
+                    cause = "durable_state_corruption",
+                    "startup skipped corrupt session; durable operator item recorded"
+                );
+            }
             for session in outcome.awaiting_recovery_decision_sessions() {
                 tracing::warn!(
                     phase = ?RuntimePhase::StartupScan,
@@ -1793,16 +2077,16 @@ async fn run_hub(
             Ok(())
         },
         || std::future::ready(()),
-    )
-    .await;
-    if let Err(error) = startup {
-        let _ = database.close().await;
-        return Err(error);
-    }
-
-    if database.check_guard().await.is_err() {
-        let _ = database.close().await;
-        return Ok(ShutdownOutcome::GuardLost);
+    );
+    match await_while_guarded(&mut database, startup).await {
+        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Err(error)) => {
+            return startup_failure_after_close(error, database.close().await);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
     }
     let blob_store_registry = match await_while_guarded(
         &mut database,
@@ -1811,13 +2095,12 @@ async fn run_hub(
     .await
     {
         GuardedAwait::Completed(Ok(registry)) => registry,
-        GuardedAwait::Completed(Err(_)) => {
+        GuardedAwait::Completed(Err(error)) => {
             let failure = erase_startup_cause(
                 RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("blob_storage_startup_reconciliation_failed"),
+                SanitizedStartupCause::BlobStorage(&error),
             );
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
         GuardedAwait::GuardLost => {
             let _ = database.close().await;
@@ -1841,8 +2124,7 @@ async fn run_hub(
                     SanitizedStartupCause::Static("blob_read_tool_construction_failed"),
                 );
                 drop(blob_store_registry);
-                let _ = database.close().await;
-                return Err(failure);
+                return startup_failure_after_close(failure, database.close().await);
             }
         };
         let (blob_catalog, executor) = blob_tools.into_parts();
@@ -1855,19 +2137,20 @@ async fn run_hub(
                 );
                 drop(executor);
                 drop(blob_store_registry);
-                let _ = database.close().await;
-                return Err(failure);
+                return startup_failure_after_close(failure, database.close().await);
             }
         };
         blob_executor = Some(executor);
     }
     let file_media_executor = if model_configuration.file_media() {
         let Some(stores) = blob_store_registry.as_ref() else {
-            let _ = database.close().await;
-            return Err(erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("file_media_requires_blob_storage"),
-            ));
+            return startup_failure_after_close(
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("file_media_requires_blob_storage"),
+                ),
+                database.close().await,
+            );
         };
         let composed = await_while_guarded(
             &mut database,
@@ -1879,11 +2162,13 @@ async fn run_hub(
                 tool_catalog = match tool_catalog.with_compiled_catalog(catalog) {
                     Ok(catalog) => catalog,
                     Err(_) => {
-                        let _ = database.close().await;
-                        return Err(erase_startup_cause(
-                            RuntimePhase::Configuration,
-                            SanitizedStartupCause::Static("file_media_catalog_conflict"),
-                        ));
+                        return startup_failure_after_close(
+                            erase_startup_cause(
+                                RuntimePhase::Configuration,
+                                SanitizedStartupCause::Static("file_media_catalog_conflict"),
+                            ),
+                            database.close().await,
+                        );
                     }
                 };
                 Some(executor.with_model_configuration(&model_configuration))
@@ -1894,11 +2179,13 @@ async fn run_hub(
                 return Ok(ShutdownOutcome::GuardLost);
             }
             GuardedAwait::Completed(Err(_)) => {
-                let _ = database.close().await;
-                return Err(erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("file_media_worker_unavailable"),
-                ));
+                return startup_failure_after_close(
+                    erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static("file_media_worker_unavailable"),
+                    ),
+                    database.close().await,
+                );
             }
         }
     } else {
@@ -1914,8 +2201,7 @@ async fn run_hub(
             drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let listener = match LocalProcessListener::bind(configuration.process_socket_path()) {
@@ -1929,8 +2215,7 @@ async fn run_hub(
             drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let snapshot_reader_budget = match signalboxd::shared_snapshot_reader_budget(
@@ -1947,8 +2232,7 @@ async fn run_hub(
             let _ = runner_listener.cleanup();
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let web_blob_runtime = match blob_store_registry.as_ref() {
@@ -1966,8 +2250,7 @@ async fn run_hub(
                     disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
                         .await;
                     drop(blob_store_registry);
-                    let _ = database.close().await;
-                    return Err(failure);
+                    return startup_failure_after_close(failure, database.close().await);
                 }
             };
             match WebBlobRuntime::new(
@@ -1988,8 +2271,7 @@ async fn run_hub(
                     disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
                         .await;
                     drop(blob_store_registry);
-                    let _ = database.close().await;
-                    return Err(failure);
+                    return startup_failure_after_close(failure, database.close().await);
                 }
             }
         }
@@ -2016,8 +2298,7 @@ async fn run_hub(
             drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     tracing::info!(
@@ -2076,7 +2357,7 @@ async fn run_hub(
         match await_while_guarded(&mut database, start).await {
             GuardedAwait::Completed(Ok(runtime)) => Some(runtime),
             GuardedAwait::Completed(Err(_)) => {
-                let failure = erase_startup_cause(
+                let failure = erase_startup_database_cause(
                     RuntimePhase::Configuration,
                     SanitizedStartupCause::Static("repository_watch_startup_failed"),
                 );
@@ -2085,8 +2366,7 @@ async fn run_hub(
                 drop(blob_executor);
                 disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
                 drop(blob_store_registry);
-                let _ = database.close().await;
-                return Err(failure);
+                return startup_failure_after_close(failure, database.close().await);
             }
             GuardedAwait::GuardLost => {
                 let _ = listener.cleanup();
@@ -2117,20 +2397,45 @@ async fn run_hub(
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let approval_judge_repository_watch = repository_watch_runtime.clone();
     let workflow_repository_watch = repository_watch_runtime.clone();
-    let repository_watch_worker = match repository_watch_runtime {
-        Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
-        None => None,
+    let mut termination_signals = TerminationSignals::new();
+    let (guard_ready, guarded_startup) = oneshot::channel();
+    let mut guard_loss = Box::pin(monitor_runtime_guard(&mut database, guard_ready));
+    let mut repository_watch_worker = None;
+    let reconstruct = async {
+        if guarded_startup.await.is_err() {
+            return GuardedAwait::GuardLost;
+        }
+        GuardedAwait::Completed(
+            async {
+                startup_goal_resumption_result(
+                    goal_disposition
+                        .reconcile_automatic_resumptions_after_restart()
+                        .await,
+                    guard_recovery.is_recovering(),
+                )?;
+                repository_watch_worker = match repository_watch_runtime {
+                    Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
+                    None => None,
+                };
+                configuration_reload
+                    .recover()
+                    .await
+                    .map_err(|error| reload_recovery_failure(&error))
+            }
+            .await,
+        )
     };
-    let recovery_failure =
-        match await_while_guarded(&mut database, configuration_reload.recover()).await {
-            GuardedAwait::Completed(Ok(())) => None,
-            GuardedAwait::Completed(Err(_)) => Some(Err(erase_startup_cause(
-                RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
-            ))),
-            GuardedAwait::GuardLost => Some(Ok(ShutdownOutcome::GuardLost)),
-        };
+    let recovery_failure = match select! {
+        biased;
+        () = &mut guard_loss => GuardedAwait::GuardLost,
+        outcome = reconstruct => outcome,
+    } {
+        GuardedAwait::Completed(Ok(())) => None,
+        GuardedAwait::Completed(Err(error)) => Some(Err(error)),
+        GuardedAwait::GuardLost => Some(Ok(ShutdownOutcome::GuardLost)),
+    };
     if let Some(outcome) = recovery_failure {
+        drop(guard_loss);
         if matches!(outcome, Ok(ShutdownOutcome::GuardLost)) {
             if let Some(registry) = blob_store_registry.as_ref() {
                 registry.disarm_staging_sweep();
@@ -2146,8 +2451,11 @@ async fn run_hub(
         let _ = runner_listener.cleanup();
         drop(tool_executor);
         drop(blob_store_registry);
-        let _ = database.close().await;
-        return outcome;
+        let closed = database.close().await;
+        return match outcome {
+            Ok(outcome) => Ok(outcome),
+            Err(failure) => startup_failure_after_close(failure, closed),
+        };
     }
     let recovered_catalogs = configuration_reload.catalogs();
     let model_configuration = (*recovered_catalogs.models).clone();
@@ -2173,6 +2481,7 @@ async fn run_hub(
     let tool_catalog = match startup_tool_catalog {
         Ok(catalog) => catalog,
         Err(failure) => {
+            drop(guard_loss);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             let _ = repository_watch_shutdown.send(true);
             if let Some(worker) = repository_watch_worker {
@@ -2182,8 +2491,7 @@ async fn run_hub(
             let _ = runner_listener.cleanup();
             drop(tool_executor);
             drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
@@ -2225,6 +2533,7 @@ async fn run_hub(
     let text_deltas = process_runtime.provider_text_delta_sink();
     let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
     let (execution_supervisor, fatal_execution) = FatalExecutionSupervisor::new(());
+    let session_supervision = execution_supervisor.recovery_reporter();
     let process_runtime =
         process_runtime.with_recovery_reporter(execution_supervisor.recovery_reporter());
     let pass_pool = scheduler_pool.clone();
@@ -2345,22 +2654,6 @@ async fn run_hub(
         SessionDeadlineBounds::new(session_admission_deadline, session_waiting_deadline),
     );
     let process_runtime = process_runtime.with_goal_resumption(goal_disposition.clone());
-    match goal_disposition
-        .reconcile_automatic_resumptions_after_restart()
-        .await
-    {
-        Ok(rearmed) => tracing::info!(
-            phase = ?RuntimePhase::StartupScan,
-            rearmed_goal_resumption_count = rearmed,
-            "daemon startup reconciled automatic goal resumptions"
-        ),
-        Err(error) => tracing::error!(
-            phase = ?RuntimePhase::StartupScan,
-            cause_code = error.operator_failure_cause_code(),
-            cause = %error,
-            "daemon startup exhausted automatic goal-resumption reconciliation"
-        ),
-    }
     let pass = GoalAwareEligibilityPass::new(activated_pass, goal_disposition);
     let scheduler_max_in_flight_passes = scheduler_pass_admission_cap;
     let mut scheduler = match scheduler_max_in_flight_passes {
@@ -2411,188 +2704,217 @@ async fn run_hub(
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
     let (lifecycle_metrics_shutdown, lifecycle_metrics_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
-    runtime_tasks.spawn(async move {
-        let result = async {
-            let (_service, workflows) = workflows?;
-            workflows
-                .run(async {
-                    let _ = workflow_shutdown_receiver.await;
-                })
-                .await
-        }
-        .await;
-        RuntimeTaskExit::Workflows(result)
-    });
-    runtime_tasks.spawn(async move {
-        RuntimeTaskExit::Scheduler(
-            scheduler
-                .run_until(async move {
-                    let _ = scheduler_shutdown_receiver.await;
-                })
-                .await,
-        )
-    });
-    if let Some(policy) = fenced_pool_floor_reconciliation {
-        runtime_tasks.spawn(async move {
-            run_fenced_pool_floor_reconciliation(
-                fenced_pool_floor_pool,
-                policy,
-                fenced_pool_floor_shutdown_receiver,
-            )
-            .await;
-            RuntimeTaskExit::FencedPoolFloor
-        });
-    }
-    runtime_tasks.spawn(async move {
-        RuntimeTaskExit::Process(process_runtime.run(process_shutdown_receiver).await)
-    });
-    runtime_tasks.spawn(async move {
-        RuntimeTaskExit::Runner(runner_runtime.run(runner_shutdown_receiver).await)
-    });
-    runtime_tasks.spawn(async move {
-        RuntimeTaskExit::WebHttp(web_http_runtime.run(web_http_shutdown_receiver).await)
-    });
-    if let Some(worker) = repository_watch_worker {
-        runtime_tasks.spawn(async move {
-            RuntimeTaskExit::RepositoryWatch(
-                worker
-                    .await
-                    .unwrap_or(Err(RepositoryWatchRuntimeError::RepositoryWorker)),
-            )
-        });
-    }
-    let invocation_shutdown = turn_liveness_shutdown_receiver.clone();
-    runtime_tasks.spawn(async move {
-        invocation_processes.run(invocation_shutdown).await;
-        RuntimeTaskExit::CredentialInvocations
-    });
-    runtime_tasks.spawn(async move {
-        turn_liveness_runtime
-            .run(turn_liveness_shutdown_receiver)
-            .await;
-        RuntimeTaskExit::TurnLiveness
-    });
-    runtime_tasks.spawn(async move {
-        lifecycle_deadline_runtime
-            .run(lifecycle_deadline_shutdown_receiver)
-            .await;
-        RuntimeTaskExit::LifecycleDeadline
-    });
-    if let Some(lifecycle_metrics_runtime) = lifecycle_metrics_runtime {
-        runtime_tasks.spawn(async move {
-            lifecycle_metrics_runtime
-                .run(lifecycle_metrics_shutdown_receiver)
-                .await;
-            RuntimeTaskExit::LifecycleMetrics
-        });
-    }
-    tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
-    let mut termination_signals = TerminationSignals::new();
-
+    let supervision_pool = pool.clone();
+    let supervision_nudge = eligibility_nudge.clone();
+    let mut supervision_shutdown = process_shutdown.subscribe();
     let mut drain_interrupted = false;
+    drop(guard_loss);
+    let (guard_ready, guarded_admission) = oneshot::channel();
+    let mut guard_loss = Box::pin(monitor_runtime_guard(&mut database, guard_ready));
     let mut outcome = {
-        let guard_loss = wait_for_guard_loss(&mut database);
-        pin!(guard_loss);
-        let mut cause = select! {
-            listener_failed = shutdown_requested(&mut termination_signals) => {
-                if listener_failed {
-                    RuntimeStopCause::SignalListenerFailed
-                } else {
-                    RuntimeStopCause::Requested
+        let mut cause = {
+            let runtime = async {
+                if guarded_admission.await.is_err() {
+                    return RuntimeStopCause::GuardLost;
                 }
-            }
-            () = fatal_execution.wait() => RuntimeStopCause::ExecutionFailed,
-            () = &mut guard_loss => RuntimeStopCause::GuardLost,
-            completed = runtime_tasks.join_next() => {
-                match completed {
-                    Some(Ok(RuntimeTaskExit::Workflows(result))) => {
-                        match result {
-                            Ok(()) => tracing::error!("workflow runtime completed before shutdown"),
-                            Err(error) => tracing::error!(cause = error.cause_code(), "workflow runtime failed"),
+                runtime_tasks.spawn(async move {
+                    select! {
+                        () = session_supervision.park_failed_sessions(supervision_pool, supervision_nudge) => {},
+                        _ = supervision_shutdown.changed() => {},
+                    }
+                    RuntimeTaskExit::SessionSupervision
+                });
+                runtime_tasks.spawn(async move {
+                    let result = async {
+                        let (_service, workflows) = workflows?;
+                        workflows
+                            .run(async {
+                                let _ = workflow_shutdown_receiver.await;
+                            })
+                            .await
+                    }
+                    .await;
+                    RuntimeTaskExit::Workflows(result)
+                });
+                runtime_tasks.spawn(async move {
+                    RuntimeTaskExit::Scheduler(
+                        scheduler
+                            .run_until(async move {
+                                let _ = scheduler_shutdown_receiver.await;
+                            })
+                            .await,
+                    )
+                });
+                if let Some(policy) = fenced_pool_floor_reconciliation {
+                    runtime_tasks.spawn(async move {
+                        run_fenced_pool_floor_reconciliation(
+                            fenced_pool_floor_pool,
+                            policy,
+                            fenced_pool_floor_shutdown_receiver,
+                        )
+                        .await;
+                        RuntimeTaskExit::FencedPoolFloor
+                    });
+                }
+                runtime_tasks.spawn(async move {
+                    RuntimeTaskExit::Process(process_runtime.run(process_shutdown_receiver).await)
+                });
+                runtime_tasks.spawn(async move {
+                    RuntimeTaskExit::Runner(runner_runtime.run(runner_shutdown_receiver).await)
+                });
+                runtime_tasks.spawn(async move {
+                    RuntimeTaskExit::WebHttp(web_http_runtime.run(web_http_shutdown_receiver).await)
+                });
+                if let Some(worker) = repository_watch_worker {
+                    runtime_tasks.spawn(async move {
+                        RuntimeTaskExit::RepositoryWatch(
+                            worker
+                                .await
+                                .unwrap_or(Err(RepositoryWatchRuntimeError::RepositoryWorker)),
+                        )
+                    });
+                }
+                let invocation_shutdown = turn_liveness_shutdown_receiver.clone();
+                runtime_tasks.spawn(async move {
+                    invocation_processes.run(invocation_shutdown).await;
+                    RuntimeTaskExit::CredentialInvocations
+                });
+                runtime_tasks.spawn(async move {
+                    turn_liveness_runtime
+                        .run(turn_liveness_shutdown_receiver)
+                        .await;
+                    RuntimeTaskExit::TurnLiveness
+                });
+                runtime_tasks.spawn(async move {
+                    lifecycle_deadline_runtime
+                        .run(lifecycle_deadline_shutdown_receiver)
+                        .await;
+                    RuntimeTaskExit::LifecycleDeadline
+                });
+                if let Some(lifecycle_metrics_runtime) = lifecycle_metrics_runtime {
+                    runtime_tasks.spawn(async move {
+                        lifecycle_metrics_runtime
+                            .run(lifecycle_metrics_shutdown_receiver)
+                            .await;
+                        RuntimeTaskExit::LifecycleMetrics
+                    });
+                }
+                guard_recovery.runtime_ready();
+                tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
+
+                select! {
+                    listener_failed = shutdown_requested(&mut termination_signals) => {
+                        if listener_failed {
+                            RuntimeStopCause::SignalListenerFailed
+                        } else {
+                            RuntimeStopCause::Requested
                         }
-                        RuntimeStopCause::RuntimeFailed
                     }
-                    Some(Ok(RuntimeTaskExit::Process(Err(error)))) => {
-                        report_process_runtime_failure(&error);
-                        RuntimeStopCause::RuntimeFailed
-                    }
-                    Some(Ok(RuntimeTaskExit::FencedPoolFloor)) => {
-                        report_runtime_task_defect(
-                            RuntimeTaskDefect::FencedPoolFloorCompletedBeforeShutdown,
-                        );
-                        RuntimeStopCause::RuntimeDefect
-                    }
-                    Some(Ok(RuntimeTaskExit::Process(Ok(())))) => {
-                        report_runtime_task_defect(
-                            RuntimeTaskDefect::ProcessCompletedBeforeShutdown,
-                        );
-                        RuntimeStopCause::RuntimeDefect
-                    }
-                    Some(Ok(RuntimeTaskExit::Runner(Err(error)))) => {
-                        report_runner_runtime_failure(&error);
-                        RuntimeStopCause::RuntimeFailed
-                    }
-                    Some(Ok(RuntimeTaskExit::Runner(Ok(())))) => {
-                        report_runtime_task_defect(
-                            RuntimeTaskDefect::RunnerCompletedBeforeShutdown,
-                        );
-                        RuntimeStopCause::RuntimeDefect
-                    }
-                    Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
-                        tracing::error!(?error, "repository-watch runtime failed");
-                        RuntimeStopCause::RuntimeFailed
-                    }
-                    Some(Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))) => {
-                        report_runtime_task_defect(RuntimeTaskDefect::RepositoryWatchCompletedBeforeShutdown);
-                        RuntimeStopCause::RuntimeDefect
-                    }
-                    Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
-                        report_web_http_runtime_failure(&error);
-                        RuntimeStopCause::RuntimeFailed
-                    }
-                    Some(Ok(RuntimeTaskExit::WebHttp(Ok(())))) => {
-                        report_runtime_task_defect(
-                            RuntimeTaskDefect::WebHttpCompletedBeforeShutdown,
-                        );
-                        RuntimeStopCause::RuntimeDefect
-                    }
-                    Some(Ok(RuntimeTaskExit::LifecycleMetrics)) => {
-                        report_runtime_task_defect(
-                            RuntimeTaskDefect::LifecycleMetricsCompletedBeforeShutdown,
-                        );
-                        RuntimeStopCause::RuntimeDefect
-                    }
-                    Some(Ok(RuntimeTaskExit::CredentialInvocations)) => {
-                        tracing::error!("invocation reservation reconciliation completed before shutdown");
-                        RuntimeStopCause::RuntimeDefect
-                    }
-                    Some(Ok(RuntimeTaskExit::TurnLiveness)) => {
-                        report_runtime_task_defect(
-                            RuntimeTaskDefect::TurnLivenessCompletedBeforeShutdown,
-                        );
-                        RuntimeStopCause::RuntimeDefect
-                    }
-                    Some(Ok(RuntimeTaskExit::LifecycleDeadline)) => {
-                        report_runtime_task_defect(
-                            RuntimeTaskDefect::LifecycleDeadlineCompletedBeforeShutdown,
-                        );
-                        RuntimeStopCause::RuntimeDefect
-                    }
-                    Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
-                        report_runtime_task_defect(
-                            RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
-                        );
-                        RuntimeStopCause::RuntimeDefect
-                    }
-                    Some(Err(error)) => {
-                        report_runtime_task_defect(joined_task_defect(&error));
-                        RuntimeStopCause::RuntimeDefect
-                    }
-                    None => {
-                        report_runtime_task_defect(RuntimeTaskDefect::TaskSetEmpty);
-                        RuntimeStopCause::RuntimeDefect
+                    () = fatal_execution.wait_for_process_recovery() => RuntimeStopCause::ExecutionFailed,
+                    completed = runtime_tasks.join_next() => {
+                        match completed {
+                            Some(Ok(RuntimeTaskExit::Workflows(result))) => {
+                                match result {
+                                    Ok(()) => tracing::error!("workflow runtime completed before shutdown"),
+                                    Err(error) => tracing::error!(cause = error.cause_code(), "workflow runtime failed"),
+                                }
+                                RuntimeStopCause::RuntimeFailed
+                            }
+                            Some(Ok(RuntimeTaskExit::Process(Err(error)))) => {
+                                report_process_runtime_failure(&error);
+                                RuntimeStopCause::RuntimeFailed
+                            }
+                            Some(Ok(RuntimeTaskExit::FencedPoolFloor)) => {
+                                report_runtime_task_defect(
+                                    RuntimeTaskDefect::FencedPoolFloorCompletedBeforeShutdown,
+                                );
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            Some(Ok(RuntimeTaskExit::Process(Ok(())))) => {
+                                report_runtime_task_defect(
+                                    RuntimeTaskDefect::ProcessCompletedBeforeShutdown,
+                                );
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            Some(Ok(RuntimeTaskExit::Runner(Err(error)))) => {
+                                report_runner_runtime_failure(&error);
+                                RuntimeStopCause::RuntimeFailed
+                            }
+                            Some(Ok(RuntimeTaskExit::Runner(Ok(())))) => {
+                                report_runtime_task_defect(
+                                    RuntimeTaskDefect::RunnerCompletedBeforeShutdown,
+                                );
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
+                                tracing::error!(?error, "repository-watch runtime failed");
+                                RuntimeStopCause::RuntimeFailed
+                            }
+                            Some(Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))) => {
+                                report_runtime_task_defect(RuntimeTaskDefect::RepositoryWatchCompletedBeforeShutdown);
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
+                                report_web_http_runtime_failure(&error);
+                                RuntimeStopCause::RuntimeFailed
+                            }
+                            Some(Ok(RuntimeTaskExit::WebHttp(Ok(())))) => {
+                                report_runtime_task_defect(
+                                    RuntimeTaskDefect::WebHttpCompletedBeforeShutdown,
+                                );
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            Some(Ok(RuntimeTaskExit::SessionSupervision)) => {
+                                report_runtime_task_defect(
+                                    RuntimeTaskDefect::SessionSupervisionCompletedBeforeShutdown,
+                                );
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            Some(Ok(RuntimeTaskExit::LifecycleMetrics)) => {
+                                report_runtime_task_defect(
+                                    RuntimeTaskDefect::LifecycleMetricsCompletedBeforeShutdown,
+                                );
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            Some(Ok(RuntimeTaskExit::CredentialInvocations)) => {
+                                tracing::error!("invocation reservation reconciliation completed before shutdown");
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            Some(Ok(RuntimeTaskExit::TurnLiveness)) => {
+                                report_runtime_task_defect(
+                                    RuntimeTaskDefect::TurnLivenessCompletedBeforeShutdown,
+                                );
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            Some(Ok(RuntimeTaskExit::LifecycleDeadline)) => {
+                                report_runtime_task_defect(
+                                    RuntimeTaskDefect::LifecycleDeadlineCompletedBeforeShutdown,
+                                );
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
+                                report_runtime_task_defect(
+                                    RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
+                                );
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            Some(Err(error)) => {
+                                report_runtime_task_defect(joined_task_defect(&error));
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                            None => {
+                                report_runtime_task_defect(RuntimeTaskDefect::TaskSetEmpty);
+                                RuntimeStopCause::RuntimeDefect
+                            }
+                        }
                     }
                 }
+            };
+            pin!(runtime);
+            select! {
+                biased;
+                () = &mut guard_loss => RuntimeStopCause::GuardLost,
+                cause = &mut runtime => cause,
             }
         };
 
@@ -2636,11 +2958,13 @@ async fn run_hub(
         }
     };
 
+    drop(guard_loss);
+
     // A timed-out component may still have held a connection before its task
     // was aborted. Waiting for an ordinary pool drain here would silently
     // extend the shutdown window. Guard loss is different: tasks are cancelled
     // immediately and the old fenced sessions must be terminated before
-    // returning control to process exit.
+    // constructing a replacement incarnation.
     if outcome != ShutdownOutcome::GuardLost && database.check_guard().await.is_err() {
         outcome = ShutdownOutcome::GuardLost;
     }
@@ -2879,7 +3203,7 @@ async fn main() -> ExitCode {
             );
             ExitCode::FAILURE
         }
-        Ok(ShutdownOutcome::GuardLost) => {
+        Ok(ShutdownOutcome::GuardLost | ShutdownOutcome::GuardRecoveryExhausted) => {
             let error = HubRuntimeError::infrastructure(RuntimePhase::Runtime);
             tracing::error!(
                 phase = ?error.phase,
@@ -3306,6 +3630,697 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn startup_database_failure_reacquires_only_when_cleanup_lost_the_guard()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testcontainers_modules::{
+            postgres::Postgres,
+            testcontainers::{ImageExt, runners::AsyncRunner},
+        };
+        let container = Postgres::default()
+            // Same PostgreSQL image as tests/process_substrate.rs.
+            .with_tag("18.4-alpine3.23")
+            .with_cmd(signalbox_persistence::disposable_postgres_server_args())
+            .with_mount(signalbox_persistence::disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(signalbox_persistence::disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?,
+        );
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        let options = signalbox_persistence::local_test_connection_options(&url)?;
+        let control = sqlx::PgPool::connect_with(options.clone()).await?;
+        let database = signalboxd::FencedHubDatabase::connect_with(options.clone(), None).await?;
+        let previous_generation = database.generation();
+        let guard_backend: i32 = sqlx::query_scalar(
+            "SELECT DISTINCT pid FROM pg_locks
+             WHERE locktype = 'advisory' AND mode = 'ExclusiveLock' AND granted
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+        )
+        .fetch_one(&control)
+        .await?;
+        sqlx::query("SELECT pg_terminate_backend($1)")
+            .bind(guard_backend)
+            .execute(&control)
+            .await?;
+        database.pool().close().await;
+        let failure = super::migrate_hub_database(database.pool())
+            .await
+            .expect_err("the interrupted migration cannot use a closed pool");
+        let result = super::startup_failure_after_close(failure, database.close().await);
+        assert!(matches!(
+            super::recovery_incarnation_outcome(result, false),
+            GuardedIncarnationOutcome::Reacquire
+        ));
+
+        let recovered = signalboxd::FencedHubDatabase::connect_with(options, None).await?;
+        assert!(recovered.generation().get() > previous_generation.get());
+        recovered.pool().close().await;
+        let failure = super::migrate_hub_database(recovered.pool())
+            .await
+            .expect_err("an initial pool failure remains a startup error with a healthy guard");
+        let result = super::startup_failure_after_close(failure, recovered.close().await);
+        assert!(
+            matches!(super::recovery_incarnation_outcome(result, false), GuardedIncarnationOutcome::Finished(Err(error)) if error == failure)
+        );
+        control.close().await;
+        drop(container);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn runtime_guard_revalidation_withholds_admission_after_guard_death()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalboxd::guard_recovery::{
+            GuardRecoveryPolicy, GuardedIncarnationOutcome, run_guarded_incarnations,
+        };
+        use testcontainers_modules::{
+            postgres::Postgres,
+            testcontainers::{ImageExt, runners::AsyncRunner},
+        };
+        let container = Postgres::default()
+            // Same PostgreSQL image as tests/process_substrate.rs.
+            .with_tag("18.4-alpine3.23")
+            .with_cmd(signalbox_persistence::disposable_postgres_server_args())
+            .with_mount(signalbox_persistence::disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(signalbox_persistence::disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?,
+        );
+        let options = signalbox_persistence::local_test_connection_options(&url)?;
+        let control = sqlx::PgPool::connect_with(options.clone()).await?;
+        let mut database = signalboxd::FencedHubDatabase::connect_with(options, None).await?;
+        {
+            let (ready, admission) = tokio::sync::oneshot::channel();
+            tokio::select! {
+                biased;
+                () = super::monitor_runtime_guard(&mut database, ready) => panic!("the live guard must permit admission"),
+                result = admission => result.expect("the watcher checked the live guard"),
+            }
+        }
+        let guard_backend: i32 = sqlx::query_scalar(
+            "SELECT DISTINCT pid FROM pg_locks
+             WHERE locktype = 'advisory' AND mode = 'ExclusiveLock' AND granted
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+        )
+        .fetch_one(&control)
+        .await?;
+        sqlx::query("SELECT pg_terminate_backend($1)")
+            .bind(guard_backend)
+            .execute(&control)
+            .await?;
+        let mut database = Some(database);
+        let result = run_guarded_incarnations(
+            GuardRecoveryPolicy::new(Duration::from_secs(1), Duration::from_secs(2), None).unwrap(),
+            |observer| {
+                let mut database = database
+                    .take()
+                    .unwrap()
+                    .with_recovery_observer(observer.clone());
+                async move {
+                    observer.guard_lost();
+                    let (ready, admission) = tokio::sync::oneshot::channel();
+                    let admission = async {
+                        admission
+                            .await
+                            .expect("admission requires a fresh guard check");
+                        panic!("workers must not start after guard death between admission checks");
+                    };
+                    tokio::select! {
+                        biased;
+                        () = super::monitor_runtime_guard(&mut database, ready) => {},
+                        () = admission => {},
+                    }
+                    assert!(observer.is_recovering());
+                    let _ = database.close().await;
+                    GuardedIncarnationOutcome::Finished(())
+                }
+            },
+            std::future::pending(),
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), result).await?,
+            Ok(())
+        );
+        control.close().await;
+        drop(container);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn guarded_startup_interrupts_ambiguous_supervision_reconciliation_after_database_loss()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalbox_domain::{
+            CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
+            SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance,
+            SessionId, TranscriptAncestry,
+        };
+        use signalbox_persistence::{
+            SessionCredentialPin, SessionModelCredential,
+            create_session::CreateSessionRepository,
+            session_lifecycle::SessionLifecycleRepositoryError,
+            startup::{StartupScanCorruption, StartupScanRepositoryError},
+        };
+        use signalboxd::guard_recovery::{
+            GuardRecoveryPolicy, GuardedIncarnationOutcome, run_guarded_incarnations,
+        };
+        use testcontainers_modules::{
+            postgres::Postgres,
+            testcontainers::{ImageExt, runners::AsyncRunner},
+        };
+        let container = Postgres::default()
+            // Same PostgreSQL image as tests/process_substrate.rs.
+            .with_tag("18.4-alpine3.23")
+            .with_cmd(signalbox_persistence::disposable_postgres_server_args())
+            .with_mount(signalbox_persistence::disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(signalbox_persistence::disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?,
+        );
+        let database = signalboxd::FencedHubDatabase::connect_with(
+            signalbox_persistence::local_test_connection_options(&url)?,
+            None,
+        )
+        .await?;
+        signalbox_persistence::migrate(database.pool()).await?;
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+        let creation = CreateSession::new(
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(2)),
+            SessionCreationProvenance::new(
+                SessionCreationCause::Interactive,
+                TranscriptAncestry::None,
+            ),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(uuid::Uuid::from_u128(3)),
+            )),
+        )
+        .prepare(session)
+        .unwrap();
+        CreateSessionRepository::new(
+            database.pool().clone(),
+            SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+                "startup-test-family",
+                "startup-test-profile",
+            )])
+            .expect("the startup fixture has one credential pin"),
+        )
+        .handle(creation)
+        .await?;
+        let failure = StartupScanRepositoryError::from(StartupScanCorruption::Missing(
+            "startup supervision fixture",
+        ));
+        let mut database = Some(database);
+        let result = run_guarded_incarnations(
+            GuardRecoveryPolicy::new(Duration::from_secs(1), Duration::from_secs(2), None).unwrap(),
+            |observer| {
+                let mut database = database
+                    .take()
+                    .unwrap()
+                    .with_recovery_observer(observer.clone());
+                let pool = database.pool().clone();
+                let container = &container;
+                let failure = &failure;
+                async move {
+                    let result = {
+                        let (ambiguous, observed) = tokio::sync::oneshot::channel();
+                        let mut supervision_write = signalbox_persistence::session_lifecycle::SessionSupervisionWrite::default();
+                        let record =
+                        signalbox_persistence::test_support::record_supervision_failure_with_commit(
+                            &pool,
+                            session,
+                            failure,
+                            &mut supervision_write,
+                            |transaction| async move {
+                                transaction.commit().await?;
+                                container
+                                    .stop()
+                                    .await
+                                    .expect("stop the disposable PostgreSQL server");
+                                ambiguous.send(()).expect("observe the ambiguous acknowledgement");
+                                Err(SessionLifecycleRepositoryError::CommitAmbiguous(
+                                    sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+                                ))
+                            },
+                        );
+                        tokio::pin!(record);
+                        tokio::select! {
+                            biased;
+                            result = &mut record => panic!("identity reconciliation ended while PostgreSQL was down: {result:?}"),
+                            result = observed => result.expect("the park entered identity reconciliation"),
+                        }
+                        super::await_while_guarded(&mut database, &mut record).await
+                    };
+                    assert!(matches!(result, super::GuardedAwait::GuardLost));
+                    assert!(observer.is_recovering());
+                    let _ = database.close().await;
+                    GuardedIncarnationOutcome::Finished(())
+                }
+            },
+            std::future::pending(),
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), result).await?,
+            Ok(())
+        );
+        drop(container);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guard_recovery_retries_database_reconstruction_failures_with_capped_backoff() {
+        use signalboxd::guard_recovery::{GuardRecoveryPolicy, run_guarded_incarnations};
+        let failures = RefCell::new(VecDeque::from([
+            Ok(ShutdownOutcome::GuardLost),
+            Err(super::erase_startup_cause(
+                RuntimePhase::Migration,
+                super::SanitizedStartupCause::Migration(&sqlx::migrate::MigrateError::Execute(
+                    sqlx::Error::PoolClosed,
+                )),
+            )),
+            Err(HubRuntimeError::startup_scan(
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+                None,
+                None,
+            )),
+            Err(super::erase_startup_database_cause(
+                RuntimePhase::Configuration,
+                super::SanitizedStartupCause::Static("repository_watch_startup_failed"),
+            )),
+            Err(super::erase_startup_database_cause(
+                RuntimePhase::StartupScan,
+                super::SanitizedStartupCause::Static("approval_wait_deadline_restore_failed"),
+            )),
+            Ok(ShutdownOutcome::Clean),
+        ]));
+        let attempts = RefCell::new(Vec::new());
+        let started = tokio::time::Instant::now();
+        let result = run_guarded_incarnations(
+            GuardRecoveryPolicy::new(
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Some(Duration::from_secs(10)),
+            )
+            .unwrap(),
+            |observer| {
+                attempts.borrow_mut().push(started.elapsed());
+                let result = failures
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("six reconstruction attempts");
+                ready(super::recovery_incarnation_outcome(
+                    result,
+                    observer.is_recovering(),
+                ))
+            },
+            pending(),
+        )
+        .await;
+        assert_eq!(result, Ok(Ok(ShutdownOutcome::Clean)));
+        assert_eq!(
+            *attempts.borrow(),
+            [
+                Duration::ZERO,
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+                Duration::from_secs(5),
+                Duration::from_secs(7),
+                Duration::from_secs(9)
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guard_recovery_reports_a_failed_termination_listener() {
+        use signalboxd::guard_recovery::{GuardRecoveryPolicy, GuardedIncarnationOutcome};
+        let result = super::run_hub_recovery(
+            GuardRecoveryPolicy::new(Duration::from_secs(1), Duration::from_secs(10), None)
+                .unwrap(),
+            |observer| async move {
+                observer.guard_lost();
+                pending::<GuardedIncarnationOutcome<Result<ShutdownOutcome, HubRuntimeError>>>()
+                    .await
+            },
+            Err(std::io::Error::from(std::io::ErrorKind::Other)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, ShutdownOutcome::SignalListenerFailed);
+    }
+
+    #[test]
+    fn reload_recovery_reacquires_only_database_failures() {
+        use signalbox_persistence::reload_configuration::ReloadRepositoryError;
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        for (failure, expected_class, database) in [
+            (
+                ReloadRepositoryError::Database(sqlx::Error::PoolClosed),
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+                true,
+            ),
+            (
+                ReloadRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                },
+                true,
+            ),
+            (
+                ReloadRepositoryError::Corruption("fixture snapshot is incompatible"),
+                OperatorFailureClass::FailClosedCorruption,
+                false,
+            ),
+            (
+                ReloadRepositoryError::InvalidCommandId,
+                OperatorFailureClass::CallerOrHubBug,
+                false,
+            ),
+        ] {
+            let error = super::reload_recovery_failure(&failure);
+            assert_eq!(error.failure_class, expected_class, "{failure}");
+            assert_eq!(
+                matches!(
+                    super::recovery_incarnation_outcome(Err(error), true),
+                    GuardedIncarnationOutcome::Reacquire
+                ),
+                database,
+                "{failure}"
+            );
+        }
+    }
+
+    #[test]
+    fn fence_recovery_surfaces_corruption_and_retries_database_failures() {
+        use signalbox_persistence::hub_fence::{HubFenceCorruption, HubFenceError};
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        let corrupt = signalboxd::FencedHubDatabaseError::AdvanceFence(HubFenceError::Corruption(
+            HubFenceCorruption::GenerationExhausted,
+        ));
+        let corrupt = super::erase_startup_cause(
+            RuntimePhase::DatabaseConnection,
+            super::SanitizedStartupCause::Database(&corrupt),
+        );
+        assert_eq!(
+            corrupt.failure_class,
+            OperatorFailureClass::FailClosedCorruption
+        );
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(corrupt), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == corrupt)
+        );
+        let unavailable = signalboxd::FencedHubDatabaseError::AdvanceFence(
+            HubFenceError::Database(sqlx::Error::PoolClosed),
+        );
+        let unavailable = super::erase_startup_cause(
+            RuntimePhase::DatabaseConnection,
+            super::SanitizedStartupCause::Database(&unavailable),
+        );
+        assert!(matches!(
+            super::recovery_incarnation_outcome(Err(unavailable), true),
+            GuardedIncarnationOutcome::Reacquire
+        ));
+    }
+
+    #[tokio::test]
+    async fn migration_recovery_preserves_database_and_version_failures() {
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://fixture:fixture@localhost/fixture")
+            .unwrap();
+        pool.close().await;
+        let unavailable = super::migrate_hub_database(&pool)
+            .await
+            .expect_err("closed pool cannot migrate");
+        assert!(matches!(
+            super::recovery_incarnation_outcome(Err(unavailable), true),
+            GuardedIncarnationOutcome::Reacquire
+        ));
+        let mismatch = sqlx::migrate::MigrateError::VersionMismatch(1);
+        let migration = super::erase_startup_cause(
+            RuntimePhase::Migration,
+            super::SanitizedStartupCause::Migration(&mismatch),
+        );
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(migration), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == migration)
+        );
+        let initialization = signalboxd::FencedHubDatabaseError::InitializeFence(mismatch);
+        let initialization = super::erase_startup_cause(
+            RuntimePhase::Migration,
+            super::SanitizedStartupCause::Database(&initialization),
+        );
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(initialization), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == initialization)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn automatic_resumption_inventory_failure_keeps_guard_recovery_pending() {
+        use signalbox_persistence::goal::GoalRepositoryError;
+        use signalboxd::PostgresGoalPassDispositionError;
+        use signalboxd::guard_recovery::{GuardRecoveryPolicy, run_guarded_incarnations};
+        let database_failure = super::startup_goal_resumption_result(
+            Err(PostgresGoalPassDispositionError::Repository(
+                GoalRepositoryError::Database(sqlx::Error::PoolClosed),
+            )),
+            true,
+        )
+        .expect_err("unrestored goal timers prevent recovery admission");
+        let ambiguous = super::startup_goal_resumption_result(
+            Err(PostgresGoalPassDispositionError::Repository(
+                GoalRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+            )),
+            true,
+        )
+        .expect_err("an ambiguous inventory failure prevents recovery admission");
+        assert_eq!(
+            ambiguous.failure_class,
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
+        let failures = RefCell::new(VecDeque::from([
+            Ok(ShutdownOutcome::GuardLost),
+            Err(database_failure),
+            Err(ambiguous),
+            Ok(ShutdownOutcome::Clean),
+        ]));
+        let started = tokio::time::Instant::now();
+        let attempts = RefCell::new(Vec::new());
+        let result = run_guarded_incarnations(
+            GuardRecoveryPolicy::new(
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Some(Duration::from_secs(10)),
+            )
+            .unwrap(),
+            |observer| {
+                attempts.borrow_mut().push(started.elapsed());
+                ready(super::recovery_incarnation_outcome(
+                    failures
+                        .borrow_mut()
+                        .pop_front()
+                        .expect("four reconstruction attempts"),
+                    observer.is_recovering(),
+                ))
+            },
+            pending(),
+        )
+        .await;
+        assert_eq!(result, Ok(Ok(ShutdownOutcome::Clean)));
+        assert_eq!(
+            *attempts.borrow(),
+            [
+                Duration::ZERO,
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+                Duration::from_secs(5)
+            ]
+        );
+    }
+
+    #[test]
+    fn automatic_resumption_inventory_preserves_initial_and_non_database_reporting() {
+        use signalbox_persistence::goal::GoalRepositoryError;
+        use signalboxd::PostgresGoalPassDispositionError;
+        assert_eq!(
+            super::startup_goal_resumption_result(
+                Err(PostgresGoalPassDispositionError::Repository(
+                    GoalRepositoryError::Database(sqlx::Error::PoolClosed),
+                )),
+                false,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            super::startup_goal_resumption_result(
+                Err(PostgresGoalPassDispositionError::InvalidStaticNeed),
+                true,
+            ),
+            Ok(())
+        );
+        assert_eq!(super::startup_goal_resumption_result(Ok(1), true), Ok(()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blob_catalog_startup_failures_reacquire_with_capped_backoff() {
+        use signalbox_persistence::blob::BlobCatalogRepositoryError;
+        use signalboxd::guard_recovery::{GuardRecoveryPolicy, run_guarded_incarnations};
+        use signalboxd::{BlobStoreRegistry, BlobStoreRegistryError};
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://fixture:fixture@localhost/fixture")
+            .expect("fixture URL is valid");
+        pool.close().await;
+        let unavailable = BlobStoreRegistry::initialize(None, pool)
+            .await
+            .expect_err("catalog access reports the closed pool");
+        let ambiguous = BlobStoreRegistryError::Catalog(
+            BlobCatalogRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+        );
+        let unavailable = super::erase_startup_cause(
+            RuntimePhase::Configuration,
+            super::SanitizedStartupCause::BlobStorage(&unavailable),
+        );
+        let ambiguous = super::erase_startup_cause(
+            RuntimePhase::Configuration,
+            super::SanitizedStartupCause::BlobStorage(&ambiguous),
+        );
+        assert_eq!(
+            ambiguous.failure_class,
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
+        let failures = RefCell::new(VecDeque::from([
+            Ok(ShutdownOutcome::GuardLost),
+            Err(unavailable),
+            Err(ambiguous),
+            Ok(ShutdownOutcome::Clean),
+        ]));
+        let started = tokio::time::Instant::now();
+        let attempts = RefCell::new(Vec::new());
+        let result = run_guarded_incarnations(
+            GuardRecoveryPolicy::new(
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Some(Duration::from_secs(10)),
+            )
+            .unwrap(),
+            |observer| {
+                attempts.borrow_mut().push(started.elapsed());
+                ready(super::recovery_incarnation_outcome(
+                    failures
+                        .borrow_mut()
+                        .pop_front()
+                        .expect("four blob recovery attempts"),
+                    observer.is_recovering(),
+                ))
+            },
+            pending(),
+        )
+        .await;
+        assert_eq!(result, Ok(Ok(ShutdownOutcome::Clean)));
+        assert_eq!(
+            *attempts.borrow(),
+            [
+                Duration::ZERO,
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+                Duration::from_secs(5)
+            ]
+        );
+    }
+
+    #[test]
+    fn blob_configuration_and_corruption_failures_do_not_reacquire_the_database() {
+        use signalbox_persistence::blob::{BlobCatalogCorruption, BlobCatalogRepositoryError};
+        use signalboxd::BlobStoreRegistryError;
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        for failure in [
+            BlobStoreRegistryError::ConfigurationRequired,
+            BlobStoreRegistryError::S3StartupDeadline,
+            BlobStoreRegistryError::Catalog(BlobCatalogRepositoryError::Corruption(
+                BlobCatalogCorruption::InvalidDigest,
+            )),
+        ] {
+            let error = super::erase_startup_cause(
+                RuntimePhase::Configuration,
+                super::SanitizedStartupCause::BlobStorage(&failure),
+            );
+            assert!(
+                matches!(super::recovery_incarnation_outcome(Err(error), true), GuardedIncarnationOutcome::Finished(Err(observed)) if observed == error)
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guard_recovery_reconstruction_failures_reach_the_configured_elapsed_bound() {
+        use signalboxd::guard_recovery::{
+            GuardRecoveryPolicy, GuardRecoveryStop, run_guarded_incarnations,
+        };
+        let result = run_guarded_incarnations(
+            GuardRecoveryPolicy::new(
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Some(Duration::from_secs(4)),
+            )
+            .unwrap(),
+            |observer| {
+                let result = if observer.is_recovering() {
+                    Err(HubRuntimeError::startup_scan(
+                        OperatorFailureClass::Infrastructure {
+                            commit_ambiguous: true,
+                        },
+                        None,
+                        None,
+                    ))
+                } else {
+                    Ok(ShutdownOutcome::GuardLost)
+                };
+                ready(super::recovery_incarnation_outcome(
+                    result,
+                    observer.is_recovering(),
+                ))
+            },
+            pending(),
+        )
+        .await;
+        assert_eq!(result, Err(GuardRecoveryStop::ElapsedBoundExhausted));
+    }
+
+    #[test]
+    fn guard_recovery_preserves_initial_startup_and_non_database_failures() {
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        let migration = HubRuntimeError::infrastructure(RuntimePhase::Migration);
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(migration), false), GuardedIncarnationOutcome::Finished(Err(error)) if error == migration)
+        );
+        let filesystem = HubRuntimeError::infrastructure(RuntimePhase::StartupScan);
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(filesystem), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == filesystem)
+        );
+        let corruption =
+            HubRuntimeError::startup_scan(OperatorFailureClass::FailClosedCorruption, None, None);
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(corruption), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == corruption)
+        );
+    }
+
+    #[tokio::test]
     async fn adr0044_migration_precedes_scan_and_scheduling() {
         let events = Rc::new(RefCell::new(Vec::new()));
         let migration_events = Rc::clone(&events);
@@ -3699,6 +4714,7 @@ mod tests {
             HubRuntimeError {
                 phase: RuntimePhase::StartupScan,
                 failure_class: OperatorFailureClass::FailClosedCorruption,
+                database_failure: true,
                 session: Some(session),
                 turn: Some(turn),
             }

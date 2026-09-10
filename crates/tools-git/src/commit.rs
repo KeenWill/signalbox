@@ -220,7 +220,7 @@ pub(super) fn commit<ValidateRoot>(
 where
     ValidateRoot: FnOnce() -> Result<(), LocalGitFailure>,
 {
-    let (index_lock, mut index) = IndexLock::acquire_for_repository(authority)?;
+    let (index_lock, index) = IndexLock::acquire_for_repository(authority)?;
     validate_index_objects(repository, &index)?;
     let state = RepositoryOperationState::capture(authority)?;
     let merge_parent_ids = state.merge_parent_ids(authority.object_format)?;
@@ -256,7 +256,14 @@ where
             return Err(LocalGitFailure::Operation);
         }
     }
-    let tree_id = index
+    let mut tree_index =
+        git2::Index::new_ext(authority.object_format).map_err(|_| LocalGitFailure::Operation)?;
+    for entry in index.iter() {
+        tree_index
+            .add(&entry)
+            .map_err(|_| LocalGitFailure::Operation)?;
+    }
+    let tree_id = tree_index
         .write_tree_to(repository)
         .map_err(|_| LocalGitFailure::Operation)?;
     let tree = find_bounded_tree(repository, tree_id)?;

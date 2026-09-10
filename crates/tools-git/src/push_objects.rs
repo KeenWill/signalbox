@@ -243,6 +243,7 @@ pub(super) struct ObjectSource {
     format: ObjectFormat,
     max_object_bytes: Option<usize>,
     pub(super) directory: tempfile::TempDir,
+    private_directory: File,
     deadline: Option<Instant>,
 }
 
@@ -303,6 +304,8 @@ impl ObjectSource {
             .map_err(rejected)?,
         );
         let pack_path = descriptor_path(&pack_directory);
+        let directory = tempfile::tempdir().map_err(rejected)?;
+        let private_directory = File::open(directory.path()).map_err(rejected)?;
         let mut source = Self {
             objects,
             directories: vec![SourceDirectory {
@@ -314,7 +317,8 @@ impl ObjectSource {
             packs: Vec::new(),
             format: authority.object_format,
             max_object_bytes: authority.max_object_bytes,
-            directory: tempfile::tempdir().map_err(rejected)?,
+            directory,
+            private_directory,
             deadline,
         };
         let mut scanned = 0usize;
@@ -546,8 +550,7 @@ impl ObjectSource {
         // libgit2 deduplicates disk backends by directory identity.
         database
             .add_disk_alternate(
-                self.directory
-                    .path()
+                descriptor_path(&self.private_directory)
                     .to_str()
                     .ok_or(LocalGitFailure::Repository)?,
             )

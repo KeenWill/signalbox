@@ -1628,7 +1628,7 @@ where
     if crate::commit_outcome_is_unknown(&error)
         && let Some(reporter) = recovery_reporter
     {
-        reporter.report_recovery_required();
+        reporter.report_session_recovery_required(session);
     }
     let response = match error {
         ContextCompactionRepositoryError::Database(_) => ProtocolError::mutation_unavailable(false),

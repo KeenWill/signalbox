@@ -9,8 +9,12 @@ pub enum ImportedConversationFormat {
     ClaudeCodeSessionJsonlV1,
     /// Claude Code session JSONL interpreted by converter version 2.
     ClaudeCodeSessionJsonlV2,
+    /// Claude Code session JSONL interpreted by resilient converter version 3.
+    ClaudeCodeSessionJsonlV3,
     /// Codex rollout JSONL interpreted by converter version 1.
     CodexRolloutJsonlV1,
+    /// Codex rollout JSONL interpreted by resilient converter version 2.
+    CodexRolloutJsonlV2,
 }
 
 impl ImportedConversationFormat {
@@ -18,7 +22,9 @@ impl ImportedConversationFormat {
         match self {
             Self::ClaudeCodeSessionJsonlV1 => b"claude-code-session-jsonl-v1",
             Self::ClaudeCodeSessionJsonlV2 => b"claude-code-session-jsonl-v2",
+            Self::ClaudeCodeSessionJsonlV3 => b"claude-code-session-jsonl-v3",
             Self::CodexRolloutJsonlV1 => b"codex-rollout-jsonl-v1",
+            Self::CodexRolloutJsonlV2 => b"codex-rollout-jsonl-v2",
         }
     }
 }

@@ -235,6 +235,7 @@ pub(crate) fn write_assistant_texts(
 enum OperatorStatusPhase {
     LifecycleWeeks,
     LifecycleDeadlineViolations,
+    SessionSupervision,
     RepositoryIngestion,
 }
 
@@ -243,6 +244,7 @@ struct OperatorStatusCounts {
     repository_ingestion: u64,
     lifecycle_weeks: u64,
     lifecycle_deadline_violations: u64,
+    session_supervision: u64,
 }
 
 pub(crate) async fn status(
@@ -271,6 +273,10 @@ pub(crate) async fn status(
         let frame = connection.frame().await?;
         let item_phase = match frame.message() {
             ServerMessage::OperatorStatus(message) => match message.as_ref() {
+                OperatorStatusMessage::SessionSupervision(_) => {
+                    counts.session_supervision = status_increment(counts.session_supervision)?;
+                    Some(OperatorStatusPhase::SessionSupervision)
+                }
                 OperatorStatusMessage::RepositoryIngestion(_) => {
                     counts.repository_ingestion = status_increment(counts.repository_ingestion)?;
                     Some(OperatorStatusPhase::RepositoryIngestion)
@@ -288,6 +294,7 @@ pub(crate) async fn status(
                     if counts
                         == (OperatorStatusCounts {
                             repository_ingestion: item.repository_ingestion_count.value(),
+                            session_supervision: item.session_supervision_count.value(),
                             lifecycle_weeks: item.lifecycle_week_count.value(),
                             lifecycle_deadline_violations: item
                                 .lifecycle_deadline_violation_count
@@ -328,6 +335,7 @@ pub(crate) async fn status(
     }
     output.operator_status_counts(OperatorStatusPresentationCounts {
         lifecycle_weeks: counts.lifecycle_weeks,
+        session_supervision: counts.session_supervision,
         lifecycle_deadline_violations: counts.lifecycle_deadline_violations,
     })?;
     spool.seek(SeekFrom::Start(0))?;

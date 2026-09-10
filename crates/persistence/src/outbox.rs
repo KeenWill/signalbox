@@ -860,6 +860,12 @@ impl OutboxConsumerReader {
         .await?)
     }
 
+    /// Reports a durably completed configured push in a session's tool history.
+    pub async fn session_pushed(&self, session: SessionId) -> Result<bool, OutboxDispatchError> {
+        Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tool_attempt a JOIN tool_request r USING (request_id) WHERE a.session_id = $1 AND r.tool_name = 'git_push_configured' AND a.terminal_disposition_kind = 'completed')")
+            .bind(session_id_to_uuid(session)).fetch_one(&self.pool).await?)
+    }
+
     /// Reads the next typed event without advancing the durable prefix.
     pub async fn read_next(&self) -> Result<Option<DispatchedOutboxEvent>, OutboxDispatchError> {
         let mut transaction = self.pool.begin().await?;
