@@ -388,6 +388,7 @@ test_suite(
         "//crates/model-runtime-openai:live_smoke",
         "//crates/model-runtime-openai:loopback",
         "//crates/session-ownership:lifecycle_vocabulary",
+        "//crates/persistence:evaluation_postgres_ordinary",
         "//crates/persistence:approval_judge_eval_postgres_ordinary",
         "//crates/persistence:blob_postgres_ordinary",
         "//crates/persistence:conversation_import_postgres_ordinary",
@@ -684,6 +685,7 @@ alias(
 
 PERSISTENCE_TEST_BINARIES = {
     "//crates/persistence:unit_tests": "signalbox_persistence",
+    "//crates/persistence:evaluation_postgres": "evaluation_postgres",
     "//crates/persistence:approval_judge_eval_postgres": "approval_judge_eval_postgres",
     "//crates/persistence:blob_postgres": "blob_postgres",
     "//crates/persistence:conversation_import_postgres": "conversation_import_postgres",

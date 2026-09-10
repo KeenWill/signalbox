@@ -28,6 +28,7 @@ pub mod create_session_from_imported_frontier;
 pub mod credential_capacity;
 pub mod credential_exclusions;
 pub mod credential_invocations;
+pub mod evaluation;
 pub mod goal;
 pub mod goal_turn;
 pub mod hub_fence;

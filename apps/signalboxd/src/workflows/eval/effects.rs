@@ -37,8 +37,9 @@ use std::{
 /// Resolved host services; provider simulation is supplied only by tests.
 #[derive(Clone)]
 pub struct EvalServices {
-    registrations: ProgramRegistrationRepository,
-    journal: ProgramJournalRepository,
+    pub(super) recordings: signalbox_persistence::evaluation::EvaluationRepository,
+    pub(super) registrations: ProgramRegistrationRepository,
+    pub(super) journal: ProgramJournalRepository,
     blobs: Arc<dyn CorpusBlobs>,
     model: Arc<dyn ApprovalJudgeModel>,
     binding: JudgeBinding,
@@ -54,6 +55,7 @@ impl EvalServices {
         configuration: Arc<HubModelConfiguration>,
     ) -> Self {
         Self {
+            recordings: signalbox_persistence::evaluation::EvaluationRepository::new(pool.clone()),
             registrations: ProgramRegistrationRepository::new(pool.clone()),
             journal: ProgramJournalRepository::new(pool.clone()),
             blobs: Arc::new(CatalogBlobs {
@@ -66,7 +68,7 @@ impl EvalServices {
         }
     }
 
-    async fn manifest(&self, run: ProgramRunId) -> Result<EvalManifest, EvalFailure> {
+    pub(super) async fn manifest(&self, run: ProgramRunId) -> Result<EvalManifest, EvalFailure> {
         let bytes = self
             .registrations
             .input_for_run(run)
@@ -76,7 +78,10 @@ impl EvalServices {
         EvalManifest::decode(bytes.as_bytes()).map_err(failure)
     }
 
-    async fn corpus(&self, manifest: &EvalManifest) -> Result<CorpusAnswer, EvalFailure> {
+    pub(super) async fn corpus(
+        &self,
+        manifest: &EvalManifest,
+    ) -> Result<CorpusAnswer, EvalFailure> {
         let digest = manifest.corpus.parse().map_err(failure)?;
         let bytes = self.blobs.read(digest).await?;
         if BlobDigest::digest(&bytes) != digest {
@@ -293,6 +298,9 @@ impl EvaluationEffects {
                 let corpus = self.corpus(&manifest).await?;
                 encode(&self.services.judge(&manifest, trial, corpus).await?).map_err(failure)?
             }
+            (ProgramCapability::EvalRecord, "seal") => {
+                encode(&self.services.seal(invocation).await?).map_err(failure)?
+            }
             (ProgramCapability::Blob, "read") => {
                 let input: BlobReadRequest = decode(bytes).map_err(failure)?;
                 let digest = input.digest.parse().map_err(failure)?;
@@ -487,16 +495,16 @@ fn stable_digest(bytes: &[u8]) -> String {
 }
 
 #[derive(Debug)]
-enum EvalFailure {
+pub(super) enum EvalFailure {
     Rejected(LiveDeliveryFailure),
     Infrastructure(LiveDeliveryFailure),
 }
 
-fn failure(error: impl std::fmt::Display) -> EvalFailure {
+pub(super) fn failure(error: impl std::fmt::Display) -> EvalFailure {
     EvalFailure::Rejected(LiveDeliveryFailure::new(error.to_string()))
 }
 
-fn infrastructure_failure(error: impl std::fmt::Display) -> EvalFailure {
+pub(super) fn infrastructure_failure(error: impl std::fmt::Display) -> EvalFailure {
     EvalFailure::Infrastructure(LiveDeliveryFailure::new(error.to_string()))
 }
 
