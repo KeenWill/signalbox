@@ -39,6 +39,7 @@ pub mod measurements;
 mod observation_decode;
 pub mod poll_cache;
 pub mod provider;
+mod retry;
 pub mod workflow;
 
 use baseline::observation_payload;
@@ -2025,7 +2026,14 @@ impl RepoWatchStore {
     ) -> Result<DispatchAdmission, StoreError> {
         let mut transaction = self.pool.begin().await?;
         let outcome = self
-            .record_commands_transaction(&mut transaction, planned, issued_at, codec, admission)
+            .record_commands_transaction(
+                &mut transaction,
+                planned,
+                issued_at,
+                codec,
+                admission,
+                None,
+            )
             .await?;
         if matches!(
             outcome,
@@ -2043,6 +2051,7 @@ impl RepoWatchStore {
         issued_at: OffsetDateTime,
         codec: &mut Codec,
         admission: Option<(&str, std::time::Duration)>,
+        retry: Option<&retry::RetryAdmission>,
     ) -> Result<DispatchAdmission, StoreError> {
         let Some(first) = planned.first() else {
             return Err(StoreError::InvalidDispatchBatch);
@@ -2081,12 +2090,34 @@ impl RepoWatchStore {
         .bind(first.dispatch().into_uuid())
         .execute(&mut **transaction)
         .await?;
+        let retry_parent: Option<Uuid> = if let Some(retry) = retry {
+            if !self
+                .retry_still_due(transaction, first, retry, issued_at, admission)
+                .await?
+            {
+                return Ok(DispatchAdmission::Suppressed);
+            }
+            Some(retry.parent)
+        } else if !initial_batch {
+            sqlx::query_scalar("SELECT retry_of FROM dispatch_ledger WHERE dispatch_ref = $1 AND trigger_sequence IS NULL AND command_kind = 'create_session' ORDER BY action_ordinal LIMIT 1")
+                .bind(first.dispatch().into_uuid()).fetch_optional(&mut **transaction).await?.flatten()
+        } else {
+            None
+        };
+        let retry_event: Option<Vec<u8>> = if let Some(retry) = retry {
+            Some(retry.event.clone())
+        } else if retry_parent.is_some() {
+            sqlx::query_scalar("SELECT retry_event FROM dispatch_ledger WHERE dispatch_ref = $1 AND trigger_sequence IS NULL AND command_kind = 'create_session' ORDER BY action_ordinal LIMIT 1")
+                .bind(first.dispatch().into_uuid()).fetch_optional(&mut **transaction).await?.flatten()
+        } else {
+            None
+        };
         let retained_actions: Vec<(Uuid, Decimal, Uuid, String, Vec<u8>)> = sqlx::query_as(
             "SELECT dispatch_ref, action_ordinal, command_id, command_kind, command_payload
                FROM dispatch_ledger
               WHERE repository = $1 AND rule_id = $2 AND rule_revision = $3
                 AND event_id = $4 AND trigger_sequence IS NOT DISTINCT FROM $5
-                AND retirement_event_id IS NULL
+                AND retirement_event_id IS NULL AND retry_of IS NOT DISTINCT FROM $6
               ORDER BY action_ordinal",
         )
         .bind(first.repository().as_str())
@@ -2094,6 +2125,7 @@ impl RepoWatchStore {
         .bind(Decimal::from(first.rule_revision().get()))
         .bind(first.event_id().into_uuid())
         .bind(first.trigger_sequence().map(Decimal::from))
+        .bind(retry_parent)
         .fetch_all(&mut **transaction)
         .await?;
         if retained_actions.len() == planned.len() {
@@ -2200,7 +2232,9 @@ impl RepoWatchStore {
                 .bind(issued_at).bind(Decimal::from(cooldown.as_secs()))
                 .fetch_one(&mut **transaction).await?;
             if suppressed {
-                advance_evaluation(transaction, first).await?;
+                if retry.is_none() {
+                    advance_evaluation(transaction, first).await?;
+                }
                 return Ok(DispatchAdmission::Suppressed);
             }
         }
@@ -2223,8 +2257,11 @@ impl RepoWatchStore {
                 .bind(command.event_id().into_uuid())
                 .fetch_one(&mut **transaction)
                 .await?;
-                let event = crate::event_decode::event(command.event_id(), &event_payload)
-                    .ok_or(StoreError::InvalidRetainedEvent)?;
+                let event = crate::event_decode::event(
+                    command.event_id(),
+                    retry_event.as_deref().unwrap_or(&event_payload),
+                )
+                .ok_or(StoreError::InvalidRetainedEvent)?;
                 let observation = baseline
                     .as_ref()
                     .map(|value| {
@@ -2241,8 +2278,8 @@ impl RepoWatchStore {
                     "INSERT INTO dispatch_ledger
                         (dispatch_ref, action_ordinal, command_id, repository, rule_id,
                          rule_revision, event_id, trigger_sequence, command_kind, command_payload,
-                         status, issued_at, singleton_key, kickoff_text)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12, $13)
+                         status, issued_at, singleton_key, kickoff_text, retry_of, retry_event)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12, $13, $14, $15)
                      ON CONFLICT DO NOTHING",
                 )
                 .bind(command.dispatch().into_uuid())
@@ -2258,6 +2295,8 @@ impl RepoWatchStore {
                 .bind(issued_at)
                 .bind(admission.map(|(key, _)| key))
                 .bind(kickoff)
+                .bind(retry_parent)
+                .bind(&retry_event)
                 .execute(&mut **transaction)
                 .await?
                 .rows_affected()
@@ -2265,7 +2304,7 @@ impl RepoWatchStore {
             );
         }
         if inserted_count == planned.len() {
-            if admission.is_some() {
+            if admission.is_some() && retry.is_none() {
                 advance_evaluation(transaction, first).await?;
             }
             return Ok(DispatchAdmission::Inserted);

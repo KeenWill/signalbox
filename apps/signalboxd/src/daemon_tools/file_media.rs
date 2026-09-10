@@ -415,9 +415,8 @@ generated_artifact = "fixture"
             staging, store
         );
         let document: toml_edit::DocumentMut = configuration.parse()?;
-        let configuration =
-            crate::BlobStorageConfiguration::parse(document.get("blob_storage"), 1)?
-                .ok_or("fixture blob configuration")?;
+        let configuration = crate::BlobStorageConfiguration::parse(document.get("blob_storage"))?
+            .ok_or("fixture blob configuration")?;
         let stores = Arc::new(
             BlobStoreRegistry::initialize(Some(&configuration), pool.clone())
                 .await?

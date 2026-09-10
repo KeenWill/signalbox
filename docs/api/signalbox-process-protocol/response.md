@@ -351,9 +351,13 @@ pub enum ServerMessage {
     },
     ConversationImportInserted {
         imported_conversation_id: CanonicalUuid,
+        dropped_record_count: CanonicalU64,
+        first_dropped_record_position: option::Option<CanonicalU64>,
     },
     ConversationImportAlreadyImported {
         imported_conversation_id: CanonicalUuid,
+        dropped_record_count: CanonicalU64,
+        first_dropped_record_position: option::Option<CanonicalU64>,
     },
     ConversationImportBegun {
         declared_size_bytes: CanonicalU64,
@@ -391,6 +395,8 @@ pub enum ServerMessage {
     },
     ImportedConversationStart {
         imported_conversation_id: CanonicalUuid,
+        dropped_record_count: CanonicalU64,
+        first_dropped_record_position: option::Option<CanonicalU64>,
     },
     ImportedConversationEntry {
         position: CanonicalU64,

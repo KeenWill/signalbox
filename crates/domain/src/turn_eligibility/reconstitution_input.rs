@@ -7,10 +7,11 @@ use super::record::{AcceptedInputTurnSchedulingRecord, DelegatedTurnSchedulingFa
 use crate::{
     AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase, AppliedInterruptCommandResult,
     AttemptEnd, CancellationStopDisposition, ChildWait, ContextFrontierId, CurrentTurnAttempt,
-    DeliveryRequest, DirectModelSelection, ReconstitutedImportedSession,
-    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-    SemanticTranscriptEntryReconstitutionInput, Session, SessionId, SessionInputPosition,
-    ToolApprovalResolution, ToolRequestId, TurnAttemptId, TurnId, UnstoppedAttemptDisposition,
+    DeliveryRequest, DirectModelSelection, ImportedSessionSeedHeaderReconstitutionInput,
+    ReconstitutedImportedSession, ResolvedContextFrontierReconstitutionInput,
+    ResolvedContextFrontierSnapshot, SemanticTranscriptEntryReconstitutionInput, Session,
+    SessionId, SessionInputPosition, ToolApprovalResolution, ToolRequestId, TurnAttemptId, TurnId,
+    UnstoppedAttemptDisposition,
 };
 
 /// Correlated stored execution provenance for one failed terminal turn.
@@ -1032,14 +1033,17 @@ impl ContinuationRoundReconstitutionInput {
 /// Complete purpose-specific stored facts for one session's scheduling read.
 ///
 /// The input owns the already-checked current [`Session`], every currently
-/// known accepted-input turn record, and complete semantic-entry and snapshot
-/// collections needed by any stored start or failed-terminal frontier.
+/// known accepted-input turn record, and the semantic-entry and snapshot
+/// collections needed by stored native starts or failed-terminal frontiers. An
+/// imported seed may be supplied either completely or as its checked bounded
+/// header when only native scheduling facts are required.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedInputSchedulingReconstitutionInput {
     pub(super) inadmissible_requests: Vec<crate::ToolInadmissibleCorrelation>,
     pub(super) runner_placement_frontiers: Vec<ContextFrontierId>,
     pub(super) session: Session,
     pub(super) imported_session: Option<ReconstitutedImportedSession>,
+    pub(super) bounded_imported_seed: Option<ImportedSessionSeedHeaderReconstitutionInput>,
     pub(super) turns: Vec<AcceptedInputTurnSchedulingRecord>,
     pub(super) semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     pub(super) snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
@@ -1088,6 +1092,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
         Self {
             session,
             imported_session: None,
+            bounded_imported_seed: None,
             runner_placement_frontiers: Vec::new(),
             inadmissible_requests: Vec::new(),
             turns,
@@ -1133,6 +1138,16 @@ impl AcceptedInputSchedulingReconstitutionInput {
     /// required by an imported session.
     pub fn with_imported_session(mut self, imported_session: ReconstitutedImportedSession) -> Self {
         self.imported_session = Some(imported_session);
+        self
+    }
+
+    /// Supplies the checked constant-size imported seed header when scheduling
+    /// does not require the imported semantic prefix itself.
+    pub fn with_bounded_imported_seed(
+        mut self,
+        imported_seed: ImportedSessionSeedHeaderReconstitutionInput,
+    ) -> Self {
+        self.bounded_imported_seed = Some(imported_seed);
         self
     }
 

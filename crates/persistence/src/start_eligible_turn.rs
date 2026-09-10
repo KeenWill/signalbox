@@ -1060,14 +1060,17 @@ async fn session_refuses_new_work(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<bool, StartEligibleTurnRepositoryError> {
-    let refuses: Option<bool> = sqlx::query_scalar(
-        "SELECT state_kind = 'parked' OR pending_terminal_outcome_kind IS NOT NULL
-           FROM session_lifecycle WHERE session_id = $1",
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM session_lifecycle WHERE session_id = $1
+              AND (state_kind = 'parked' OR pending_terminal_outcome_kind IS NOT NULL)
+         ) OR EXISTS (
+             SELECT 1 FROM session_supervision WHERE session_id = $1 AND supervision_pending
+         )",
     )
     .bind(session_id_to_uuid(session))
-    .fetch_optional(&mut *connection)
-    .await?;
-    Ok(refuses.unwrap_or(false))
+    .fetch_one(&mut *connection)
+    .await?)
 }
 
 async fn handle_in_transaction(
@@ -1093,6 +1096,12 @@ async fn handle_in_transaction(
             .fetch_one(&mut *connection)
             .await?;
 
+    // A queued hint can arrive after a park or a corruption report.
+    if session_refuses_new_work(connection, requested_session).await? {
+        return Ok(TransactionDecision::Rollback(
+            StartEligibleTurnOutcome::NoEligibleTurn,
+        ));
+    }
     if scheduler_session.is_none() {
         if session_exists {
             return Err(StartEligibleTurnCorruption::Missing("session scheduler row").into());
@@ -1101,12 +1110,7 @@ async fn handle_in_transaction(
             StartEligibleTurnOutcome::NoEligibleTurn,
         ));
     }
-    // The sweep's parked exclusion is a hint filter, not an authority: a hint
-    // queued before the park still reaches this transaction. The satellite row
-    // is already locked by the scheduler statement above, so this reads under
-    // that lock rather than racing it.
-    if session_refuses_new_work(connection, requested_session).await?
-        || session_start_gate_is_held(connection, requested_session).await?
+    if session_start_gate_is_held(connection, requested_session).await?
         || session_runner_is_lost(connection, requested_session).await?
     {
         return Ok(TransactionDecision::Rollback(

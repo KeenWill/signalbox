@@ -433,6 +433,19 @@ impl GoalRepository {
                     .await?;
             }
 
+            if matches!(command.action(), GoalUserAction::Resume(_)) {
+                crate::session_lifecycle::lock_supervision_frontier(
+                    &mut transaction,
+                    command.session(),
+                )
+                .await
+                .map_err(|error| match error {
+                    crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source) => {
+                        GoalRepositoryError::Database(source)
+                    }
+                    _ => GoalCorruption::Inconsistent("supervision delegation frontier").into(),
+                })?;
+            }
             let session_exists = lock_session(&mut transaction, command.session()).await?;
 
             if matches!(command.action(), GoalUserAction::Stop { .. })
@@ -548,6 +561,20 @@ impl GoalRepository {
         insert_command(&mut transaction, &command, &result).await?;
         match &result {
             GoalCommandResult::Applied(event) => {
+                if matches!(command.action(), GoalUserAction::Resume(_)) {
+                    crate::session_lifecycle::reconcile_supervision_in_transaction(
+                        &mut transaction,
+                        command.session(),
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source)
+                        | crate::session_lifecycle::SessionLifecycleRepositoryError::CommitAmbiguous(
+                            source,
+                        ) => GoalRepositoryError::Database(source),
+                        _ => GoalCorruption::Inconsistent("supervised session reconstitution").into(),
+                    })?;
+                }
                 insert_event(&mut transaction, command.session(), event).await?;
                 if matches!(command.action(), GoalUserAction::Attach(_)) {
                     crate::session_lifecycle::confer_ownership_in_transaction(

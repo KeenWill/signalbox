@@ -35,12 +35,11 @@ use crate::credential_pools::{
 };
 
 use super::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
-    DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS, FileCredentialAccess, HubModelConfiguration,
-    HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES, MIGRATED_ANTHROPIC_MODEL_FAMILY,
-    ModelAdapter, ModelCallInputUsage, RepositoryWatchWebhookMode, UnknownSessionModel,
-    absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference, validate_alias_count,
-    validate_model_count,
+    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS,
+    FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError,
+    MAX_COMPACTION_PROMPT_UTF8_BYTES, MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter,
+    ModelCallInputUsage, RepositoryWatchWebhookMode, UnknownSessionModel, absolute_search_entries,
+    credential_bytes, resolved_mcp_bridge_reference, validate_alias_count, validate_model_count,
 };
 
 const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
@@ -133,6 +132,9 @@ max_image_request_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
 repository_watch_webhook_retention = "604800s"
+guard_recovery_initial_delay = "1s"
+guard_recovery_maximum_delay = "10s"
+guard_recovery_elapsed_bound = "none"
 fenced_pool_min_connections = 48
 fenced_pool_floor_reconciliation_interval = "5s"
 fenced_pool_floor_reconciliation_attempt_bound = "30s"
@@ -2121,55 +2123,15 @@ fn approval_judge_rejects_an_unconfigured_direct_selection() {
 }
 
 #[test]
-fn conversation_import_bound_defaults_to_256_mib() {
-    let configuration =
-        HubModelConfiguration::parse(CONFIGURATION).expect("the canonical configuration is valid");
-
-    assert_eq!(
-        configuration.conversation_import_max_source_bytes(),
-        DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES
-    );
-}
-
-#[test]
-fn conversation_import_bound_accepts_an_explicit_positive_byte_count() {
-    let max_source_bytes = 1_048_576;
+fn conversation_import_table_is_an_unknown_top_level_field() {
     let configured = CONFIGURATION.replace(
         "[compaction]",
-        &format!("[conversation_import]\nmax_source_bytes = {max_source_bytes}\n\n[compaction]"),
-    );
-    let configuration =
-        HubModelConfiguration::parse(&configured).expect("the explicit import bound is valid");
-
-    assert_eq!(
-        configuration.conversation_import_max_source_bytes(),
-        max_source_bytes
-    );
-}
-
-#[test]
-fn conversation_import_bound_rejects_zero() {
-    let configured = CONFIGURATION.replace(
-        "[compaction]",
-        "[conversation_import]\nmax_source_bytes = 0\n\n[compaction]",
+        "[conversation_import]\nmax_source_bytes = 268435456\n\n[compaction]",
     );
 
     assert_eq!(
         HubModelConfiguration::parse(&configured).err(),
-        Some(HubModelConfigurationError::InvalidConversationImportLimit)
-    );
-}
-
-#[test]
-fn conversation_import_bound_rejects_unknown_fields() {
-    let configured = CONFIGURATION.replace(
-        "[compaction]",
-        "[conversation_import]\nmax_source_bytes = 1048576\nextra = 1\n\n[compaction]",
-    );
-
-    assert_eq!(
-        HubModelConfiguration::parse(&configured).err(),
-        Some(HubModelConfigurationError::InvalidConversationImportLimit)
+        Some(HubModelConfigurationError::UnknownField)
     );
 }
 

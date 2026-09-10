@@ -101,9 +101,13 @@ effective user. A group- or other-writable ancestor is admitted only when it is
 sticky and its child is owned by the effective user. A daemon holds an exclusive
 lock beside the socket for its lifetime and pins the bound inode, and it unlinks
 a socket path only after revalidating that pin, so a restart never removes a
-live successor's socket. The daemon admits only socket peers whose uid equals
-its effective uid. Remote access needs an authenticated identity and revocation
-design that does not exist, recorded in
+live successor's socket. Stale-pin cleanup probes the matching public socket
+path, temporarily linking an orphan pin there when needed, under the path lock
+and removes it only after connection refusal and inode revalidation. An absent
+public socket permits cleanup; a present public socket must match the pin. A
+live or inconclusive probe preserves it. The daemon admits only socket peers
+whose uid equals its effective uid. Remote access needs an authenticated
+identity and revocation design that does not exist, recorded in
 [open-questions.md](../open-questions.md).
 
 A denial on the wire requires a reason although the domain command admits its
@@ -183,7 +187,8 @@ the connection. Neither bound limits idle connections or idle follow streams;
 
 SIGINT or SIGTERM stops admission and drains runtime work under the configured
 shutdown grace window. A subsequent termination signal interrupts that drain,
-aborts remaining runtime tasks, and proceeds immediately to cleanup.
+aborts remaining runtime tasks, and proceeds immediately to cleanup. The runtime
+creates its termination listeners before marking guard recovery complete.
 
 Every accepted non-review mutation, import transport request, or blob transport
 request produces exactly one receipt message or an error, except when a
@@ -284,6 +289,14 @@ The reader budget leaves at least two pool connections outside snapshot work.
 
 The imported seed frontier is selected only when no persisted turn-start lineage
 exists; a queued but unstarted first native turn does not hide it.
+
+Operator status streams `session_supervision` records after lifecycle deadline
+violations and before repository ingestion. Each carries `session_id`,
+`terminal`, `failure_class`, and `cause_code`; its closed failure vocabulary is
+`infrastructure`, `commit_ambiguous`, `corruption`, `identity_collision`, and
+`bug`. The end message carries `session_supervision_count`. The client validates
+the section order and count and presents each pending item, including corrupt
+terminal sessions skipped at startup.
 
 Operator status includes one `repository_ingestion` record per configured
 watched repository and a `repository_ingestion_count` in its end message. A
@@ -696,5 +709,4 @@ event is `turn_failed`; it emits no pool-exhaustion event.
 
 ## Planned
 
-- Listener probing before stale socket identity-pin cleanup; see
-  [daemon survival design](../design/daemon-survival.md).
+None.

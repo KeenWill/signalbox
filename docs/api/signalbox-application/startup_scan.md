@@ -66,7 +66,7 @@ pub enum StartupScanSessionOutcome {
 ```rust
 pub trait StartupScanRepository {
     type Error: ClassifyOperatorFailure;
-    fn active_sessions(
+    fn sessions(
         &mut self,
     ) -> impl future::Future<
         Output = result::Result<
@@ -74,6 +74,12 @@ pub trait StartupScanRepository {
             <Self as StartupScanRepository>::Error,
         >,
     > + marker::Send;
+    fn record_corrupt_session(
+        &mut self,
+        session: signalbox_domain::SessionId,
+        error: &<Self as StartupScanRepository>::Error,
+    ) -> impl future::Future<Output = result::Result<(), <Self as StartupScanRepository>::Error>>
+           + marker::Send;
     fn recover<Generator>(
         &mut self,
         session: signalbox_domain::SessionId,
@@ -93,6 +99,7 @@ pub trait StartupScanRepository {
 pub struct StartupScanOutcome {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl StartupScanOutcome {
+    pub fn skipped_corrupt_sessions(&self) -> &[signalbox_domain::SessionId];
     pub const fn recovered_turn_count(&self) -> usize;
     pub fn awaiting_recovery_decision_sessions(&self) -> &[signalbox_domain::SessionId];
 }

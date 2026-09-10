@@ -4,7 +4,7 @@ use super::load::{
     load_complete_rows, load_existing_interrupt, load_from_connection, load_turn_origin_graph,
     non_accepted_predecessor, related_turn_origin_key,
 };
-use super::scheduling_projection::load_scheduling_projection;
+use super::scheduling_projection::load_bounded_scheduling_projection;
 use super::{
     PreparedAgainstLockedState, SubmitInputCorruption, SubmitInputHandlingOutcome,
     SubmitInputRepositoryError, TransactionDecision, required,
@@ -356,7 +356,7 @@ where
         }
     };
 
-    let scheduling = load_scheduling_projection(connection, session.clone()).await?;
+    let scheduling = load_bounded_scheduling_projection(connection, session.clone()).await?;
     let active_turn_id = scheduling.active_turn().map(|active| active.turn());
     let prepared = if active_turn_id.is_some() {
         match model_capabilities {

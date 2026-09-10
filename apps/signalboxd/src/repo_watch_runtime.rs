@@ -861,6 +861,18 @@ impl RuntimeState {
                     )
                     .await
                     .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
+                self.store
+                    .retry_due(
+                        repository.repository(),
+                        rule,
+                        &mut RepositoryWatchDispatchIds,
+                        &mut self.factory,
+                        &mut codec,
+                        &self.lifecycle,
+                        OffsetDateTime::now_utc(),
+                    )
+                    .await
+                    .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
             }
         }
         crate::repo_watch_dispatch::submit_pending(&self.store, configuration, &mut self.sink)

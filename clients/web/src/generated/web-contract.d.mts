@@ -128,7 +128,7 @@ export type WebImportContinuationReference = {
   readonly position: number;
 };
 
-export type WebImportFormat = "claude_code_session_jsonl_v1" | "claude_code_session_jsonl_v2" | "codex_rollout_jsonl_v1";
+export type WebImportFormat = "claude_code_session_jsonl_v1" | "claude_code_session_jsonl_v2" | "claude_code_session_jsonl_v3" | "codex_rollout_jsonl_v1" | "codex_rollout_jsonl_v2";
 
 export type WebImportSizeFacts = {
   readonly normalized_entry_bytes: number;

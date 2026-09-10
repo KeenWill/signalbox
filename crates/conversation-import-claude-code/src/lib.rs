@@ -4,14 +4,17 @@
 //! raw JSONL record, and emits source-neutral imported entries. It performs no
 //! filesystem access and creates no native Signalbox session.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, io::BufRead};
 
 use signalbox_application::{
     ImportedConversationConversionReport, ImportedConversationConverter,
-    ImportedConversationSkippedRecord, ResilientImportedConversationConverter,
+    ImportedConversationSkippedRecord, ImportedConversationStreamItem,
+    ResilientImportedConversationConverter, StreamConversionError,
+    StreamingResilientImportedConversationConverter,
 };
 use signalbox_conversation_import_json::{
-    JsonFailure, one_based_ordinal, parse_record, split_jsonl_records,
+    JsonFailure, JsonlRecordReadFailure, one_based_ordinal, parse_record, read_jsonl_records,
+    split_jsonl_records,
 };
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -25,11 +28,18 @@ use signalbox_domain::{
     unique_imported_structured_field,
 };
 
-const FORMAT: ImportedConversationFormat = ImportedConversationFormat::ClaudeCodeSessionJsonlV2;
+const STRICT_FORMAT: ImportedConversationFormat =
+    ImportedConversationFormat::ClaudeCodeSessionJsonlV2;
+const RESILIENT_FORMAT: ImportedConversationFormat =
+    ImportedConversationFormat::ClaudeCodeSessionJsonlV3;
 
 /// Claude Code session JSONL version 2 converter.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ClaudeCodeJsonlConverter;
+
+/// Claude Code session JSONL resilient converter version 3.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResilientClaudeCodeJsonlConverter;
 
 /// Content-silent reason a complete Claude Code JSONL conversion failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,6 +117,11 @@ pub enum ClaudeCodeJsonlConversionFailure {
         /// One-based tool-result block position.
         result_block: u64,
     },
+    /// One physical record exceeded the configured raw-record byte ceiling.
+    RawRecordTooLarge {
+        /// One-based physical line number.
+        line: u64,
+    },
     /// A required source or entry position could not be represented.
     PositionExhausted,
     /// The converted candidate violated an imported-conversation invariant.
@@ -138,7 +153,7 @@ impl ImportedConversationConverter for ClaudeCodeJsonlConverter {
     type Error = ClaudeCodeJsonlConversionError;
 
     fn format(&self) -> ImportedConversationFormat {
-        FORMAT
+        STRICT_FORMAT
     }
 
     fn convert<NextEntryId>(
@@ -165,11 +180,46 @@ impl ImportedConversationConverter for ClaudeCodeJsonlConverter {
             .into_iter()
             .map(|record| prepare_record(record.line(), record.bytes()))
             .collect::<Result<Vec<_>, _>>()?;
-        build_conversation(conversation, prepared, next_entry_id)
+        build_conversation(STRICT_FORMAT, conversation, prepared, next_entry_id)
     }
 }
 
-impl ResilientImportedConversationConverter for ClaudeCodeJsonlConverter {
+impl ImportedConversationConverter for ResilientClaudeCodeJsonlConverter {
+    type Error = ClaudeCodeJsonlConversionError;
+
+    fn format(&self) -> ImportedConversationFormat {
+        RESILIENT_FORMAT
+    }
+
+    fn convert<NextEntryId>(
+        &mut self,
+        conversation: ImportedConversationId,
+        source: &[u8],
+        next_entry_id: NextEntryId,
+    ) -> Result<ImportedConversation, Self::Error>
+    where
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+    {
+        let records = split_jsonl_records(source).map_err(|_| position_error())?;
+        if records.is_empty() {
+            return Err(conversion_error(
+                ClaudeCodeJsonlConversionFailure::EmptySource,
+            ));
+        }
+        if let Some(blank) = records.iter().find(|record| record.bytes().is_empty()) {
+            return Err(conversion_error(
+                ClaudeCodeJsonlConversionFailure::BlankLine { line: blank.line() },
+            ));
+        }
+        let prepared = records
+            .into_iter()
+            .map(|record| prepare_record(record.line(), record.bytes()))
+            .collect::<Result<Vec<_>, _>>()?;
+        build_conversation(RESILIENT_FORMAT, conversation, prepared, next_entry_id)
+    }
+}
+
+impl ResilientImportedConversationConverter for ResilientClaudeCodeJsonlConverter {
     type RecordFailure = ClaudeCodeJsonlConversionFailure;
 
     fn convert_resilient<NextEntryId>(
@@ -211,10 +261,99 @@ impl ResilientImportedConversationConverter for ClaudeCodeJsonlConverter {
                 skipped_records: skipped_records.into_boxed_slice(),
             });
         }
-        let conversation = build_conversation(conversation, prepared, next_entry_id)?;
+        let conversation =
+            build_conversation(RESILIENT_FORMAT, conversation, prepared, next_entry_id)?;
         Ok(ImportedConversationConversionReport::Converted {
             conversation,
             skipped_records: skipped_records.into_boxed_slice(),
+        })
+    }
+}
+
+impl StreamingResilientImportedConversationConverter for ResilientClaudeCodeJsonlConverter {
+    fn convert_resilient_from_reader<Reader, NextEntryId>(
+        &mut self,
+        conversation: ImportedConversationId,
+        source: Reader,
+        maximum_record_bytes: u64,
+        next_entry_id: NextEntryId,
+    ) -> impl Iterator<
+        Item = Result<
+            ImportedConversationStreamItem<Self::RecordFailure>,
+            StreamConversionError<Self::Error>,
+        >,
+    > + Send
+    where
+        Reader: BufRead + Send,
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
+    {
+        let mut records = read_jsonl_records(source, maximum_record_bytes);
+        let mut next_entry_id = next_entry_id;
+        let mut saw_record = false;
+        let mut finished = false;
+        std::iter::from_fn(move || {
+            if finished {
+                return None;
+            }
+            let record = match records.next() {
+                Some(Ok(record)) => record,
+                Some(Err(JsonlRecordReadFailure::SourceRead)) => {
+                    finished = true;
+                    return Some(Err(StreamConversionError::SourceRead));
+                }
+                Some(Err(JsonlRecordReadFailure::PositionExhausted)) => {
+                    finished = true;
+                    return Some(Err(StreamConversionError::Conversion(position_error())));
+                }
+                Some(Err(JsonlRecordReadFailure::RecordTooLarge { line })) => {
+                    finished = true;
+                    return Some(Err(StreamConversionError::Conversion(conversion_error(
+                        ClaudeCodeJsonlConversionFailure::RawRecordTooLarge { line },
+                    ))));
+                }
+                None if !saw_record => {
+                    finished = true;
+                    return Some(Err(StreamConversionError::Conversion(conversion_error(
+                        ClaudeCodeJsonlConversionFailure::EmptySource,
+                    ))));
+                }
+                None => {
+                    finished = true;
+                    return None;
+                }
+            };
+            saw_record = true;
+            let line = record.line();
+            let bytes = record.into_bytes();
+            if bytes.is_empty() {
+                return Some(Ok(ImportedConversationStreamItem::Skipped(
+                    ImportedConversationSkippedRecord::new(
+                        line,
+                        ClaudeCodeJsonlConversionFailure::BlankLine { line },
+                    ),
+                )));
+            }
+            match prepare_owned_record(line, bytes) {
+                Ok(record) => Some(
+                    build_conversation(
+                        RESILIENT_FORMAT,
+                        conversation,
+                        vec![record],
+                        &mut next_entry_id,
+                    )
+                    .map(ImportedConversationStreamItem::Converted)
+                    .map_err(StreamConversionError::Conversion),
+                ),
+                Err(error) => match record_local_failure(error) {
+                    Ok(failure) => Some(Ok(ImportedConversationStreamItem::Skipped(
+                        ImportedConversationSkippedRecord::new(line, failure),
+                    ))),
+                    Err(error) => {
+                        finished = true;
+                        Some(Err(StreamConversionError::Conversion(error)))
+                    }
+                },
+            }
         })
     }
 }
@@ -224,6 +363,7 @@ fn record_local_failure(
 ) -> Result<ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConversionError> {
     match error.failure() {
         ClaudeCodeJsonlConversionFailure::EmptySource
+        | ClaudeCodeJsonlConversionFailure::RawRecordTooLarge { .. }
         | ClaudeCodeJsonlConversionFailure::PositionExhausted
         | ClaudeCodeJsonlConversionFailure::InvalidAggregate(_) => Err(error),
         failure => Ok(failure),
@@ -239,15 +379,23 @@ fn prepare_record(
     line: u64,
     bytes: &[u8],
 ) -> Result<PreparedRecord, ClaudeCodeJsonlConversionError> {
-    let normalized = parse_record(bytes).map_err(|failure| json_error(line, failure))?;
+    prepare_owned_record(line, bytes.to_vec())
+}
+
+fn prepare_owned_record(
+    line: u64,
+    bytes: Vec<u8>,
+) -> Result<PreparedRecord, ClaudeCodeJsonlConversionError> {
+    let normalized = parse_record(&bytes).map_err(|failure| json_error(line, failure))?;
     let pending = normalize_record(&normalized, line)?;
     Ok(PreparedRecord {
-        raw: ImportedRawSourceRecord::from_converted(bytes.to_vec(), normalized),
+        raw: ImportedRawSourceRecord::from_converted(bytes, normalized),
         pending,
     })
 }
 
 fn build_conversation<NextEntryId>(
+    format: ImportedConversationFormat,
     conversation: ImportedConversationId,
     prepared: Vec<PreparedRecord>,
     mut next_entry_id: NextEntryId,
@@ -289,7 +437,7 @@ where
             }
         }
     }
-    ImportedConversation::from_converted_records(conversation, FORMAT, raws, entries).map_err(
+    ImportedConversation::from_converted_records(conversation, format, raws, entries).map_err(
         |error| ClaudeCodeJsonlConversionError {
             failure: ClaudeCodeJsonlConversionFailure::InvalidAggregate(error.failure()),
         },
@@ -653,21 +801,28 @@ fn media_source_attestation(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::{
+        collections::VecDeque,
+        io::{BufReader, Cursor},
+    };
 
     use signalbox_application::{
         ImportedConversationConversionReport, ImportedConversationConverter,
-        ResilientImportedConversationConverter,
+        ImportedConversationStreamItem, ResilientImportedConversationConverter,
+        StreamingResilientImportedConversationConverter,
     };
     use signalbox_domain::{
-        ImportedConversation, ImportedConversationId, ImportedMessageContentAbsence,
-        ImportedSourceAttestation, ImportedSpeaker, ImportedToolResultBlock,
-        ImportedToolResultValue, ImportedTranscriptContent, ImportedTranscriptEntry,
-        ImportedTranscriptEntryId,
+        ImportedConversation, ImportedConversationFormat, ImportedConversationId,
+        ImportedMessageContentAbsence, ImportedSourceAttestation, ImportedSpeaker,
+        ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
+        ImportedTranscriptEntry, ImportedTranscriptEntryId,
     };
     use uuid::Uuid;
 
-    use super::{ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConverter};
+    use super::{
+        ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConverter,
+        ResilientClaudeCodeJsonlConverter,
+    };
 
     fn conversation() -> ImportedConversationId {
         ImportedConversationId::from_uuid(Uuid::from_u128(1))
@@ -708,6 +863,22 @@ mod tests {
         assert_eq!(
             entry.content(),
             &ImportedTranscriptContent::MessageContentAbsent(expected)
+        );
+    }
+
+    #[test]
+    fn maximum_fidelity_converter_declares_version_two() {
+        assert_eq!(
+            ClaudeCodeJsonlConverter.format(),
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV2
+        );
+    }
+
+    #[test]
+    fn resilient_converter_declares_version_three() {
+        assert_eq!(
+            ResilientClaudeCodeJsonlConverter.format(),
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV3
         );
     }
 
@@ -1189,7 +1360,7 @@ mod tests {
         .concat();
         let mut next_identity = 100_u128;
 
-        let report = ClaudeCodeJsonlConverter
+        let report = ResilientClaudeCodeJsonlConverter
             .convert_resilient(conversation(), &source, || {
                 let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(next_identity));
                 next_identity = next_identity
@@ -1198,6 +1369,40 @@ mod tests {
                 identity
             })
             .expect("record-local failures must not abort resilient conversion");
+        let mut streamed_next_identity = 100_u128;
+        let streamed_records = ResilientClaudeCodeJsonlConverter
+            .convert_resilient_from_reader(
+                conversation(),
+                BufReader::with_capacity(4, Cursor::new(&source)),
+                u64::MAX,
+                || {
+                    let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        streamed_next_identity,
+                    ));
+                    streamed_next_identity = streamed_next_identity
+                        .checked_add(1)
+                        .expect("fixture identity range is bounded");
+                    identity
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .expect("streamed record-local failures must not abort conversion");
+
+        assert_eq!(streamed_records.len(), 6);
+        assert_eq!(
+            streamed_records
+                .iter()
+                .filter(|record| matches!(record, ImportedConversationStreamItem::Converted(_)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            streamed_records
+                .iter()
+                .filter(|record| matches!(record, ImportedConversationStreamItem::Skipped(_)))
+                .count(),
+            4
+        );
         let ImportedConversationConversionReport::Converted {
             conversation: imported,
             skipped_records,
@@ -1237,7 +1442,7 @@ mod tests {
 
     #[test]
     fn resilient_conversion_reports_when_no_record_is_valid() {
-        let report = ClaudeCodeJsonlConverter
+        let report = ResilientClaudeCodeJsonlConverter
             .convert_resilient(conversation(), b"\n{", || {
                 panic!("rejected records must not consume an entry identity")
             })
@@ -1262,7 +1467,7 @@ mod tests {
 
     #[test]
     fn resilient_empty_source_remains_a_fatal_error() {
-        let error = ClaudeCodeJsonlConverter
+        let error = ResilientClaudeCodeJsonlConverter
             .convert_resilient(conversation(), b"", || {
                 panic!("empty source must not consume an entry identity")
             })
@@ -1271,6 +1476,28 @@ mod tests {
         assert_eq!(
             error.failure(),
             ClaudeCodeJsonlConversionFailure::EmptySource
+        );
+    }
+
+    #[test]
+    fn streamed_conversion_rejects_an_oversized_record_before_parsing() {
+        let error = ResilientClaudeCodeJsonlConverter
+            .convert_resilient_from_reader(
+                conversation(),
+                BufReader::with_capacity(2, Cursor::new(b"{\"type\":\"system\"}\n")),
+                3,
+                || panic!("oversized record must not consume an entry identity"),
+            )
+            .next()
+            .expect("the oversized physical record is observed")
+            .expect_err("the record byte ceiling rejects before conversion");
+
+        let signalbox_application::StreamConversionError::Conversion(error) = error else {
+            panic!("the in-memory fixture cannot fail its source read")
+        };
+        assert_eq!(
+            error.failure(),
+            ClaudeCodeJsonlConversionFailure::RawRecordTooLarge { line: 1 }
         );
     }
 
