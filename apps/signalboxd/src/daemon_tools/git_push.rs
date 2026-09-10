@@ -10,7 +10,7 @@ use signalbox_tools_git::{
 
 use crate::repo_watch_credentials::{RepositoryWatchClientLoadError, RepositoryWatchClientLoader};
 
-// The exec family's command duration also bounds push credential preparation.
+// One exec-family command budget covers credentials, push attempts, and confirmation.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(super) struct ProcessGitPushTransport<Runner> {
@@ -23,11 +23,18 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
         &mut self,
         request: GitPushRequest,
     ) -> Result<GitPushReceipt, GitPushTransportFailure> {
-        let authentication = self
-            .credentials
-            .authenticated_push_url(request.remote().url(), PUSH_TIMEOUT)
-            .await
-            .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
+        let deadline = tokio::time::Instant::now() + PUSH_TIMEOUT;
+        let authentication = tokio::time::timeout_at(
+            deadline,
+            self.credentials.authenticated_push_url(
+                request.remote().url(),
+                remaining_push_timeout(deadline)
+                    .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?,
+            ),
+        )
+        .await
+        .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?
+        .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
         if !request.repository_root().is_dir() {
             return Err(GitPushTransportFailure::PreDispatchInfrastructure);
         }
@@ -77,21 +84,19 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
                 request.remote().url(),
                 &request.refspec(),
             ],
+            remaining_push_timeout(deadline)
+                .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?,
         );
-        let push = push_with_refresh(
-            &mut self.runner,
-            &mut push_request,
-            self.credentials.refreshed_push_url(
-                request.remote().url(),
-                &authentication,
-                PUSH_TIMEOUT,
-            ),
-        )
+        let push = push_with_refresh(&mut self.runner, &mut push_request, deadline, |remaining| {
+            self.credentials
+                .refreshed_push_url(request.remote().url(), &authentication, remaining)
+        })
         .await?;
         classify_push(&push)?;
         let remote_ref = format!("refs/heads/{}", request.branch());
         let confirmation = self
-            .run(
+            .runner
+            .run(process_request(
                 &request,
                 &push_request.environment,
                 &[
@@ -101,7 +106,8 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
                     request.remote().url(),
                     &remote_ref,
                 ],
-            )
+                remaining_push_timeout(deadline).ok_or(GitPushTransportFailure::DispatchUnknown)?,
+            ))
             .await;
         let expected_ref = format!("{}\t{remote_ref}", request.commit());
         if !matches!(
@@ -121,29 +127,23 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
     }
 }
 
-impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
-    async fn run(
-        &mut self,
-        request: &GitPushRequest,
-        environment: &BTreeMap<OsString, OsString>,
-        arguments: &[&str],
-    ) -> ProcessRunResult {
-        self.runner
-            .run(process_request(request, environment, arguments))
-            .await
-    }
+fn remaining_push_timeout(deadline: tokio::time::Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
 }
 
 fn process_request(
     request: &GitPushRequest,
     environment: &BTreeMap<OsString, OsString>,
     arguments: &[&str],
+    timeout: Duration,
 ) -> ProcessRequest {
     ProcessRequest {
         program: "git".into(),
         arguments: arguments.iter().map(OsString::from).collect(),
         working_directory: request.repository_root().to_owned(),
-        timeout: PUSH_TIMEOUT,
+        timeout,
         capture_bytes: 64 * 1024,
         environment: environment.clone(),
         environment_inheritance: ProcessEnvironment::Clear,
@@ -151,21 +151,31 @@ fn process_request(
     }
 }
 
-async fn push_with_refresh(
+async fn push_with_refresh<
+    Refresh: std::future::Future<Output = Result<Option<String>, RepositoryWatchClientLoadError>>,
+>(
     runner: &mut impl ProcessRunner,
     request: &mut ProcessRequest,
-    refresh: impl std::future::Future<Output = Result<Option<String>, RepositoryWatchClientLoadError>>,
+    deadline: tokio::time::Instant,
+    refresh: impl FnOnce(Duration) -> Refresh,
 ) -> Result<ProcessRunResult, GitPushTransportFailure> {
+    request.timeout = remaining_push_timeout(deadline)
+        .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?;
     let first = runner.run(request.clone()).await;
     if authentication_rejected(&first) {
-        let refreshed = refresh
+        let remaining = remaining_push_timeout(deadline)
+            .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?;
+        let refreshed = tokio::time::timeout_at(deadline, refresh(remaining))
             .await
+            .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?
             .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
         if let Some(url) = refreshed {
             request.environment.insert(
                 "GIT_CONFIG_KEY_0".into(),
                 format!("url.{url}.insteadOf").into(),
             );
+            request.timeout = remaining_push_timeout(deadline)
+                .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?;
             return Ok(runner.run(request.clone()).await);
         }
     }
@@ -230,6 +240,7 @@ mod tests {
     struct RecordedRunner {
         responses: std::collections::VecDeque<ProcessRunResult>,
         requests: Vec<ProcessRequest>,
+        delays: std::collections::VecDeque<Duration>,
     }
 
     impl ProcessRunner for RecordedRunner {
@@ -247,6 +258,9 @@ mod tests {
         }
         async fn run(&mut self, request: ProcessRequest) -> ProcessRunResult {
             self.requests.push(request);
+            if let Some(delay) = self.delays.pop_front() {
+                tokio::time::sleep(delay).await;
+            }
             self.responses.pop_front().expect("no extra Git invocation")
         }
     }
@@ -254,7 +268,7 @@ mod tests {
     fn push_fixture(
         responses: impl IntoIterator<Item = ProcessRunResult>,
     ) -> (RecordedRunner, ProcessRequest) {
-        (RecordedRunner { responses: responses.into_iter().collect(), requests: Vec::new() }, ProcessRequest {
+        (RecordedRunner { responses: responses.into_iter().collect(), requests: Vec::new(), delays: Default::default() }, ProcessRequest {
             program: "git".into(),
             arguments: ["push", "--porcelain", "--", "https://github.com/fixture/project.git", "HEAD:refs/heads/review"].into_iter().map(OsString::from).collect(),
             working_directory: "/unused/checkout".into(),
@@ -274,17 +288,99 @@ mod tests {
         )
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn push_attempts_and_refresh_consume_only_the_budget_left_after_preparation() {
+        let started = tokio::time::Instant::now();
+        let deadline = started + Duration::from_secs(300);
+        let (mut runner, mut request) = push_fixture([
+            authentication_failure(),
+            result(ProcessOutcome::TimedOut, "", ""),
+        ]);
+        runner.delays = [Duration::from_secs(20), Duration::from_secs(25)].into();
+        // Credential preparation has already consumed four minutes of the push budget.
+        tokio::time::advance(Duration::from_secs(240)).await;
+        let response = push_with_refresh(
+            &mut runner,
+            &mut request,
+            deadline,
+            |remaining| async move {
+                assert_eq!(remaining, Duration::from_secs(40));
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                Ok(Some(
+                    "https://x-access-token:synthetic-new@github.com/fixture/project.git"
+                        .to_owned(),
+                ))
+            },
+        )
+        .await
+        .expect("retry returns its process outcome");
+        assert_eq!(runner.requests[0].timeout, Duration::from_secs(60));
+        assert_eq!(runner.requests[1].timeout, Duration::from_secs(25));
+        assert_eq!(response.outcome, ProcessOutcome::TimedOut);
+        assert_eq!(started.elapsed(), Duration::from_secs(300));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_push_preparation_does_not_start_git() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        let (mut runner, mut request) = push_fixture([]);
+        tokio::time::advance(Duration::from_secs(300)).await;
+        let response = push_with_refresh(&mut runner, &mut request, deadline, |_| async {
+            panic!("an expired push must not refresh")
+        })
+        .await;
+        assert_eq!(
+            response.err(),
+            Some(GitPushTransportFailure::PreDispatchInfrastructure)
+        );
+        assert!(runner.requests.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_refresh_expires_without_starting_a_push_retry() {
+        let started = tokio::time::Instant::now();
+        let deadline = started + Duration::from_secs(300);
+        let (mut runner, mut request) = push_fixture([authentication_failure()]);
+        runner.delays = [Duration::from_secs(250)].into();
+        let response = tokio::time::timeout(
+            Duration::from_secs(301),
+            push_with_refresh(
+                &mut runner,
+                &mut request,
+                deadline,
+                |remaining| async move {
+                    assert_eq!(remaining, Duration::from_secs(50));
+                    std::future::pending().await
+                },
+            ),
+        )
+        .await
+        .expect("refresh must expire within the original push deadline");
+        assert_eq!(
+            response.err(),
+            Some(GitPushTransportFailure::PreDispatchInfrastructure)
+        );
+        assert_eq!(runner.requests.len(), 1);
+        assert_eq!(started.elapsed(), Duration::from_secs(300));
+    }
+
     #[tokio::test]
     async fn authentication_rejection_retries_with_the_refreshed_url() {
         let (mut runner, mut request) = push_fixture([
             authentication_failure(),
             result(ProcessOutcome::Exited { code: Some(0) }, "", ""),
         ]);
-        let response = push_with_refresh(&mut runner, &mut request, async {
-            Ok(Some(
-                "https://x-access-token:synthetic-new@github.com/fixture/project.git".to_owned(),
-            ))
-        })
+        let response = push_with_refresh(
+            &mut runner,
+            &mut request,
+            tokio::time::Instant::now() + PUSH_TIMEOUT,
+            |_| async {
+                Ok(Some(
+                    "https://x-access-token:synthetic-new@github.com/fixture/project.git"
+                        .to_owned(),
+                ))
+            },
+        )
         .await
         .expect("refresh and retry");
         assert_eq!(classify_push(&response), Ok(()));
@@ -309,11 +405,17 @@ mod tests {
     async fn a_second_authentication_rejection_does_not_retry_again() {
         let (mut runner, mut request) =
             push_fixture([authentication_failure(), authentication_failure()]);
-        let response = push_with_refresh(&mut runner, &mut request, async {
-            Ok(Some(
-                "https://x-access-token:synthetic-new@github.com/fixture/project.git".to_owned(),
-            ))
-        })
+        let response = push_with_refresh(
+            &mut runner,
+            &mut request,
+            tokio::time::Instant::now() + PUSH_TIMEOUT,
+            |_| async {
+                Ok(Some(
+                    "https://x-access-token:synthetic-new@github.com/fixture/project.git"
+                        .to_owned(),
+                ))
+            },
+        )
         .await
         .expect("second definitive rejection");
         assert_eq!(
@@ -330,9 +432,12 @@ mod tests {
             "!\tcommit:refs/heads/review\t[rejected] (non-fast-forward)\n",
             "",
         )]);
-        let response = push_with_refresh(&mut runner, &mut request, async {
-            panic!("branch rejection must not refresh authentication")
-        })
+        let response = push_with_refresh(
+            &mut runner,
+            &mut request,
+            tokio::time::Instant::now() + PUSH_TIMEOUT,
+            |_| async { panic!("branch rejection must not refresh authentication") },
+        )
         .await
         .expect("definitive branch rejection");
         assert_eq!(
@@ -349,9 +454,12 @@ mod tests {
             "",
             "fatal: Authentication failed",
         )]);
-        let response = push_with_refresh(&mut runner, &mut request, async {
-            panic!("unknown outcome must not trigger a retry")
-        })
+        let response = push_with_refresh(
+            &mut runner,
+            &mut request,
+            tokio::time::Instant::now() + PUSH_TIMEOUT,
+            |_| async { panic!("unknown outcome must not trigger a retry") },
+        )
         .await
         .expect("unknown outcome retained");
         assert_eq!(
@@ -364,9 +472,14 @@ mod tests {
     #[tokio::test]
     async fn token_file_authentication_rejection_does_not_retry() {
         let (mut runner, mut request) = push_fixture([authentication_failure()]);
-        let response = push_with_refresh(&mut runner, &mut request, async { Ok(None) })
-            .await
-            .expect("file rejection retained");
+        let response = push_with_refresh(
+            &mut runner,
+            &mut request,
+            tokio::time::Instant::now() + PUSH_TIMEOUT,
+            |_| async { Ok(None) },
+        )
+        .await
+        .expect("file rejection retained");
         assert_eq!(
             classify_push(&response),
             Err(GitPushTransportFailure::Rejected)
@@ -377,9 +490,12 @@ mod tests {
     #[tokio::test]
     async fn failed_token_refresh_does_not_dispatch_a_retry() {
         let (mut runner, mut request) = push_fixture([authentication_failure()]);
-        let response = push_with_refresh(&mut runner, &mut request, async {
-            Err(RepositoryWatchClientLoadError::CredentialUnavailable)
-        })
+        let response = push_with_refresh(
+            &mut runner,
+            &mut request,
+            tokio::time::Instant::now() + PUSH_TIMEOUT,
+            |_| async { Err(RepositoryWatchClientLoadError::CredentialUnavailable) },
+        )
         .await;
         assert_eq!(
             response.err(),

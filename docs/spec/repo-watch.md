@@ -110,7 +110,9 @@ recovery. The task clears each removed-target handoff after its nudge is
 retained.
 
 The sweep scrubs the response-scoped App token and its JSON-escaped form before
-convergence evaluation and durable session input construction.
+convergence evaluation and durable session input construction. Each convergence
+HTTP request establishes its configured deadline before credential resolution
+and dispatches with only the remaining budget.
 
 The daemon composes the repository-watch module when `[repository_watch]` is
 configured and enabled. Dispatch actions and lifecycle reactions are retained in
@@ -325,9 +327,10 @@ Dispatched pull-request sessions whose watched repository configures
 `https://github.com/<owner>/<repo>.git`; fork heads are unavailable because that
 destination is the watched repository.
 
-App push credential lookups and refreshes use the push process's 300-second
-timeout. An explicit Git authentication rejection refreshes the rejected token
-and retries the push once; concurrent callers share the replacement token.
+App credential preparation, push attempts, refresh, and remote confirmation
+share one 300-second deadline. An explicit Git authentication rejection
+refreshes the rejected token and retries the push once; concurrent callers share
+the replacement token.
 
 ## Boundary contracts
 

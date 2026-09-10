@@ -751,22 +751,6 @@ impl ConvergenceSweepRuntime {
     }
 
     async fn fetch(&self, target: &SweepTarget) -> Result<FetchedPullRequest, CensusError> {
-        let credential = target
-            .credentials
-            .resolve(&target.credential_reference)
-            .await
-            .map_err(|_| CensusError::Credential)?;
-        if credential.expose_bytes().is_empty()
-            || credential.expose_bytes().len() > MAX_CREDENTIAL_BYTES
-        {
-            return Err(CensusError::Credential);
-        }
-        let mut authorization = Vec::with_capacity(7 + credential.expose_bytes().len());
-        authorization.extend_from_slice(b"Bearer ");
-        authorization.extend_from_slice(credential.expose_bytes());
-        let mut authorization =
-            HeaderValue::from_bytes(&authorization).map_err(|_| CensusError::Credential)?;
-        authorization.set_sensitive(true);
         let mut policy = self.convergence_policy.clone().ok_or(CensusError::Shape)?;
         if let Some(ceiling) = self.numeric_bounds.connection_pages {
             policy.page_limit = policy.page_limit.min(ceiling);
@@ -785,14 +769,13 @@ impl ConvergenceSweepRuntime {
             .unwrap_or_else(|| json!({}));
         let app = target.credentials.github_app();
         let mut send = |request| -> RequestFuture<'_> {
-            let authorization = &authorization;
             let app = app.as_deref();
             Box::pin(async move {
                 let result = match request {
                     GitHubRequest::GraphQl { query, variables } => {
-                        self.graphql(&query, variables, authorization, app).await
+                        self.graphql(&query, variables, target, app).await
                     }
-                    GitHubRequest::Rest { path } => self.rest(&path, authorization, app).await,
+                    GitHubRequest::Rest { path } => self.rest(&path, target, app).await,
                 };
                 result.map_err(|_| {
                     signalbox_convergence::Error::Evidence(
@@ -842,22 +825,21 @@ impl ConvergenceSweepRuntime {
     async fn rest(
         &self,
         path: &str,
-        authorization: &HeaderValue,
+        target: &SweepTarget,
         app: Option<&signalbox_github_transport::AppAuthentication>,
     ) -> Result<Value, CensusError> {
         let request = self
             .client
             .get(format!("{}{path}", self.rest_base))
-            .header(AUTHORIZATION, authorization.clone())
             .header(ACCEPT, "application/vnd.github+json")
             .header(USER_AGENT, USER_AGENT_VALUE);
-        let mut response = match app {
-            Some(app) => app
-                .send(request, self.numeric_bounds.request_timeout)
-                .await
-                .map_err(|_| CensusError::Credential)?,
-            None => request.send().await.map_err(|_| CensusError::Request)?,
-        };
+        let mut response = send_census_request(
+            request,
+            self.numeric_bounds.request_timeout,
+            target.credentials.resolve(&target.credential_reference),
+            app,
+        )
+        .await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(Value::Null);
         }
@@ -879,7 +861,7 @@ impl ConvergenceSweepRuntime {
         &self,
         query: &str,
         variables: Value,
-        authorization: &HeaderValue,
+        target: &SweepTarget,
         app: Option<&signalbox_github_transport::AppAuthentication>,
     ) -> Result<Value, CensusError> {
         let body = serde_json::to_vec(&json!({"query": query, "variables": variables}))
@@ -893,18 +875,17 @@ impl ConvergenceSweepRuntime {
             let request = self
                 .client
                 .post(&self.graphql_url)
-                .header(AUTHORIZATION, authorization.clone())
                 .header(ACCEPT, "application/vnd.github+json")
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, USER_AGENT_VALUE)
                 .body(body.clone());
-            let sent = match app {
-                Some(app) => app
-                    .send(request, self.numeric_bounds.request_timeout)
-                    .await
-                    .map_err(|_| CensusError::Credential),
-                None => request.send().await.map_err(|_| CensusError::Request),
-            };
+            let sent = send_census_request(
+                request,
+                self.numeric_bounds.request_timeout,
+                target.credentials.resolve(&target.credential_reference),
+                app,
+            )
+            .await;
             match sent {
                 Ok(response)
                     if self
@@ -949,6 +930,7 @@ impl ConvergenceSweepRuntime {
                         }
                     }
                 }
+                Err(CensusError::Credential) => return Err(CensusError::Credential),
                 Err(_)
                     if self
                         .numeric_bounds
@@ -965,6 +947,63 @@ impl ConvergenceSweepRuntime {
             return Err(CensusError::Response);
         }
         Ok(value)
+    }
+}
+
+async fn send_census_request(
+    request: reqwest::RequestBuilder,
+    timeout: Option<Duration>,
+    resolution: impl std::future::Future<
+        Output = Result<
+            signalbox_model_runtime::CredentialValue,
+            signalbox_model_runtime::CredentialAccessError,
+        >,
+    >,
+    app: Option<&signalbox_github_transport::AppAuthentication>,
+) -> Result<reqwest::Response, CensusError> {
+    let deadline = timeout
+        .map(|timeout| {
+            Instant::now()
+                .checked_add(timeout)
+                .ok_or(CensusError::Request)
+        })
+        .transpose()?;
+    let credential = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, resolution)
+            .await
+            .map_err(|_| CensusError::Credential)?,
+        None => resolution.await,
+    }
+    .map_err(|_| CensusError::Credential)?;
+    if credential.expose_bytes().is_empty()
+        || credential.expose_bytes().len() > MAX_CREDENTIAL_BYTES
+    {
+        return Err(CensusError::Credential);
+    }
+    let mut authorization = Vec::with_capacity(7 + credential.expose_bytes().len());
+    authorization.extend_from_slice(b"Bearer ");
+    authorization.extend_from_slice(credential.expose_bytes());
+    let mut authorization =
+        HeaderValue::from_bytes(&authorization).map_err(|_| CensusError::Credential)?;
+    authorization.set_sensitive(true);
+    let mut request = request.header(AUTHORIZATION, authorization);
+    let remaining = deadline
+        .map(|deadline| {
+            deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or(CensusError::Request)
+        })
+        .transpose()?;
+    if let Some(app) = app {
+        app.send(request, remaining)
+            .await
+            .map_err(|_| CensusError::Credential)
+    } else {
+        if let Some(remaining) = remaining {
+            request = request.timeout(remaining);
+        }
+        request.send().await.map_err(|_| CensusError::Request)
     }
 }
 
@@ -1085,6 +1124,56 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn census_credential_preparation_leaves_only_the_remaining_dispatch_budget() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        // Arbitrary App identities; a pending key reader prevents network dispatch.
+        let app = signalbox_github_transport::AppAuthentication::new(
+            42,
+            73,
+            Arc::new(|| Box::pin(std::future::pending())),
+        );
+        let resolution = async {
+            sleep(Duration::from_secs(20)).await;
+            Ok(signalbox_model_runtime::CredentialValue::new(
+                "synthetic-installation-token",
+            ))
+        };
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(31),
+            send_census_request(
+                Client::new().get(GRAPHQL_URL),
+                Some(Duration::from_secs(30)),
+                resolution,
+                Some(&app),
+            ),
+        )
+        .await
+        .expect("preparation and stalled App dispatch must share one deadline");
+        assert!(matches!(result, Err(CensusError::Credential)));
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn census_expired_credential_preparation_does_not_dispatch() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(31),
+            send_census_request(
+                Client::new().get(GRAPHQL_URL),
+                Some(Duration::from_secs(30)),
+                std::future::pending(),
+                None,
+            ),
+        )
+        .await
+        .expect("a stalled credential lookup expires before any network request");
+        assert!(matches!(result, Err(CensusError::Credential)));
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+    }
 
     #[test]
     fn response_tokens_are_scrubbed_before_convergence_commission_content() {
