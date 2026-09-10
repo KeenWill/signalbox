@@ -9,8 +9,20 @@ assert binary.read_bytes()[:4] == b"\x7fELF"
 shutil.copy2(binary, root / "postgres-tests")
 headers = subprocess.check_output(["readelf", "-l", str(binary)], text=True)
 loader = pathlib.Path(re.search(r"Requesting program interpreter: (.*?)\]", headers)[1])
-for name in ["ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"]:
-    shutil.copy2(loader.parent / name, root / "lib" / name)
+shutil.copy2(loader, root / "lib/ld-linux-x86-64.so.2")
 linked = subprocess.check_output(["ldd", str(binary)], text=True)
-libgcc = re.search(r"libgcc_s\.so\.1 => (\S+)", linked)[1]
-shutil.copy2(libgcc, root / "lib/libgcc_s.so.1")
+if "not found" in linked:
+    raise RuntimeError(f"Missing executable runtime dependency: {linked}")
+for name, source in re.findall(r"^\s*(\S+) => (/\S+)", linked, re.MULTILINE):
+    shutil.copy2(source, root / "lib" / name)
+subprocess.run(
+    [
+        str((root / "lib/ld-linux-x86-64.so.2").resolve()),
+        "--library-path",
+        str((root / "lib").resolve()),
+        str((root / "postgres-tests").resolve()),
+        "--list",
+    ],
+    check=True,
+    stdout=subprocess.DEVNULL,
+)
