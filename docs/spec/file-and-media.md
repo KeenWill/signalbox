@@ -42,7 +42,7 @@ untrusted until the registry has reparsed and cross-checked it.
 
 With `file_media = true` and blob storage configured, the daemon registers
 `file_inspect` and `file_read` as external-effect tools. Startup verifies the
-compiled text-family worker beside the daemon executable through
+compiled text and PDF workers beside the daemon executable through
 `/usr/bin/bwrap` and the delegated `SIGNALBOX_FILE_MEDIA_CGROUP_ROOT`. The
 resolver reuses `blob_read`'s projected-frontier attachment proof and completes
 catalog work before source or worker I/O. A digest outside that frontier is

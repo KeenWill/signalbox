@@ -52,21 +52,27 @@ impl DaemonFileMediaExecutor {
             .parent()
             .ok_or_else(DaemonToolExecutorError::pre_dispatch)?
             .join("signalbox-file-media-text-worker");
-        Self::compose_with_text_worker(pool, stores, worker).await
+        let pdf_worker = worker.with_file_name("signalbox-file-media-pdf-worker");
+        Self::compose_with_workers(pool, stores, worker, pdf_worker).await
     }
 
-    async fn compose_with_text_worker(
+    async fn compose_with_workers(
         pool: PgPool,
         stores: Arc<BlobStoreRegistry>,
         worker: std::path::PathBuf,
+        pdf_worker: std::path::PathBuf,
     ) -> Result<(CompiledToolCatalog, Self), DaemonToolExecutorError> {
         let declaration = signalbox_file_media_adapters_text::text_family_declaration()
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
         let binding = WorkerBinding::try_new(worker, declaration.clone())
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        let pdf = signalbox_file_media_adapter_pdf::declaration()
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        let pdf_binding = WorkerBinding::try_new(pdf_worker, pdf.clone())
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
         let processor = SandboxedFileMediaProcessor::try_new(
             "/usr/bin/bwrap",
-            vec![binding],
+            vec![binding, pdf_binding],
             FileMediaProcessCeilings::version_one(),
         )
         .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
@@ -75,7 +81,7 @@ impl DaemonFileMediaExecutor {
             return Err(DaemonToolExecutorError::pre_dispatch());
         }
         let registry = FileMediaRegistry::try_new(
-            vec![declaration],
+            vec![declaration, pdf],
             FileMediaCeilings::version_one(),
             isolation,
         )
@@ -382,8 +388,12 @@ generated_artifact = "fixture"
                 .iter()
                 .any(|tool| tool.name().as_str() == "file_inspect")
         );
+        let pdf_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_pdf_worker")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| worker.with_file_name("signalbox-file-media-pdf-worker"));
         let (family, executor) =
-            DaemonFileMediaExecutor::compose_with_text_worker(pool.clone(), stores, worker).await?;
+            DaemonFileMediaExecutor::compose_with_workers(pool.clone(), stores, worker, pdf_worker)
+                .await?;
         let composed = base.with_compiled_catalog(family)?;
         let definitions = composed.definitions();
         assert_eq!(
@@ -398,8 +408,116 @@ generated_artifact = "fixture"
                 |tool| tool.effect_class() == signalbox_domain::ToolEffectClass::ExternalEffect
             )
         );
+        use signalbox_file_media_runtime::{
+            FileInspectionStatus, FileReadInput, FileReadRequest, FileReadResult,
+            InspectionRequest, ReadContinuation, ReadViewName,
+        };
+        let source = PdfSource;
+        let inspection_request = InspectionRequest {
+            source: FileUse::new(
+                source.digest(),
+                source.byte_length(),
+                AttachmentKind::Document,
+                DeclaredMediaType::try_new("application/pdf")?,
+                None,
+            ),
+            visible_part: None,
+        };
+        let inspection = executor
+            .registry
+            .inspect(
+                &executor.processor,
+                inspection_request.clone(),
+                &source,
+                &NeverCancelled,
+            )
+            .await?;
+        assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+        let result = executor
+            .registry
+            .read(
+                &executor.processor,
+                FileReadRequest {
+                    inspection: inspection_request,
+                    view: ReadViewName::try_new("text")?,
+                    input: FileReadInput::Initial {
+                        options: serde_json::json!({}),
+                    },
+                },
+                &source,
+                &NeverCancelled,
+            )
+            .await?;
+        let FileReadResult::Text { body, continuation } = result else {
+            panic!("the PDF text view returns text");
+        };
+        assert!(body.contains("bounded PDF fixture"));
+        assert_eq!(continuation, ReadContinuation::Complete);
+        assert!(body.len() < signalbox_file_media_runtime::MAX_TEXT_BODY_BYTES);
         drop(executor);
         pool.close().await;
         Ok(())
     }
+    struct PdfSource;
+
+    impl VerifiedBlobSource for PdfSource {
+        fn digest(&self) -> FileDigest {
+            use sha2::Digest as _;
+            FileDigest::from_bytes(sha2::Sha256::digest(PDF_FIXTURE).into())
+        }
+        fn byte_length(&self) -> NonZeroU64 {
+            NonZeroU64::new(PDF_FIXTURE.len() as u64).unwrap()
+        }
+        fn read_range(&self, offset: u64, length: NonZeroU64) -> SourceReadFuture<'_> {
+            Box::pin(async move {
+                let start =
+                    usize::try_from(offset).map_err(|_| SourceReadError::RangeOutOfBounds)?;
+                let length =
+                    usize::try_from(length.get()).map_err(|_| SourceReadError::RangeOutOfBounds)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or(SourceReadError::RangeOutOfBounds)?;
+                PDF_FIXTURE
+                    .get(start..end)
+                    .map(<[u8]>::to_vec)
+                    .ok_or(SourceReadError::RangeOutOfBounds)
+            })
+        }
+    }
+
+    // One uncompressed page with a fixed Helvetica text stream and exact cross-reference offsets.
+    const PDF_FIXTURE: &[u8] = concat!(
+        "%PDF-1.4\n",
+        "1 0 obj\n",
+        "<< /Type /Catalog /Pages 2 0 R >>\n",
+        "endobj\n",
+        "2 0 obj\n",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n",
+        "endobj\n",
+        "3 0 obj\n",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\n",
+        "endobj\n",
+        "4 0 obj\n",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\n",
+        "endobj\n",
+        "5 0 obj\n",
+        "<< /Length 51 >>\n",
+        "stream\n",
+        "BT /F1 12 Tf 72 720 Td (bounded PDF fixture) Tj ET\n",
+        "endstream\n",
+        "endobj\n",
+        "xref\n",
+        "0 6\n",
+        "0000000000 65535 f \n",
+        "0000000009 00000 n \n",
+        "0000000058 00000 n \n",
+        "0000000115 00000 n \n",
+        "0000000241 00000 n \n",
+        "0000000311 00000 n \n",
+        "trailer\n",
+        "<< /Size 6 /Root 1 0 R >>\n",
+        "startxref\n",
+        "411\n",
+        "%%EOF\n",
+    ).as_bytes();
 }
