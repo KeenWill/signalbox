@@ -18,6 +18,8 @@ const MAX_RESOLVED_ADDRESSES: usize = 32;
 pub enum WebFetchTransportFailure {
     /// Destination resolution or client setup failed before dispatch.
     RequestFailed,
+    /// The exchange deadline elapsed before a complete bounded response.
+    Timeout,
     /// Dispatch began but no complete bounded response was established.
     DispatchUnknown,
 }
@@ -37,15 +39,13 @@ impl Error for ReqwestWebFetchConstructionError {}
 /// Whether a body stream still holds content after an exact-cap read. Empty
 /// trailing frames are legal and are not evidence that bytes were discarded.
 #[doc(hidden)]
-pub async fn has_more_response_bytes<S, B, E>(
-    stream: &mut S,
-) -> Result<bool, WebFetchTransportFailure>
+pub async fn has_more_response_bytes<S, B, E>(stream: &mut S) -> Result<bool, E>
 where
     S: futures_util::Stream<Item = Result<B, E>> + Unpin,
     B: AsRef<[u8]>,
 {
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| WebFetchTransportFailure::DispatchUnknown)?;
+        let chunk = chunk?;
         if !chunk.as_ref().is_empty() {
             return Ok(true);
         }

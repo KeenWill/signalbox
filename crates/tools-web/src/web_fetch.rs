@@ -27,6 +27,7 @@ pub const WEB_FETCH_NAME: &str = "web_fetch";
 const INVALID_ARGUMENTS_DETAIL: &str =
     "expected one absolute HTTP(S) URL without user information or a fragment";
 const REQUEST_FAILED_DETAIL: &str = "web fetch request failed";
+const TIMEOUT_DETAIL: &str = "web fetch request timed out";
 const DEFAULT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_URL_BYTES: usize = 8 * 1024;
 const MAX_CONTENT_TYPE_BYTES: usize = 1024;
@@ -150,8 +151,7 @@ pub enum WebFetchToolConstructionError {
 
 /// Compiled catalog entry and matching executor for `web_fetch`.
 ///
-/// Effect posture: `ExternalEffect`. Although the method is GET, the remote
-/// server can observe the request, so a crash-lost dispatch is not effect-free.
+/// Effect posture: `EffectFree`: read-only GET is safe to repeat after crash loss.
 #[derive(Clone, Debug)]
 pub struct WebFetchTool<Transport> {
     catalog: CompiledToolCatalog,
@@ -255,9 +255,11 @@ impl<Transport> WebFetchTool<Transport> {
         let request_failed_detail =
             ToolExecutionErrorDetail::try_new(String::from(REQUEST_FAILED_DETAIL))
                 .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
+        let timeout_detail = ToolExecutionErrorDetail::try_new(String::from(TIMEOUT_DETAIL))
+            .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
         let definition = compile_contract_definition::<Self>(
             ToolPermissionDefault::Confirm,
-            ToolEffectClass::ExternalEffect,
+            ToolEffectClass::EffectFree,
         )
         .map_err(|error| match error {
             ToolContractCompileError::Name => WebFetchToolConstructionError::Name,
@@ -278,6 +280,7 @@ impl<Transport> WebFetchTool<Transport> {
             executor: WebFetchExecutor {
                 transport,
                 request_failed_detail,
+                timeout_detail,
                 egress_policy,
             },
         })
@@ -416,7 +419,7 @@ async fn fetch_with_client(
     let mut truncated = false;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| WebFetchTransportFailure::DispatchUnknown)?;
+        let chunk = chunk.map_err(classify_send_failure)?;
         let remaining = MAX_WEB_FETCH_BODY_BYTES.saturating_sub(body.len());
         if chunk.len() > remaining {
             body.extend_from_slice(&chunk[..remaining]);
@@ -425,7 +428,9 @@ async fn fetch_with_client(
         }
         body.extend_from_slice(&chunk);
         if body.len() == MAX_WEB_FETCH_BODY_BYTES {
-            truncated = has_more_response_bytes(&mut stream).await?;
+            truncated = has_more_response_bytes(&mut stream)
+                .await
+                .map_err(classify_send_failure)?;
             break;
         }
     }
@@ -439,7 +444,9 @@ async fn fetch_with_client(
 }
 
 fn classify_send_failure(error: reqwest::Error) -> WebFetchTransportFailure {
-    if error.is_connect() {
+    if error.is_timeout() {
+        WebFetchTransportFailure::Timeout
+    } else if error.is_connect() {
         WebFetchTransportFailure::RequestFailed
     } else {
         WebFetchTransportFailure::DispatchUnknown
@@ -448,13 +455,12 @@ fn classify_send_failure(error: reqwest::Error) -> WebFetchTransportFailure {
 
 /// Daemon-local bounded web executor.
 ///
-/// Effect posture: `ExternalEffect`. Although the method is GET, the remote
-/// server can observe the request; the registry therefore never describes a
-/// crash-lost dispatch as effect-free.
+/// Effect posture: `EffectFree`: read-only GET is safe to repeat after crash loss.
 #[derive(Clone, Debug)]
 pub struct WebFetchExecutor<Transport> {
     transport: Transport,
     request_failed_detail: ToolExecutionErrorDetail,
+    timeout_detail: ToolExecutionErrorDetail,
     egress_policy: WebFetchEgressPolicy,
 }
 
@@ -468,9 +474,6 @@ pub enum WebFetchExecutorError {
     #[error("web_fetch result encoding failed")]
     /// Compact result encoding unexpectedly failed.
     ResultEncoding,
-    #[error("web_fetch dispatch outcome is unknown")]
-    /// Physical dispatch began without a complete bounded acknowledgement.
-    DispatchUnknown,
 }
 
 impl ClassifyOperatorFailure for WebFetchExecutorError {
@@ -479,9 +482,6 @@ impl ClassifyOperatorFailure for WebFetchExecutorError {
             Self::ArgumentValidationDrift | Self::ResultEncoding => {
                 OperatorFailureClass::CallerOrHubBug
             }
-            Self::DispatchUnknown => OperatorFailureClass::Infrastructure {
-                commit_ambiguous: true,
-            },
         }
     }
 }
@@ -501,12 +501,14 @@ where
                 .map_err(|_| WebFetchExecutorError::ArgumentValidationDrift)?;
         let evidence = match self.transport.fetch(request.clone()).await {
             Ok(response) => web_fetch_success_evidence(&request, response)?,
-            Err(WebFetchTransportFailure::RequestFailed) => ToolExecutorEvidence::KnownFailed {
+            Err(
+                WebFetchTransportFailure::RequestFailed | WebFetchTransportFailure::DispatchUnknown,
+            ) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.request_failed_detail.clone()),
             },
-            Err(WebFetchTransportFailure::DispatchUnknown) => {
-                return Err(WebFetchExecutorError::DispatchUnknown);
-            }
+            Err(WebFetchTransportFailure::Timeout) => ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.timeout_detail.clone()),
+            },
         };
         Ok(invocation.bind(evidence))
     }
@@ -610,7 +612,7 @@ mod tests {
             definition.permission_default(),
             ToolPermissionDefault::Confirm
         );
-        assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
+        assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
     }
 
     /// Confirmation does not replace the exact deployment allowlist: an absent
@@ -781,16 +783,44 @@ mod tests {
         ));
     }
 
-    /// Loss after physical dispatch is classified as commit-ambiguous
-    /// infrastructure failure.
-    #[test]
-    fn web_fetch_dispatch_unknown_is_commit_ambiguous() {
-        assert_eq!(
-            WebFetchExecutorError::DispatchUnknown.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: true
-            }
-        );
+    #[tokio::test]
+    async fn web_fetch_timeouts_preserve_the_typed_deadline_at_every_read_stage() {
+        // Cover waiting for headers, a partial body, and EOF after the exact cap.
+        for body_bytes in [None, Some(1), Some(MAX_WEB_FETCH_BODY_BYTES)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let destination = ResolvedPublicDestination {
+                host: "example.test".to_owned(),
+                addresses: vec![address],
+            };
+            let client =
+                build_web_fetch_client(Some(Duration::from_millis(250)), Some(&destination))
+                    .unwrap();
+            let request = WebFetchRequest {
+                url: Url::parse(&format!("http://example.test:{}/", address.port())).unwrap(),
+            };
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut input = [0; 1024];
+                socket.read(&mut input).await.unwrap();
+                if let Some(bytes) = body_bytes {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                        .await
+                        .unwrap();
+                    socket.write_all(&vec![b'x'; bytes]).await.unwrap();
+                }
+                std::future::pending::<()>().await;
+            });
+            let result = fetch_with_client(client, request).await;
+            server.abort();
+            let _ = server.await;
+            assert_eq!(
+                result,
+                Err(WebFetchTransportFailure::Timeout),
+                "stage {body_bytes:?}"
+            );
+        }
     }
 
     /// Hostname resolution rejects a destination set containing only loopback

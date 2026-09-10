@@ -181,7 +181,6 @@ where
 pub enum WebFetchExecutorError {
     ArgumentValidationDrift,
     ResultEncoding,
-    DispatchUnknown,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for WebFetchExecutorError {
