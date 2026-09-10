@@ -24,9 +24,10 @@ the typed Git library, `git2`, works only on those snapshots. All operations
 capture objects on demand into a private database and revalidate their source
 bindings before returning; unrelated historical object contents are not copied.
 Packed delta traversal retains layer offsets and decodes one layer at a time;
-open descriptors do not grow with delta depth. Blob decoding, delta
-reconstruction, worktree reads, checkout, and object publication use temporary
-files and fixed-size I/O buffers.
+open descriptors do not grow with delta depth. Pack and index files open on
+demand against captured identities; idle pairs retain no descriptors. Blob
+decoding, delta reconstruction, worktree reads, checkout, and object publication
+use temporary files and fixed-size I/O buffers.
 
 Pushing is a separate surface with its own authority. A push names a branch; its
 destination is a remote the deployment configured, never one the caller chose. A
