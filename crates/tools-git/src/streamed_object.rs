@@ -450,7 +450,33 @@ pub(super) fn checkout_paths(
     paths: &std::collections::BTreeSet<std::path::PathBuf>,
     destination: &std::path::Path,
     expected: Option<&CheckoutIdentities>,
-    mut updated: impl FnMut(&std::path::Path) -> Result<(), LocalGitFailure>,
+    updated: impl FnMut(
+        &std::path::Path,
+        Option<crate::descriptor::FileIdentity>,
+    ) -> Result<(), LocalGitFailure>,
+) -> Result<(), LocalGitFailure> {
+    checkout_paths_with_copy_hook(
+        repository,
+        tree,
+        paths,
+        destination,
+        expected,
+        updated,
+        |_, _| {},
+    )
+}
+
+pub(super) fn checkout_paths_with_copy_hook(
+    repository: &crate::pinning::RepositoryShell,
+    tree: &git2::Tree<'_>,
+    paths: &std::collections::BTreeSet<std::path::PathBuf>,
+    destination: &std::path::Path,
+    expected: Option<&CheckoutIdentities>,
+    mut updated: impl FnMut(
+        &std::path::Path,
+        Option<crate::descriptor::FileIdentity>,
+    ) -> Result<(), LocalGitFailure>,
+    mut after_page: impl FnMut(&std::path::Path, usize),
 ) -> Result<(), LocalGitFailure> {
     use rustix::fs::{Mode, OFlags, mkdirat, openat};
     use std::{
@@ -480,7 +506,7 @@ pub(super) fn checkout_paths(
             if let Some(identity) = identity {
                 let (parent, leaf) = crate::rollback::open_worktree_parent(&root, path)?;
                 crate::descriptor::remove_file_if_snapshot_identity(&parent, &leaf, identity)?;
-                updated(path)?;
+                updated(path, None)?;
             }
         }
     }
@@ -518,7 +544,7 @@ pub(super) fn checkout_paths(
         let descriptor = openat(
             &parent,
             leaf,
-            OFlags::WRONLY
+            OFlags::RDWR
                 | OFlags::NONBLOCK
                 | OFlags::NOFOLLOW
                 | OFlags::CLOEXEC
@@ -542,12 +568,66 @@ pub(super) fn checkout_paths(
             target.set_len(0).map_err(failed)?;
         }
         // Record each touched path even when a later write fails, for rollback ownership.
-        updated(&path)?;
-        std::io::copy(&mut content.file, &mut target).map_err(failed)?;
+        let owned = crate::descriptor::file_identity(&target.metadata().map_err(failed)?);
+        updated(&path, Some(owned))?;
+        let mut buffer = [0; IO_BYTES];
+        let mut written = 0;
+        loop {
+            if capture_checkout_identity(&root, &path)?.map(|identity| identity.file) != Some(owned)
+            {
+                return Err(LocalGitFailure::Operation);
+            }
+            let count = content.file.read(&mut buffer).map_err(failed)?;
+            if count == 0 {
+                break;
+            }
+            target.write_all(&buffer[..count]).map_err(failed)?;
+            written += count;
+            after_page(&path, written);
+        }
         target
             .set_permissions(std::fs::Permissions::from_mode(mode & 0o777))
             .map_err(failed)?;
-        updated(&path)?;
+        verify_checkout_output(&root, &path, &mut target, content.size, oid)?;
+    }
+    Ok(())
+}
+
+fn verify_checkout_output(
+    root: &File,
+    path: &std::path::Path,
+    target: &mut File,
+    size: usize,
+    expected: Oid,
+) -> Result<(), LocalGitFailure> {
+    let identity = crate::descriptor::file_snapshot_identity(&target.metadata().map_err(failed)?);
+    if identity.length != size as u64 {
+        return Err(LocalGitFailure::Operation);
+    }
+    let validate = |target: &File| {
+        if crate::descriptor::file_snapshot_identity(&target.metadata().map_err(failed)?)
+            != identity
+            || capture_checkout_identity(root, path)? != Some(identity)
+        {
+            return Err(LocalGitFailure::Operation);
+        }
+        Ok(())
+    };
+    let mut hash = ObjectHash::new(expected.object_format());
+    hash.update(format!("blob {size}\0").as_bytes());
+    target.rewind().map_err(failed)?;
+    let mut buffer = [0; IO_BYTES];
+    loop {
+        validate(target)?;
+        let count = target.read(&mut buffer).map_err(failed)?;
+        validate(target)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    if hash.finish()? != expected {
+        return Err(LocalGitFailure::Operation);
     }
     Ok(())
 }
