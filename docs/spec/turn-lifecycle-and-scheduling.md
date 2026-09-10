@@ -452,7 +452,9 @@ singleton with configured exponential backoff, capped by its configured maximum
 delay. A configured elapsed recovery bound includes pool shutdown and fence
 establishment; `none` leaves recovery unbounded. Expiry exits with the typed
 recovery-exhausted reason. A fresh generation and startup reconstitution precede
-resumed admission. Shutdown signals remain effective during recovery.
+resumed admission. The runtime guard watcher completes a successful guard check
+before workers start and remains active before recovery is marked complete.
+Shutdown signals remain effective during recovery.
 
 On SIGINT or SIGTERM the listener stops accepting requests, follow streams
 close, the dispatcher stops starting transactions, the scheduler stops admitting
