@@ -1395,13 +1395,11 @@ async fn deferred_turn_validation_skips_immutable_tool_round_frontiers()
     Ok(())
 }
 
-/// provider usage plus newly projected result content that exhausts
-/// configured headroom preserves the results, closes the turn with typed
-/// evidence, and prepares no oversized continuation call. The daemon-owned
-/// closure is budget-neutral for goals.
+/// Provider usage plus newly projected result content checkpoints the active
+/// turn without preparing an oversized continuation call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn tool_continuation_headroom_closes_before_another_call() -> Result<(), Box<dyn Error>> {
+async fn tool_continuation_headroom_checkpoints_the_active_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7ef9;
     let (fixture, _, _, request) = checkpoint_confirmed_tool_round_with_usage(
@@ -1494,8 +1492,7 @@ async fn tool_continuation_headroom_closes_before_another_call() -> Result<(), B
     else {
         panic!("reported usage closes the continuation for compaction");
     };
-    assert_eq!(required.producing_call(), fixture.call);
-    assert_eq!(required.failed().turn(), fixture.turn);
+    assert_eq!(required, fixture.turn);
     let reported = model_repository
         .latest_reported_usage(
             fixture.session,
@@ -1510,120 +1507,10 @@ async fn tool_continuation_headroom_closes_before_another_call() -> Result<(), B
         reported.projected_unreported_content_bytes(),
         result_content_bytes
     );
-    let producing_frontier: Uuid = sqlx::query_scalar(
-        "SELECT context_frontier_id
-           FROM model_call
-          WHERE model_call_id = $1",
-    )
-    .bind(fixture.call.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    let successor_reported = model_repository
-        .latest_reported_usage(
-            fixture.session,
-            target,
-            FastMode::Disabled,
-            false,
-            ContextFrontierId::from_uuid(producing_frontier),
-        )
-        .await?
-        .expect("the durable headroom proof remains authoritative for a successor frontier");
-    assert_eq!(
-        successor_reported.projected_unreported_content_bytes(),
-        result_content_bytes
-    );
-    let disjoint_content = "successor content outside the proved tool-result batch";
-    SubmitInputRepository::new(pool.clone())
-        .handle(
-            start_input(
-                seed + 0x200,
-                seed + 1,
-                disjoint_content,
-                1,
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x201)),
-            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x202))),
-        )
-        .await?;
-    let disjoint_entry = Uuid::from_u128(seed + 0x203);
-    activate_earliest_queued_turn(
-        &pool,
-        EarliestQueuedTurnActivation {
-            session: fixture.session.into_uuid(),
-            origin_entry: disjoint_entry,
-            starting_frontier: Uuid::from_u128(seed + 0x204),
-            initial_attempt: Uuid::from_u128(seed + 0x205),
-        },
-    )
-    .await?;
-    let producing_member_count: i64 = sqlx::query_scalar(
-        "SELECT member_count::bigint
-           FROM context_frontier
-          WHERE owning_session_id = $1
-            AND context_frontier_id = $2",
-    )
-    .bind(fixture.session.into_uuid())
-    .bind(producing_frontier)
-    .fetch_one(&pool)
-    .await?;
-    let disjoint_frontier = Uuid::from_u128(seed + 0x206);
-    let mut transaction = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO context_frontier
-             (owning_session_id, context_frontier_id, member_count,
-              prefix_context_frontier_id)
-         VALUES ($1, $2, $3, $4)",
-    )
-    .bind(fixture.session.into_uuid())
-    .bind(disjoint_frontier)
-    .bind(producing_member_count + 1)
-    .bind(producing_frontier)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO context_frontier_delta
-             (owning_session_id, context_frontier_id, member_position,
-              source_session_id, semantic_entry_id)
-         VALUES ($1, $2, $3, $1, $4)",
-    )
-    .bind(fixture.session.into_uuid())
-    .bind(disjoint_frontier)
-    .bind(producing_member_count + 1)
-    .bind(disjoint_entry)
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
-    let disjoint_reported = model_repository
-        .latest_reported_usage(
-            fixture.session,
-            target,
-            FastMode::Disabled,
-            false,
-            ContextFrontierId::from_uuid(disjoint_frontier),
-        )
-        .await?
-        .expect("durable proof and a disjoint successor suffix are both retained");
-    assert_eq!(
-        disjoint_reported.projected_unreported_content_bytes(),
-        result_content_bytes + u64::try_from(disjoint_content.len())?
-    );
-
-    let stored: (String, Option<Uuid>, Uuid, Decimal, Decimal, Decimal, i64) = sqlx::query_as(
-        "SELECT lifecycle.terminal_disposition_kind,
-                lifecycle.terminal_model_call_id,
-                headroom.producing_model_call_id,
-                headroom.projected_result_content_bytes,
-                headroom.max_output_tokens,
-                headroom.context_window_tokens,
+    let stored: (String, Option<String>, Option<Uuid>, i64) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, compaction_frontier_id,
                 (SELECT count(*) FROM model_call WHERE model_call_id = $3)
-           FROM turn_lifecycle AS lifecycle
-           JOIN tool_continuation_context_headroom AS headroom
-             ON headroom.terminal_attempt_id = lifecycle.terminal_attempt_id
-            AND headroom.turn_id = lifecycle.turn_id
-            AND headroom.session_id = lifecycle.session_id
-          WHERE lifecycle.session_id = $1
-            AND lifecycle.turn_id = $2",
+           FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2",
     )
     .bind(fixture.session.into_uuid())
     .bind(fixture.turn.into_uuid())
@@ -1633,21 +1520,11 @@ async fn tool_continuation_headroom_closes_before_another_call() -> Result<(), B
     assert_eq!(
         stored,
         (
-            String::from("failed"),
+            String::from("active"),
             None,
-            fixture.call.into_uuid(),
-            Decimal::from(result_content_bytes),
-            Decimal::from(10_u64),
-            Decimal::from(100_u64),
-            0,
+            Some(result_frontier.into_uuid()),
+            0
         )
-    );
-    assert_eq!(
-        GoalRepository::new(pool.clone())
-            .unchargeable_automatic_resume_turns(fixture.session, &[fixture.turn])
-            .await?
-            .as_ref(),
-        &[fixture.turn]
     );
 
     pool.close().await;
@@ -1759,7 +1636,7 @@ async fn disabled_provider_compaction_keeps_tool_continuation_aggregate_headroom
     else {
         panic!("pre-compaction usage must close disabled replay continuation headroom");
     };
-    assert_eq!(required.producing_call(), fixture.call);
+    assert_eq!(required, fixture.turn);
 
     pool.close().await;
     drop(container);
@@ -2289,20 +2166,7 @@ async fn tool_continuation_headroom_counts_delegation_results() -> Result<(), Bo
     else {
         panic!("the delivered child result exhausts the configured continuation headroom");
     };
-    assert_eq!(required.producing_call(), fixture.call);
-    let stored_bytes: Decimal = sqlx::query_scalar(
-        "SELECT projected_result_content_bytes
-           FROM tool_continuation_context_headroom
-          WHERE session_id = $1
-            AND turn_id = $2
-            AND producing_model_call_id = $3",
-    )
-    .bind(fixture.session.into_uuid())
-    .bind(fixture.turn.into_uuid())
-    .bind(fixture.call.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(stored_bytes, Decimal::from(36 + 44_u64));
+    assert_eq!(required, fixture.turn);
     let reported = model_repository
         .latest_reported_usage(
             fixture.session,
@@ -5521,7 +5385,7 @@ async fn assert_headroom_case(pool: &PgPool, case: HeadroomCase) -> Result<(), B
                 target,
                 FastMode::Disabled,
                 10,
-                100,
+                70 + 5 + 10 + result_bytes + steering_bytes - 1,
             )]);
     let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
     let frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27));
@@ -5558,21 +5422,25 @@ async fn assert_headroom_case(pool: &PgPool, case: HeadroomCase) -> Result<(), B
         ),
         "case {index}"
     );
-    let evidence: (Decimal, Decimal, bool) = sqlx::query_as(
-        "SELECT projected_result_content_bytes, pending_steering_content_bytes,
-                EXISTS (SELECT 1 FROM model_call WHERE model_call_id = $2)
-           FROM tool_continuation_context_headroom WHERE producing_model_call_id = $1",
+    let checkpoint: (String, Option<Uuid>, bool, i64) = sqlx::query_as(
+        "SELECT state_kind, compaction_frontier_id,
+                EXISTS (SELECT 1 FROM model_call WHERE model_call_id = $2),
+                (SELECT count(*) FROM accepted_input WHERE session_id = $3
+                    AND disposition_kind = 'pending_steering')
+           FROM turn_lifecycle WHERE turn_id = $1",
     )
-    .bind(fixture.call.into_uuid())
+    .bind(fixture.turn.into_uuid())
     .bind(call.into_uuid())
+    .bind(fixture.session.into_uuid())
     .fetch_one(pool)
     .await?;
     assert_eq!(
-        evidence,
+        checkpoint,
         (
-            Decimal::from(result_bytes),
-            Decimal::from(steering_bytes),
-            false
+            String::from("active"),
+            Some(frontier.into_uuid()),
+            false,
+            i64::from(steering_bytes > 0),
         ),
         "case {index}"
     );
@@ -5583,7 +5451,7 @@ async fn assert_headroom_case(pool: &PgPool, case: HeadroomCase) -> Result<(), B
     assert_eq!(
         reported.projected_unreported_content_bytes(),
         result_bytes,
-        "pending steering is reclassified, not retained as a tool result"
+        "pending steering remains outside the committed tool-result frontier"
     );
     Ok(())
 }
@@ -5689,9 +5557,14 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     )));
     let limits =
         ToolContinuationUsageLimit::new(target, FastMode::Disabled, OUTPUT_CEILING, 200_000);
-    let fixture =
-        checkpoint_restart_model_call_with_limits(&pool, FIXTURE_SEED, false, None, &[limits])
-            .await?;
+    let fixture = checkpoint_restart_model_call_with_limits(
+        &pool,
+        FIXTURE_SEED,
+        false,
+        None,
+        std::slice::from_ref(&limits),
+    )
+    .await?;
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_SEED + 5)),
         target,
@@ -5959,9 +5832,14 @@ async fn assert_bounded_269_kib_batch(arguments: &str) -> Result<Vec<i64>, Box<d
     )));
     let limits = ToolContinuationUsageLimit::new(target, FastMode::Disabled, 8_192, 258_400)
         .with_compaction_prompt_bytes(COMPACTION_PROMPT.len() as u64);
-    let fixture =
-        checkpoint_restart_model_call_with_limits(&pool, FIXTURE_SEED, false, None, &[limits])
-            .await?;
+    let fixture = checkpoint_restart_model_call_with_limits(
+        &pool,
+        FIXTURE_SEED,
+        false,
+        None,
+        std::slice::from_ref(&limits),
+    )
+    .await?;
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_SEED + 5)),
         target,
@@ -6308,5 +6186,75 @@ async fn image_result_commit_is_atomic_and_terminal_reference_is_immutable()
         signalbox_application::RetainedToolAttemptObservationStatus::AlreadyCommitted
     );
     assert!(sqlx::query("UPDATE tool_attempt SET result_media_reference = jsonb_set(result_media_reference, '{byte_length}', '65') WHERE attempt_id = $1").bind(attempt.into_uuid()).execute(&pool).await.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_watch_push_evidence_requires_a_completed_configured_push()
+-> Result<(), Box<dyn Error>> {
+    let (_database, pool, _) = migrated_postgres().await?;
+    let reader = OutboxConsumerReader::new(pool.clone(), OutboxConsumer::RepoWatch);
+    let result = ToolResultContent::Text(
+        ToolResultText::try_new("confirmed push".to_owned()).expect("fixture result"),
+    );
+    let failed = ToolAttemptObservation::KnownFailed {
+        error: ToolExecutionError::new(ToolExecutionErrorKind::ResultContainsNull, None),
+    };
+    for (seed, tool, observation, expected) in [
+        (
+            0x820_1000,
+            "git_push_configured",
+            ToolAttemptObservation::Completed {
+                result: result.clone(),
+            },
+            true,
+        ),
+        (
+            0x820_2000,
+            "file_read",
+            ToolAttemptObservation::Completed { result },
+            false,
+        ),
+        (0x820_3000, "git_push_configured", failed, false),
+    ] {
+        let (fixture, _, _, request) =
+            checkpoint_confirmed_tool_round(&pool, seed, tool, "{}").await?;
+        let repository = PostgresToolLoopRepository::new(pool.clone());
+        repository
+            .decide(
+                decide_tool_request(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    request,
+                    ToolApprovalDecision::Approve,
+                ),
+                || TurnAttemptId::from_uuid(Uuid::now_v7()),
+            )
+            .await?;
+        let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+        repository
+            .prepare_next_attempt(
+                fixture.session,
+                fixture.turn,
+                attempt,
+                ToolEffectClass::ExternalEffect,
+            )
+            .await?;
+        let authorized = repository
+            .authorize_attempt(fixture.session, fixture.turn, attempt)
+            .await?;
+        assert!(
+            !reader.session_pushed(fixture.session).await?,
+            "in-flight {tool}"
+        );
+        repository
+            .commit_observation(authorized.executor_fence().bind(observation))
+            .await?;
+        assert_eq!(
+            reader.session_pushed(fixture.session).await?,
+            expected,
+            "{tool}, fixture {seed}"
+        );
+    }
     Ok(())
 }

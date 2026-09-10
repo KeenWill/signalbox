@@ -350,7 +350,7 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
   const scenario = await useRecoveringBootstrap(page)
   await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText('Server unavailable')).toBeVisible()
+  await expect(page.getByText('Daemon unavailable')).toBeVisible()
   scenario.recover()
   await page.getByRole('button', { name: 'Retry connection' }).click()
 
@@ -966,7 +966,7 @@ test('retries an initial bootstrap failure', async ({ page }) => {
 
   // A refused admission answers with a status, so `readBootstrap` raises a plain error and the
   // shell classifies it as an unavailable bootstrap rather than an unreachable transport.
-  await expect(page.getByText('Server unavailable')).toBeVisible()
+  await expect(page.getByText('Daemon unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry connection' }).click()
   await expect(page.locator('.product-connection')).toHaveCount(0)
   await expect(page.getByRole('main')).toBeFocused()
@@ -980,7 +980,7 @@ test('distinguishes an incompatible bootstrap contract from an outage', async ({
 
   // A schema-invalid payload decodes into a contract error, which the shell reports as a rejected
   // contract. Addressed by text because a deferred surface also publishes a `status` region.
-  await expect(page.getByText('Unexpected server response')).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response')).toBeVisible()
 })
 
 test('shows transcript-detail commands only on Settings among product routes', async ({ page }) => {
@@ -1091,7 +1091,7 @@ test('keeps Settings available without consulting daemon bootstrap', async ({ pa
 
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible()
   await expect(page.getByRole('group', { name: 'Theme', exact: true })).toBeVisible()
-  await expect(page.getByText("Can't reach the server")).toHaveCount(0)
+  await expect(page.getByText('Daemon unreachable')).toHaveCount(0)
   expect(bootstrapRequests).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -1120,7 +1120,7 @@ test('does not start Attention reads when bootstrap validation fails', async ({ 
   await page.goto('/attention')
 
   await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
-  await expect(page.getByText('Unexpected server response')).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response')).toBeVisible()
   expect(attentionRequests).toBe(0)
 })
 
@@ -1142,7 +1142,7 @@ test('does not start Attention reads for incompatible bootstrap values', async (
   await page.goto('/attention')
 
   await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
-  await expect(page.getByText('Unexpected server response')).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response')).toBeVisible()
   expect(attentionRequests).toBe(0)
 })
 
@@ -1152,7 +1152,7 @@ test('retries a transient Attention bootstrap failure in place', async ({ page }
   await page.goto('/attention')
 
   await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
-  await expect(page.getByText('Server unavailable')).toBeVisible()
+  await expect(page.getByText('Daemon unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: /^Retry/ })).toHaveCount(1)
   await page.getByRole('button', { name: 'Retry connection', exact: true }).click()
 
@@ -1238,7 +1238,7 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
   ).toBeVisible()
   // A refused admission answers with a status, so the shell classifies it as an unavailable
   // bootstrap rather than as an unreachable transport or a rejected contract.
-  await expect(page.getByText('Server unavailable')).toBeVisible()
+  await expect(page.getByText('Daemon unavailable')).toBeVisible()
   await expect(page.locator('.imports-shell-product')).toHaveCount(0)
   expect(importRequests).toBe(0)
   expect(problems.pageErrors).toEqual([])
@@ -1254,7 +1254,7 @@ test('shares expired Imports admission failure with the shell retry state', asyn
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
   await page.clock.fastForward(30_001)
   await page.getByRole('textbox', { name: 'Source session' }).fill('expired-admission')
-  await expect(page.getByText('Unexpected server response')).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry connection' })).toBeVisible()
   await useDeterministicBootstrap(page)
   await page.getByRole('button', { name: 'Retry connection' }).click()
@@ -1273,7 +1273,7 @@ test('withholds Search focus after cached bootstrap refetch failure and restores
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
   await page.clock.fastForward(30_001)
   await page.getByRole('textbox', { name: 'Source session', exact: true }).fill('expired-admission')
-  await expect(page.getByText('Unexpected server response')).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response')).toBeVisible()
   await page.getByRole('link', { name: 'Search', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Search unavailable', exact: true })).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveCount(0)
@@ -1319,7 +1319,7 @@ test('mounts Imports after the daemon contract recovers', async ({ page }) => {
   await useDeterministicImportApi(page)
   await page.goto(importsProductFixture.path)
 
-  await expect(page.getByText('Server unavailable')).toBeVisible()
+  await expect(page.getByText('Daemon unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry connection' }).click()
 
   await expect(page.locator('.product-connection')).toHaveCount(0)
@@ -1683,7 +1683,7 @@ test('retries a transient bootstrap failure without reloading', async ({ page })
   await useDeterministicAttention(page)
   await page.goto('/attention')
 
-  await expect(page.getByText('Server unavailable')).toBeVisible()
+  await expect(page.getByText('Daemon unavailable')).toBeVisible()
   scenario.recover()
   await page.getByRole('button', { name: 'Retry connection' }).click()
   await expect(page.locator('.product-connection')).toHaveCount(0)
@@ -1703,7 +1703,7 @@ test('distinguishes a rejected bootstrap contract from transport failure', async
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
   await page.goto('/attention')
 
-  await expect(page.getByText('Unexpected server response')).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry connection' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

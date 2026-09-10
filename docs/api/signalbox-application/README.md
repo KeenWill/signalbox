@@ -11,7 +11,7 @@
 | attention | 16 | 1 | 6 | [attention](attention.md) |
 | blob_derivation | 6 | 3 | 0 | [blob_derivation](blob_derivation.md) |
 | commissioned_dispatch | 5 | 1 | 0 | [commissioned_dispatch](commissioned_dispatch.md) |
-| conversation_import | 8 | 4 | 0 | [conversation_import](conversation_import.md) |
+| conversation_import | 11 | 5 | 0 | [conversation_import](conversation_import.md) |
 | create_session | 6 | 2 | 0 | [create_session](create_session.md) |
 | create_session_from_imported_frontier | 4 | 2 | 0 | [create_session_from_imported_frontier](create_session_from_imported_frontier.md) |
 | list_conversations | 6 | 2 | 0 | [list_conversations](list_conversations.md) |
@@ -38,4 +38,4 @@
 | turn_liveness | 16 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | update_session_placement | 3 | 1 | 0 | [update_session_placement](update_session_placement.md) |
 | usage | 36 | 1 | 4 | [usage](usage.md) |
-| workspace_instructions | 5 | 0 | 1 | [workspace_instructions](workspace_instructions.md) |
+| workspace_instructions | 6 | 0 | 2 | [workspace_instructions](workspace_instructions.md) |

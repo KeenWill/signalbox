@@ -713,6 +713,74 @@ async fn held_start_gate_survives_a_module_park_and_resume() -> Result<(), Box<d
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn held_start_gate_preserves_supervision_until_operator_resume() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    let module = DispatchingModule::CommissionedDispatch;
+    for (seed, module_parked) in [(31, false), (32, true)] {
+        let creation = owned_creation(seed, StartGate::Held);
+        let session = creation.applied_result().session();
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+            .handle(creation)
+            .await?;
+        queue_turn(&pool, session, seed).await?;
+        if module_parked {
+            repository
+                .park(
+                    session,
+                    SessionParkCause::ModulePark,
+                    SessionParkResponder::Module { module },
+                    None,
+                    LifecycleActor::Module { module },
+                )
+                .await?;
+        }
+        let failure = signalbox_persistence::startup::StartupScanRepositoryError::from(
+            signalbox_persistence::startup::StartupScanCorruption::Missing(
+                "fixture execution evidence",
+            ),
+        );
+        repository
+            .record_supervision_failure(session, &failure)
+            .await?;
+        if module_parked {
+            assert!(
+                !signalbox_persistence::test_support::restore_module_park(&pool, session, module)
+                    .await?
+            );
+        }
+        let parked = repository.load(session).await?.unwrap();
+        assert_eq!(
+            parked.state(),
+            SessionLifecycleState::Parked {
+                cause: SessionParkCause::UnknownFailure,
+                responder: SessionParkResponder::Operator,
+                standing: None,
+            }
+        );
+        assert!(parked.supervision_failure().unwrap().pending);
+        assert_eq!(
+            repository.resume(session).await?,
+            SessionLifecycleState::Created
+        );
+        let resumed = repository.load(session).await?.unwrap();
+        assert!(!resumed.supervision_failure().unwrap().pending);
+        let held: bool = sqlx::query_scalar(
+            "SELECT start_gate_held FROM session_lifecycle WHERE session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert!(held);
+    }
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn retired_never_started_turn_restores_dispatched_admission() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let creation = owned_creation(6, StartGate::Open);

@@ -68,9 +68,10 @@ pub use commissioned_dispatch::{
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,
     ImportConversationService, ImportedConversationConversionReport, ImportedConversationConverter,
-    ImportedConversationIdGenerator, ImportedConversationSkippedRecord, ImportedConversationStore,
-    ImportedConversationStoreOutcome, ResilientImportedConversationConverter,
-    UuidV7ImportedConversationIdGenerator,
+    ImportedConversationDropFacts, ImportedConversationIdGenerator,
+    ImportedConversationSkippedRecord, ImportedConversationStore, ImportedConversationStoreOutcome,
+    ImportedConversationStreamItem, ResilientImportedConversationConverter, StreamConversionError,
+    StreamingResilientImportedConversationConverter, UuidV7ImportedConversationIdGenerator,
 };
 pub use create_session::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
@@ -264,7 +265,8 @@ pub use usage::{
 };
 pub use workspace_instructions::{
     InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
-    InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
+    InstructionDiscoveryLimits, InstructionDiscoveryRoot, InstructionDiscoverySnapshot,
+    discover_workspace_instructions, discover_workspace_instructions_with_limits,
 };
 
 /// Verified host-side session attribution for program input.

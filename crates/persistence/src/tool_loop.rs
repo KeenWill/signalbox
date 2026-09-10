@@ -1384,7 +1384,59 @@ impl PostgresToolLoopRepository {
         turn: TurnId,
         producing_call: signalbox_domain::ModelCallId,
         identities: ToolContinuationIdentities,
+        next_steering: NextSteering,
+    ) -> Result<PrepareToolContinuationOutcome, ToolLoopRepositoryError>
+    where
+        NextSteering: FnMut(
+            signalbox_domain::AcceptedInputId,
+        ) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
+    {
+        self.prepare_continuation_with_failure(
+            session,
+            turn,
+            producing_call,
+            identities,
+            next_steering,
+            None,
+        )
+        .await
+    }
+
+    /// Closes the exact active compaction checkpoint after a preparation failure.
+    /// A changed checkpoint or an already prepared command retains its own recovery.
+    pub async fn fail_compaction_checkpoint<NextSteering>(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        producing_call: signalbox_domain::ModelCallId,
+        checkpoint: signalbox_domain::ContextFrontierId,
+        identities: ToolContinuationIdentities,
+        next_steering: NextSteering,
+    ) -> Result<PrepareToolContinuationOutcome, ToolLoopRepositoryError>
+    where
+        NextSteering: FnMut(
+            signalbox_domain::AcceptedInputId,
+        ) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
+    {
+        self.prepare_continuation_with_failure(
+            session,
+            turn,
+            producing_call,
+            identities,
+            next_steering,
+            Some(checkpoint),
+        )
+        .await
+    }
+
+    async fn prepare_continuation_with_failure<NextSteering>(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        producing_call: signalbox_domain::ModelCallId,
+        identities: ToolContinuationIdentities,
         mut next_steering: NextSteering,
+        failed_checkpoint: Option<signalbox_domain::ContextFrontierId>,
     ) -> Result<PrepareToolContinuationOutcome, ToolLoopRepositoryError>
     where
         NextSteering: FnMut(
@@ -1426,6 +1478,61 @@ impl PostgresToolLoopRepository {
                     }
                     _ => return Ok(PrepareToolContinuationOutcome::NoWork),
                 };
+                let checkpoint: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT compaction_frontier_id FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
+                ).bind(turn.into_uuid()).bind(session.into_uuid())
+                    .fetch_one(&mut *transaction).await?;
+                let compacted: Option<Uuid> = match checkpoint {
+                    Some(frontier) => sqlx::query_scalar(
+                        "SELECT result_frontier_id FROM context_compaction
+                          WHERE session_id = $1 AND source_frontier_id = $2",
+                    ).bind(session.into_uuid()).bind(frontier)
+                        .fetch_optional(&mut *transaction).await?,
+                    None => None,
+                };
+                if let Some(expected) = failed_checkpoint {
+                    if checkpoint != Some(expected.into_uuid()) || compacted.is_some() {
+                        return Ok(PrepareToolContinuationOutcome::NoWork);
+                    }
+                    let prepared: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM compact_session_command AS command
+                          JOIN context_compaction_model_call AS call
+                            ON call.model_call_id = command.model_call_id
+                          WHERE command.session_id = $1 AND command.automatic_for_turn_id = $2
+                            AND call.source_frontier_id = $3)",
+                    ).bind(session.into_uuid()).bind(turn.into_uuid()).bind(expected.into_uuid())
+                        .fetch_one(&mut *transaction).await?;
+                    if prepared {
+                        return Ok(PrepareToolContinuationOutcome::NoWork);
+                    }
+                }
+                let compaction_failed = failed_checkpoint.is_some() || checkpoint.is_some() && sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM compact_session_command
+                      WHERE session_id = $1 AND automatic_for_turn_id = $2 AND result_kind = 'failed')",
+                ).bind(session.into_uuid()).bind(turn.into_uuid())
+                    .fetch_one(&mut *transaction).await?;
+                if checkpoint.is_some() && compacted.is_none() && !compaction_failed {
+                    return Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(turn));
+                }
+                let mut boundaries = Vec::new();
+                let result_count = batch.yielded_snapshot().entry_count() + batch.requests().len();
+                let mut result_frontier = checkpoint.map_or(identities.result_frontier(),
+                    signalbox_domain::ContextFrontierId::from_uuid);
+                let result_entries = if checkpoint.is_some() {
+                    let mut snapshot = load_snapshot(&mut transaction, session, result_frontier).await?;
+                    while snapshot.entry_count() > result_count {
+                        boundaries.push(snapshot.clone());
+                        let prefix: Uuid = sqlx::query_scalar(
+                            "SELECT prefix_context_frontier_id FROM context_frontier WHERE context_frontier_id = $1",
+                        ).bind(result_frontier.into_uuid()).fetch_one(&mut *transaction).await?;
+                        result_frontier = signalbox_domain::ContextFrontierId::from_uuid(prefix);
+                        snapshot = load_snapshot(&mut transaction, session, result_frontier).await?;
+                    }
+                    snapshot.ordered_entries().skip(batch.yielded_snapshot().entry_count())
+                        .map(|entry| entry.entry()).collect()
+                } else {
+                    identities.result_entries().to_vec()
+                };
                 let mut child_outcomes = BTreeMap::new();
                 for request in batch.requests() {
                     if let Some(ReconstitutedToolAttempt::Ended(attempt)) =
@@ -1450,8 +1557,8 @@ impl PostgresToolLoopRepository {
                 }
                 let mut projection = batch
                     .prepare_delegation_result_projection(
-                        identities.result_entries().to_vec(),
-                        identities.result_frontier(),
+                        result_entries.clone(),
+                        result_frontier,
                         child_outcomes,
                     )
                     .map_err(|_| {
@@ -1459,6 +1566,28 @@ impl PostgresToolLoopRepository {
                             "tool batch is not ready for continuation",
                         )
                     })?;
+                boundaries.reverse();
+                if let Some(frontier) = compacted {
+                    boundaries.push(load_snapshot(&mut transaction, session,
+                        signalbox_domain::ContextFrontierId::from_uuid(frontier)).await?);
+                }
+                if !boundaries.is_empty() {
+                    let loaded = crate::session::load_session_from_connection(&mut transaction, session)
+                        .await.map_err(|error| match error {
+                            crate::session::SessionRepositoryError::Database(error) => ToolLoopRepositoryError::from(error),
+                            crate::session::SessionRepositoryError::Corruption(_) => ToolLoopCorruption::Inconsistent("compaction session").into(),
+                        })?.ok_or(ToolLoopCorruption::Missing("compaction session"))?;
+                    let scheduling = Box::pin(crate::submit_input::load_scheduling_projection(&mut transaction, loaded))
+                        .await.map_err(crate::model_execution::map_scheduling_error).map_err(map_model_call_error)?;
+                    for snapshot in boundaries {
+                        let reference = snapshot.ordered_entries().last()
+                            .ok_or(ToolLoopCorruption::Missing("checkpoint boundary entry"))?;
+                        let entry = scheduling.semantic_entry(reference).cloned()
+                            .ok_or(ToolLoopCorruption::Missing("checkpoint boundary entry"))?;
+                        projection = projection.with_context_boundary(entry, snapshot)
+                            .map_err(|_| ToolLoopCorruption::Inconsistent("checkpoint boundary projection"))?;
+                    }
+                }
                 let pending_inputs: Vec<Uuid> = sqlx::query_scalar(
                     "SELECT accepted_input_id FROM accepted_input
                       WHERE session_id = $1 AND expected_active_turn_id = $2
@@ -1496,10 +1625,11 @@ impl PostgresToolLoopRepository {
                 )
                 .await
                 .map_err(map_model_call_error)?;
-                persist_result_entries(&mut transaction, &projection).await?;
-                insert_snapshot(&mut transaction, projection.snapshot())
-                    .await
-                    .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
+                if checkpoint.is_none() {
+                    persist_result_entries(&mut transaction, &projection).await?;
+                    insert_snapshot(&mut transaction, projection.snapshot())
+                        .await.map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
+                }
                 if let Some(runner) = &self.runner_recovery {
                     let (settled, boundary) = runner
                         .settle_replacement_at_boundary(
@@ -1552,6 +1682,7 @@ impl PostgresToolLoopRepository {
                     crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
                         .await
                         .map_err(map_model_call_error)?;
+                if checkpoint.is_none() {
                 outbox::append(
                     &mut transaction,
                     OutboxEvent::ToolBatchTransition {
@@ -1562,6 +1693,7 @@ impl PostgresToolLoopRepository {
                     },
                 )
                 .await?;
+                }
                 let outcome = crate::model_execution::prepare_tool_continuation_call(
                     &mut transaction,
                     outbox_order_guard,
@@ -1576,6 +1708,7 @@ impl PostgresToolLoopRepository {
                     &self.continuation_usage_limits,
                     &projection,
                     producing_call,
+                    compaction_failed,
                     identities.call(),
                     identities.target_failure().clone(),
                     identities.steering_frontier(),
@@ -1587,6 +1720,7 @@ impl PostgresToolLoopRepository {
                     let rows = sqlx::query(
                         "UPDATE turn_lifecycle
                         SET active_tool_round_call_id = NULL,
+                            compaction_frontier_id = NULL,
                             approval_tool_request_id = NULL,
                             recovery_tool_attempt_id = NULL
                       WHERE turn_id = $1
@@ -2226,7 +2360,16 @@ async fn load_tool_round_result_window(
                AND round.turn_id = $2
                AND round.boundary_kind = 'continuing'
                AND terminal.member_count =
-                       boundary.member_count + round.request_count + $4
+                       boundary.member_count + round.request_count + $4 + (
+                           SELECT count(*) FROM context_frontier_member AS member
+                           JOIN semantic_transcript_entry AS entry
+                             ON entry.source_session_id = member.source_session_id
+                            AND entry.semantic_entry_id = member.semantic_entry_id
+                           WHERE member.owning_session_id = $1
+                             AND member.context_frontier_id = $3
+                             AND member.member_position > boundary.member_count + round.request_count
+                             AND entry.payload_kind = 'context_summary'
+                       )
          ), terminal_member AS MATERIALIZED (
             SELECT member_position,
                    source_session_id,

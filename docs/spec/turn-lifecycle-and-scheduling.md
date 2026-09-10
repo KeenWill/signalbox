@@ -60,8 +60,8 @@ turns that hold a live operation past every deadline, and one retries
 reconciliation of ambiguous operations.
 
 At startup, before it admits any request, the daemon runs one transaction per
-session with an active turn or a nonterminal standalone compaction call and
-classifies the abandoned tenure from its durable evidence
+session, validates its projection, and classifies abandoned active turns or
+nonterminal standalone compaction calls from durable evidence
 (`crates/persistence/src/startup.rs`). The liveness watchdogs and the
 scheduler's pass-expiry handoff hand turns to that same classification.
 
@@ -124,8 +124,8 @@ completion, refusal, or confirmed-interrupt evidence and no path retries a call
 automatically ([model-call-execution](model-call-execution.md)).
 
 There is no process-incarnation column and no lease: under the single-daemon
-contract every nonterminal attempt observed at startup is a prior-process
-abandonment.
+contract every nonterminal attempt observed at startup is an abandonment from
+the preceding fenced runtime incarnation.
 
 Frontier equality is identity rather than content, because two independently
 created snapshots may hold equal entries without being the same fixed frontier.
@@ -300,9 +300,23 @@ whose requests are all resolved with no current tool attempt is returned as
 resumable work for a scheduler pass. In the two failing branches only, one
 failure entry is appended, preceded in the tool branch by one correlated result
 entry per request in proposal order. Identity collisions are retried with fresh
-candidates; infrastructure failures and fail-closed corruption stop startup
-visibly. The scan is idempotent: a rerun inventories only work still active, and
-a stale observation rolls back.
+candidates. The startup inventory covers every session. A non-retriable,
+session-scoped reconstitution failure receives a durable operator item and its
+session is skipped; non-terminal sessions with valid lifecycle projections are
+parked, while terminal sessions retain their outcome. Missing or undecodable
+lifecycle projections retain independent operator evidence and remain suspended
+without automatic repair. Operator status exposes both kinds of pending
+supervision item. Successful startup reconstitution settles repaired terminal
+items without resuming them. Other sessions continue. Infrastructure failures
+stop initial startup visibly. Fenced migrations and the startup scan run under
+guard monitoring, including operator-item identity reconciliation. Observed
+guard loss starts the recovery clock even while pool drain waits, so the elapsed
+bound and shutdown can interrupt that wait. During guard recovery, database
+failures throughout incarnation reconstruction, including repository-watch
+startup, continue reacquisition with the same capped backoff and elapsed bound,
+after closing the failed incarnation’s fenced pool. Migration validation, fence
+corruption, and reload corruption failures stop recovery visibly. Recovery is
+idempotent, and a stale observation rolls back.
 
 Every terminal transition of a source turn, whether by interrupt, model-call
 outcome, startup recovery, or the watchdog, reclassifies its pending steering
@@ -433,17 +447,26 @@ the sweep recognize child waits, pending inbox content, and undelivered results
 from durable rows and infer nothing from child transcript state or process
 memory.
 
-Losing the guard session is a fatal fencing event: admission, dispatch, and
-scheduling are cancelled without the graceful window and the process exits
-rather than reacquiring. On SIGINT or SIGTERM the listener stops accepting
-requests, follow streams close, the dispatcher stops starting transactions, the
-scheduler stops admitting passes, and liveness stops scanning. Finite handlers,
-the current dispatcher transaction, in-flight scheduler passes, and an in-flight
-liveness read or terminalization share a grace window of the configured longest
-model exchange plus a fixed cleanup margin. An admitted pass stops spending its
-occupancy bound and drains under that window: after its in-flight operation
-reaches a durable boundary, it checkpoints the active turn and returns without
-issuing another, and a successor resumes from that boundary.
+Losing the guard session cancels admission, dispatch, and scheduling without the
+graceful window. The daemon drains the old fenced pool and reacquires the
+singleton with configured exponential backoff, capped by its configured maximum
+delay. A configured elapsed recovery bound includes pool shutdown and fence
+establishment; `none` leaves recovery unbounded. Expiry exits with the typed
+recovery-exhausted reason. A fresh generation and startup reconstitution precede
+resumed admission. The runtime guard watcher completes a successful guard check
+before repository-watch recovery can start workers. Final runtime admission
+requires another successful check, with its watcher retained through shutdown.
+Shutdown signals remain effective during recovery.
+
+On SIGINT or SIGTERM the listener stops accepting requests, follow streams
+close, the dispatcher stops starting transactions, the scheduler stops admitting
+passes, and liveness stops scanning. Finite handlers, the current dispatcher
+transaction, in-flight scheduler passes, and an in-flight liveness read or
+terminalization share a grace window of the configured longest model exchange
+plus a fixed cleanup margin. An admitted pass stops spending its occupancy bound
+and drains under that window: after its in-flight operation reaches a durable
+boundary, it checkpoints the active turn and returns without issuing another,
+and a successor resumes from that boundary.
 
 A runner replacement issued during a model call or tool batch remains staged.
 Replacement admission or installation for a turn parked in
@@ -474,9 +497,6 @@ cancellation.
 
 ## Planned
 
-- Session failure isolation, corrupt-session startup isolation, and bounded
-  guard reacquisition; see
-  [daemon survival design](../design/daemon-survival.md).
 - Pre-continuation runner takeover and retry supersession; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - Recovery-only startup: a runner reconciliation phase between migrations and

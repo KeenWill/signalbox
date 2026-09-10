@@ -4,14 +4,19 @@ pub(crate) mod tests {
         cell::RefCell,
         collections::{BTreeSet, VecDeque},
         error::Error,
-        io::{self, Write},
-        sync::{Arc, Mutex, OnceLock, mpsc},
-        thread,
+        io::{self, Seek, Write},
+        sync::{
+            Arc, Mutex, OnceLock,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     use signalbox_application::{
         EligibilityNudge, EligibilityNudgeOutcome, ImportConversationError,
-        ImportedConversationConverter,
+        ImportedConversationConversionReport, ImportedConversationConverter,
+        ImportedConversationSkippedRecord, ImportedConversationStreamItem,
+        ResilientImportedConversationConverter,
+        StreamConversionError, StreamingResilientImportedConversationConverter,
     };
     use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
@@ -48,16 +53,18 @@ pub(crate) mod tests {
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
-        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, duplex},
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, duplex},
         net::UnixStream,
-        sync::{Semaphore, watch},
+        sync::{Notify, Semaphore, watch},
         time::{Duration, Instant, timeout},
     };
     use uuid::Uuid;
 
     use super::{
-        CommittedForegroundDelivery, ContextCompactionRangeLoadError, ConversationImportState,
-        ConversionFailureDisposition, DispatchedTurnTerminalDisposition,
+        CommittedForegroundDelivery, ContextCompactionRangeLoadError, ConversationImportSource,
+        ConversationImportState,
+        ConversionFailureDisposition, ClassifyConversationImportRecordFailure,
+        DispatchedTurnTerminalDisposition,
         GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES, ImportedConversationRepository,
         ImportedConversationRepositoryError, ImportedRawBlobStorageError, InboundFrameBudgets,
         IncomingLine, InternalDiagnostic, MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES,
@@ -563,17 +570,53 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn successor_compaction_rejects_an_unreachable_later_safe_boundary() {
-        assert!(super::successor_compaction_cannot_advance(
-            &[10, 100, 100],
-            &[(31, true), (32, false), (33, true)],
-            203,
-        ));
-        assert!(!super::successor_compaction_cannot_advance(
-            &[10, 100, 100],
-            &[(31, true), (32, false), (33, true)],
-            204,
-        ));
+    fn automatic_compaction_source_reserves_the_adapter_envelope_and_json_escaping() {
+        let configuration = crate::configuration::HubModelConfiguration::parse(
+            &crate::configuration::tests::CONFIGURATION.replace(
+                "Summarize the prior conversation faithfully for continuation.",
+                r#"Summarize \"quoted\" text and \n newlines."#,
+            ),
+        ).expect("the compaction configuration parses");
+        let selection = DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000001").expect("fixture selection"),
+        );
+        let window = 2048_u64;
+        let output = 256_u64;
+        let framing = configuration.compaction_request_bytes(selection, "x")
+            .expect("the request serializes") - 1;
+        let budget = window - output - framing;
+        let source = "\\\"\n".repeat(1024);
+        let raw_bounded = super::bounded_compaction_source(source.clone(), budget);
+        assert!(configuration.compaction_request_bytes(selection, &raw_bounded)
+            .expect("the request serializes") + output > window);
+        let bounded = super::bounded_compaction_request_source(&configuration, selection, source, budget)
+            .expect("the source fits the complete request budget");
+        assert!(bounded.contains("compaction text truncated"));
+        assert!(configuration.compaction_request_bytes(selection, &bounded)
+            .expect("the request serializes") + output <= window);
+    }
+
+    #[test]
+    fn oversized_compaction_source_retains_a_marked_utf8_prefix() {
+        let source = "🦀".repeat(269 * 1024 / 4);
+        let bounded = super::bounded_compaction_material(source, 1024);
+        assert!(bounded.len() <= 1024);
+        assert!(bounded.starts_with("🦀"));
+        assert!(bounded.contains("[compaction text truncated: retained "));
+        assert!(bounded.ends_with(" bytes]"));
+    }
+
+    #[test]
+    fn oversized_compaction_source_includes_the_last_exchange() {
+        let source = serde_json::json!([
+            { "content": "first exchange".repeat(1024) },
+            { "content": "last exchange".repeat(1024) },
+        ]).to_string();
+        let bounded = super::bounded_compaction_source(source, 1024);
+        assert!(bounded.len() <= 1024);
+        assert!(bounded.contains("first exchange"));
+        assert!(bounded.contains("last exchange"));
+        assert_eq!(bounded.matches("compaction text truncated").count(), 2);
     }
 
     #[test]
@@ -1773,14 +1816,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn oversized_begin_is_rejected_without_reserving_import_capacity() {
+    fn every_inactive_import_begin_requires_a_permit_while_blob_limits_remain() {
         let limit = 8;
         let oversized = ClientRequest::BeginConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
             declared_size_bytes: CanonicalU64::new(u64::try_from(limit + 1).expect("limit fits")),
         };
         let admitted = ClientRequest::BeginConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
             declared_size_bytes: CanonicalU64::new(u64::try_from(limit).expect("limit fits")),
         };
         let zero_blob = ClientRequest::BeginBlobUpload {
@@ -1796,40 +1839,34 @@ pub(crate) mod tests {
             expected_length_bytes: CanonicalU64::new(u64::try_from(limit + 1).expect("limit fits")),
         };
 
-        assert!(!super::conversation_import_request_requires_permit(
+        assert!(super::conversation_import_request_requires_permit(
             &oversized,
             ConversationImportState::Inactive,
-            limit,
             u64::MAX,
         ));
         assert!(super::conversation_import_request_requires_permit(
             &admitted,
             ConversationImportState::Inactive,
-            limit,
             u64::MAX,
         ));
         assert!(!super::conversation_import_request_requires_permit(
             &admitted,
             ConversationImportState::Active,
-            limit,
             u64::MAX,
         ));
         assert!(!super::conversation_import_request_requires_permit(
             &zero_blob,
             ConversationImportState::Inactive,
-            limit,
             u64::try_from(limit).expect("limit fits"),
         ));
         assert!(super::conversation_import_request_requires_permit(
             &admitted_blob,
             ConversationImportState::Inactive,
-            limit,
             u64::try_from(limit).expect("limit fits"),
         ));
         assert!(!super::conversation_import_request_requires_permit(
             &oversized_blob,
             ConversationImportState::Inactive,
-            limit,
             u64::try_from(limit).expect("limit fits"),
         ));
     }
@@ -1863,6 +1900,28 @@ pub(crate) mod tests {
         ));
     }
 
+    async fn pending_conversation_import(
+        format: signalbox_process_protocol::ConversationImportFormat,
+        declared_size_bytes: u64,
+        actual_size_bytes: u64,
+        source_bytes: &[u8],
+        import_permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<PendingConversationImport, io::Error> {
+        let mut source = tokio::fs::File::from_std(tempfile::tempfile()?);
+        source.write_all(source_bytes).await?;
+        source.flush().await?;
+        let started_at = Instant::now();
+        Ok(PendingConversationImport {
+            format,
+            declared_size_bytes,
+            actual_size_bytes,
+            source,
+            import_permit,
+            started_at,
+            idle_since: started_at,
+        })
+    }
+
     /// inactivity resets after accepted lifecycle output while the
     /// whole-session deadline stays anchored to permit acquisition.
     #[tokio::test(start_paused = true)]
@@ -1870,15 +1929,18 @@ pub(crate) mod tests {
     -> Result<(), Box<dyn Error>> {
         let started_at = Instant::now();
         let permit = Arc::new(Semaphore::new(1)).acquire_owned().await?;
-        let mut pending = Some(PendingConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            declared_size_bytes: 1,
-            actual_size_bytes: 0,
-            source: Vec::new(),
-            import_permit: permit,
-            started_at,
-            idle_since: started_at,
-        });
+        let mut pending = Some(
+            pending_conversation_import(
+                signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
+                1,
+                0,
+                &[],
+                permit,
+            )
+            .await?,
+        );
+        pending.as_mut().expect("fixture import").started_at = started_at;
+        pending.as_mut().expect("fixture import").idle_since = started_at;
 
         assert_eq!(
             super::pending_bulk_ingest_deadline(&pending, &None, true),
@@ -1917,19 +1979,20 @@ pub(crate) mod tests {
         let capacity = 1;
         let budget = Arc::new(Semaphore::new(capacity));
         let permit = Arc::clone(&budget).acquire_owned().await?;
-        let format = signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1;
+        let format = signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2;
         let source = b"partial".to_vec();
         let expected_source = source.clone();
         let declared_size_bytes = u64::try_from(source.len())?;
-        let mut pending = Some(PendingConversationImport {
-            format,
-            declared_size_bytes,
-            actual_size_bytes: declared_size_bytes,
-            source,
-            import_permit: permit,
-            started_at: Instant::now(),
-            idle_since: Instant::now(),
-        });
+        let mut pending = Some(
+            pending_conversation_import(
+                format,
+                declared_size_bytes,
+                declared_size_bytes,
+                &source,
+                permit,
+            )
+            .await?,
+        );
         let request_id = RequestId::try_new(1)?;
         let (mut writer, mut reader) = duplex(1_024);
 
@@ -1939,7 +2002,6 @@ pub(crate) mod tests {
             request_id,
             format,
             CanonicalU64::new(declared_size_bytes),
-            usize::try_from(declared_size_bytes)?,
             None,
             None,
             &mut pending,
@@ -1965,7 +2027,7 @@ pub(crate) mod tests {
             .expect("the active import remains available");
 
         assert_eq!(observed, expected);
-        assert_eq!(active.source, expected_source);
+        assert_eq!(active.source.metadata().await?.len(), u64::try_from(expected_source.len())?);
         assert_eq!(budget.available_permits(), capacity - 1);
         Ok(())
     }
@@ -1982,13 +2044,12 @@ pub(crate) mod tests {
             .acquire_owned()
             .await?;
         let begin = ClientRequest::BeginConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
             declared_size_bytes: CanonicalU64::new(u64::try_from(capacity)?),
         };
         let import_requires_permit = super::conversation_import_request_requires_permit(
             &begin,
             ConversationImportState::Inactive,
-            capacity,
             u64::MAX,
         );
 
@@ -2056,8 +2117,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn conversation_import_allocation_exhaustion_is_unavailable() {
-        let diagnostic = InternalDiagnostic::ConversationImportAllocationFailure;
+    fn conversation_import_spool_failure_is_unavailable() {
+        let diagnostic = InternalDiagnostic::ConversationImportSpoolUnavailable;
         let error = unavailable_protocol_error(diagnostic);
 
         assert_eq!(error.code, ErrorCode::Unavailable);
@@ -2070,56 +2131,6 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn conversation_import_capacity_grows_geometrically_within_declared_and_configured_bounds() {
-        let chunk_capacity = 4;
-        let declared_capacity = chunk_capacity * 4;
-        let configured_capacity = declared_capacity * 2;
-        let first_capacity = super::conversation_import_capacity_target(
-            0,
-            chunk_capacity,
-            declared_capacity,
-            configured_capacity,
-        );
-        let second_capacity = super::conversation_import_capacity_target(
-            first_capacity,
-            chunk_capacity * 2,
-            declared_capacity,
-            configured_capacity,
-        );
-        let retained_capacity = super::conversation_import_capacity_target(
-            second_capacity,
-            chunk_capacity * 2 - 1,
-            declared_capacity,
-            configured_capacity,
-        );
-        let third_capacity = super::conversation_import_capacity_target(
-            retained_capacity,
-            chunk_capacity * 2 + 1,
-            declared_capacity,
-            configured_capacity,
-        );
-        let declared_bound = super::conversation_import_capacity_target(
-            third_capacity,
-            declared_capacity,
-            declared_capacity,
-            configured_capacity,
-        );
-        let configured_bound = super::conversation_import_capacity_target(
-            declared_bound,
-            declared_capacity + 1,
-            declared_capacity,
-            configured_capacity,
-        );
-
-        assert_eq!(first_capacity, chunk_capacity);
-        assert_eq!(second_capacity, chunk_capacity * 2);
-        assert_eq!(retained_capacity, second_capacity);
-        assert_eq!(third_capacity, declared_capacity);
-        assert_eq!(declared_bound, declared_capacity);
-        assert_eq!(configured_bound, configured_capacity);
-    }
-
     #[tokio::test]
     async fn chunk_appends_assemble_exact_source_order() -> Result<(), Box<dyn Error>> {
         let budget = Arc::new(Semaphore::new(1));
@@ -2128,16 +2139,16 @@ pub(crate) mod tests {
         let second = b"second".to_vec();
         let expected_source = [first.as_slice(), second.as_slice()].concat();
         let expected_size = u64::try_from(expected_source.len())?;
-        let limit = 32;
-        let mut pending = Some(PendingConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            declared_size_bytes: expected_size,
-            actual_size_bytes: 0,
-            source: Vec::new(),
-            import_permit: permit,
-            started_at: Instant::now(),
-            idle_since: Instant::now(),
-        });
+        let mut pending = Some(
+            pending_conversation_import(
+                signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
+                expected_size,
+                0,
+                &[],
+                permit,
+            )
+            .await?,
+        );
         let (mut writer, _reader) = duplex(1_024);
 
         handle_append_conversation_import(
@@ -2145,7 +2156,6 @@ pub(crate) mod tests {
             ProtocolVersion::One,
             RequestId::try_new(1)?,
             first,
-            limit,
             &mut pending,
         )
         .await?;
@@ -2154,123 +2164,66 @@ pub(crate) mod tests {
             ProtocolVersion::One,
             RequestId::try_new(2)?,
             second,
-            limit,
             &mut pending,
         )
         .await?;
 
-        let assembled = pending.as_ref().expect("the import remains pending");
-        assert_eq!(assembled.source, expected_source);
+        let assembled = pending.as_mut().expect("the import remains pending");
+        assembled.source.seek(std::io::SeekFrom::Start(0)).await?;
+        let mut observed = Vec::new();
+        assembled.source.read_to_end(&mut observed).await?;
+        assert_eq!(observed, expected_source);
         assert_eq!(assembled.actual_size_bytes, expected_size);
-        assert!(assembled.source.capacity() <= limit);
         Ok(())
     }
 
     #[tokio::test]
-    async fn begin_rejects_a_declared_size_above_the_configured_bound() -> Result<(), Box<dyn Error>>
-    {
-        let capacity = 1;
-        let budget = Arc::new(Semaphore::new(capacity));
-        let permit = budget.clone().acquire_owned().await?;
-        let request_id = RequestId::try_new(1)?;
-        let limit = 8;
-        let declared_size_bytes = CanonicalU64::new(9);
-        let mut pending = None;
-        let (mut writer, mut reader) = duplex(1_024);
+    async fn conversation_import_spools_more_than_the_removed_default_with_a_bounded_buffer()
+    -> Result<(), Box<dyn Error>> {
+        const REMOVED_DEFAULT_BYTES: u64 = 256 * 1024 * 1024;
+        const GENERATED_CHUNK_BYTES: usize = 1024 * 1024;
 
+        let declared_size_bytes = REMOVED_DEFAULT_BYTES + 1;
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await?;
+        let mut pending = None;
+        let mut writer = tokio::io::sink();
         handle_begin_conversation_import(
             &mut writer,
             ProtocolVersion::One,
-            request_id,
-            signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            declared_size_bytes,
-            limit,
+            RequestId::try_new(1)?,
+            signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
+            CanonicalU64::new(declared_size_bytes),
             Some(permit),
-            None,
+            Some(Instant::now()),
             &mut pending,
         )
         .await?;
-        drop(writer);
-        let mut encoded = Vec::new();
-        reader.read_to_end(&mut encoded).await?;
-        let observed = decode_server_line(&encoded)?;
-        let expected = ServerFrame::try_new_for_version(
-            ProtocolVersion::One,
-            request_id,
-            ServerMessage::Error {
-                code: ErrorCode::InvalidRequest,
-                message: String::from("conversation import was rejected"),
-                detail: ErrorDetail::invalid_request(
-                    RejectionDetail::ConversationImportSourceTooLarge {
-                        limit_bytes: CanonicalU64::new(u64::try_from(limit)?),
-                        declared_size_bytes,
-                        actual_size_bytes: None,
-                    },
-                ),
-            },
-        )?;
 
-        assert_eq!(observed, expected);
-        assert!(pending.is_none());
-        assert_eq!(budget.available_permits(), capacity);
-        Ok(())
-    }
+        let mut remaining = declared_size_bytes;
+        let mut request = 2_u64;
+        let mut peak_generated_buffer_bytes = 0_usize;
+        while remaining > 0 {
+            let chunk_size = usize::try_from(remaining.min(GENERATED_CHUNK_BYTES as u64))?;
+            let chunk = vec![b'x'; chunk_size];
+            peak_generated_buffer_bytes = peak_generated_buffer_bytes.max(chunk.capacity());
+            handle_append_conversation_import(
+                &mut writer,
+                ProtocolVersion::One,
+                RequestId::try_new(request)?,
+                chunk,
+                &mut pending,
+            )
+            .await?;
+            remaining -= u64::try_from(chunk_size)?;
+            request += 1;
+        }
 
-    #[tokio::test]
-    async fn append_rejects_observed_size_above_the_configured_bound() -> Result<(), Box<dyn Error>>
-    {
-        let capacity = 1;
-        let budget = Arc::new(Semaphore::new(capacity));
-        let permit = budget.clone().acquire_owned().await?;
-        let request_id = RequestId::try_new(1)?;
-        let limit = 8;
-        let declared_size_bytes = u64::try_from(limit)?;
-        let prior_size_bytes = u64::try_from(limit - 1)?;
-        let chunk = vec![b'x'; 2];
-        let observed_size_bytes = prior_size_bytes + u64::try_from(chunk.len())?;
-        let mut pending = Some(PendingConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            declared_size_bytes,
-            actual_size_bytes: prior_size_bytes,
-            source: vec![b'x'; usize::try_from(prior_size_bytes)?],
-            import_permit: permit,
-            started_at: Instant::now(),
-            idle_since: Instant::now(),
-        });
-        let (mut writer, mut reader) = duplex(1_024);
-
-        handle_append_conversation_import(
-            &mut writer,
-            ProtocolVersion::One,
-            request_id,
-            chunk,
-            limit,
-            &mut pending,
-        )
-        .await?;
-        drop(writer);
-        let mut encoded = Vec::new();
-        reader.read_to_end(&mut encoded).await?;
-        let observed = decode_server_line(&encoded)?;
-        let expected = ServerFrame::try_new_for_version(
-            ProtocolVersion::One,
-            request_id,
-            ServerMessage::Error {
-                code: ErrorCode::InvalidRequest,
-                message: String::from("conversation import was rejected"),
-                detail: ErrorDetail::invalid_request(
-                    RejectionDetail::ConversationImportSourceTooLarge {
-                        limit_bytes: CanonicalU64::new(u64::try_from(limit)?),
-                        declared_size_bytes: CanonicalU64::new(declared_size_bytes),
-                        actual_size_bytes: Some(CanonicalU64::new(observed_size_bytes)),
-                    },
-                ),
-            },
-        )?;
-
-        assert_eq!(budget.available_permits(), capacity);
-        assert_eq!(observed, expected);
-        assert!(pending.is_none());
+        let assembled = pending.as_mut().expect("the import remains pending");
+        assembled.source.flush().await?;
+        assert!(declared_size_bytes > REMOVED_DEFAULT_BYTES);
+        assert!(peak_generated_buffer_bytes <= GENERATED_CHUNK_BYTES);
+        assert_eq!(assembled.actual_size_bytes, declared_size_bytes);
+        assert_eq!(assembled.source.metadata().await?.len(), declared_size_bytes);
         Ok(())
     }
 
@@ -2283,16 +2236,16 @@ pub(crate) mod tests {
         let actual_size_bytes = u64::try_from(source.len())?;
         let declared_size_bytes = actual_size_bytes + 1;
         let request_id = RequestId::try_new(1)?;
-        let limit = 8;
-        let mut pending = Some(PendingConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            declared_size_bytes,
-            actual_size_bytes,
-            source,
-            import_permit: permit,
-            started_at: Instant::now(),
-            idle_since: Instant::now(),
-        });
+        let mut pending = Some(
+            pending_conversation_import(
+                signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
+                declared_size_bytes,
+                actual_size_bytes,
+                &source,
+                permit,
+            )
+            .await?,
+        );
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
         let repository = ImportedConversationRepository::new(pool);
@@ -2302,7 +2255,6 @@ pub(crate) mod tests {
                 &mut writer,
                 ProtocolVersion::One,
                 request_id,
-                limit,
                 repository,
                 &mut pending,
             )
@@ -2338,76 +2290,19 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn commit_rechecks_the_configured_total_bound() -> Result<(), Box<dyn Error>> {
-        let budget = Arc::new(Semaphore::new(1));
-        let permit = budget.clone().acquire_owned().await?;
-        let request_id = RequestId::try_new(1)?;
-        let declared_size_bytes = 7;
-        let actual_size_bytes = 9;
-        let limit = 8;
-        let mut pending = Some(PendingConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            declared_size_bytes,
-            actual_size_bytes,
-            source: Vec::new(),
-            import_permit: permit,
-            started_at: Instant::now(),
-            idle_since: Instant::now(),
-        });
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
-        let repository = ImportedConversationRepository::new(pool);
-        let (mut writer, mut reader) = duplex(1_024);
-
-        handle_commit_conversation_import(
-            &mut writer,
-            ProtocolVersion::One,
-            request_id,
-            limit,
-            repository,
-            &mut pending,
-        )
-        .await?;
-        drop(writer);
-        let mut encoded = Vec::new();
-        reader.read_to_end(&mut encoded).await?;
-        let observed = decode_server_line(&encoded)?;
-        let expected = ServerFrame::try_new_for_version(
-            ProtocolVersion::One,
-            request_id,
-            ServerMessage::Error {
-                code: ErrorCode::InvalidRequest,
-                message: String::from("conversation import was rejected"),
-                detail: ErrorDetail::invalid_request(
-                    RejectionDetail::ConversationImportSourceTooLarge {
-                        limit_bytes: CanonicalU64::new(u64::try_from(limit)?),
-                        declared_size_bytes: CanonicalU64::new(declared_size_bytes),
-                        actual_size_bytes: Some(CanonicalU64::new(actual_size_bytes)),
-                    },
-                ),
-            },
-        )?;
-
-        assert_eq!(observed, expected);
-        assert!(pending.is_none());
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn disconnect_drop_discards_partial_import_and_releases_its_permit()
     -> Result<(), Box<dyn Error>> {
         let capacity = 1;
         let budget = Arc::new(Semaphore::new(capacity));
         let permit = budget.clone().acquire_owned().await?;
-        let pending = PendingConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            declared_size_bytes: 4,
-            actual_size_bytes: 2,
-            source: b"pa".to_vec(),
-            import_permit: permit,
-            started_at: Instant::now(),
-            idle_since: Instant::now(),
-        };
+        let pending = pending_conversation_import(
+            signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
+            4,
+            2,
+            b"pa",
+            permit,
+        )
+        .await?;
 
         drop(pending);
         let reacquired = timeout(Duration::from_secs(1), budget.acquire_owned()).await??;
@@ -2447,64 +2342,97 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn import_conversion_runs_off_the_async_worker() -> Result<(), Box<dyn Error>> {
-        let async_worker = thread::current().id();
-        let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
+    async fn unavailable_import_storage_fails_before_conversion() -> Result<(), Box<dyn Error>> {
+        let conversion_started = Arc::new(AtomicBool::new(false));
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
-        let repository = ImportedConversationRepository::new(pool);
+        let storage = Arc::new(crate::imported_source_blobs::ImportedSourceBlobStorage::new(
+            pool.clone(),
+            None,
+        ));
+        let repository = ImportedConversationRepository::with_blob_storage(pool, storage);
+        let import_permit = Arc::new(Semaphore::new(1)).acquire_owned().await?;
+        let mut source = tempfile::tempfile()?;
+        source.write_all(b"fixture")?;
+        source.rewind()?;
 
         let outcome = execute_import(
-            ThreadReportingRejectConverter(thread_sender),
-            Vec::new(),
+            ConversionReportingRejectConverter(Arc::clone(&conversion_started)),
+            ConversationImportSource::Spooled(source),
             repository,
+            import_permit,
         )
         .await;
-        let conversion_worker = thread_receiver.recv_timeout(Duration::from_secs(1))?;
 
-        assert_eq!(
-            outcome,
-            Err(OperationalImportError::InvalidSource(
-                super::import_evidence(
-                    signalbox_process_protocol::ConversationImportRejectionClass::InvalidJson,
-                    None,
-                )
-            ))
-        );
-        assert_ne!(conversion_worker, async_worker);
+        assert_eq!(outcome, Err(OperationalImportError::Unavailable));
+        assert!(!conversion_started.load(Ordering::SeqCst));
         Ok(())
     }
 
-    #[tokio::test]
-    async fn import_worker_termination_remains_distinct_from_repository_corruption()
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_import_stops_storage_work_and_releases_the_permit()
     -> Result<(), Box<dyn Error>> {
+        let budget = Arc::new(Semaphore::new(1));
+        let import_permit = Arc::clone(&budget).acquire_owned().await?;
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+        let publication_started = Arc::new(Notify::new());
+        let publication_cancelled = Arc::new(AtomicBool::new(false));
+        let storage = Arc::new(PendingPublicationStorage {
+            started: Arc::clone(&publication_started),
+            cancelled: Arc::clone(&publication_cancelled),
+        });
+        let repository = ImportedConversationRepository::with_blob_storage(pool, storage);
+        let import = tokio::spawn(execute_import(
+            signalbox_conversation_import_codex::ResilientCodexRolloutJsonlConverter,
+            ConversationImportSource::Inline(
+                b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n".to_vec(),
+            ),
+            repository,
+            import_permit,
+        ));
+        timeout(Duration::from_secs(1), publication_started.notified()).await?;
+
+        import.abort();
+        assert!(import.await.is_err());
+        let permit = timeout(Duration::from_secs(1), Arc::clone(&budget).acquire_owned()).await??;
+        drop(permit);
+        assert!(publication_cancelled.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_import_interrupts_a_synchronous_record_read_loop()
+    -> Result<(), Box<dyn Error>> {
+        let budget = Arc::new(Semaphore::new(1));
+        let import_permit = Arc::clone(&budget).acquire_owned().await?;
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
         let repository = ImportedConversationRepository::new(pool);
+        let started = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let import = tokio::spawn(execute_import(
+            BusyRecordReaderConverter {
+                started: Arc::clone(&started),
+                stopped: Arc::clone(&stopped),
+            },
+            ConversationImportSource::Inline(Vec::new()),
+            repository,
+            import_permit,
+        ));
+        timeout(Duration::from_secs(1), async {
+            while !started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
 
-        let outcome = execute_import(PanickingConverter, Vec::new(), repository).await;
-
-        assert_eq!(
-            outcome,
-            Err(OperationalImportError::Internal(
-                InternalDiagnostic::ConversationImportWorkerTerminated,
-            )),
-        );
+        import.abort();
+        assert!(import.await.is_err());
+        let permit = timeout(Duration::from_secs(1), Arc::clone(&budget).acquire_owned()).await??;
+        drop(permit);
+        assert!(stopped.load(Ordering::SeqCst));
         Ok(())
-    }
-
-    #[test]
-    fn import_worker_termination_has_exact_operator_diagnostic() {
-        let diagnostic = InternalDiagnostic::ConversationImportWorkerTerminated;
-
-        assert_eq!(
-            diagnostic.failure_class(),
-            signalbox_application::OperatorFailureClass::CallerOrHubBug
-        );
-        assert_eq!(
-            diagnostic.cause_code(),
-            "conversation_import_worker_terminated"
-        );
     }
 
     #[test]
@@ -2582,6 +2510,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn import_spool_read_failure_is_retryable_without_ambiguity() {
+        let error =
+            ImportConversationError::<io::Error, ImportedConversationRepositoryError>::SourceRead;
+
+        assert_eq!(
+            operational_import_error(error),
+            OperationalImportError::Unavailable,
+        );
+    }
+
+    #[test]
     fn import_catalog_database_failure_remains_retryable() {
         let error =
             ImportConversationError::<io::Error, ImportedConversationRepositoryError>::Store(
@@ -2630,31 +2569,21 @@ pub(crate) mod tests {
         );
     }
 
-    struct PanickingConverter;
+    #[derive(Clone, Copy)]
+    struct SyntheticRecordFailure;
 
-    impl ImportedConversationConverter for PanickingConverter {
-        type Error = io::Error;
-
-        fn format(&self) -> ImportedConversationFormat {
-            ImportedConversationFormat::CodexRolloutJsonlV1
-        }
-
-        fn convert<NextEntryId>(
-            &mut self,
-            _conversation: ImportedConversationId,
-            _source: &[u8],
-            _next_entry_id: NextEntryId,
-        ) -> Result<ImportedConversation, Self::Error>
-        where
-            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
-        {
-            panic!("synthetic import worker panic")
+    impl ClassifyConversationImportRecordFailure for SyntheticRecordFailure {
+        fn disposition(self) -> ConversionFailureDisposition {
+            ConversionFailureDisposition::Rejected(import_evidence(
+                ConversationImportRejectionClass::InvalidJson,
+                Some(1),
+            ))
         }
     }
 
-    struct ThreadReportingRejectConverter(mpsc::SyncSender<thread::ThreadId>);
+    struct ConversionReportingRejectConverter(Arc<AtomicBool>);
 
-    impl ImportedConversationConverter for ThreadReportingRejectConverter {
+    impl ImportedConversationConverter for ConversionReportingRejectConverter {
         type Error = io::Error;
 
         fn format(&self) -> ImportedConversationFormat {
@@ -2670,10 +2599,188 @@ pub(crate) mod tests {
         where
             NextEntryId: FnMut() -> ImportedTranscriptEntryId,
         {
-            self.0
-                .send(thread::current().id())
-                .map_err(|_| io::Error::other("the test thread receiver closed"))?;
+            self.0.store(true, Ordering::SeqCst);
             Err(io::Error::other("fixture conversion rejection"))
+        }
+    }
+
+    impl ResilientImportedConversationConverter for ConversionReportingRejectConverter {
+        type RecordFailure = SyntheticRecordFailure;
+
+        fn convert_resilient<NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            _source: &[u8],
+            _next_entry_id: NextEntryId,
+        ) -> Result<ImportedConversationConversionReport<Self::RecordFailure>, Self::Error>
+        where
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(ImportedConversationConversionReport::NoValidRecords {
+                skipped_records: vec![ImportedConversationSkippedRecord::new(
+                    1,
+                    SyntheticRecordFailure,
+                )]
+                .into_boxed_slice(),
+            })
+        }
+    }
+
+    impl StreamingResilientImportedConversationConverter for ConversionReportingRejectConverter {
+        fn convert_resilient_from_reader<Reader, NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            mut source: Reader,
+            _maximum_record_bytes: u64,
+            _next_entry_id: NextEntryId,
+        ) -> impl Iterator<
+            Item = Result<
+                ImportedConversationStreamItem<Self::RecordFailure>,
+                StreamConversionError<Self::Error>,
+            >,
+        > + Send
+        where
+            Reader: std::io::BufRead + Send,
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
+        {
+            let conversion_started = Arc::clone(&self.0);
+            std::iter::once_with(move || {
+                source
+                    .fill_buf()
+                    .map_err(|_| StreamConversionError::SourceRead)?;
+                conversion_started.store(true, Ordering::SeqCst);
+                Ok(ImportedConversationStreamItem::Skipped(
+                    ImportedConversationSkippedRecord::new(
+                    1,
+                    SyntheticRecordFailure,
+                    ),
+                ))
+            })
+        }
+    }
+
+    struct BusyRecordReaderConverter {
+        started: Arc<AtomicBool>,
+        stopped: Arc<AtomicBool>,
+    }
+
+    impl ImportedConversationConverter for BusyRecordReaderConverter {
+        type Error = io::Error;
+
+        fn format(&self) -> ImportedConversationFormat {
+            ImportedConversationFormat::CodexRolloutJsonlV1
+        }
+
+        fn convert<NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            _source: &[u8],
+            _next_entry_id: NextEntryId,
+        ) -> Result<ImportedConversation, Self::Error>
+        where
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            panic!("the fixture uses only streamed conversion")
+        }
+    }
+
+    impl ResilientImportedConversationConverter for BusyRecordReaderConverter {
+        type RecordFailure = SyntheticRecordFailure;
+
+        fn convert_resilient<NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            _source: &[u8],
+            _next_entry_id: NextEntryId,
+        ) -> Result<ImportedConversationConversionReport<Self::RecordFailure>, Self::Error>
+        where
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            panic!("the fixture uses only streamed conversion")
+        }
+    }
+
+    impl StreamingResilientImportedConversationConverter for BusyRecordReaderConverter {
+        fn convert_resilient_from_reader<Reader, NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            mut source: Reader,
+            _maximum_record_bytes: u64,
+            _next_entry_id: NextEntryId,
+        ) -> impl Iterator<
+            Item = Result<
+                ImportedConversationStreamItem<Self::RecordFailure>,
+                StreamConversionError<Self::Error>,
+            >,
+        > + Send
+        where
+            Reader: std::io::BufRead + Send,
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
+        {
+            let started = Arc::clone(&self.started);
+            let stopped = Arc::clone(&self.stopped);
+            std::iter::once_with(move || {
+                struct StopGuard(Arc<AtomicBool>);
+
+                impl Drop for StopGuard {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+
+                let _guard = StopGuard(stopped);
+                started.store(true, Ordering::SeqCst);
+                loop {
+                    if source.fill_buf().is_err() {
+                        return Err(StreamConversionError::SourceRead);
+                    }
+                    std::thread::yield_now();
+                }
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct PendingPublicationStorage {
+        started: Arc<Notify>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl signalbox_persistence::conversation_import::ImportedRawBlobStorage
+        for PendingPublicationStorage
+    {
+        fn maximum_blob_bytes(&self) -> u64 {
+            u64::MAX
+        }
+
+        fn publish(
+            &self,
+            _blobs: Box<[signalbox_persistence::conversation_import::ImportedRawBlobInput]>,
+        ) -> signalbox_persistence::conversation_import::ImportedRawBlobPublicationFuture<'_>
+        {
+            let started = Arc::clone(&self.started);
+            let cancelled = Arc::clone(&self.cancelled);
+            Box::pin(async move {
+                struct CancellationGuard(Arc<AtomicBool>);
+
+                impl Drop for CancellationGuard {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+
+                let _guard = CancellationGuard(cancelled);
+                started.notify_one();
+                std::future::pending().await
+            })
+        }
+
+        fn read(
+            &self,
+            _blobs: Box<[signalbox_blob_store::ExpectedBlob]>,
+        ) -> signalbox_persistence::conversation_import::ImportedRawBlobReadFuture<'_> {
+            Box::pin(async { Err(ImportedRawBlobStorageError::Unavailable) })
         }
     }
 

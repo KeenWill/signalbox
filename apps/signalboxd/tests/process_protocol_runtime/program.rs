@@ -7,6 +7,153 @@ use signalbox_process_protocol::{
 };
 use signalbox_process_protocol::{ProgramRunCancellationOutcome, ProgramRunCancelledState};
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn evaluation_commands_print_sealed_scorecards_without_provider_access()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_evaluation().await?;
+    let inputs = tempfile::tempdir()?;
+    let corpus = inputs.path().join("corpus.json");
+    let responses = inputs.path().join("responses.json");
+    std::fs::write(
+        &corpus,
+        include_bytes!("../../../../crates/approval-judge-eval/corpora/seed-v1.json"),
+    )?;
+    std::fs::write(
+        &responses,
+        include_bytes!("../../../../crates/approval-judge-eval/corpora/seed-responses-v1.json"),
+    )?;
+    let output = tokio::process::Command::new(signalbox_test_bin::test_bin_path!(
+        "signalbox-approval-judge-eval"
+    ))
+    .arg("--socket")
+    .arg(runtime.socket())
+    .arg(&corpus)
+    .arg(&responses)
+    .output()
+    .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let scorecard: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let expected: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../../../crates/approval-judge-eval/corpora/seed-scorecard-v1.json"
+    ))?;
+    assert_eq!(scorecard, expected);
+    let live = inputs.path().join("cases.jsonl");
+    std::fs::write(
+        &live,
+        "{\"name\":\"synthetic-read\",\"category\":\"workspace_benign\",\"tool\":\"current_time\",\"arguments\":\"{}\",\"expected\":\"approve\",\"notes\":\"synthetic label\"}\ninvalid unselected row\n",
+    )?;
+    std::fs::write(
+        &responses,
+        r#"{"responses":[{"disposition":"approve","rationale":"Recorded permission."}]}"#,
+    )?;
+    let output =
+        tokio::process::Command::new(signalbox_test_bin::test_bin_path!("approval-judge-eval"))
+            .arg("--socket")
+            .arg(runtime.socket())
+            .arg("--cases")
+            .arg(&live)
+            .args(["--repeats", "1", "--limit", "1", "--responses"])
+            .arg(&responses)
+            .output()
+            .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let live_scorecard: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(live_scorecard["total_cases"], 1);
+    assert_eq!(live_scorecard["correct_majorities"], 1);
+    assert_eq!(live_scorecard["failed_calls"], 0);
+    let sealed: Vec<sqlx::types::Json<serde_json::Value>> =
+        sqlx::query_scalar("SELECT scorecard FROM evaluation_run")
+            .fetch_all(&runtime.pool)
+            .await?;
+    assert_eq!(sealed.len(), 2);
+    assert!(sealed.iter().any(|value| value.0 == expected));
+    assert!(sealed.iter().any(|value| value.0 == live_scorecard));
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn evaluation_launch_rejects_corrupt_inputs_before_pinning() -> Result<(), Box<dyn Error>> {
+    const RESPONSES: &[u8] =
+        br#"{"responses":[{"disposition":"approve","rationale":"Synthetic permission."}]}"#;
+    let mut fixture = CommittedBlobReadFixture::from_runtime(
+        RunningRuntime::start_evaluation().await?,
+        RESPONSES,
+    )
+    .await?;
+    let corpus = br#"{"name":"synthetic-read","category":"workspace_benign","tool":"current_time","arguments":"{}","expected":"approve"}"#;
+    let corpus_digest = CanonicalBlobDigest::from_digest(BlobDigest::digest(corpus));
+    commit_blob_upload(
+        &mut fixture.connection,
+        corpus_digest,
+        CanonicalU64::new(corpus.len() as u64),
+        corpus,
+    )
+    .await?;
+    // The replica remains valid JSON with its catalogued length but different content.
+    let corrupt = std::str::from_utf8(RESPONSES)?.replace("Synthetic", "Corrupted");
+    std::fs::write(fixture.object_path(), corrupt)?;
+    let run_id = CanonicalUuid::from_uuid(uuid::Uuid::new_v4());
+    let registration_id = CanonicalUuid::from_uuid(uuid::Uuid::new_v4());
+    let request = ClientRequest::LaunchEvaluation {
+        run_id,
+        registration_id,
+        input: signalbox_process_protocol::EvaluationInput {
+            corpus: corpus_digest,
+            format: signalbox_process_protocol::EvaluationCorpusFormat::Live,
+            cases: vec![0],
+            repeats: 1,
+            recorded_responses: Some(fixture.wire_digest),
+        },
+    };
+    assert!(matches!(
+        program_request(&mut fixture.connection, request.clone()).await?,
+        ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    std::fs::write(fixture.object_path(), RESPONSES)?;
+    let corpus_path = fixture
+        .runtime
+        .blob_storage_root
+        .as_ref()
+        .unwrap()
+        .store
+        .join(BlobObjectKey::for_digest(corpus_digest.into_digest()).as_str());
+    let corrupt = std::str::from_utf8(corpus)?.replace("current_time", "altered_time");
+    assert_ne!(corrupt.as_bytes(), corpus);
+    std::fs::write(&corpus_path, corrupt)?;
+    assert!(matches!(
+        program_request(&mut fixture.connection, request.clone()).await?,
+        ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    std::fs::write(corpus_path, corpus)?;
+    assert!(matches!(
+        program_request(&mut fixture.connection, request).await?,
+        ServerMessage::ProgramRunStarted { .. }
+    ));
+    assert!(matches!(
+        program_result(&mut fixture.connection, run_id)
+            .await?
+            .outcome,
+        ProgramRunState::Succeeded { .. }
+    ));
+    fixture.runtime.stop().await
+}
+
 async fn program_request(
     connection: &mut Connection,
     request: ClientRequest,

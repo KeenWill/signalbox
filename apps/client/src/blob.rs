@@ -157,6 +157,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::ProgramRegistered { .. }
         | ServerMessage::ProgramRunStarted { .. }
         | ServerMessage::ProgramRunRead { .. }
+        | ServerMessage::EvaluationScorecardRead { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }

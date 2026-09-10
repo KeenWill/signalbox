@@ -97,16 +97,25 @@ duration policies use Jiff's friendly unsigned-duration syntax.
 `max_review_findings_per_run` must be finite and no greater than its domain
 bound. A finite `max_blob_replica_count` must admit the durable catalog's full
 store bound. Disabling reconciliation requires an unbounded nudge buffer.
-`repository_watch_webhook_retention` must be positive and finite and governs
-authenticated webhook `expires_at` and merged-pull-request baseline retention as
-described in [repository watch](repo-watch.md). `codex_cli_version_probe_bound`
-bounds a credential-free startup probe of the configured Codex executable, and a
-missing, malformed, zero, unsuccessful, or mismatched probe fails configuration
-before the socket opens. One valid document yields correlated immutable
-in-memory catalogs: the domain `ModelTargetCatalog` for execution-time target
-resolution and the `RuntimeModelCatalog` for the provider bridge. The optional
+Conversation import admits no source-size setting; a `conversation_import` table
+is rejected by the closed top-level schema. `repository_watch_webhook_retention`
+must be positive and finite and governs authenticated webhook `expires_at` and
+merged-pull-request baseline retention as described in
+[repository watch](repo-watch.md). `codex_cli_version_probe_bound` bounds a
+credential-free startup probe of the configured Codex executable, and a missing,
+malformed, zero, unsuccessful, or mismatched probe fails configuration before
+the socket opens. One valid document yields correlated immutable in-memory
+catalogs: the domain `ModelTargetCatalog` for execution-time target resolution
+and the `RuntimeModelCatalog` for the provider bridge. The optional
 `repository_watch_poll_request_budget` defaults to 100 and accepts integers from
 2 through 1,000, including the quota preflight request in each attempt.
+
+`guard_recovery_initial_delay` and `guard_recovery_maximum_delay` are positive
+durations, with the maximum no smaller than the initial delay.
+`guard_recovery_elapsed_bound` limits one guard-loss recovery episode, including
+pool shutdown and runtime reconstruction; `none` leaves it unbounded.
+[Turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md) owns
+reacquisition before admission resumes.
 
 The `[[tool_mappings]]` array composes the deployment-mapped tool families and
 binds one configured workspace root. Each session's workspace root is derived
@@ -145,7 +154,9 @@ human wait when that wait first reaches the daemon. The optional
 delegated requests, and when it is absent the judge reuses the request-producing
 call's selection. The optional `[workspace_instructions]` table is either absent
 or present at version one, and its bounded `registered_roots` array names the
-instruction directories registered outside a session's workspace.
+instruction directories registered outside a session's workspace. Its entry,
+finding, source-byte, and elapsed discovery limits accept finite values or
+`"none"` ([workspace-instructions.md](workspace-instructions.md)).
 
 A credential profile names one account. Its `CredentialReference` is the
 non-secret name that appears in configuration, errors, logs, and durable
@@ -779,9 +790,11 @@ removes `push_credential_file` takes effect for registration at the next boot.
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
 true; false disables module polling, webhook listening, and command dispatch,
-including convergence-sweep target enrollment and session commissioning.
-Repository-watch duration fields accept integer seconds or Jiff's friendly
-unsigned-duration strings; rule cooldowns retain whole-second precision.
+including convergence-sweep target enrollment and session commissioning. The
+`workflows_enabled` boolean defaults to false and selects workflow-driven
+observations when true. Repository-watch duration fields accept integer seconds
+or Jiff's friendly unsigned-duration strings; rule cooldowns retain whole-second
+precision.
 
 The optional `[convergence]` table deserializes the
 [shared convergence policy](../../crates/convergence/README.md), including its
@@ -875,8 +888,6 @@ credential pool admission as [contention](credential-availability.md).
 
 ## Planned
 
-- Guard recovery initial and maximum backoff delays and an elapsed bound
-  admitting `none`; see [daemon survival design](../design/daemon-survival.md).
 - Input-modality declarations on model and serving-target records, and the blob
   catalog they feed: [design](../design/configuration-and-credentials.md).
 - Dated rate windows on a model entry; the present grammar admits one flat rate,

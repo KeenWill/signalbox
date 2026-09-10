@@ -62,6 +62,47 @@ impl ImportedRawRecordConversionDigest {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ImportedConversationSourceDigest([u8; 32]);
 
+/// Incremental derivation of an ordered imported-source digest.
+pub struct ImportedConversationSourceDigestBuilder {
+    digest: Sha256,
+    expected_records: u64,
+    observed_records: u64,
+}
+
+impl ImportedConversationSourceDigestBuilder {
+    /// Starts a digest for an exact format and accepted-record count.
+    pub fn new(format: ImportedConversationFormat, expected_records: u64) -> Self {
+        let mut digest = Sha256::new();
+        update_length_framed(&mut digest, SOURCE_DIGEST_DOMAIN);
+        update_length_framed(&mut digest, format.digest_tag());
+        digest.update(expected_records.to_be_bytes());
+        Self {
+            digest,
+            expected_records,
+            observed_records: 0,
+        }
+    }
+
+    /// Adds the next accepted raw-record hash in physical order.
+    pub fn push(&mut self, hash: ImportedRawRecordHash) -> bool {
+        let Some(observed) = self.observed_records.checked_add(1) else {
+            return false;
+        };
+        if observed > self.expected_records {
+            return false;
+        }
+        update_length_framed(&mut self.digest, hash.as_bytes());
+        self.observed_records = observed;
+        true
+    }
+
+    /// Finishes only after the declared number of hashes was supplied.
+    pub fn finish(self) -> Option<ImportedConversationSourceDigest> {
+        (self.observed_records == self.expected_records)
+            .then(|| ImportedConversationSourceDigest(self.digest.finalize().into()))
+    }
+}
+
 impl ImportedConversationSourceDigest {
     /// Reconstitutes one stored source digest.
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {

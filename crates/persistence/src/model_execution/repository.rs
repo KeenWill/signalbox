@@ -58,13 +58,18 @@ impl PostgresModelCallRepository {
         }
     }
 
-    /// Observes whether the session's park suspends further scheduler operations.
+    /// Observes whether a park or pending supervision suspends further scheduler operations.
     pub async fn session_is_parked(
         &self,
         session: SessionId,
     ) -> Result<bool, ModelCallRepositoryError> {
         Ok(sqlx::query_scalar(
-            "SELECT state_kind = 'parked' FROM session_lifecycle WHERE session_id = $1",
+            "SELECT COALESCE(lifecycle.state_kind = 'parked', true)
+                    OR COALESCE(supervision.supervision_pending, false)
+               FROM session
+               LEFT JOIN session_lifecycle AS lifecycle USING (session_id)
+               LEFT JOIN session_supervision AS supervision USING (session_id)
+              WHERE session_id = $1",
         )
         .bind(session_id_to_uuid(session))
         .fetch_one(&self.pool)
@@ -305,9 +310,8 @@ impl PostgresModelCallRepository {
                 -- A dedicated compaction call's reported input is the source
                 -- text its summary replaced: the summary removed exactly that
                 -- material from model visibility, so none of it bounds the next
-                -- request. Its reported output is the retained summary, and the
-                -- content the compaction did not summarize stays in the
-                -- projected membership below.
+                -- request. The admitted summary and unsummarized content are
+                -- measured from the projected membership below.
                 SELECT 'context_compaction'::text AS call_kind,
                        latest.model_call_id,
                        latest.source_frontier_id AS context_frontier_id,
@@ -315,7 +319,7 @@ impl PostgresModelCallRepository {
                        false AS input_is_retained,
                        NULL::numeric AS retained_input_tokens,
                        NULL::numeric AS retained_output_tokens,
-                       true AS output_is_retained,
+                       false AS output_is_retained,
                        latest.usage_input_tokens,
                        latest.usage_output_tokens,
                        latest.usage_cache_creation_input_tokens,
@@ -341,8 +345,7 @@ impl PostgresModelCallRepository {
                 -- An ordinary call's reported input is its own frontier, so
                 -- only projected members outside that membership are new. A
                 -- compaction call reports no retained input at all: every
-                -- projected member except its summary is content the next
-                -- request adds to that summary.
+                -- projected member contributes its admitted content bytes.
                 SELECT prospective.source_session_id, prospective.semantic_entry_id
                   FROM UNNEST($2::uuid[], $3::uuid[])
                        AS prospective(source_session_id, semantic_entry_id)
@@ -513,6 +516,7 @@ impl PostgresModelCallRepository {
                                entry.delegation_result_spawning_tool_request_id
                          WHERE entry.semantic_entry_id IS NULL OR NOT (
                                    latest_call.usage_output_tokens IS NOT NULL
+                               AND latest_call.output_is_retained
                                AND (
                                       (
                                           latest_call.call_kind = 'ordinary'
@@ -946,7 +950,7 @@ impl PostgresModelCallRepository {
             prepared.session(),
             prepared.turn(),
             prepared.attempt(),
-            serving_evidence,
+            serving_evidence.clone(),
             credential_reference,
             &self.credential_pools,
         )

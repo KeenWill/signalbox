@@ -143,7 +143,8 @@ pub enum PrepareToolContinuationOutcome {
     Checkpointed(signalbox_domain::ModelCallId),
     TargetUnavailable(boxed::Box<signalbox_domain::FailedModelCallTurn>),
     PoolExhausted(boxed::Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
-    ContextCompactionRequired(boxed::Box<signalbox_domain::ContextHeadroomExhaustedModelCallTurn>),
+    ContextCompactionRequired(signalbox_domain::TurnId),
+    ContextCompactionFailed(boxed::Box<signalbox_domain::FailedModelCallTurn>),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

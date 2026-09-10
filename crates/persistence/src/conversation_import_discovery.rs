@@ -3,7 +3,7 @@
 //! These reads deliberately avoid [`crate::conversation_import::ImportedConversationRepository`]:
 //! catalog and entry-window callers never reconstruct a complete imported aggregate.
 
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -13,7 +13,7 @@ use signalbox_domain::{
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::conversation_import::{
-    DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_UNDERIVABLE, decode_format,
+    DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_UNDERIVABLE, STORAGE_VERSION, decode_format,
     decode_source_speaker, encode_format, positive_u64,
 };
 
@@ -180,6 +180,44 @@ pub struct ImportedEntryWindow {
     pub items: Vec<ImportedEntryProjection>,
 }
 
+/// Once-validated immutable entry inventory for one inspection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImportedEntryInventory {
+    conversation: ImportedConversationId,
+    entry_count: u64,
+}
+
+impl ImportedEntryInventory {
+    /// Returns the immutable imported-conversation identity.
+    pub const fn conversation(&self) -> ImportedConversationId {
+        self.conversation
+    }
+
+    /// Returns the exact validated entry count.
+    pub const fn entry_count(&self) -> u64 {
+        self.entry_count
+    }
+}
+
+/// One database- and byte-bounded page of selectively decoded imported entries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportedEntryPage {
+    items: Vec<ImportedEntryProjection>,
+    has_more: bool,
+}
+
+impl ImportedEntryPage {
+    /// Returns entries in ascending immutable position.
+    pub fn items(&self) -> &[ImportedEntryProjection] {
+        &self.items
+    }
+
+    /// Reports whether a later immutable position exists.
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
 #[derive(signalbox_derive::OperatorError)]
 /// A durable import projection failed checked decoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -265,6 +303,156 @@ impl ImportedConversationDiscoveryRepository {
     /// Uses the supplied pool for short read-only projections.
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Validates the complete immutable entry inventory once for an inspection.
+    pub async fn entry_inventory(
+        &self,
+        conversation: ImportedConversationId,
+    ) -> Result<Option<ImportedEntryInventory>, ImportedConversationDiscoveryError> {
+        let row = sqlx::query(
+            "SELECT conversation.storage_version,
+                    conversation.declared_entry_count,
+                    inventory.actual_entry_count,
+                    inventory.inventory_is_complete
+               FROM imported_conversation AS conversation
+               CROSS JOIN LATERAL (
+                   SELECT COUNT(*)::numeric AS actual_entry_count,
+                          COUNT(*)::numeric = conversation.declared_entry_count
+                          AND MIN(imported_entry_position) = 1
+                          AND MAX(imported_entry_position) =
+                              conversation.declared_entry_count
+                              AS inventory_is_complete
+                     FROM imported_transcript_entry
+                    WHERE imported_conversation_id =
+                          conversation.imported_conversation_id
+               ) AS inventory
+              WHERE conversation.imported_conversation_id = $1",
+        )
+        .bind(conversation.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.try_get::<i16, _>("storage_version")? != STORAGE_VERSION {
+            return Err(
+                ImportedConversationDiscoveryCorruption::Unsupported("storage version").into(),
+            );
+        }
+        let entry_count = positive(row.try_get("declared_entry_count")?, "declared entry count")?;
+        let actual_entry_count =
+            positive(row.try_get("actual_entry_count")?, "actual entry count")?;
+        if actual_entry_count != entry_count || !row.try_get::<bool, _>("inventory_is_complete")? {
+            return Err(ImportedConversationDiscoveryCorruption::Inconsistent(
+                "immutable entry inventory",
+            )
+            .into());
+        }
+        Ok(Some(ImportedEntryInventory {
+            conversation,
+            entry_count,
+        }))
+    }
+
+    /// Reads one entry page while bounding projected text bytes in PostgreSQL.
+    pub async fn entry_page(
+        &self,
+        inventory: ImportedEntryInventory,
+        after_position: u64,
+        limit: NonZeroUsize,
+        maximum_text_bytes_per_entry: usize,
+        maximum_text_bytes: usize,
+    ) -> Result<ImportedEntryPage, ImportedConversationDiscoveryError> {
+        let limit = i64::try_from(limit.get())
+            .map_err(|_| ImportedConversationDiscoveryRequestError::WindowTooLarge)?;
+        let maximum_text_bytes_per_entry = maximum_text_bytes_per_entry
+            .checked_add(3)
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or(ImportedConversationDiscoveryRequestError::WindowTooLarge)?;
+        let maximum_text_bytes = i64::try_from(maximum_text_bytes)
+            .map_err(|_| ImportedConversationDiscoveryRequestError::WindowTooLarge)?;
+        let projected_text_bytes = i64::from(maximum_text_bytes_per_entry);
+        let rows = sqlx::query(
+            "WITH candidates AS (
+                 SELECT imported_entry_position, imported_transcript_entry_id,
+                        raw_record_position, record_entry_position,
+                        source_speaker_kind, content_encoding, content_kind,
+                        CASE WHEN get_byte(content_encoding, 2) = 1
+                                  AND get_byte(content_encoding, 3) = 2
+                             THEN octet_length(content_encoding) - 12
+                             ELSE 0
+                        END::bigint AS text_bytes
+                   FROM imported_transcript_entry
+                  WHERE imported_conversation_id = $1
+                    AND imported_entry_position > $2
+                  ORDER BY imported_entry_position
+                  LIMIT $3
+             ), budgeted AS (
+                 SELECT candidates.*,
+                        COALESCE(
+                            SUM(LEAST(text_bytes, $4::bigint - 3)) OVER (
+                                ORDER BY imported_entry_position
+                                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                            ),
+                            0
+                        )::bigint AS prior_projected_text_bytes
+                   FROM candidates
+             ), projected AS (
+                 SELECT budgeted.*,
+                        GREATEST(
+                            LEAST(
+                                $4::bigint - 3,
+                                $5::bigint - prior_projected_text_bytes
+                            ),
+                            0
+                        )::bigint AS text_byte_budget
+                   FROM budgeted
+             )
+             SELECT imported_entry_position, imported_transcript_entry_id,
+                    raw_record_position, record_entry_position,
+                    source_speaker_kind,
+                    substring(content_encoding FROM 1 FOR 12) AS content_header,
+                    CASE WHEN get_byte(content_encoding, 2) = 1
+                              AND get_byte(content_encoding, 3) = 2
+                         THEN substring(
+                             content_encoding FROM 13
+                             FOR (text_byte_budget + 3)::integer
+                         )
+                    END AS content_text_prefix,
+                    content_kind,
+                    octet_length(content_encoding)::bigint AS content_bytes,
+                    (text_byte_budget + 3)::bigint AS content_projected_bytes
+               FROM projected
+              ORDER BY imported_entry_position",
+        )
+        .bind(inventory.conversation.into_uuid())
+        .bind(Decimal::from(after_position))
+        .bind(limit)
+        .bind(projected_text_bytes)
+        .bind(maximum_text_bytes)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut items = Vec::with_capacity(rows.len());
+        let mut expected_position = after_position.checked_add(1);
+        for row in &rows {
+            let item = decode_entry(inventory.conversation, row)?;
+            if Some(item.frontier.position) != expected_position {
+                return Err(ImportedConversationDiscoveryCorruption::Inconsistent(
+                    "immutable entry page",
+                )
+                .into());
+            }
+            expected_position = expected_position.and_then(|position| position.checked_add(1));
+            items.push(item);
+        }
+        let last_position = items
+            .last()
+            .map_or(after_position, |item| item.frontier.position);
+        Ok(ImportedEntryPage {
+            items,
+            has_more: last_position < inventory.entry_count,
+        })
     }
 
     /// Reads one stable UUID-keyset page plus one bounded lookahead row.

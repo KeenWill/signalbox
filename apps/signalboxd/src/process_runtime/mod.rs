@@ -4,8 +4,8 @@ use std::{
     error::Error,
     fmt,
     future::Future,
-    io::{self, SeekFrom},
-    num::NonZeroU64,
+    io::{self, BufReader, Cursor, SeekFrom},
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
@@ -18,8 +18,8 @@ use signalbox_application::{
     CreateSessionError, CreateSessionFromImportedFrontierOutcome,
     CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
-    EligibilityNudge, ImportConversationError, ImportConversationOutcome,
-    ImportConversationService, ImportedConversationConverter, InProcessEligibilityNudge,
+    EligibilityNudge, ImportConversationOutcome, ImportedConversationDropFacts,
+    ImportedConversationIdGenerator, ImportedConversationStoreOutcome, InProcessEligibilityNudge,
     InProcessToolDispatchGate, ListConversationsService, ListSessionMetadataService,
     LoadSessionMetadataService, OperatorFailureClass, OverrideDeniedToolRequestService,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
@@ -27,7 +27,8 @@ use signalbox_application::{
     ReplaceSessionMetadataService, ReviewPassCompletionStatus, ReviewWorkflowCommand,
     ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
     ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
-    SessionMetadataListQuery, SessionTimelineEventKind, SubmitInputOutcome, SubmitInputRequest,
+    SessionMetadataListQuery, SessionTimelineEventKind,
+    StreamingResilientImportedConversationConverter, SubmitInputOutcome, SubmitInputRequest,
     SubmitInputService, SubmitInputTransaction, UpdateSessionPlacementOutcome,
     UpdateSessionPlacementRequest, UpdateSessionPlacementService,
     UuidV7CommissionedDispatchIdGenerator, UuidV7CreateSessionFromImportedFrontierIdGenerator,
@@ -36,11 +37,12 @@ use signalbox_application::{
 };
 use signalbox_blob_store::ExpectedBlob;
 use signalbox_conversation_import_claude_code::{
-    ClaudeCodeJsonlConversionError, ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConverter,
+    ClaudeCodeJsonlConversionError, ClaudeCodeJsonlConversionFailure,
+    ResilientClaudeCodeJsonlConverter,
 };
 use signalbox_conversation_import_codex::{
     CodexRolloutJsonlConversionError, CodexRolloutJsonlConversionFailure,
-    CodexRolloutJsonlConverter,
+    ResilientCodexRolloutJsonlConverter,
 };
 use signalbox_domain::{
     AcceptedInputId, Actor, BranchName, CancelledModelCallTurnIdentities, CommandPrincipal,
@@ -56,10 +58,9 @@ use signalbox_domain::{
     FrozenModelSelection, Goal, GoalBlockProvenance, GoalBlockedReasonKind,
     GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult, GoalEvent,
     GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
-    ImportedConversation, ImportedConversationFormat, ImportedConversationId,
+    ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
-    ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
-    ImportedTranscriptEntryInput, ImportedTranscriptPosition, ModelAlias, ModelCallId,
+    ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptPosition, ModelAlias, ModelCallId,
     ModelChangeAdjustment as DomainModelChangeAdjustment, ModelSelectionOverride,
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
@@ -116,7 +117,12 @@ use signalbox_persistence::{
     },
     conversation_import::{
         ImportedConversationRepository, ImportedConversationRepositoryError,
-        ImportedRawBlobStorageError,
+        ImportedRawBlobStorageError, StreamingImportedConversationError,
+        StreamingImportedConversationReport,
+    },
+    conversation_import_discovery::{
+        ImportedConversationDiscoveryError, ImportedConversationDiscoveryRepository,
+        ImportedEntryContentProjection,
     },
     conversation_listing::{ConversationListingRepository, ConversationListingRepositoryError},
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
@@ -189,11 +195,11 @@ use signalbox_process_protocol::{
     ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, LifecycleActorClass,
-    MAX_BLOB_READ_BYTES, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
-    ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
-    ModelCapabilities as WireModelCapabilities, ModelChangeAdjustment as WireModelChangeAdjustment,
-    ModelSelection as WireModelSelection, ModelSettingSource as WireModelSettingSource,
-    ModelSettingsOverlay as WireModelSettingsOverlay,
+    MAX_BLOB_READ_BYTES, MAX_CONTENT_FRAGMENT_BYTES, MAX_FRAME_BYTES, MetadataActor,
+    MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost,
+    ModelCallState, ModelCallTokenUsage, ModelCapabilities as WireModelCapabilities,
+    ModelChangeAdjustment as WireModelChangeAdjustment, ModelSelection as WireModelSelection,
+    ModelSettingSource as WireModelSettingSource, ModelSettingsOverlay as WireModelSettingsOverlay,
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
     ModelSettingsSnapshot as WireModelSettingsSnapshot, OperatorStatusEndMessage,
     OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
@@ -373,6 +379,7 @@ mod reload;
 mod request;
 use request::handle_request;
 mod credential_exclusions;
+mod evaluation;
 mod program;
 use credential_exclusions::*;
 use program::*;

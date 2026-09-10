@@ -433,6 +433,19 @@ impl GoalRepository {
                     .await?;
             }
 
+            if matches!(command.action(), GoalUserAction::Resume(_)) {
+                crate::session_lifecycle::lock_supervision_frontier(
+                    &mut transaction,
+                    command.session(),
+                )
+                .await
+                .map_err(|error| match error {
+                    crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source) => {
+                        GoalRepositoryError::Database(source)
+                    }
+                    _ => GoalCorruption::Inconsistent("supervision delegation frontier").into(),
+                })?;
+            }
             let session_exists = lock_session(&mut transaction, command.session()).await?;
 
             if matches!(command.action(), GoalUserAction::Stop { .. })
@@ -548,6 +561,20 @@ impl GoalRepository {
         insert_command(&mut transaction, &command, &result).await?;
         match &result {
             GoalCommandResult::Applied(event) => {
+                if matches!(command.action(), GoalUserAction::Resume(_)) {
+                    crate::session_lifecycle::reconcile_supervision_in_transaction(
+                        &mut transaction,
+                        command.session(),
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source)
+                        | crate::session_lifecycle::SessionLifecycleRepositoryError::CommitAmbiguous(
+                            source,
+                        ) => GoalRepositoryError::Database(source),
+                        _ => GoalCorruption::Inconsistent("supervised session reconstitution").into(),
+                    })?;
+                }
                 insert_event(&mut transaction, command.session(), event).await?;
                 if matches!(command.action(), GoalUserAction::Attach(_)) {
                     crate::session_lifecycle::confer_ownership_in_transaction(
@@ -750,8 +777,8 @@ impl GoalRepository {
     /// Reconciled ambiguity is infrastructure work whether it originated at
     /// startup or from the live watchdog. A definitive provider response is
     /// likewise external only for transient rate limiting, overload, or an
-    /// internal provider failure. A continuation closed for configured context
-    /// headroom is also daemon-owned. Session-actionable provider failures
+    /// internal provider failure. Automatic compaction failure is also
+    /// daemon-owned. Session-actionable provider failures
     /// remain chargeable.
     pub async fn unchargeable_automatic_resume_turns(
         &self,
@@ -782,6 +809,7 @@ impl GoalRepository {
               WHERE lifecycle.session_id = $1
                 AND lifecycle.turn_id = ANY($2::uuid[])
                 AND (recovery.state_kind = 'reconciled'
+                     OR lifecycle.terminal_cause_kind = 'context_compaction_failed'
                      OR headroom.terminal_attempt_id IS NOT NULL
                      OR terminal_call.terminal_provider_failure_cause IN
                         ('rate_limited', 'overloaded', 'provider_internal'))
