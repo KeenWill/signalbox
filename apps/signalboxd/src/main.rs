@@ -2288,23 +2288,24 @@ async fn run_hub_incarnation(
     };
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let approval_judge_repository_watch = repository_watch_runtime.clone();
-    let repository_watch_worker = match repository_watch_runtime {
-        Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
-        None => None,
-    };
+    let mut repository_watch_worker = None;
     let reconstruct = async {
-        configuration_reload.recover().await.map_err(|_| {
-            erase_startup_database_cause(
-                RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
-            )
-        })?;
         startup_goal_resumption_result(
             goal_disposition
                 .reconcile_automatic_resumptions_after_restart()
                 .await,
             guard_recovery.is_recovering(),
-        )
+        )?;
+        repository_watch_worker = match repository_watch_runtime {
+            Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
+            None => None,
+        };
+        configuration_reload.recover().await.map_err(|_| {
+            erase_startup_database_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
+            )
+        })
     };
     let recovery_failure = match await_while_guarded(&mut database, reconstruct).await {
         GuardedAwait::Completed(Ok(())) => None,
