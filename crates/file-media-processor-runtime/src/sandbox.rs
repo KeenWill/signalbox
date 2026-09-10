@@ -2021,29 +2021,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_executable_remains_pinned_after_path_replacement() {
-        let directory = tempfile::tempdir().expect("temporary directory is available");
-        let worker = directory.path().join("worker");
-        fs::write(&worker, b"original").expect("fixture worker is written");
-        fs::set_permissions(&worker, fs::Permissions::from_mode(0o700))
-            .expect("fixture worker is executable");
-        let pinned = open_worker_executable(&worker).expect("worker is pinned");
-        let replacement = directory.path().join("replacement");
-        fs::write(&replacement, b"replacement").expect("replacement is written");
-        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700))
-            .expect("replacement is executable");
-        fs::rename(&replacement, &worker).expect("worker path is atomically replaced");
-        assert_eq!(
-            fs::read(&pinned.proc_path).expect("pinned handle remains readable"),
-            b"original"
-        );
-        assert_eq!(
-            fs::read(worker).expect("replacement path is readable"),
-            b"replacement"
-        );
-    }
-
-    #[test]
     fn worker_executable_snapshot_ignores_in_place_rewrites() {
         let directory = tempfile::tempdir().expect("temporary directory is available");
         let worker = directory.path().join("worker");

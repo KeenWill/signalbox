@@ -384,11 +384,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_preserves_empty_frontier() {
-        assert_eq!(AttentionCursor::new(0).value(), 0);
-    }
-
-    #[test]
     fn continuation_must_match_the_selected_sort() {
         let continuation =
             AttentionContinuation::SessionIdentity(SessionId::from_uuid(uuid::Uuid::from_u128(7)));

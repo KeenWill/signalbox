@@ -58,7 +58,7 @@ pub(super) async fn result_byte_limit(
     ));
     let Some(limit) = limits
         .iter()
-        .find_map(|((candidate, _), limit)| (*candidate == target).then_some(*limit))
+        .find_map(|((candidate, _), limit)| (*candidate == target).then_some(limit))
     else {
         return Ok(None);
     };

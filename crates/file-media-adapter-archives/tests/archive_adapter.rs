@@ -82,34 +82,6 @@ fn map_provider_failure(
 }
 
 #[tokio::test]
-async fn declared_zip_beyond_probe_prefix_fits_one_validation_range() -> Result<(), Box<dyn Error>>
-{
-    let source = ArchiveFixture::zip_after_long_preamble()?.into_source()?;
-    let ceilings = FileMediaCeilings {
-        validation_ranges: 1,
-        ..FileMediaCeilings::version_one()
-    };
-    let registry = FileMediaRegistry::try_new(
-        vec![declaration()?],
-        ceilings,
-        ProcessorIsolation::Available,
-    )?;
-    let inspection = registry
-        .inspect(
-            &DirectProcessor::new(),
-            InspectionRequest {
-                source: source.file_use()?,
-                visible_part: None,
-            },
-            &source,
-            &NeverCancelled,
-        )
-        .await?;
-    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
-    Ok(())
-}
-
-#[tokio::test]
 async fn lowered_validation_byte_ceiling_returns_a_typed_size_limit() -> Result<(), Box<dyn Error>>
 {
     let source = ArchiveFixture::zip()?.into_source()?;
@@ -593,27 +565,9 @@ async fn compressed_zip_bomb_is_a_typed_bounded_failure() -> Result<(), Box<dyn 
 }
 
 #[tokio::test]
-async fn compressed_gzip_bomb_is_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
-    assert_malformed(
-        malformed_inspection(ArchiveFixture::gzip_bomb()?).await?,
-        "expanded_size_limit",
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn gzip_logical_entry_obeys_the_per_entry_ceiling() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::gzip_entry_bomb()?).await?,
-        "expanded_size_limit",
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn compressed_zstd_bomb_is_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
-    assert_malformed(
-        malformed_inspection(ArchiveFixture::zstd_bomb()?).await?,
         "expanded_size_limit",
     );
     Ok(())

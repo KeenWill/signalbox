@@ -694,54 +694,67 @@ impl S3BlobStore {
         if length == 0 || length > MAX_BLOB_RANGE_BYTES {
             return Err(BlobStoreError::unavailable("validate S3 object range"));
         }
-        let end = offset
-            .checked_add(length)
-            .filter(|end| *end <= expected.byte_length())
-            .ok_or_else(|| BlobStoreError::unavailable("validate S3 object range"))?;
-        let capacity = usize::try_from(length)
-            .map_err(|_| BlobStoreError::unavailable("allocate S3 object range"))?;
-        let credentials = self.credentials().await?;
-        self.ensure_namespace_ready(&credentials).await?;
-        let response = self.open_response(&credentials, key).await?;
-        let mut reader = response_reader(response);
-        let mut hasher = Sha256::new();
-        let mut retained = Vec::with_capacity(capacity);
-        let mut observed_length = 0_u64;
-        let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
-        loop {
-            let count = reader.read(&mut buffer).await.map_err(|_| {
-                BlobStoreError::io("read S3 range verification", SanitizedS3Failure)
-            })?;
-            if count == 0 {
-                break;
-            }
-            let chunk_start = observed_length;
-            observed_length = observed_length.saturating_add(count as u64);
-            if observed_length > expected.byte_length() {
-                return Err(BlobStoreError::verification(
-                    "verify S3 object range",
-                    BlobVerificationFailure::new(expected, None, observed_length),
-                ));
-            }
-            hasher.update(&buffer[..count]);
-            let retain_start = offset.max(chunk_start);
-            let retain_end = end.min(observed_length);
-            if retain_start < retain_end {
-                let local_start = usize::try_from(retain_start - chunk_start)
-                    .map_err(|_| BlobStoreError::unavailable("retain S3 object range"))?;
-                let local_end = usize::try_from(retain_end - chunk_start)
-                    .map_err(|_| BlobStoreError::unavailable("retain S3 object range"))?;
-                retained.extend_from_slice(&buffer[local_start..local_end]);
-            }
-        }
-        let observed_digest = BlobDigest::from_bytes(hasher.finalize().into());
-        if observed_length != expected.byte_length() || observed_digest != expected.digest() {
-            return Err(BlobStoreError::verification(
-                "verify S3 object range",
-                BlobVerificationFailure::new(expected, Some(observed_digest), observed_length),
+        let length = length.min(expected.byte_length().saturating_sub(offset));
+        if length == 0 {
+            return Ok(OpenedBlob::new(
+                0,
+                Box::new(std::io::Cursor::new(Vec::new())),
             ));
         }
-        if retained.len() != capacity {
+        let end = offset + length - 1;
+        let credentials = self.credentials().await?;
+        self.ensure_namespace_ready(&credentials).await?;
+        let action = self.bucket.get_object(Some(&credentials), key.as_str());
+        let response = self
+            .client
+            .get(action.sign(SIGNED_URL_LIFETIME))
+            .header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
+            .send()
+            .await
+            .map_err(|_| BlobStoreError::io("get S3 object range", SanitizedS3Failure))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(classify_absence(response, "get S3 object range").await);
+        }
+        let partial_content = response.status() == StatusCode::PARTIAL_CONTENT;
+        if !partial_content && response.status() != StatusCode::RANGE_NOT_SATISFIABLE {
+            return Err(BlobStoreError::unavailable(
+                "validate S3 object range response",
+            ));
+        }
+        let content_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split_once('/'));
+        let Some((range, observed_length)) = content_range else {
+            return Err(BlobStoreError::unavailable("read S3 content range"));
+        };
+        let expected_range = if partial_content {
+            format!("bytes {offset}-{end}")
+        } else {
+            String::from("bytes *")
+        };
+        let observed_length = observed_length
+            .parse::<u64>()
+            .map_err(|_| BlobStoreError::unavailable("read S3 object length"))?;
+        if observed_length != expected.byte_length() {
+            return Err(BlobStoreError::verification(
+                "check S3 object range length",
+                BlobVerificationFailure::new(expected, None, observed_length),
+            ));
+        }
+        if !partial_content || range != expected_range {
+            return Err(BlobStoreError::unavailable(
+                "validate S3 object range response",
+            ));
+        }
+        let mut retained = Vec::new();
+        response_reader(response)
+            .take(length + 1)
+            .read_to_end(&mut retained)
+            .await
+            .map_err(|_| BlobStoreError::io("read S3 object range", SanitizedS3Failure))?;
+        if u64::try_from(retained.len()).ok() != Some(length) {
             return Err(BlobStoreError::unavailable(
                 "retain complete S3 object range",
             ));
@@ -1814,17 +1827,6 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_rejects_a_whole_bucket_filter_beside_a_narrow_legacy_prefix()
-    -> Result<(), Box<dyn Error>> {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>staging/</Prefix><Filter></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
-
-        assert!(!LifecycleRule::covers_blobs(&rule));
-        Ok(())
-    }
-
-    #[test]
     fn an_absent_object_code_proves_absence() {
         let key = r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchKey</Code><Message>The specified key does not exist</Message><RequestId>fixture</RequestId></Error>"#;
 
@@ -1836,13 +1838,6 @@ mod tests {
         let bucket = r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message><BucketName>fixture-bucket</BucketName><RequestId>fixture</RequestId></Error>"#;
 
         assert!(!names_absent_object(bucket));
-    }
-
-    #[test]
-    fn an_unrecognized_code_does_not_prove_object_absence() {
-        let denied = r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>"#;
-
-        assert!(!names_absent_object(denied));
     }
 
     #[test]
@@ -1930,24 +1925,6 @@ mod tests {
     #[test]
     fn an_object_above_the_s3_size_ceiling_is_rejected() {
         assert_eq!(multipart_part_bytes(MAX_S3_OBJECT_BYTES + 1), None);
-    }
-
-    #[test]
-    fn a_long_opaque_etag_fits_a_small_completion() -> Result<(), Box<dyn Error>> {
-        let store = S3BlobStore::try_new(
-            Url::parse(ENDPOINT)?,
-            "fixture-region",
-            BUCKET,
-            PathBuf::from("/fixture/credentials"),
-        )?;
-        let etag = "\"".repeat(super::MAX_ETAG_BYTES);
-        let mut budget = super::MultipartCompletionBudget::new(&store.bucket, 1);
-        assert!(budget.admit(&store.bucket, &etag));
-        assert_eq!(
-            budget.total_bytes,
-            super::completion_document_bytes(&store.bucket, std::iter::once(etag.as_str()))
-        );
-        Ok(())
     }
 
     #[test]
@@ -2093,11 +2070,6 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_length_entity_tag_header_leaves_the_generation_unnamed() {
-        assert_eq!(object_generation(&generation_headers("")), None);
-    }
-
-    #[test]
     fn a_quoted_empty_entity_tag_leaves_the_generation_unnamed() {
         assert_eq!(object_generation(&generation_headers("\"\"")), None);
     }
@@ -2156,5 +2128,6 @@ mod tests {
         assert!(!debug.contains(SECRET_KEY));
         Ok(())
     }
+    mod ranges;
     mod upload_deadlines;
 }

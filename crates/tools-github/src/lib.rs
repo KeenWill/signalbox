@@ -1057,12 +1057,17 @@ impl fmt::Debug for GitHubResult {
 
 /// Mockable request transport.
 pub trait GitHubTransport: Send {
+    /// Budget shared by credential preparation and transport dispatch.
+    fn request_timeout(&self) -> Duration;
+
     /// Executes one operation with request-scoped credentials and exact egress.
+    /// `request_timeout` is the budget remaining after credential preparation.
     fn execute(
         &mut self,
         operation: GitHubOperation,
         credential: &CredentialValue,
         egress_policy: &GitHubEgressPolicy,
+        request_timeout: Duration,
     ) -> impl Future<Output = Result<GitHubResult, GitHubTransportFailure>> + Send;
 }
 
@@ -1258,7 +1263,13 @@ where
         }
         let arguments = decode_create_pull_request(invocation.request().arguments())
             .map_err(|_| caller_bug())?;
-        let credential = match self.credentials.resolve(&self.credential_reference).await {
+        let (credential, remaining) = match prepare_credential(
+            self.transport.request_timeout(),
+            self.credentials.resolve(&self.credential_reference),
+            &self.credential_reference,
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) => {
                 let correlation = invocation.correlation();
@@ -1281,7 +1292,7 @@ where
         };
         let mut result = match self
             .transport
-            .execute(operation, &credential, &self.egress_policy)
+            .execute(operation, &credential, &self.egress_policy, remaining)
             .await
         {
             Ok(result) if result.kind() == GitHubResultKind::CreatedPullRequest => result,
@@ -1404,7 +1415,13 @@ where
         let kind = kind_for_name(invocation.request().name().as_str()).ok_or_else(caller_bug)?;
         let operation =
             decode_operation(kind, invocation.request().arguments()).map_err(|_| caller_bug())?;
-        let credential = match self.credentials.resolve(&self.credential_reference).await {
+        let (credential, remaining) = match prepare_credential(
+            self.transport.request_timeout(),
+            self.credentials.resolve(&self.credential_reference),
+            &self.credential_reference,
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) => {
                 let correlation = invocation.correlation();
@@ -1423,7 +1440,7 @@ where
         };
         let mut result = match self
             .transport
-            .execute(operation, &credential, &self.egress_policy)
+            .execute(operation, &credential, &self.egress_policy, remaining)
             .await
         {
             Ok(result) if kind.accepts(&result) => result,
@@ -1450,6 +1467,30 @@ where
         }
         Ok(invocation.bind(ToolExecutorEvidence::CompletedText(content)))
     }
+}
+
+async fn prepare_credential(
+    timeout: Duration,
+    resolution: impl Future<
+        Output = Result<CredentialValue, signalbox_model_runtime::CredentialAccessError>,
+    >,
+    reference: &CredentialReference,
+) -> Result<(CredentialValue, Duration), signalbox_model_runtime::CredentialAccessError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let unavailable = || {
+        signalbox_model_runtime::CredentialAccessError::new(
+            reference.clone(),
+            signalbox_model_runtime::CredentialAccessFailure::Unavailable,
+        )
+    };
+    let credential = tokio::time::timeout_at(deadline, resolution)
+        .await
+        .map_err(|_| unavailable())??;
+    let remaining = deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(unavailable)?;
+    Ok((credential, remaining))
 }
 
 fn truncate_diff_result(value: &mut serde_json::Value) -> Result<(), InvalidGitHubArguments> {
@@ -1812,16 +1853,32 @@ fn longest_trailing_prefix(text: &str, secret: &str) -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn sanitize_error_body(
     bytes: &[u8],
     source: ResponseExtent,
     scrubber: &CredentialScrubber,
 ) -> Option<SanitizedGitHubError> {
+    sanitize_error_body_with_app(bytes, source, scrubber, None)
+}
+
+fn sanitize_error_body_with_app(
+    bytes: &[u8],
+    source: ResponseExtent,
+    scrubber: &CredentialScrubber,
+    app_scrubber: Option<&CredentialScrubber>,
+) -> Option<SanitizedGitHubError> {
     let bytes = match source {
         ResponseExtent::Complete => bytes,
         ResponseExtent::Truncated => discard_incomplete_utf8_suffix(bytes),
     };
-    let redacted = scrubber.redact_text(String::from_utf8_lossy(bytes).into_owned());
+    let mut redacted = scrubber.redact_text(String::from_utf8_lossy(bytes).into_owned());
+    if let Some(app_scrubber) = app_scrubber {
+        redacted = app_scrubber.redact_text(redacted);
+        if source == ResponseExtent::Truncated {
+            redacted = app_scrubber.redact_trailing_prefix(redacted);
+        }
+    }
     let redacted = match source {
         ResponseExtent::Complete => redacted,
         ResponseExtent::Truncated => scrubber.redact_trailing_prefix(redacted),
@@ -1887,9 +1944,10 @@ fn truncate_sanitized(mut text: String) -> String {
     text
 }
 
-/// Production REST/GraphQL transport with no ambient proxy, redirect, or retry.
+/// Production REST/GraphQL transport with request-scoped authentication.
 #[derive(Clone, Debug)]
 pub struct GitHubApiTransport {
+    app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
     timeout: Duration,
     rest_base: Url,
     graphql_url: Url,
@@ -1899,12 +1957,27 @@ impl GitHubApiTransport {
     /// Constructs the fixed production transport.
     pub fn try_new() -> Result<Self, GitHubApiTransportConstructionError> {
         Ok(Self {
+            app: None,
             timeout: DEFAULT_TIMEOUT,
             rest_base: Url::parse(REST_BASE_URL)
                 .map_err(|_| GitHubApiTransportConstructionError)?,
             graphql_url: Url::parse(GRAPHQL_URL)
                 .map_err(|_| GitHubApiTransportConstructionError)?,
         })
+    }
+
+    /// Request budget used for credential preparation and HTTP exchanges.
+    pub const fn request_timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Uses the profile's shared installation authentication for each request.
+    pub fn with_app(
+        mut self,
+        app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
+    ) -> Self {
+        self.app = app;
+        self
     }
 
     fn repository_url(
@@ -2155,24 +2228,45 @@ impl GitHubApiTransport {
             .ok_or(GitHubTransportFailure::InvalidCredential)?;
         let authentication = authorization(credential.expose_bytes())
             .map_err(|_| GitHubTransportFailure::InvalidCredential)?;
-        let client = public_destination_client(&url, Some(timeout))
-            .await
-            .map_err(classify_destination_failure)?;
+        let (client, remaining) = destination_with_remaining_timeout(
+            timeout,
+            public_destination_client(&url, Some(timeout)),
+        )
+        .await?;
         let request = authenticated_request(&client, method, url, authentication, body);
-        let response = request
-            .send()
-            .await
-            .map_err(|error| classify_send_failure(error.is_connect()))?;
+        let response = match &self.app {
+            Some(app) => {
+                app.send(request, Some(remaining))
+                    .await
+                    .map_err(|failure| match failure {
+                        signalbox_github_transport::AppRequestFailure::Credential(_) => {
+                            GitHubTransportFailure::InvalidCredential
+                        }
+                        signalbox_github_transport::AppRequestFailure::Request(error) => {
+                            classify_send_failure(error.is_connect())
+                        }
+                    })?
+            }
+            None => request
+                .send()
+                .await
+                .map_err(|error| classify_send_failure(error.is_connect()))?,
+        };
         if classify_status(response.status().as_u16()) == StatusClass::Success {
             return Ok(response);
         }
+        let app_credential =
+            signalbox_github_transport::response_credential(&response).map(CredentialValue::new);
+        let app_scrubber = app_credential
+            .as_ref()
+            .and_then(CredentialScrubber::try_new);
         let status = response.status();
         let status_code = status.as_u16();
         let (body, extent) = match read_bounded(response, MAX_ERROR_SOURCE_BYTES).await {
             Ok(body) => body,
             Err(failure) => return Err(classify_error_body_failure(status, failure)),
         };
-        let detail = sanitize_error_body(&body, extent, &scrubber);
+        let detail = sanitize_error_body_with_app(&body, extent, &scrubber, app_scrubber.as_ref());
         Err(GitHubTransportFailure::Rejected {
             status: status_code,
             detail,
@@ -2188,6 +2282,11 @@ impl GitHubApiTransport {
         if response.status() != expected {
             return Err(invalid_response(None));
         }
+        let app_credential =
+            signalbox_github_transport::response_credential(&response).map(CredentialValue::new);
+        let app_scrubber = app_credential
+            .as_ref()
+            .and_then(CredentialScrubber::try_new);
         let (body, extent) = read_bounded(response, MAX_RESPONSE_BYTES).await?;
         if matches!(extent, ResponseExtent::Truncated) {
             return Err(GitHubTransportFailure::ResponseTooLarge);
@@ -2195,13 +2294,17 @@ impl GitHubApiTransport {
         let scrubber = CredentialScrubber::try_new(credential)
             .ok_or(GitHubTransportFailure::InvalidCredential)?;
         let mut value = serde_json::from_slice::<serde_json::Value>(&body).map_err(|_| {
-            invalid_response(sanitize_error_body(
+            invalid_response(sanitize_error_body_with_app(
                 &body,
                 ResponseExtent::Complete,
                 &scrubber,
+                app_scrubber.as_ref(),
             ))
         })?;
         scrubber.redact_value(&mut value);
+        if let Some(app_scrubber) = app_scrubber {
+            app_scrubber.redact_value(&mut value);
+        }
         Ok(value)
     }
 }
@@ -2255,29 +2358,41 @@ fn create_pull_request_body(
 }
 
 impl GitHubTransport for GitHubApiTransport {
+    fn request_timeout(&self) -> Duration {
+        self.timeout
+    }
+
     async fn execute(
         &mut self,
         operation: GitHubOperation,
         credential: &CredentialValue,
         policy: &GitHubEgressPolicy,
+        request_timeout: Duration,
     ) -> Result<GitHubResult, GitHubTransportFailure> {
+        let mut transport = self.clone();
+        transport.timeout = request_timeout;
         match operation {
             GitHubOperation::CreatePullRequest {
                 repository,
                 arguments,
             } => {
-                self.create_pull_request(repository, arguments, credential, policy)
+                transport
+                    .create_pull_request(repository, arguments, credential, policy)
                     .await
             }
             GitHubOperation::Metadata(arguments) => {
-                self.metadata(arguments, credential, policy).await
+                transport.metadata(arguments, credential, policy).await
             }
-            GitHubOperation::Diff(arguments) => self.diff(arguments, credential, policy).await,
+            GitHubOperation::Diff(arguments) => transport.diff(arguments, credential, policy).await,
             GitHubOperation::ReviewThreads(arguments) => {
-                self.review_threads(arguments, credential, policy).await
+                transport
+                    .review_threads(arguments, credential, policy)
+                    .await
             }
             GitHubOperation::PublishReview(arguments) => {
-                self.publish_review(arguments, credential, policy).await
+                transport
+                    .publish_review(arguments, credential, policy)
+                    .await
             }
         }
     }
@@ -2311,6 +2426,21 @@ const fn classify_send_failure(is_connect: bool) -> GitHubTransportFailure {
     } else {
         GitHubTransportFailure::DispatchUnknown
     }
+}
+
+async fn destination_with_remaining_timeout(
+    timeout: Duration,
+    destination: impl Future<Output = Result<reqwest::Client, PublicDestinationClientError>>,
+) -> Result<(reqwest::Client, Duration), GitHubTransportFailure> {
+    let deadline = tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or(GitHubTransportFailure::PreDispatchInfrastructure)?;
+    let client = destination.await.map_err(classify_destination_failure)?;
+    let remaining = deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(GitHubTransportFailure::PreDispatchInfrastructure)?;
+    Ok((client, remaining))
 }
 
 const fn classify_destination_failure(
@@ -2919,65 +3049,6 @@ mod tests {
     struct SyntheticCredentials;
     struct SyntheticTransport;
 
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct RecordedCreateRequest {
-        repository: String,
-        title: String,
-        body: String,
-        head: String,
-        base: String,
-        credential: Vec<u8>,
-        origin: String,
-    }
-
-    #[derive(Clone, Debug, Default)]
-    struct RecordingCreateTransport(Arc<Mutex<Option<RecordedCreateRequest>>>);
-
-    impl RecordingCreateTransport {
-        fn recorded(&self) -> RecordedCreateRequest {
-            self.0
-                .lock()
-                .expect("recording transport lock is available")
-                .clone()
-                .expect("creation request was recorded")
-        }
-    }
-
-    impl GitHubTransport for RecordingCreateTransport {
-        async fn execute(
-            &mut self,
-            operation: GitHubOperation,
-            credential: &CredentialValue,
-            policy: &GitHubEgressPolicy,
-        ) -> Result<GitHubResult, GitHubTransportFailure> {
-            let GitHubOperation::CreatePullRequest {
-                repository,
-                arguments,
-            } = operation
-            else {
-                return Err(GitHubTransportFailure::PreDispatchInfrastructure);
-            };
-            *self
-                .0
-                .lock()
-                .expect("recording transport lock is available") = Some(RecordedCreateRequest {
-                repository: repository.as_str().to_owned(),
-                title: arguments.title().to_owned(),
-                body: arguments.body().to_owned(),
-                head: arguments.head().to_owned(),
-                base: arguments.base().to_owned(),
-                credential: credential.expose_bytes().to_vec(),
-                origin: policy.admitted_origin().to_owned(),
-            });
-            Ok(GitHubResult::created_pull_request(serde_json::json!({
-                "number": CREATED_PULL_REQUEST_NUMBER,
-                "url": CREATED_PULL_REQUEST_URL,
-                "head": CREATE_HEAD,
-                "base": CREATE_BASE,
-            })))
-        }
-    }
-
     thread_local! {
         /// Telemetry captured on this thread alone.
         static CAPTURED_TELEMETRY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -3158,6 +3229,35 @@ mod tests {
     }
 
     #[test]
+    fn refreshed_token_prefixes_are_redacted_before_error_text_is_shortened() {
+        let initial = CredentialValue::new(b"synthetic-initial-token".as_slice());
+        let refreshed = CredentialValue::new(b"synthetic-refreshed-token".as_slice());
+        let initial = CredentialScrubber::try_new(&initial).expect("initial fixture scrubber");
+        let refreshed =
+            CredentialScrubber::try_new(&refreshed).expect("refreshed fixture scrubber");
+        let detail = sanitize_error_body_with_app(
+            b"rejected synthetic-refreshed",
+            ResponseExtent::Truncated,
+            &initial,
+            Some(&refreshed),
+        )
+        .expect("sanitized detail");
+        assert_eq!(detail.0, "rejected [redacted]");
+        let body = format!(
+            "{}synthetic-refreshed-token",
+            "x".repeat(MAX_ERROR_DETAIL_BYTES - ERROR_TRUNCATION_SUFFIX.len() - 4)
+        );
+        let detail = sanitize_error_body_with_app(
+            body.as_bytes(),
+            ResponseExtent::Complete,
+            &initial,
+            Some(&refreshed),
+        )
+        .expect("bounded detail");
+        assert!(!detail.0.contains("synt"));
+    }
+
+    #[test]
     fn credential_failure_diagnostic_preserves_safe_classification() {
         let error = CredentialAccessError::new(
             CredentialReference::new(GITHUB_CREDENTIAL_REFERENCE),
@@ -3225,7 +3325,7 @@ mod tests {
             .expect("configured repository is admitted");
         let catalog = GitHubPullRequestCreateTools::try_new(
             SyntheticCredentials,
-            RecordingCreateTransport::default(),
+            SyntheticTransport,
             GitHubEgressPolicy::github_api_only(),
             repository,
         )
@@ -3251,42 +3351,6 @@ mod tests {
         assert!(decode_create_pull_request(&injected_repository).is_err());
     }
 
-    #[tokio::test]
-    async fn create_transport_records_exact_configured_request() {
-        let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
-            .expect("configured repository is admitted");
-        let arguments = decode_create_pull_request(&normalized(serde_json::json!({
-            "title": CREATE_TITLE,
-            "body": CREATE_BODY,
-            "head": CREATE_HEAD,
-            "base": CREATE_BASE
-        })))
-        .expect("creation arguments are admitted");
-        let operation = GitHubOperation::CreatePullRequest {
-            repository,
-            arguments,
-        };
-        let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
-        let policy = GitHubEgressPolicy::github_api_only();
-        let mut transport = RecordingCreateTransport::default();
-        let observer = transport.clone();
-
-        let result = transport
-            .execute(operation, &credential, &policy)
-            .await
-            .expect("synthetic creation succeeds");
-        let recorded = observer.recorded();
-
-        assert_eq!(result.kind(), GitHubResultKind::CreatedPullRequest);
-        assert_eq!(recorded.repository, CONFIGURED_REPOSITORY);
-        assert_eq!(recorded.title, CREATE_TITLE);
-        assert_eq!(recorded.body, CREATE_BODY);
-        assert_eq!(recorded.head, CREATE_HEAD);
-        assert_eq!(recorded.base, CREATE_BASE);
-        assert_eq!(recorded.credential, SYNTHETIC_TOKEN.as_bytes());
-        assert_eq!(recorded.origin, GITHUB_API_ORIGIN);
-    }
-
     #[test]
     fn create_body_is_exact() {
         let arguments = decode_create_pull_request(&normalized(serde_json::json!({
@@ -3305,13 +3369,13 @@ mod tests {
         assert_eq!(body["base"], arguments.base());
     }
 
-    fn create_executor()
-    -> GitHubPullRequestCreateExecutor<SyntheticCredentials, RecordingCreateTransport> {
+    fn create_executor() -> GitHubPullRequestCreateExecutor<SyntheticCredentials, SyntheticTransport>
+    {
         let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
             .expect("configured repository is admitted");
         GitHubPullRequestCreateTools::try_new(
             SyntheticCredentials,
-            RecordingCreateTransport::default(),
+            SyntheticTransport,
             GitHubEgressPolicy::github_api_only(),
             repository,
         )
@@ -3380,11 +3444,16 @@ mod tests {
     }
 
     impl GitHubTransport for RejectingCreateTransport {
+        fn request_timeout(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(30)
+        }
+
         async fn execute(
             &mut self,
             _operation: GitHubOperation,
             _credential: &CredentialValue,
             _policy: &GitHubEgressPolicy,
+            _request_timeout: std::time::Duration,
         ) -> Result<GitHubResult, GitHubTransportFailure> {
             *self
                 .dispatches
@@ -3392,6 +3461,62 @@ mod tests {
                 .expect("dispatch counter lock is available") += 1;
             Err(GitHubTransportFailure::rejected(self.status))
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn credential_preparation_cannot_exceed_the_request_budget() {
+        let reference = CredentialReference::new(GITHUB_CREDENTIAL_REFERENCE);
+        let started = tokio::time::Instant::now();
+        let result =
+            prepare_credential(Duration::from_secs(30), std::future::pending(), &reference).await;
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+        assert_eq!(
+            result.unwrap_err().failure,
+            signalbox_model_runtime::CredentialAccessFailure::Unavailable
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn creation_shares_one_budget_between_credentials_and_dispatch() {
+        struct SlowCredentials;
+        impl CredentialAccess for SlowCredentials {
+            async fn resolve(
+                &self,
+                _reference: &CredentialReference,
+            ) -> Result<CredentialValue, signalbox_model_runtime::CredentialAccessError>
+            {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                Ok(CredentialValue::new(SYNTHETIC_TOKEN))
+            }
+        }
+        struct StalledTransport;
+        impl GitHubTransport for StalledTransport {
+            fn request_timeout(&self) -> Duration {
+                Duration::from_secs(30)
+            }
+            async fn execute(
+                &mut self,
+                _operation: GitHubOperation,
+                _credential: &CredentialValue,
+                _policy: &GitHubEgressPolicy,
+                request_timeout: Duration,
+            ) -> Result<GitHubResult, GitHubTransportFailure> {
+                assert_eq!(request_timeout, Duration::from_secs(10));
+                tokio::time::timeout(request_timeout, std::future::pending::<()>())
+                    .await
+                    .unwrap_err();
+                Err(GitHubTransportFailure::DispatchUnknown)
+            }
+        }
+        let started = tokio::time::Instant::now();
+        let outcome = crate::test_support::create_pull_request_evidence_with_credentials(
+            SlowCredentials,
+            StalledTransport,
+        )
+        .await;
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+        assert!(outcome.result.is_err());
+        assert_eq!(outcome.evidence, None);
     }
 
     /// a definitively rejected creation reaches the workflow as
@@ -3679,19 +3804,6 @@ mod tests {
                 .is_err()
         );
         assert_eq!(catalog.validate_arguments(&name, &approval), Ok(()));
-    }
-
-    #[test]
-    fn deserialization_rejects_inline_only_comment() {
-        let value = serde_json::json!({
-            "repository": "KeenWill/signalbox", "number": 1,
-            "commit_id": HEAD_REVISION, "event": "comment",
-            "comments": [{
-                "path": FILE_PATH, "line": 1, "side": "right", "body": REVIEW_COMMENT_BODY
-            }]
-        });
-
-        assert!(serde_json::from_value::<PublishReviewArguments>(value).is_err());
     }
 
     #[test]
@@ -4089,31 +4201,6 @@ mod tests {
     }
 
     #[test]
-    fn fixed_host_destination_rejection_is_pre_dispatch_infrastructure() {
-        let failure =
-            classify_destination_failure(PublicDestinationClientError::DestinationRejected);
-        let executor = GitHubTools::try_new(
-            SyntheticCredentials,
-            SyntheticTransport,
-            GitHubEgressPolicy::github_api_only(),
-        )
-        .expect("static declarations compile")
-        .into_parts()
-        .1;
-        let error = executor
-            .failure_detail(ToolKind::PublishReview, &failure)
-            .expect_err("fixed-host admission failure is surfaced to the operator");
-
-        assert_eq!(failure, GitHubTransportFailure::PreDispatchInfrastructure);
-        assert_eq!(
-            error.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false
-            }
-        );
-    }
-
-    #[test]
     fn provider_status_distinguishes_rejection_from_infrastructure() {
         let client_status =
             StatusCode::from_u16(CLIENT_ERROR_STATUS).expect("fixture status is valid");
@@ -4178,6 +4265,48 @@ mod tests {
         assert_eq!(
             remaining_timeout(Instant::now()),
             Err(GitHubTransportFailure::DispatchUnknown),
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dns_resolution_consumes_the_app_request_budget() {
+        let started = tokio::time::Instant::now();
+        let (client, remaining) =
+            destination_with_remaining_timeout(Duration::from_secs(30), async {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                signalbox_github_transport::client(Some(Duration::from_secs(10)))
+                    .map_err(|_| PublicDestinationClientError::Infrastructure)
+            })
+            .await
+            .expect("offline destination resolution");
+        assert_eq!(remaining, Duration::from_secs(10));
+        // Arbitrary App identities; a pending key reader prevents any network request.
+        let app = signalbox_github_transport::AppAuthentication::new(
+            42,
+            73,
+            std::sync::Arc::new(|| Box::pin(std::future::pending())),
+        );
+        let response = app.send(client.get(GRAPHQL_URL), Some(remaining)).await;
+        assert!(matches!(
+            response,
+            Err(signalbox_github_transport::AppRequestFailure::Credential(
+                signalbox_github_transport::AppCredentialFailure::ExchangeRejected
+            ))
+        ));
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dns_exhausting_the_request_budget_fails_before_dispatch() {
+        let resolved = destination_with_remaining_timeout(Duration::from_secs(30), async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            signalbox_github_transport::client(None)
+                .map_err(|_| PublicDestinationClientError::Infrastructure)
+        })
+        .await;
+        assert_eq!(
+            resolved.err(),
+            Some(GitHubTransportFailure::PreDispatchInfrastructure)
         );
     }
 

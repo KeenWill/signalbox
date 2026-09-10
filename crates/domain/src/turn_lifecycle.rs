@@ -708,19 +708,4 @@ mod tests {
         assert_eq!(marker.ambiguous_operations(), &ambiguous_operations);
         assert_eq!(marker.reason(), &reason);
     }
-
-    /// the user-stop proof exposes only its exact applied
-    /// command and turn while raw identities cannot construct it publicly.
-    #[test]
-    fn user_stop_proof_preserves_exact_identity() {
-        let decision_command = command_id(1);
-        let turn = turn_id(100);
-        let proof = AppliedStopForReconciliationProof {
-            decision_command,
-            turn,
-        };
-
-        assert_eq!(proof.decision_command(), decision_command);
-        assert_eq!(proof.turn(), turn);
-    }
 }

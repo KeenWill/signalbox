@@ -187,7 +187,7 @@
     },
   });
   const capabilities = ["time", "random", "sleep", "subscribe", "session", "judge",
-    "exec-stage", "corpus", "eval-record", "blob", "register"];
+    "exec-stage", "corpus", "eval-record", "blob", "register", "repo-watch"];
 
   const unsigned = (value) => {
     if (typeof value !== "string" || !regexExec(/^(0|[1-9][0-9]*)$/, value)
@@ -225,7 +225,113 @@
     },
   });
 
+  const exact = (value, fields) => {
+    record(value);
+    if (objectKeys(value).length !== fields.length) throw new CodecTypeError("invalid evaluation fields");
+    for (let index = 0; index < fields.length; index++) if (!hasOwn(value, fields[index])) throw new CodecTypeError("missing evaluation field");
+    return value;
+  };
+  const each = (values, check) => {
+    for (let index = 0; index < values.length; index++) check(values[index]);
+  };
+  const nullable = (value, check) => value === null ? null : check(value);
+  const disposition = (value) => {
+    if (!contains(["approve", "deny", "escalate_to_human"], value)) throw new CodecTypeError("invalid disposition");
+    return value;
+  };
+  const u32 = (value) => {
+    if (!isInteger(value) || value < 0 || value > 4294967295) throw new CodecTypeError("expected u32");
+    return value;
+  };
+  const digest = (value) => {
+    const text = string(value);
+    if (text.length !== 71 || regexExec(/^sha256:[0-9a-f]{64}$/, text) === null) throw new CodecTypeError("invalid blob digest");
+    return value;
+  };
+  const list = (value, check) => {
+    if (!isArray(value)) throw new CodecTypeError("expected array");
+    for (let index = 0; index < value.length; index++) check(value[index]);
+    return value;
+  };
+  const judgeBinding = (value) => {
+    exact(value, ["selection", "target", "credential_reference", "provider_model", "contract_digest", "cache_accounting"]);
+    uuid(value.selection); uuid(value.target);
+    each(["credential_reference", "provider_model", "contract_digest", "cache_accounting"], (key) => string(value[key]));
+    return value;
+  };
+  const judgeUsage = (value) => {
+    exact(value, ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]);
+    each(objectKeys(value), (key) => nullable(value[key], unsigned));
+    return value;
+  };
+  const judgeAnswer = (value) => {
+    if (value.outcome === "ambiguous") return exact(value, ["outcome"]);
+    if (value.outcome === "verdict") {
+      exact(value, ["outcome", "call", "request_digest", "binding", "actual", "rationale", "provider_reported_model", "usage"]);
+      uuid(value.call); disposition(value.actual); string(value.rationale); nullable(value.provider_reported_model, string);
+    } else if (value.outcome === "failed") {
+      exact(value, ["outcome", "call", "request_digest", "binding", "cause", "provider_reported_model", "usage"]);
+      nullable(value.call, uuid); string(value.cause); nullable(value.provider_reported_model, string);
+    } else throw new CodecTypeError("invalid judge outcome");
+    digest(value.request_digest); judgeBinding(value.binding); judgeUsage(value.usage);
+    return value;
+  };
+  const corpusCase = (value) => {
+    exact(value, ["format", "case"]);
+    const item = record(value.case);
+    if (value.format === "offline") {
+      exact(item, ["id", "request", "expected", "label_provenance"]);
+      string(item.id); disposition(item.expected); string(item.label_provenance);
+      exact(item.request, ["tool", "arguments", "commissioned_goal", "session_template", "frozen_system_prompt"]);
+      string(item.request.tool); string(item.request.arguments);
+      each(["commissioned_goal", "session_template", "frozen_system_prompt"], (key) => nullable(item.request[key], string));
+    } else if (value.format === "live") {
+      exact(item, ["name", "category", "tool", "arguments", "expected", "goal", "template", "system_prompt", "dispatch", "notes"]);
+      each(["name", "tool", "arguments"], (key) => string(item[key]));
+      disposition(item.expected);
+      if (!contains(["git_push", "thread_ops", "network_egress", "credential_access", "destructive", "workspace_benign", "injection_resistance", "context_absent", "undecodable_arguments"], item.category)) throw new CodecTypeError("invalid case category");
+      each(["goal", "template", "system_prompt", "notes"], (key) => nullable(item[key], string));
+      // JSONL pull-request identities are transported as decimal strings.
+      nullable(item.dispatch, (fence) => {
+        exact(fence, ["repository", "pull_request", "head_sha", "head_repository", "head_branch", "base_branch"]);
+        unsigned(fence.pull_request);
+        each(["repository", "head_sha", "head_repository", "head_branch", "base_branch"], (key) => string(fence[key]));
+      });
+    } else throw new CodecTypeError("invalid corpus format");
+    return value;
+  };
+  const evaluation = freeze({
+    manifest: jsonCodec((value) => {
+      exact(value, ["corpus", "format", "cases", "repeats", "binding", "postures", "speculative_tools"]);
+      digest(value.corpus); judgeBinding(value.binding); list(value.cases, u32); u32(value.repeats);
+      if (!contains(["offline", "live"], value.format) || value.cases.length === 0 || value.repeats === 0 || (value.format === "offline" && value.repeats !== 1) || value.cases.length * value.repeats > 1000) throw new CodecTypeError("invalid evaluation trial plan");
+      record(value.postures);
+      each(objectKeys(value.postures), (key) => string(value.postures[key]));
+      list(value.speculative_tools, string);
+      return value;
+    }),
+    corpus() {
+      return answer(effect("corpus", "load", encodeJson({})), (value) => {
+        exact(value, ["cases", "corpus_digest", "rendered_digest"]);
+        list(value.cases, corpusCase); string(value.corpus_digest); string(value.rendered_digest);
+        return value;
+      });
+    },
+    judge(input) {
+      exact(input, ["trial"]);
+      return answer(effect("judge", "evaluate", encodeJson({ trial: u32(input.trial) })), judgeAnswer);
+    },
+    blob(input) {
+      exact(input, ["digest"]);
+      return answer(effect("blob", "read", encodeJson({ digest: digest(input.digest) })), (value) => {
+        exact(value, ["bytes"]);
+        return { bytes: byteArray(value.bytes) };
+      });
+    },
+  });
+
   return freeze({
+    evaluation,
     jsonCodec,
     primitives,
     defineProgram({ input, output, run }) {

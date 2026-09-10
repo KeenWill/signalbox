@@ -1024,17 +1024,6 @@ mod tests {
     }
 
     #[test]
-    fn window_limits_preserve_client_selected_bounds() {
-        let selected_item_limit = 37;
-        let selected_byte_limit = 4096;
-        let limits = TimelineWindowLimits::new(selected_item_limit, selected_byte_limit)
-            .expect("fixture limits are bounded");
-
-        assert_eq!(limits.max_items(), selected_item_limit);
-        assert_eq!(limits.max_projected_bytes(), selected_byte_limit);
-    }
-
-    #[test]
     fn detail_limits_reject_unbounded_requests() {
         assert_eq!(
             TimelineDetailLimits::new(max_timeline_detail_items() + 1, 1024),

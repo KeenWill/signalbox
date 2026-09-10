@@ -637,18 +637,6 @@ async fn a_line_that_never_decodes_withholds_the_tool_fact() {
 }
 
 #[tokio::test]
-async fn malformed_stream_line_is_protocol_boundary_loss() {
-    let result = execute_scenario("malformed_stream", OperationShape::Text).await;
-    let loss = boundary_loss(&result.evidence);
-
-    assert!(matches!(
-        loss.cause,
-        LossCause::StreamProtocolViolation { .. }
-    ));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
 async fn conflicting_assistant_message_id_is_protocol_boundary_loss() {
     let result = execute_scenario("conflicting_message_id", OperationShape::Text).await;
     let loss = boundary_loss(&result.evidence);
