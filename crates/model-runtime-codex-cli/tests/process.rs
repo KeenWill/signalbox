@@ -4642,3 +4642,75 @@ async fn capacity_probe_cancellation_kills_descendants() {
     );
     assert_recorded_process_group_exited(group_record);
 }
+
+#[tokio::test]
+async fn capacity_probe_retains_superseding_sparse_updates() {
+    let directory = tempfile::tempdir().expect("private probe fixture");
+    let runtime = capacity_probe_runtime(directory.path());
+    std::fs::write(
+        directory.path().join("fake-codex-capacity-probe"),
+        r#"{
+        "primary":{"usedPercent":1}, "secondary":{"usedPercent":2},
+        "updates":[{"primary":{"usedPercent":100}},{"secondary":{"usedPercent":25}}]
+    }"#,
+    )
+    .expect("newer notifications supersede the stale read response");
+    let snapshot = runtime
+        .read_credential_capacity(
+            &CredentialReference::new(CREDENTIAL_REFERENCE),
+            OFFLINE_HARNESS_TIMEOUT,
+        )
+        .await
+        .expect("notification capacity is retained");
+    assert_eq!(
+        snapshot
+            .windows
+            .iter()
+            .map(|window| window.remaining_percent)
+            .collect::<Vec<_>>(),
+        vec![0, 75],
+        "a sparse secondary update must preserve the exhausted primary window and supersede the stale read"
+    );
+}
+
+#[tokio::test]
+async fn capacity_probe_empty_updates_do_not_supersede_the_read() {
+    let directory = tempfile::tempdir().expect("private probe fixture");
+    let runtime = capacity_probe_runtime(directory.path());
+    std::fs::write(
+        directory.path().join("fake-codex-capacity-probe"),
+        r#"{
+        "primary":{"usedPercent":25}, "updates":[{}, {"primary":null,"secondary":null}]
+    }"#,
+    )
+    .expect("empty notifications carry no capacity evidence");
+    let snapshot = runtime
+        .read_credential_capacity(
+            &CredentialReference::new(CREDENTIAL_REFERENCE),
+            OFFLINE_HARNESS_TIMEOUT,
+        )
+        .await
+        .expect("read capacity remains usable");
+    assert_eq!(snapshot.windows[0].remaining_percent, 75);
+}
+
+#[tokio::test]
+async fn capacity_probe_retains_notifications_when_the_pending_read_is_rejected() {
+    let directory = tempfile::tempdir().expect("private probe fixture");
+    let runtime = capacity_probe_runtime(directory.path());
+    std::fs::write(
+        directory.path().join("fake-codex-capacity-probe"),
+        r#"{
+        "readError":true, "updates":[{"primary":{"usedPercent":100}}]
+    }"#,
+    )
+    .expect("valid capacity notification followed by a rejected read");
+    let snapshot = runtime
+        .read_credential_capacity(
+            &CredentialReference::new(CREDENTIAL_REFERENCE),
+            OFFLINE_HARNESS_TIMEOUT,
+        )
+        .await
+        .expect("valid notification remains usable despite the read error");
+    assert_eq!(snapshot.windows[0].remaining_percent, 0);
+}

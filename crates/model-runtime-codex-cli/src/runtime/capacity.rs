@@ -3,6 +3,7 @@ use super::{
     CODEX_ENVIRONMENT, CodexCliRuntime, DISABLED_CODEX_CLI_CAPABILITY_FEATURES, OperationHome,
     VersionProbeProcessGroup, operation_home,
 };
+use crate::app_server::frame::{AccountRateLimitsUpdated, RateLimits, RpcError};
 use serde_json::{Value, json};
 use signalbox_model_runtime::{CredentialReference, RateLimitSnapshot};
 use std::{
@@ -96,6 +97,7 @@ impl CodexCliRuntime {
         let exchange = async {
             let mut input = child.stdin.take().ok_or(Failed)?;
             let mut output = BufReader::new(child.stdout.take().ok_or(Failed)?);
+            let observed_at = SystemTime::now();
             write_frame(
                 &mut input,
                 json!({"id":1,"method":"initialize","params":{
@@ -103,22 +105,27 @@ impl CodexCliRuntime {
                 }}),
             )
             .await?;
-            read_response(&mut output, 1, self.event_limit).await?;
+            let (initialized, mut limits) = read_response(&mut output, 1, self.event_limit).await?;
+            if !initialized.is_some_and(|result| result.is_object()) {
+                return Err(Failed);
+            }
             write_frame(&mut input, json!({"method":"initialized"})).await?;
-            // A slow read must not overwrite an observation that began later.
-            let observed_at = SystemTime::now();
             write_frame(
                 &mut input,
                 json!({"id":2,"method":"account/rateLimits/read"}),
             )
             .await?;
-            let result = read_response(&mut output, 2, self.event_limit).await?;
-            let limits: crate::app_server::frame::AccountRateLimitsUpdated =
-                serde_json::from_value(result).map_err(|_| Failed)?;
-            limits
-                .rate_limits
-                .capacity_snapshot(observed_at)
-                .ok_or(Failed)
+            let (result, updates) = read_response(&mut output, 2, self.event_limit).await?;
+            let response = result
+                .map(serde_json::from_value::<AccountRateLimitsUpdated>)
+                .transpose()
+                .map_err(|_| Failed)?;
+            if updates.primary.is_some() || updates.secondary.is_some() {
+                limits.merge(updates);
+            } else if let Some(response) = response {
+                limits.merge(response.rate_limits);
+            }
+            limits.capacity_snapshot(observed_at).ok_or(Failed)
         };
         let result = tokio::time::timeout_at(deadline, exchange)
             .await
@@ -150,8 +157,9 @@ async fn read_response(
     output: &mut BufReader<tokio::process::ChildStdout>,
     id: u64,
     limit: usize,
-) -> Result<Value, CodexCliCapacityProbeError> {
+) -> Result<(Option<Value>, RateLimits), CodexCliCapacityProbeError> {
     use CodexCliCapacityProbeError::Failed;
+    let mut updates = RateLimits::default();
     loop {
         let mut bytes = Vec::new();
         (&mut *output)
@@ -167,11 +175,22 @@ async fn read_response(
             if frame.get("id").is_some() {
                 return Err(Failed);
             }
+            if frame.get("method").and_then(Value::as_str) == Some("account/rateLimits/updated") {
+                let notification: AccountRateLimitsUpdated =
+                    serde_json::from_value(frame.get("params").cloned().ok_or(Failed)?)
+                        .map_err(|_| Failed)?;
+                updates.merge(notification.rate_limits);
+            }
             continue;
         }
-        if frame.get("id").and_then(Value::as_u64) != Some(id) || frame.get("error").is_some() {
+        if frame.get("id").and_then(Value::as_u64) != Some(id)
+            || frame.get("error").is_some() == frame.get("result").is_some()
+        {
             return Err(Failed);
         }
-        return frame.get("result").cloned().ok_or(Failed);
+        if let Some(error) = frame.get("error") {
+            let _: RpcError = serde_json::from_value(error.clone()).map_err(|_| Failed)?;
+        }
+        return Ok((frame.get("result").cloned(), updates));
     }
 }
