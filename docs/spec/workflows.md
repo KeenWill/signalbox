@@ -148,8 +148,10 @@ one bounded `repo.observe` poll/webhook unit and returns its accepted frontier
 and event range or explicit ambiguity. The runner resolves admitted JavaScript
 artifacts from their registrations without requiring a native catalog. Empty
 `Now` requests receive the SDK's typed Unix-millisecond answer. Registration
-effects and durable primitives are composed; other effects are not composed. The
-process protocol and CLI expose registration, start, read and cancellation.
+effects and durable primitives are composed. The compiled catalog also contains
+`approval-judge-eval` revision `1`; `WorkflowRuntime::with_eval` supplies its
+Corpus, Judge and Blob adapters under [evaluation](eval-system.md). The process
+protocol and CLI expose registration, start, read and cancellation.
 `program register REGISTRATION_ID REGISTRATION_JSON` reads a registration
 description; `program start RUN_ID REGISTRATION_ID --input FILE` admits the
 program codec's exact input bytes. `program read RUN_ID` prints retained input,
@@ -214,10 +216,13 @@ production runner routes these effects through the current repository-watch
 runtime and its serialized checkout-aware command sink, acknowledging receipts
 after durable delivery before the next effect or any attempt outcome. Startup
 and shutdown also reconcile retained receipts against exact durable answers,
-including cancelled, faulted and completed runs. Observation adapters retain
-completed stage receipts in the module frontier; the existing repository worker
-admits runs and adopts interrupted receipts before subsequent observations when
-selected by `repository_watch.workflows_enabled`.
+including cancelled, faulted and completed runs. Checked module rejections fault
+only the requesting run; storage and delivery failures retain their
+infrastructure classification. The shared module pool remains available until
+all runtime owners finish, including workflow shutdown reconciliation.
+Observation adapters retain completed stage receipts in the module frontier; the
+existing repository worker admits runs and adopts interrupted receipts before
+subsequent observations when selected by `repository_watch.workflows_enabled`.
 
 The canonical SDK specifier is `@signalbox/program-sdk/v<version>`, where the
 version is a positive decimal integer with no leading zero. Frame-contract

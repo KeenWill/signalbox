@@ -207,20 +207,22 @@ impl RepoWatchStore {
         let next: Option<(Decimal, Uuid, Vec<u8>)> = sqlx::query_as("SELECT event.repository_event_ordinal, event.event_id, event.normalized_payload FROM rule active JOIN rule_revision revision ON revision.repository = active.repository AND revision.rule_id = active.rule_id AND revision.revision = active.active_revision LEFT JOIN rule_evaluation_cursor cursor ON cursor.repository = active.repository AND cursor.rule_id = active.rule_id AND cursor.rule_revision = active.active_revision JOIN gh_event event ON event.repository = active.repository AND event.repository_event_ordinal > GREATEST(revision.activated_after_event_ordinal, COALESCE(cursor.event_ordinal, 0)) WHERE active.repository = $1 AND active.rule_id = $2 AND active.active_revision = $3 AND revision.content_digest = $4 AND cursor.effect_id IS NULL ORDER BY event.repository_event_ordinal LIMIT 1")
             .bind(event.repository().as_str()).bind(rule.id().as_str()).bind(Decimal::from(rule.version().get())).bind(rule.content_digest().as_bytes().as_slice()).fetch_optional(&mut *tx).await?;
         let Some((ordinal, id, bytes)) = next else {
-            return Err(StoreError::InvalidDispatchBatch);
+            return Err(StoreError::WorkflowInputRejected);
         };
-        if ordinal.to_u64() != Some(context.ordinal)
-            || id != event.id().into_uuid()
-            || crate::event_decode::event(event.id(), &bytes).as_ref() != Some(event)
-            || context.plan() != plan
+        let retained_ordinal = ordinal
+            .to_u64()
+            .ok_or(StoreError::InvalidEventEvaluationPosition)?;
+        let retained_event = crate::event_decode::event(RepoWatchEventId::from_uuid(id), &bytes)
+            .ok_or(StoreError::InvalidRetainedEvent)?;
+        if retained_ordinal != context.ordinal || &retained_event != event || context.plan() != plan
         {
-            return Err(StoreError::InvalidDispatchBatch);
+            return Err(StoreError::WorkflowInputRejected);
         }
         let observation = baseline(&mut tx, event.repository()).await?;
         if crate::dispatch::singleton_key(rule.singleton_per(), event, observation.as_ref())
             != context.singleton_key
         {
-            return Err(StoreError::InvalidDispatchBatch);
+            return Err(StoreError::WorkflowInputRejected);
         }
         let batches = plan_repository_event(std::slice::from_ref(rule), event, ids, factory)
             .map_err(|_| StoreError::InvalidDispatchBatch)?;
@@ -295,7 +297,7 @@ async fn evaluation_receipt(
             .fetch_one(&mut **tx)
             .await?;
     if submission {
-        return Err(StoreError::InvalidDispatchBatch);
+        return Err(StoreError::WorkflowInputRejected);
     }
     let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
         "SELECT effect_input, effect_result FROM rule_evaluation_cursor WHERE effect_id = $1",
@@ -307,7 +309,7 @@ async fn evaluation_receipt(
         if retained == input {
             Ok(result)
         } else {
-            Err(StoreError::InvalidDispatchBatch)
+            Err(StoreError::WorkflowInputRejected)
         }
     })
     .transpose()
@@ -350,12 +352,12 @@ impl RepoWatchStore {
         .map_err(StoreError::from)
         .map_err(SubmissionError::Store)?;
         if evaluation {
-            return Err(SubmissionError::Store(StoreError::InvalidDispatchBatch));
+            return Err(SubmissionError::Store(StoreError::WorkflowInputRejected));
         }
         let retained: Option<(Uuid, Vec<u8>, Option<Vec<u8>>)> = sqlx::query_as("SELECT dispatch_ref, effect_input, effect_result FROM dispatch_ledger WHERE effect_id = $1").bind(effect).fetch_optional(&mut *tx).await.map_err(StoreError::from).map_err(SubmissionError::Store)?;
         if let Some((retained_dispatch, retained_input, result)) = retained {
             if retained_dispatch != dispatch.into_uuid() || retained_input != input {
-                return Err(SubmissionError::Store(StoreError::InvalidDispatchBatch));
+                return Err(SubmissionError::Store(StoreError::WorkflowInputRejected));
             }
             if let Some(result) = result {
                 return Ok(result);
@@ -364,7 +366,7 @@ impl RepoWatchStore {
             let changed = sqlx::query("UPDATE dispatch_ledger SET effect_id = $1, effect_input = $2 WHERE command_id = (SELECT command_id FROM dispatch_ledger WHERE dispatch_ref = $3 AND trigger_sequence IS NULL AND retirement_event_id IS NULL ORDER BY action_ordinal LIMIT 1) AND effect_id IS NULL")
                 .bind(effect).bind(input).bind(dispatch.into_uuid()).execute(&mut *tx).await.map_err(StoreError::from).map_err(SubmissionError::Store)?.rows_affected();
             if changed != 1 {
-                return Err(SubmissionError::Store(StoreError::InvalidDispatchBatch));
+                return Err(SubmissionError::Store(StoreError::WorkflowInputRejected));
             }
         }
         tx.commit()
@@ -393,7 +395,7 @@ impl RepoWatchStore {
         .fetch_one(&mut *tx)
         .await?;
         if conflicting {
-            return Err(StoreError::InvalidDispatchBatch);
+            return Err(StoreError::WorkflowInputRejected);
         }
         let row: Option<(Vec<u8>, Option<Vec<u8>>)> = sqlx::query_as(
             "SELECT effect_input, effect_result FROM dispatch_ledger WHERE effect_id = $1",
@@ -409,7 +411,7 @@ impl RepoWatchStore {
                     result,
                 })
             } else {
-                Err(StoreError::InvalidDispatchBatch)
+                Err(StoreError::WorkflowInputRejected)
             }
         })
         .transpose()

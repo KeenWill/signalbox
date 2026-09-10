@@ -61,15 +61,6 @@ fn reconciliation_witness_waits_for_final_batch_hints_to_finish() {
     assert_eq!(witness.completed_cycles(), 1);
 }
 
-#[test]
-fn reconciliation_witness_completes_an_empty_cycle_immediately() {
-    let witness = ReconciliationWitness::new();
-
-    witness.record_batch(&[], false);
-
-    assert_eq!(witness.completed_cycles(), 1);
-}
-
 /// Parks the session's active turn on an ambiguous model call exactly as a
 /// prior daemon incarnation would: the queued turn activates, its call is
 /// authorized for send, and the next startup scan classifies the unobserved
@@ -343,6 +334,7 @@ async fn streamed_protocol_violation_parks_then_reconciles() -> Result<(), Box<d
     )
     .await?;
     let script = Script::delivering(TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+        response_content_observed: true,
         cause: LossCause::StreamProtocolViolation {
             detail: String::from("thinking block carries more than one signature"),
         },

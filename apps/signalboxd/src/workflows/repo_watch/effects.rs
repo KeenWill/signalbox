@@ -268,6 +268,154 @@ impl<Ids, Factory, Codec, Sink> RepoWatchEffects<Ids, Factory, Codec, Sink> {
     }
 }
 
+/// Checked input refusal is distinct from a failed storage or command delivery.
+pub(crate) enum RepoWatchEffectFailure {
+    Rejected(LiveDeliveryFailure),
+    Delivery(LiveDeliveryFailure),
+}
+
+impl From<LiveDeliveryFailure> for RepoWatchEffectFailure {
+    fn from(error: LiveDeliveryFailure) -> Self {
+        Self::Delivery(error)
+    }
+}
+
+impl From<signalbox_module_repo_watch_v2::StoreError> for RepoWatchEffectFailure {
+    fn from(error: signalbox_module_repo_watch_v2::StoreError) -> Self {
+        if matches!(
+            error,
+            signalbox_module_repo_watch_v2::StoreError::WorkflowInputRejected
+        ) {
+            Self::Rejected(failure(error))
+        } else {
+            Self::Delivery(failure(error))
+        }
+    }
+}
+
+impl From<RepoWatchEffectFailure> for LiveDeliveryFailure {
+    fn from(error: RepoWatchEffectFailure) -> Self {
+        match error {
+            RepoWatchEffectFailure::Rejected(error) | RepoWatchEffectFailure::Delivery(error) => {
+                error
+            }
+        }
+    }
+}
+
+impl<
+    Ids: DispatchReferenceGenerator,
+    Factory: CreateSessionCommandFactory,
+    Codec: SessionCommandCodec,
+    Sink: SessionCommandSink,
+> RepoWatchEffects<Ids, Factory, Codec, Sink>
+{
+    pub(crate) async fn adopt_checked(
+        &mut self,
+        invocation: EffectInvocation<'_>,
+    ) -> Result<Option<InlineFramePayload>, RepoWatchEffectFailure> {
+        let request = RepoWatchRequest::decode(invocation.request)
+            .ok_or_else(|| RepoWatchEffectFailure::Rejected(invalid()))?;
+        let input = invocation.request.payload().as_bytes();
+        match request {
+            RepoWatchRequest::NextRuleEvent { .. } => Ok(None),
+            RepoWatchRequest::CommitEvaluation { effect, .. } => self
+                .store
+                .adopt_evaluation(effect, input)
+                .await
+                .map(|v| v.map(InlineFramePayload::new))
+                .map_err(RepoWatchEffectFailure::from),
+            RepoWatchRequest::SubmitPending { effect, .. } => match self
+                .store
+                .submission_receipt(effect, input)
+                .await
+                .map_err(RepoWatchEffectFailure::from)?
+            {
+                Some(signalbox_module_repo_watch_v2::workflow::SubmissionReceipt {
+                    result: Some(result),
+                    ..
+                }) => Ok(Some(InlineFramePayload::new(result))),
+                Some(signalbox_module_repo_watch_v2::workflow::SubmissionReceipt {
+                    result: None,
+                    ..
+                }) => self.execute_checked(invocation).await.map(Some),
+                None => Ok(None),
+            },
+        }
+    }
+    pub(crate) async fn execute_checked(
+        &mut self,
+        invocation: EffectInvocation<'_>,
+    ) -> Result<InlineFramePayload, RepoWatchEffectFailure> {
+        let request = RepoWatchRequest::decode(invocation.request)
+            .ok_or_else(|| RepoWatchEffectFailure::Rejected(invalid()))?;
+        let input = invocation.request.payload().as_bytes();
+        let result = match request {
+            RepoWatchRequest::NextRuleEvent { repository, rule } => {
+                let Some(rule) = self
+                    .rules
+                    .get(&repository)
+                    .and_then(|rules| rules.iter().find(|candidate| candidate.id() == &rule))
+                else {
+                    return Ok(InlineFramePayload::default());
+                };
+                self.store
+                    .next_rule_context(&repository, rule)
+                    .await
+                    .map_err(failure)?
+                    .map(|v| v.encode())
+                    .transpose()
+                    .map_err(failure)?
+                    .unwrap_or_default()
+            }
+            RepoWatchRequest::CommitEvaluation {
+                effect,
+                context,
+                plan,
+            } => self
+                .store
+                .commit_evaluation(
+                    EvaluationInvocation {
+                        effect,
+                        input,
+                        context: &context,
+                        plan: &plan,
+                        now: OffsetDateTime::now_utc(),
+                    },
+                    &mut self.ids,
+                    &mut self.factory,
+                    &mut self.codec,
+                )
+                .await
+                .map_err(RepoWatchEffectFailure::from)?,
+            RepoWatchRequest::SubmitPending { effect, dispatch } => self
+                .store
+                .submit_dispatch(
+                    SubmissionInvocation {
+                        effect,
+                        input,
+                        dispatch,
+                    },
+                    &mut self.codec,
+                    &mut self.sink,
+                    &self.source,
+                )
+                .await
+                .map_err(|error| match error {
+                    signalbox_module_repo_watch_v2::dispatch::SubmissionError::Store(error) => {
+                        RepoWatchEffectFailure::from(error)
+                    }
+                    signalbox_module_repo_watch_v2::dispatch::SubmissionError::Sink(_) => {
+                        RepoWatchEffectFailure::Delivery(LiveDeliveryFailure::new(
+                            "repository-watch submission failed",
+                        ))
+                    }
+                })?,
+        };
+        Ok(InlineFramePayload::new(result))
+    }
+}
+
 impl<
     Ids: DispatchReferenceGenerator,
     Factory: CreateSessionCommandFactory,
@@ -283,98 +431,13 @@ impl<
         invocation: EffectInvocation<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<Option<InlineFramePayload>, LiveDeliveryFailure>> + 'a>>
     {
-        Box::pin(async move {
-            let request = RepoWatchRequest::decode(invocation.request).ok_or_else(invalid)?;
-            let input = invocation.request.payload().as_bytes();
-            match request {
-                RepoWatchRequest::NextRuleEvent { .. } => Ok(None),
-                RepoWatchRequest::CommitEvaluation { effect, .. } => self
-                    .store
-                    .adopt_evaluation(effect, input)
-                    .await
-                    .map(|v| v.map(InlineFramePayload::new))
-                    .map_err(failure),
-                RepoWatchRequest::SubmitPending { effect, .. } => match self
-                    .store
-                    .submission_receipt(effect, input)
-                    .await
-                    .map_err(failure)?
-                {
-                    Some(signalbox_module_repo_watch_v2::workflow::SubmissionReceipt {
-                        result: Some(result),
-                        ..
-                    }) => Ok(Some(InlineFramePayload::new(result))),
-                    Some(signalbox_module_repo_watch_v2::workflow::SubmissionReceipt {
-                        result: None,
-                        ..
-                    }) => self.execute(invocation).await.map(Some),
-                    None => Ok(None),
-                },
-            }
-        })
+        Box::pin(async move { self.adopt_checked(invocation).await.map_err(Into::into) })
     }
     fn execute<'a>(
         &'a mut self,
         invocation: EffectInvocation<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
-        Box::pin(async move {
-            let request = RepoWatchRequest::decode(invocation.request).ok_or_else(invalid)?;
-            let input = invocation.request.payload().as_bytes();
-            let result = match request {
-                RepoWatchRequest::NextRuleEvent { repository, rule } => {
-                    let Some(rule) = self
-                        .rules
-                        .get(&repository)
-                        .and_then(|rules| rules.iter().find(|candidate| candidate.id() == &rule))
-                    else {
-                        return Ok(InlineFramePayload::default());
-                    };
-                    self.store
-                        .next_rule_context(&repository, rule)
-                        .await
-                        .map_err(failure)?
-                        .map(|v| v.encode())
-                        .transpose()
-                        .map_err(failure)?
-                        .unwrap_or_default()
-                }
-                RepoWatchRequest::CommitEvaluation {
-                    effect,
-                    context,
-                    plan,
-                } => self
-                    .store
-                    .commit_evaluation(
-                        EvaluationInvocation {
-                            effect,
-                            input,
-                            context: &context,
-                            plan: &plan,
-                            now: OffsetDateTime::now_utc(),
-                        },
-                        &mut self.ids,
-                        &mut self.factory,
-                        &mut self.codec,
-                    )
-                    .await
-                    .map_err(failure)?,
-                RepoWatchRequest::SubmitPending { effect, dispatch } => self
-                    .store
-                    .submit_dispatch(
-                        SubmissionInvocation {
-                            effect,
-                            input,
-                            dispatch,
-                        },
-                        &mut self.codec,
-                        &mut self.sink,
-                        &self.source,
-                    )
-                    .await
-                    .map_err(|_| LiveDeliveryFailure::new("repository-watch submission failed"))?,
-            };
-            Ok(InlineFramePayload::new(result))
-        })
+        Box::pin(async move { self.execute_checked(invocation).await.map_err(Into::into) })
     }
 }
 

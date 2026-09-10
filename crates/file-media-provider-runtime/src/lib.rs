@@ -31,6 +31,7 @@ pub struct ResolvedFileUse<Source> {
     file_use: FileUse,
     source: Source,
     selector: signalbox_file_media_runtime::VisiblePartSelector,
+    image_target: Option<signalbox_model_runtime::ImagePresentationCapability>,
 }
 
 impl<Source> ResolvedFileUse<Source> {
@@ -44,7 +45,17 @@ impl<Source> ResolvedFileUse<Source> {
             file_use,
             source,
             selector,
+            image_target: None,
         }
+    }
+
+    /// Attaches the issuing model's effective image presentation capability.
+    pub fn with_image_target(
+        mut self,
+        capability: Option<signalbox_model_runtime::ImagePresentationCapability>,
+    ) -> Self {
+        self.image_target = capability;
+        self
     }
 
     /// Borrows exact semantic use metadata.
@@ -116,6 +127,15 @@ pub trait FileUseResolver: Send {
     ) -> FileUseResolverFuture<'_, Self::Source>;
 }
 
+/// Publishes and verifies validated bytes, then registers their immutable catalog identity.
+pub trait FileMediaArtifactPublisher: Send + Sync + std::fmt::Debug {
+    /// Completes publication and catalog registration before a durable result can be returned.
+    fn publish<'a>(
+        &'a self,
+        artifact: &'a signalbox_file_media_runtime::ValidatedMediaArtifact,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FileMediaServiceFailure>> + Send + 'a>>;
+}
+
 /// Registry-backed implementation of both stable agent tools.
 #[derive(Debug)]
 pub struct RegistryFileMediaAgentService<Resolver, Processor, Cancellation> {
@@ -124,6 +144,7 @@ pub struct RegistryFileMediaAgentService<Resolver, Processor, Cancellation> {
     processor: Processor,
     cancellation: Cancellation,
     continuations: ContinuationAuthority,
+    publisher: Option<std::sync::Arc<dyn FileMediaArtifactPublisher>>,
 }
 
 impl<Resolver, Processor, Cancellation>
@@ -143,7 +164,17 @@ impl<Resolver, Processor, Cancellation>
             processor,
             cancellation,
             continuations,
+            publisher: None,
         }
+    }
+
+    /// Composes generated-artifact publication after independent output validation.
+    pub fn with_artifact_publisher(
+        mut self,
+        publisher: std::sync::Arc<dyn FileMediaArtifactPublisher>,
+    ) -> Self {
+        self.publisher = Some(publisher);
+        self
     }
 
     /// Borrows the immutable registry snapshot.
@@ -209,6 +240,7 @@ where
                 ))
                 .await
                 .map_err(FileMediaServiceFailure::from)?;
+            let image_target = resolved.image_target.clone();
             let (file_use, source, selector) = resolved.into_parts();
             if file_use.digest() != requested_digest {
                 return Err(FileMediaFailure::ProcessorFailed.into());
@@ -227,9 +259,9 @@ where
                 .as_ref()
                 .map(ContinuationState::reader)
                 .transpose()?;
-            let (reader, mut result) = self
+            let (reader, prepared) = self
                 .registry
-                .read_with_reader(
+                .prepare_read_with_reader(
                     &self.processor,
                     FileReadRequest {
                         inspection: InspectionRequest {
@@ -244,7 +276,48 @@ where
                     expected_reader.as_ref(),
                 )
                 .await?;
+            let mut result = match prepared {
+                signalbox_file_media_runtime::PreparedFileRead::Result(result) => result,
+                signalbox_file_media_runtime::PreparedFileRead::Generated(generated) => {
+                    let artifact = self
+                        .registry
+                        .validate_generated(&self.processor, generated, &self.cancellation)
+                        .await?;
+                    let reference = artifact.reference();
+                    if image_target.as_ref().is_none_or(|target| {
+                        !target.admits(
+                            reference.presented().media_type().as_str(),
+                            reference.byte_length().get(),
+                        )
+                    }) {
+                        return Err(FileMediaFailure::OutputUnitTooLarge.into());
+                    }
+                    self.publisher
+                        .as_ref()
+                        .ok_or(FileMediaFailure::UnsupportedView)?
+                        .publish(&artifact)
+                        .await?;
+                    signalbox_file_media_runtime::FileReadResult::Reference(
+                        artifact.into_reference(),
+                    )
+                }
+            };
+            if let signalbox_file_media_runtime::FileReadResult::Reference(reference) = &result {
+                let target = image_target
+                    .as_ref()
+                    .ok_or(FileMediaFailure::UnsupportedView)?;
+                if !target.admits(
+                    reference.presented().media_type().as_str(),
+                    reference.byte_length().get(),
+                ) {
+                    result = signalbox_file_media_runtime::FileReadResult::Structured {
+                        body: reference.large_image_description(),
+                        continuation: signalbox_file_media_runtime::ReadContinuation::Complete,
+                    };
+                }
+            }
             let continuation = match &mut result {
+                signalbox_file_media_runtime::FileReadResult::Reference(_) => return Ok(result),
                 signalbox_file_media_runtime::FileReadResult::Text { continuation, .. }
                 | signalbox_file_media_runtime::FileReadResult::Structured {
                     continuation, ..
@@ -271,3 +344,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod image_tests;

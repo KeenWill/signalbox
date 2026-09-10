@@ -597,16 +597,6 @@ impl ArchiveFixture {
         })
     }
 
-    pub fn gzip_bomb() -> Result<Self, Box<dyn Error>> {
-        let payload = vec![b'x'; 16 * 1024 * 1024 + 1];
-        Ok(Self {
-            bytes: gzip_bytes("payload.txt", &payload)?,
-            media_type: "application/gzip",
-            expected_format: "gzip",
-            expected_name: "payload.txt",
-        })
-    }
-
     pub fn gzip_entry_bomb() -> Result<Self, Box<dyn Error>> {
         let payload = vec![b'x'; 8 * 1024 * 1024 + 1];
         Ok(Self {
@@ -614,16 +604,6 @@ impl ArchiveFixture {
             media_type: "application/gzip",
             expected_format: "gzip",
             expected_name: "payload.txt",
-        })
-    }
-
-    pub fn zstd_bomb() -> Result<Self, Box<dyn Error>> {
-        let payload = vec![b'x'; 16 * 1024 * 1024 + 1];
-        Ok(Self {
-            bytes: zstd::stream::encode_all(payload.as_slice(), 1)?,
-            media_type: "application/zstd",
-            expected_format: "zstd",
-            expected_name: "content",
         })
     }
 

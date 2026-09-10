@@ -143,7 +143,6 @@ struct RuntimeState {
     observers: observation::Observers,
     workflow_service: Arc<std::sync::OnceLock<crate::workflows::WorkflowService>>,
     workers: WorkerState,
-    module_pool: PgPool,
     store: RepoWatchStore,
     lifecycle: LifecycleEventSource,
     factory: RepositoryWatchCommandFactory,
@@ -280,43 +279,49 @@ impl RepositoryWatchRuntime {
         )>,
         signalbox_module_repo_watch_v2::StoreError,
     > {
-        let (store, core, configuration) = {
+        use signalbox_application::ApprovalJudgeDispatchAuthority;
+        use signalbox_module_repo_watch_v2::StoreError;
+        use signalbox_persistence::approval_judge::{
+            ApprovalJudgeRepositoryError, load_commissioned_dispatch_authority,
+        };
+        let (core, configuration) = {
             let state = self.state.lock().await;
-            (
-                state.store.clone(),
-                state.core_pool.clone(),
-                state.configuration.clone(),
-            )
-        };
-        let command: Option<uuid::Uuid> = sqlx::query_scalar(
-            "SELECT creation.command_id FROM session
-             JOIN create_session_command AS creation ON creation.created_session_id = session.session_id
-             WHERE session.session_id = $1 AND session.creation_cause = 'module_dispatched'
-               AND session.dispatching_module = 'repo_watch'"
-        ).bind(session.into_uuid()).fetch_optional(&core).await?;
-        let Some(command) = command else {
-            return Ok(None);
-        };
-        let checkout = store
-            .dispatch_checkout(signalbox_domain::DurableCommandId::from_uuid(command))
-            .await?
-            .ok_or(signalbox_module_repo_watch_v2::StoreError::InvalidRetainedCommand)?;
-        let signalbox_domain::RepoWatchEventTarget::PullRequest(context) = checkout.event.target()
-        else {
-            return Ok(None);
+            (state.core_pool.clone(), state.configuration.clone())
         };
         let Some(configuration) = configuration else {
             return Ok(None);
         };
-        Ok(
-            git_push_repository(&configuration, &checkout.event).map(|repository| {
+        let commissioned = load_commissioned_dispatch_authority(
+            &mut *core.acquire().await?, session,
+        ).await.map_err(|error| match error {
+            ApprovalJudgeRepositoryError::Database { source, .. } => StoreError::Database(source),
+            error => {
+                tracing::error!(session_id = %session.into_uuid(), cause = %error, "retained push fence could not be loaded");
+                StoreError::InvalidRetainedCommand
+            }
+        })?;
+        let authority = match commissioned {
+            Some(authority) => Some(authority),
+            None => self.approval_judge_authority(session).await?,
+        };
+        let Some(ApprovalJudgeDispatchAuthority::PullRequest(context)) = authority else {
+            return Ok(None);
+        };
+        Ok(configuration
+            .repositories()
+            .iter()
+            .find(|repository| {
+                repository.repository() == context.repository()
+                    && repository.repository() == context.head_repository()
+                    && repository.push_credential_file().is_some()
+            })
+            .map(|repository| {
                 (
                     repository.clone(),
                     context.head_branch().clone(),
                     context.head_sha().clone(),
                 )
-            }),
-        )
+            }))
     }
 
     /// Reconciles the configured revision set before starting repository tasks.
@@ -333,7 +338,7 @@ impl RepositoryWatchRuntime {
     /// Composes the idle supervisor without activating on-disk rules before recovery.
     pub fn unstarted(module_pool: PgPool, services: RepositoryWatchServices) -> Self {
         let (repository_shutdown, _) = watch::channel(false);
-        let store = RepoWatchStore::new(module_pool.clone());
+        let store = RepoWatchStore::new(module_pool);
         let observers = observation::Observers::default();
         let workflow_service = Arc::new(std::sync::OnceLock::new());
         Self {
@@ -353,7 +358,6 @@ impl RepositoryWatchRuntime {
                 prepared_sweep: None,
                 commands: None,
                 store,
-                module_pool,
                 lifecycle: LifecycleEventSource::new(services.core_pool.clone()),
                 factory: RepositoryWatchCommandFactory(services.templates),
                 sink: RepositoryWatchCommandSink {
@@ -692,7 +696,6 @@ impl RepositoryWatchRuntime {
         state.pause().await;
         state.listener.shutdown().await;
         state.workers = WorkerState::Prepared;
-        state.module_pool.close().await;
         outcome
     }
 }

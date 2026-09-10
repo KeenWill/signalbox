@@ -881,6 +881,22 @@ impl StreamDecoder {
 
     fn loss(&self, cause: LossCause, tool_calls: ToolCallsAtLoss) -> TerminalEvidence {
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: self.opened_tool_calls
+                || !self.completed_reasoning.is_empty()
+                || self.item_parts.values().any(|item| {
+                    item.nonempty.values().any(|nonempty| *nonempty)
+                        || item.content.values().any(|content| {
+                            content
+                                .deltas
+                                .as_deref()
+                                .is_some_and(|text| !text.is_empty())
+                                || content
+                                    .snapshot
+                                    .as_deref()
+                                    .is_some_and(|text| !text.is_empty())
+                        })
+                        || item.kind.as_deref() == Some("reasoning")
+                }),
             cause,
             exchange: self.exchange.clone(),
             reported_model: self.reported_model.clone(),
@@ -961,6 +977,26 @@ mod tests {
         assert!(matches!(decode(terminal()), TerminalEvidence::Completed(_)));
     }
     #[test]
+    fn unprojected_text_delta_still_marks_content_before_transport_loss() {
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+        let mut sink = Vec::new();
+        let event = json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"later_item","delta":"partial"});
+        assert!(matches!(
+            apply(&mut decoder, event, &mut sink),
+            StreamStep::Continue
+        ));
+        assert!(
+            sink.is_empty(),
+            "the preceding output item is not yet available"
+        );
+        let TerminalEvidence::BoundaryLoss(loss) = decoder.lost(StreamInterruption::EndOfStream)
+        else {
+            panic!("incomplete stream reports loss");
+        };
+        assert!(loss.response_content_observed);
+    }
+
+    #[test]
     fn text_delta_does_not_complete_a_stream() {
         let mut decoder = StreamDecoder::new(ExchangeFacts::default());
         let mut sink = Vec::new();
@@ -979,6 +1015,7 @@ mod tests {
         assert!(matches!(
             decoder.lost(StreamInterruption::EndOfStream),
             TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: true,
                 cause: LossCause::StreamEndedWithoutTerminalMarker { .. },
                 ..
             })

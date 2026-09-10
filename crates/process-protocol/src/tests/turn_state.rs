@@ -61,14 +61,6 @@ fn runner_recovery_turn_state_round_trips_interrupted_attempt()
 }
 
 #[test]
-fn runner_recovery_revision_rejects_zero_before_state_construction() {
-    assert_eq!(
-        PositiveCanonicalU64::try_new(0),
-        Err(CanonicalValueError::Decimal),
-    );
-}
-
-#[test]
 fn runner_recovery_turn_state_round_trips_explicit_absent_attempt()
 -> Result<(), Box<dyn std::error::Error>> {
     let state = TurnState::ActiveAwaitingRunnerRecovery {

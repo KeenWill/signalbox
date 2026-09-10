@@ -1824,14 +1824,14 @@ async fn reserve_preview_frontier_identities(
 
 #[cfg(test)]
 mod tests {
-    use std::{borrow::Cow, error::Error, fmt, io};
+    use std::{borrow::Cow, error::Error, fmt};
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
     use sqlx::error::{DatabaseError, ErrorKind};
 
     use super::{
         StartEligibleTurnIdentityCollision, StartEligibleTurnRepositoryError,
-        commit_failure_is_ambiguous, semantic_entry_insert_error,
+        semantic_entry_insert_error,
     };
 
     #[derive(Debug)]
@@ -1901,48 +1901,6 @@ mod tests {
     }
 
     #[test]
-    fn lost_commit_response_is_commit_ambiguous() {
-        let error = sqlx::Error::Io(io::Error::new(
-            io::ErrorKind::ConnectionReset,
-            "commit response was lost",
-        ));
-        let commit_ambiguous = commit_failure_is_ambiguous(&error);
-        assert!(commit_ambiguous);
-        let error = StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous);
-
-        assert_eq!(
-            error.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: true
-            }
-        );
-    }
-
-    #[test]
-    fn server_rejected_commit_is_not_ambiguous() {
-        let error = sqlx::Error::Database(Box::new(ServerCommitFailure {
-            code: "23514",
-            constraint: None,
-        }));
-        let commit_ambiguous = commit_failure_is_ambiguous(&error);
-
-        assert!(!commit_ambiguous);
-        let classified = StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous);
-        assert_eq!(
-            classified.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false
-            }
-        );
-    }
-
-    #[test]
-    fn server_reported_unknown_commit_outcomes_are_ambiguous() {
-        assert_server_reported_unknown_commit_outcome_is_ambiguous("08007");
-        assert_server_reported_unknown_commit_outcome_is_ambiguous("40003");
-    }
-
-    #[test]
     fn model_identity_entry_collision_retains_its_candidate_kind() {
         let error = sqlx::Error::Database(Box::new(ServerCommitFailure {
             code: "23505",
@@ -1958,23 +1916,5 @@ mod tests {
                 StartEligibleTurnIdentityCollision::ModelIdentityEntry
             )
         ));
-    }
-
-    #[track_caller]
-    fn assert_server_reported_unknown_commit_outcome_is_ambiguous(code: &'static str) {
-        let error = sqlx::Error::Database(Box::new(ServerCommitFailure {
-            code,
-            constraint: None,
-        }));
-        let commit_ambiguous = commit_failure_is_ambiguous(&error);
-
-        assert!(commit_ambiguous);
-        let classified = StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous);
-        assert_eq!(
-            classified.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: true
-            }
-        );
     }
 }

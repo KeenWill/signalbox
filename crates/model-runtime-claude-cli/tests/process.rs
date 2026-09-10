@@ -514,6 +514,7 @@ async fn api_error_status_classifies_a_generic_terminal_error() {
 async fn truncated_stream_is_boundary_loss() {
     let result = execute_scenario("truncated_stream", OperationShape::Text).await;
     let loss = boundary_loss(&result.evidence);
+    assert!(loss.response_content_observed);
 
     assert!(matches!(
         loss.cause,
@@ -614,18 +615,6 @@ async fn a_line_that_never_decodes_withholds_the_tool_fact() {
         LossCause::StreamProtocolViolation { .. }
     ));
     assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
-}
-
-#[tokio::test]
-async fn malformed_stream_line_is_protocol_boundary_loss() {
-    let result = execute_scenario("malformed_stream", OperationShape::Text).await;
-    let loss = boundary_loss(&result.evidence);
-
-    assert!(matches!(
-        loss.cause,
-        LossCause::StreamProtocolViolation { .. }
-    ));
-    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]

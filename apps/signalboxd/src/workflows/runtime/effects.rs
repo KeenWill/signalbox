@@ -5,7 +5,7 @@ use super::*;
 use crate::workflows::repo_watch::observe::ObserveInput;
 use crate::{
     repo_watch_runtime::RepositoryWatchRuntime,
-    workflows::repo_watch::effects::{self, RepoWatchRequest},
+    workflows::repo_watch::effects::{self, RepoWatchEffectFailure, RepoWatchRequest},
 };
 
 pub(super) trait AttemptEffects: EffectExecutor {
@@ -17,6 +17,7 @@ pub(super) trait AttemptEffects: EffectExecutor {
 pub(super) struct RuntimeEffects {
     repository_watch: Option<RepositoryWatchRuntime>,
     journal: ProgramJournalRepository,
+    eval: Option<EvaluationEffects>,
     pub(super) rejected: Option<ProgramCapability>,
 }
 
@@ -24,12 +25,26 @@ impl RuntimeEffects {
     pub(super) fn new(
         repository_watch: Option<RepositoryWatchRuntime>,
         journal: ProgramJournalRepository,
+        eval: Option<EvalServices>,
     ) -> Self {
         Self {
             repository_watch,
             journal,
+            eval: eval.map(EvaluationEffects::new),
             rejected: None,
         }
+    }
+    fn classify<T>(
+        &mut self,
+        result: Result<T, RepoWatchEffectFailure>,
+        capability: ProgramCapability,
+    ) -> Result<T, LiveDeliveryFailure> {
+        result.map_err(|error| {
+            if matches!(error, RepoWatchEffectFailure::Rejected(_)) {
+                self.rejected = Some(capability);
+            }
+            error.into()
+        })
     }
 }
 
@@ -49,6 +64,8 @@ impl EffectExecutor for RuntimeEffects {
         }
         if RepoWatchRequest::decode(request).is_some() && self.repository_watch.is_some() {
             effects::recovery(request)
+        } else if let Some(eval) = &self.eval {
+            eval.recovery(request)
         } else {
             EffectRecovery::Idempotent
         }
@@ -69,8 +86,13 @@ impl EffectExecutor for RuntimeEffects {
             if RepoWatchRequest::decode(invocation.request).is_some()
                 && let Some(runtime) = &self.repository_watch
             {
-                let result = runtime.adopt_workflow_effect(invocation).await?;
-                return Ok(result);
+                let result = runtime.adopt_workflow_effect(invocation).await;
+                return self.classify(result, invocation.request.capability());
+            }
+            if let Some(eval) = &mut self.eval {
+                let result = eval.adopt(invocation).await;
+                self.rejected = eval.rejected().then_some(invocation.request.capability());
+                return result;
             }
             Ok(None)
         })
@@ -90,8 +112,13 @@ impl EffectExecutor for RuntimeEffects {
             if RepoWatchRequest::decode(invocation.request).is_some()
                 && let Some(runtime) = &self.repository_watch
             {
-                let result = runtime.execute_workflow_effect(invocation).await?;
-                return Ok(result);
+                let result = runtime.execute_workflow_effect(invocation).await;
+                return self.classify(result, invocation.request.capability());
+            }
+            if let Some(eval) = &mut self.eval {
+                let result = eval.execute(invocation).await;
+                self.rejected = eval.rejected().then_some(invocation.request.capability());
+                return result;
             }
             self.rejected = Some(invocation.request.capability());
             Err(LiveDeliveryFailure::new(

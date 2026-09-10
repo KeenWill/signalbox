@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, process::Command};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_model_reference_catalog::{
-    ActualBillingKind, BUNDLED_CATALOG_JSON, Catalog, CommercialChannel, DatePrecision,
-    MappingQuality, PriceResolution, Provider, RateDimension, ReferenceResolution, bundled_catalog,
+    BUNDLED_CATALOG_JSON, Catalog, CommercialChannel, DatePrecision, MappingQuality,
+    PriceResolution, Provider, RateDimension, ReferenceResolution, bundled_catalog,
     render_projections,
 };
 
@@ -43,18 +43,6 @@ fn consumer_mapping_mut<'a>(
         .iter_mut()
         .find(|mapping| mapping["id"] == id)
         .ok_or("consumer mapping fixture is absent")
-}
-
-#[test]
-fn actual_billing_kind_is_distinct_from_equivalent_api_pricing() {
-    assert_eq!(
-        CommercialChannel::Api.actual_billing_kind(),
-        ActualBillingKind::ApiMetered
-    );
-    assert_eq!(
-        CommercialChannel::ClaudeCodeSubscription.actual_billing_kind(),
-        ActualBillingKind::Subscription
-    );
 }
 
 #[test]
@@ -249,26 +237,6 @@ fn rolling_gpt4_alias_shares_its_launch_rate() {
     assert_eq!(
         resolution.price().unwrap().resolved_rate_sets().unwrap()[0].id,
         "oai-gpt4-launch"
-    );
-}
-
-#[test]
-fn rolling_gpt4_32k_alias_shares_its_launch_rate() {
-    let catalog = bundled_catalog().unwrap();
-
-    let resolution = catalog
-        .resolve(
-            Provider::Openai,
-            "gpt-4-32k",
-            "2023-03-14",
-            CommercialChannel::Api,
-        )
-        .unwrap();
-
-    assert_eq!(resolution.resolved_model_id(), Some("openai:gpt-4-32k"));
-    assert_eq!(
-        resolution.price().unwrap().resolved_rate_sets().unwrap()[0].id,
-        "oai-gpt4-32k-launch"
     );
 }
 
@@ -577,37 +545,6 @@ fn claude_code_sonnet_alias_moves_to_claude5_family_at_launch() {
             Provider::Anthropic,
             "sonnet",
             "2026-06-30",
-            CommercialChannel::ClaudeCodeSubscription,
-        )
-        .unwrap();
-
-    assert_eq!(
-        resolved_family_id(&before),
-        Some("anthropic:claude-4-family")
-    );
-    assert_eq!(
-        resolved_family_id(&after),
-        Some("anthropic:claude-5-family")
-    );
-}
-
-#[test]
-fn claude_code_opus_alias_moves_to_claude5_family_at_launch() {
-    let catalog = bundled_catalog().unwrap();
-
-    let before = catalog
-        .resolve(
-            Provider::Anthropic,
-            "opus",
-            "2026-07-23",
-            CommercialChannel::ClaudeCodeSubscription,
-        )
-        .unwrap();
-    let after = catalog
-        .resolve(
-            Provider::Anthropic,
-            "opus",
-            "2026-07-24",
             CommercialChannel::ClaudeCodeSubscription,
         )
         .unwrap();

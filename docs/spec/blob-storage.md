@@ -301,6 +301,11 @@ Imported raw source records of [conversation-import](conversation-import.md)
 converge onto the blob catalog: the import satellite's content hash is an
 ordinary blob reference and the bytes live in a routed store.
 
+Workflow `blob.read` returns complete verified bytes for a digest within the
+existing direct-read range bound, traversal budget and deadline through the
+catalog and recorded stores. Evaluation corpus loading uses the same read path
+and checks the pinned SHA-256 digest before decoding case data.
+
 ## Planned
 
 - A `program_journal` storage class for over-threshold program journal payloads;
@@ -312,3 +317,8 @@ ordinary blob reference and the bytes live in a routed store.
   [blob storage design](../design/blob-storage.md).
 - A modality-unsupported attachment preparation failure for typed media results;
   see [blob storage design](../design/blob-storage.md).
+
+Generated image views publish and verify their independently validated bytes,
+register their generated-artifact replica, then commit the durable tool result.
+Model preparation authenticates that result's presented identity before bounded
+blob reads; catalog presence alone does not authorize image presentation.

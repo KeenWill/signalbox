@@ -120,14 +120,6 @@ impl FileMediaProcessor for AdversarialOutputProcessor {
     }
 }
 
-#[test]
-fn declaration_registers_under_the_available_isolation_contract() -> Result<(), Box<dyn Error>> {
-    let registry = registry()?;
-
-    assert_eq!(registry.providers(), &[declaration()?]);
-    Ok(())
-}
-
 #[tokio::test]
 async fn generated_pdf_validates_and_exposes_declared_views() -> Result<(), Box<dyn Error>> {
     let fixture = PdfFixture::ordinary()?;

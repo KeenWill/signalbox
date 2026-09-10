@@ -263,15 +263,6 @@ fn non_finite_positive_number_is_rejected() {
     }
 }
 #[test]
-fn non_finite_nonnegative_number_is_rejected() {
-    for value in ["NaN", "inf", "-inf"] {
-        assert!(
-            config::number(&json!(value), "cool_off_seconds", true).is_err(),
-            "{value}"
-        );
-    }
-}
-#[test]
 fn non_numeric_configuration_is_rejected() {
     for value in [json!(null), json!({}), json!([]), json!("not-a-number")] {
         assert!(

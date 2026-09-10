@@ -367,22 +367,21 @@ resolves to one secret remain two members, and the cost is bounded to one extra
 successor attempt that fails as its predecessor did.
 
 Settings whose effect the daemon cannot supply are typed startup failures rather
-than retained and inert: `round_robin` and a `switch_now` whose adapter cannot
-prove non-acceptance for that trigger's cause unless it is
-`on_credential_rejected`. Codex pools admit `least_used`, headroom reserves and
-non-`stay` `on_headroom_low`; the other adapters reject them. The Codex adapter
-reads capacity with `account/rateLimits/read` after initialization and merges
-primary and secondary windows from `account/rateLimits/updated` into the current
-call's evidence. Remaining capacity rounds down to whole percentage points. A
-null or absent window preserves its previous value within that call; a
-notification with neither window emits no capacity evidence. Thread startup and
-turn execution do not wait for the capacity read; a rejected or unanswered read
-supplies no new evidence. A notification carrying a window supersedes an
-outstanding read, whose reply is consumed without emitting evidence. A read
-reply received after turn completion still supplies capacity evidence unless
-superseded. Members without retained evidence have unknown capacity:
-`least_used` falls back to configured order within equal priorities, reserves do
-not exclude them, and headroom actions do not fire.
+than retained and inert: `round_robin` is rejected. Codex pools admit
+`least_used`, headroom reserves and non-`stay` `on_headroom_low`; the other
+adapters reject them. The Codex adapter reads capacity with
+`account/rateLimits/read` after initialization and merges primary and secondary
+windows from `account/rateLimits/updated` into the current call's evidence.
+Remaining capacity rounds down to whole percentage points. A null or absent
+window preserves its previous value within that call; a notification with
+neither window emits no capacity evidence. Thread startup and turn execution do
+not wait for the capacity read; a rejected or unanswered read supplies no new
+evidence. A notification carrying a window supersedes an outstanding read, whose
+reply is consumed without emitting evidence. A read reply received after turn
+completion still supplies capacity evidence unless superseded. Members without
+retained evidence have unknown capacity: `least_used` falls back to configured
+order within equal priorities, reserves do not exclude them, and headroom
+actions do not fire.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under
@@ -406,14 +405,10 @@ reports one undifferentiated authentication failure the adapter cannot split;
 every `codex_home` credential rejection follows the pool's configured
 `on_credential_rejected` action.
 
-An HTTP adapter proves non-acceptance only with a decoded native error envelope
-naming the cause in a pre-stream error response. An SSE error record never
-carries that proof, whatever token it holds, because by then the provider has
-begun processing the request. The Codex CLI proves non-acceptance instead
-through its typed failed `turn/completed` closure under the
-[runtime proof rule](runtime-substrate.md), so a `codex_cli` pool admits
-`switch_now` on all three availability causes; an unproven availability failure
-authorizes no successor.
+All adapters admit `switch_now` for quota, rate-limit and overload failures. The
+classified kind and pinned policy determine successor admission; a pre-stream
+rejection and a definitive mid-stream error use the same policy. Non-acceptance
+proof is not required for these known failures.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
 observed it until an operator clears its exact generation. It applies to every
@@ -840,13 +835,17 @@ before scavenging and fails without removal on ownership, type, or containment
 mismatch. The Codex child uses the home's file backend and token-only
 authentication with ambient credentials, keyrings, helpers, and external stores
 disabled; inability to deliver the home is a typed pre-send failure. An
-access-token rejection during an invocation neither quarantines the profile nor
-permits automatic call retry. Delivery failure evidence and quarantine commit
-atomically and bypass pool trigger policy. OAuth quarantine reads lock only
-currently registered OAuth pool members. Successful re-provisioning clears OAuth
-delivery-origin quarantine and cached access; failure preserves both. Deletion
-holds the dispatch profile lock while removing authorization and cached access,
-advances the retained generation, and preserves registration and history.
+access-token rejection during an invocation refreshes the token and retries the
+same profile in a new durable call. A rejection after that successful refresh,
+or a failed refresh, rotates to the next profile. A successful invocation clears
+the token's rejection-recovery state. An expired access token does not
+quarantine the profile or apply its pool rejection action. Delivery failure
+evidence and quarantine commit atomically and bypass pool trigger policy. OAuth
+quarantine reads lock only currently registered OAuth pool members. Successful
+re-provisioning clears OAuth delivery-origin quarantine and cached access;
+failure preserves both. Deletion holds the dispatch profile lock while removing
+authorization and cached access, advances the retained generation, and preserves
+registration and history.
 
 A `codex_home` profile accepts `max_concurrent_invocations` from 1 through
 1,024. The startup registration bounds per-member invocation reservations; an

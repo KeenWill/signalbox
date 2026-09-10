@@ -1,5 +1,6 @@
 //! Daemon admission and compiled workflow catalog; governed by docs/spec/workflows.md.
 
+pub mod eval;
 mod observation;
 pub mod repo_watch;
 pub mod runtime;
@@ -23,6 +24,10 @@ use signalbox_persistence::{
 #[cfg(target_os = "linux")]
 use signalbox_workflow_runtime::native::{NativeCatalog, NativeProgram, WorkflowContext};
 use signalbox_workflow_runtime::native::{NativeProgramError, NativeValue};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::mpsc;
 
 pub use runtime::{WorkflowRuntime, WorkflowRuntimeError};
@@ -39,6 +44,8 @@ pub struct WorkflowService {
     wake: mpsc::UnboundedSender<runtime::WorkflowWake>,
     clock_executable: Option<ProgramExecutable>,
     observation_executable: Option<ProgramExecutable>,
+    eval_executable: Option<ProgramExecutable>,
+    eval_ready: Arc<AtomicBool>,
 }
 
 impl WorkflowService {
@@ -71,6 +78,12 @@ impl WorkflowService {
         result
     }
 
+    pub fn eval_executable(&self) -> Option<&ProgramExecutable> {
+        self.eval_executable
+            .as_ref()
+            .filter(|_| self.eval_ready.load(Ordering::Acquire))
+    }
+
     pub fn clock_executable(&self) -> Option<&ProgramExecutable> {
         self.clock_executable.as_ref()
     }
@@ -92,6 +105,7 @@ impl WorkflowService {
         let executable = request.clone().into_content().executable;
         if Some(&executable) != self.clock_executable.as_ref()
             && Some(&executable) != self.observation_executable.as_ref()
+            && Some(&executable) != self.eval_executable()
         {
             return Err(WorkflowRuntimeError::NativeUnavailable);
         }
@@ -127,6 +141,9 @@ fn compiled_catalog() -> Result<NativeCatalog, WorkflowRuntimeError> {
             repo_watch::observe::OBSERVE_ENTRY.into(),
             repo_watch::observe::OBSERVE_REVISION.into(),
         )
+        .map_err(WorkflowRuntimeError::Catalog)?;
+    catalog
+        .insert::<eval::ApprovalJudgeEval>(eval::EVAL_ENTRY.into(), eval::EVAL_REVISION.into())
         .map_err(WorkflowRuntimeError::Catalog)?;
     Ok(catalog)
 }
@@ -206,6 +223,8 @@ mod tests {
             wake,
             clock_executable: None,
             observation_executable: None,
+            eval_executable: None,
+            eval_ready: Arc::new(AtomicBool::new(false)),
         };
         let command = CancelProgramRun {
             command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
