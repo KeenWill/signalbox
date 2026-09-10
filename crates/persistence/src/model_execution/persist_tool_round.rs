@@ -1,7 +1,6 @@
-use super::continuation::ToolContinuationHeadroomEvidence;
 use super::persist_disposition::{
-    EndedCallEvidence, encode_token_usage, encode_tool_approval, encode_tool_decision_source,
-    insert_snapshot, persist_ended_attempt, persist_ended_call_with_provider_failure_cause,
+    EndedCallEvidence, encode_tool_approval, encode_tool_decision_source, insert_snapshot,
+    persist_ended_attempt, persist_ended_call_with_provider_failure_cause,
     persist_ended_call_with_retained_usage, persist_tool_round_entries, persist_tool_round_record,
 };
 use super::persist_terminal::persist_failed_with_delegated_child_result;
@@ -13,12 +12,10 @@ use super::{
 use crate::mapping::{session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid};
 use crate::outbox;
 use crate::outbox::{OutboxEvent, ToolBatchOutboxState};
-use rust_decimal::Decimal;
 use signalbox_domain::{
-    ActiveTurnPhase, AvailabilitySuccessorModelCallTurn, ContextHeadroomExhaustedModelCallTurn,
-    CredentialPoolExhaustedModelCallTurn, ModelCallId, ProviderModelCallFailureCause,
-    ProviderReportedTokenUsage, SessionId, ToolDecisionSource, ToolRoundModelCallTurn,
-    TurnAttemptId, TurnId, TurnTerminalCause,
+    ActiveTurnPhase, AvailabilitySuccessorModelCallTurn, CredentialPoolExhaustedModelCallTurn,
+    ModelCallId, ProviderModelCallFailureCause, ProviderReportedTokenUsage, SessionId,
+    ToolDecisionSource, ToolRoundModelCallTurn, TurnAttemptId, TurnId, TurnTerminalCause,
 };
 use sqlx::PgConnection;
 use std::time::Duration;
@@ -408,39 +405,6 @@ pub(super) async fn persist_credential_pool_exhaustion(
     .await?;
     sqlx::query("WITH header AS (INSERT INTO outbox_event (event_kind, storage_version, session_id) VALUES ('turn_credential_pool_exhausted', 1, $1) RETURNING event_sequence, event_kind, storage_version, session_id) INSERT INTO credential_pool_exhaustion_outbox_event SELECT event_sequence, event_kind, storage_version, session_id, $2 FROM header")
         .bind(exhausted.failed().session().into_uuid()).bind(exhausted.failed().attempt().id().into_uuid()).execute(connection).await?;
-    Ok(())
-}
-
-pub(super) async fn persist_tool_continuation_headroom_exhaustion(
-    connection: &mut PgConnection,
-    required: &ContextHeadroomExhaustedModelCallTurn,
-    evidence: ToolContinuationHeadroomEvidence,
-) -> Result<(), ModelCallRepositoryError> {
-    let usage = encode_token_usage(evidence.usage);
-    sqlx::query(
-        "INSERT INTO tool_continuation_context_headroom
-            (terminal_attempt_id, producing_model_call_id, session_id, turn_id,
-             usage_input_includes_cache_tokens, usage_input_tokens,
-             usage_output_tokens, usage_cache_creation_input_tokens,
-             usage_cache_read_input_tokens, projected_result_content_bytes,
-             max_output_tokens, context_window_tokens, pending_steering_content_bytes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
-    )
-    .bind(required.failed().attempt().id().into_uuid())
-    .bind(required.producing_call().into_uuid())
-    .bind(session_id_to_uuid(required.failed().session()))
-    .bind(turn_id_to_uuid(required.failed().turn()))
-    .bind(evidence.input_includes_cache_tokens)
-    .bind(usage.input_tokens)
-    .bind(usage.output_tokens)
-    .bind(usage.cache_creation_input_tokens)
-    .bind(usage.cache_read_input_tokens)
-    .bind(Decimal::from(evidence.projected_result_content_bytes))
-    .bind(Decimal::from(evidence.limit.max_output_tokens()))
-    .bind(Decimal::from(evidence.limit.context_window_tokens()))
-    .bind(Decimal::from(evidence.pending_steering_content_bytes))
-    .execute(&mut *connection)
-    .await?;
     Ok(())
 }
 

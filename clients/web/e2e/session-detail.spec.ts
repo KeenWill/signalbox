@@ -296,7 +296,7 @@ test('fails closed when detail belongs to a different event kind', async ({ page
   await openDetails(page, true)
   await toolRow(page).click()
   await expect(
-    page.getByRole('alert').filter({ hasText: "Details didn't match this event." }),
+    page.getByRole('alert').filter({ hasText: 'Details do not match this event.' }),
   ).toBeVisible()
   await expect(page.getByRole('region', { name: 'Tool arguments' })).toHaveCount(0)
 })
@@ -433,10 +433,7 @@ test('shows automatic reconciliation exhaustion in conversation and expanded det
   await events.uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
   await expect(
-    conversation.getByText(
-      'Automatic reconciliation exhausted. Waiting for an operator decision.',
-      { exact: true },
-    ),
+    conversation.getByText('Automatic reconciliation exhausted.', { exact: true }),
   ).toBeVisible()
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
   await page.screenshot({ path: test.info().outputPath('exhaustion-conversation.png') })
@@ -446,9 +443,7 @@ test('shows automatic reconciliation exhaustion in conversation and expanded det
     .filter({ hasText: 'Automatic reconciliation exhausted' })
     .press('Enter')
   const detail = page.getByRole('article', { name: 'Automatic reconciliation exhausted detail' })
-  await expect(detail).toContainText(
-    'Automatic reconciliation exhausted. Waiting for an operator decision.',
-  )
+  await expect(detail).toContainText('Automatic reconciliation exhausted.')
   await expect(detail).not.toContainText('Turn retired before it started.')
 })
 
@@ -495,13 +490,13 @@ test('labels partial tool payloads and the final continued chunk', async ({ page
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
   const output = conversation.getByRole('region', { name: 'Output', exact: true })
-  await expect(output).toContainText('Showing from byte 0 of 55')
+  await expect(output).toContainText('From byte 0 of 55')
   await expect(output).toContainText('"status": "ok"')
   await expect(
     conversation.getByRole('region', { name: 'Arguments', exact: true }),
-  ).not.toContainText('Showing from byte')
+  ).not.toContainText('From byte')
   await page.getByRole('button', { name: 'Next text page', exact: true }).click()
-  await expect(output).toContainText('Showing from byte 15 of 55')
+  await expect(output).toContainText('From byte 15 of 55')
 })
 
 for (const outcome of ['goal_stopped', 'goal_settling'] as const) {

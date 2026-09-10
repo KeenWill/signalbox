@@ -26,7 +26,7 @@ one call are one batch, and the rules on this page apply per batch.
 Each proposal becomes one immutable `ToolRequest` record fixing its producing
 call, name, normalized arguments, ordinal, and resolved approval posture.
 Arguments that decode are stored as compact JSON with lexically ordered object
-keys; arguments that do not decode are stored as the exact bounded text the
+keys; admitted arguments that do not decode are stored as the exact text the
 provider adapter emitted. Every request has an approval state separate from its
 execution state. A daemon tool mapping may declare an approval posture:
 automatic, delegated to a judge, or human. The selected posture is frozen into
@@ -100,7 +100,7 @@ materialization. Placement loss never rewrites or cancels dispatched work.
 A turn is the logical conversational outcome; a model call and a turn attempt
 are physical executions that may repeat without changing that identity.
 
-Malformed arguments are retained as bounded text instead of being rejected, so
+Admitted malformed arguments are retained as text instead of being rejected, so
 identity-safe evidence of the proposal survives without being treated as JSON.
 
 An `AlwaysConfirm` permission exists so that no session blanket can silently
@@ -114,8 +114,9 @@ without presenting policy as human consent, and only an explicit user, delegate,
 or consumed-override decision emits an approval-decided event naming its
 decider, its decision, and, for a delegate, its rationale.
 
-A denial reason is bounded and free of control characters, so a client can
-render it directly.
+A denial reason is at most 4,096 UTF-8 bytes, admits internal U+000A, and is
+free of other control characters and surrounding POSIX whitespace. An oversized
+decision returns its observed and maximum byte counts.
 
 Delegation can narrow authority but never widen it.
 
@@ -165,29 +166,31 @@ regardless of parent order. A missing or ambiguous fence binding refuses the
 push with `UnprovenMergeParents`. Multiple merge bases refuse it with
 `AmbiguousMergeBases`, listing base object IDs and an omitted count when the
 detail cannot fit them all; verification does not construct a virtual merge
-base. Before pushing a merge, the executor compares additions and removals
-relative to its base parent against the branch's effects relative to the merge
-base, ignoring line offsets and consuming each matching effect once. A carried
-addition does not require the branch patch's obsolete preimage to remain;
-carried removals must also occur in the branch diff. Rename detection correlates
-parent renames through their common source paths, permitting either parent's
-destination while retaining exact carried destinations. An effect absent from
-the branch diff refuses the push with `MergeDroppedBaseChanges`. Collected
-dropped-hunk previews share a 4 KiB budget, and collection truncation remains
-explicit in the detail. Its bounded JSON detail lists filenames before hunk
-previews, marks each shortened preview with `truncated`, and counts omitted
-filenames and previews explicitly when they cannot fit. Filenames use bytewise
-Git path quoting. Verification supports two-parent merges and refuses larger
-merges with `UnsupportedMergeShape` naming the parent count before capturing the
-push snapshot or traversing ancestry. It retains only the first dropped hunk per
-file. Merge comparison streams content into file-backed line indexes, diff
-scratch data, and effect counts; retained hunk previews remain bounded. Rename
-similarity uses fixed-size signatures of streamed content. Comparison checks the
-push-preparation deadline between I/O pages and matching steps. Non-merge pushes
-are unaffected.
-
-A rename/delete resolution may retain the branch's rename destination with its
-exact branch blob and mode while leaving the base-deleted source absent.
+base. Before pushing a merge, the executor compares the base parent's additions
+and removals relative to the merge base with the merge result's additions and
+removals relative to that same ancestor, ignoring line offsets and consuming
+each matching effect once. The merge result must keep every line the base added
+verbatim and must not restore a line the base removed; the branch's own lines
+may be re-expressed only in regions of overlapping parent hunks with different
+replacement text; non-conflicting text stays verbatim. A missing base effect or
+a changed non-conflicting span refuses the push with `MergeDroppedBaseChanges`
+and a hunk preview. Rename detection correlates parent renames through their
+common source paths, permitting either parent's destination while retaining
+exact carried destinations. Non-text changes relative to the base parent must
+occur in the branch diff. Collected dropped-hunk previews share a 4 KiB budget,
+and collection truncation remains explicit in the detail. Its bounded JSON
+detail lists filenames before hunk previews, marks each shortened preview with
+`truncated`, and counts omitted filenames and previews explicitly when they
+cannot fit. Filenames use bytewise Git path quoting. Verification supports
+two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
+the parent count before capturing the push snapshot or traversing ancestry. It
+retains only the first dropped hunk per file. Merge comparison streams content
+into file-backed line indexes, diff scratch data, and effect counts; retained
+hunk previews remain bounded. Rename similarity uses fixed-size signatures of
+streamed content. Comparison checks the push-preparation deadline between I/O
+pages and matching steps. Fixed spans use streamed literal comparison; candidate
+comparisons share a bounded work budget, and an unproven span refuses the push.
+Non-merge pushes are unaffected.
 
 Before constructing merge diffs, verification counts tree-entry occurrences
 across the four compared trees against `MAX_REPOSITORY_INSPECTIONS`, including
@@ -262,20 +265,27 @@ command claim and replay, and provenance-only attribution, in
 [identity-and-commands](identity-and-commands.md); transcript append and
 compaction in [sessions-and-transcript](sessions-and-transcript.md).
 
-Undecodable argument text is the exact bounded UTF-8 the provider adapter
+Admitted undecodable argument text is the exact UTF-8 the provider adapter
 emitted after its preparation-time credential scrub. An undecodable value, or
 JSON that does not decode against the selected tool's argument type, becomes a
 typed execution error at preflight. Empty text blocks are omitted at the
 provider boundary and create no semantic entry; tool proposals are never
 omitted. A tool-use entry carries only its call and request references and never
 copies the name or arguments, and a result entry never copies output, error
-detail, or denial reason. A response with more requests than the fixed
-per-response cap closes the producing call `KnownFailed` and creates no partial
-batch, request record, or tool-use entry. If a definitive completion carries a
-tool name or argument payload that cannot enter the bounded domain vocabulary,
-the provider bridge converts the response to a typed `KnownFailed` observation;
-it does not leave the call in flight, persist the inadmissible proposal, or
-partially commit the response.
+detail, or denial reason.
+
+The optional `[tool_proposals]` configuration sets `max_requests` (default 32)
+and `max_argument_bytes` (default 1048576); `"none"` removes the corresponding
+admission bound. The first `max_requests` proposals are eligible for approval;
+each later proposal receives an `execution_failed` result naming the cap and
+retains its normalized arguments unless the argument-byte bound requires a
+preview. Normalization and durable-value validation precede either limit. An
+argument payload exceeding its byte bound before or after canonicalization is
+stored as a bounded UTF-8 preview with retained/dropped byte counts and receives
+an `invalid_arguments` result. These requests remain in their original response
+order and never execute or require approval. Neither limit closes the producing
+model call `KnownFailed`. Tool names and argument text that cannot enter durable
+domain values still produce a typed `KnownFailed` observation.
 
 Approval visits requests in proposal order and the turn parks on the earliest
 undecided request. No request in a batch executes while any request in that

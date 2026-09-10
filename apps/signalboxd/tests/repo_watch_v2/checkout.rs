@@ -1106,9 +1106,9 @@ impl CheckoutFixture {
             std::os::unix::fs::PermissionsExt::from_mode(0o600),
         )?;
         let catalog_text = self.catalog.replace(
-            "credential_file =",
+            "\ncredential_file =",
             &format!(
-                "push_credential_file = \"{}\"\ncredential_file =",
+                "\npush_credential_file = \"{}\"\ncredential_file =",
                 credential.display()
             ),
         );
@@ -3399,9 +3399,9 @@ impl CheckoutFixture {
             .expect("catalog prefix")
             .replace("enabled = true", "enabled = false")
             .replace(
-                "credential_file =",
+                "\ncredential_file =",
                 &format!(
-                    "push_credential_file = \"{}\"\ncredential_file =",
+                    "\npush_credential_file = \"{}\"\ncredential_file =",
                     credential.display()
                 ),
             );

@@ -8,7 +8,7 @@ const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.met
 const thumbnailFixture = readFileSync(new URL('./fixtures/thumbnail.png', import.meta.url))
 const jpegOriginalFixture = readFileSync(new URL('./fixtures/original.jpg', import.meta.url))
 const incompatibleDescriptorFixture = { invented: true } as const
-const incompatibleDescriptorMessage = 'The server sent an unexpected response.'
+const incompatibleDescriptorMessage = 'Unexpected daemon response.'
 // The shared renderer admits an inline original only for a single-frame JPEG carrying a bounded
 // decode proof, so the inspector borrows the landed scenario descriptor that satisfies it.
 const admittedOriginalArtifact = jpegDescriptor
@@ -302,7 +302,7 @@ test('keeps focus moved during a pending bootstrap retry', async ({ page }) => {
     route.fulfill({ json: incompatibleDescriptorFixture }),
   )
   await page.goto('/sessions?workspace=true')
-  await expect(page.getByText('Unexpected server response')).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response')).toBeVisible()
 
   const response = Promise.withResolvers<void>()
   await page.route('**/api/bootstrap', async (route) => {
@@ -315,7 +315,7 @@ test('keeps focus moved during a pending bootstrap retry', async ({ page }) => {
   const navigation = page.getByRole('link', { name: /Settings/ })
   await navigation.focus()
   response.resolve()
-  await expect(page.getByText('Unexpected server response')).toHaveCount(0)
+  await expect(page.getByText('Unexpected daemon response')).toHaveCount(0)
   await expect(navigation).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -351,7 +351,7 @@ test('preserves an intentional blur during a pending bootstrap retry', async ({ 
     route.fulfill({ json: incompatibleDescriptorFixture }),
   )
   await page.goto('/sessions?workspace=true')
-  await expect(page.getByText('Unexpected server response')).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response')).toBeVisible()
 
   const response = Promise.withResolvers<void>()
   await page.route('**/api/bootstrap', async (route) => {

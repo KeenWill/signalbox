@@ -913,6 +913,50 @@ fn repository_watch_is_enabled_by_default() {
 }
 
 #[test]
+fn repository_observation_workflows_are_disabled_by_default() {
+    let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+        .expect("repository-watch configuration");
+    assert!(
+        !configured
+            .repository_watch()
+            .expect("configured watch")
+            .workflows_enabled()
+    );
+}
+
+#[test]
+fn repository_observation_workflows_can_be_selected_explicitly() {
+    let configured = HubModelConfiguration::parse(&configuration_with_repository_watch().replace(
+        "[repository_watch]\nversion = 1",
+        "[repository_watch]\nversion = 1\nworkflows_enabled = true",
+    ))
+    .expect("workflow repository-watch configuration");
+    assert!(
+        configured
+            .repository_watch()
+            .expect("configured watch")
+            .workflows_enabled()
+    );
+}
+
+#[test]
+fn repository_observation_workflows_reject_non_boolean_values() {
+    for value in ["1", "\"true\"", "[]"] {
+        let source = configuration_with_repository_watch().replace(
+            "[repository_watch]\nversion = 1",
+            &format!("[repository_watch]\nversion = 1\nworkflows_enabled = {value}"),
+        );
+        assert!(
+            matches!(
+                HubModelConfiguration::parse(&source),
+                Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            ),
+            "workflows_enabled must reject {value}"
+        );
+    }
+}
+
+#[test]
 fn repository_watch_can_be_disabled_explicitly() {
     let configured = HubModelConfiguration::parse(&configuration_with_repository_watch().replace(
         "[repository_watch]\nversion = 1",
@@ -4780,6 +4824,54 @@ fn configured_openai_models_route_through_the_pinned_api_key_profile() {
 }
 
 #[test]
+fn continuation_overhead_covers_nondefault_reasoning_and_service_tier() {
+    use signalbox_model_runtime::{
+        ConversationMessage, ModelOperation, ModelSettings, OpenAiServiceTier, ReasoningLevel,
+        RequestedTarget, ResolvedTarget, ServiceTier,
+    };
+
+    let configuration =
+        HubModelConfiguration::parse(&format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}"))
+            .expect("fixture settings capabilities are valid");
+    let selection = DirectModelSelection::from_uuid(
+        Uuid::parse_str("10000000-0000-4000-8000-00000000000e").expect("fixture UUID is valid"),
+    );
+    let route = configuration
+        .resolve_direct_model(selection)
+        .expect("fixture route exists");
+    let definition = configuration
+        .runtime_models
+        .resolve(route.target())
+        .expect("fixture target exists");
+    let mut operation = ModelOperation::new(
+        (),
+        CredentialReference::new("continuation-measurement"),
+        RequestedTarget::new(definition.provider_model()),
+        ResolvedTarget::new(definition.provider_model()),
+        vec![ConversationMessage::user_text("Retained summary.")],
+        ModelSettings::new(definition.max_output_tokens()),
+    );
+    let omitted = signalbox_model_runtime_openai::serialized_request_bytes(&operation)
+        .expect("default settings serialize");
+    let allowance = configuration
+        .continuation_request_bytes(route.target(), ModelAdapter::OpenAi, &operation)
+        .expect("supported settings have an allowance");
+    // These are valid turn overrides even though neither is a configured default.
+    operation.settings.reasoning_level = Some(ReasoningLevel::Minimal);
+    operation.settings.service_tier = Some(ServiceTier::OpenAi(OpenAiServiceTier::Priority));
+    let request = signalbox_model_runtime_openai::serialized_request_bytes(&operation)
+        .expect("nondefault effective settings serialize");
+    assert!(
+        request > omitted,
+        "omitting these settings would admit an oversized request"
+    );
+    assert!(
+        allowance >= request,
+        "the allowance includes effective settings from turn overrides"
+    );
+}
+
+#[test]
 fn configuration_accepts_an_opaque_openai_profile_name() {
     let other_profile = "openai-secondary";
     let configuration = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}")
@@ -6329,6 +6421,80 @@ fn human_approval_wait_rejects_zero_and_invalid_durations() {
             "{value}"
         );
     }
+}
+
+#[test]
+fn workspace_instruction_discovery_limits_accept_values_and_none() {
+    for (settings, expected) in [
+        (
+            r#"max_classified_entries = 3
+max_findings = 4
+max_candidate_source_bytes = 5
+max_elapsed = "6s""#,
+            signalbox_application::InstructionDiscoveryLimits {
+                classified_entries: Some(3),
+                findings: std::num::NonZeroUsize::new(4),
+                candidate_source_bytes: Some(5),
+                elapsed: Some(std::time::Duration::from_secs(6)),
+            },
+        ),
+        (
+            r#"max_classified_entries = "none"
+max_findings = "none"
+max_candidate_source_bytes = "none"
+max_elapsed = "none""#,
+            signalbox_application::InstructionDiscoveryLimits {
+                classified_entries: None,
+                findings: None,
+                candidate_source_bytes: None,
+                elapsed: None,
+            },
+        ),
+    ] {
+        let text = format!(
+            "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = []\n{settings}\n"
+        );
+        let configuration =
+            HubModelConfiguration::parse(&text).expect("configured discovery limits");
+        assert_eq!(configuration.workspace_instructions().limits(), expected);
+    }
+}
+
+#[test]
+fn tool_proposal_limits_use_defaults_values_and_none() {
+    let defaults = HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration");
+    assert_eq!(
+        defaults.tool_proposal_limits(),
+        signalbox_application::ToolProposalLimits::default()
+    );
+    let configured = HubModelConfiguration::parse(&format!(
+        "{CONFIGURATION}\n[tool_proposals]\nmax_requests = 5\nmax_argument_bytes = 2048\n"
+    ))
+    .expect("finite tool proposal limits");
+    assert_eq!(
+        configured.tool_proposal_limits(),
+        signalbox_application::ToolProposalLimits {
+            max_requests: Some(5),
+            max_argument_bytes: Some(2048),
+        }
+    );
+    let unbounded = HubModelConfiguration::parse(&format!("{CONFIGURATION}\n[tool_proposals]\nmax_requests = \"none\"\nmax_argument_bytes = \"none\"\n"))
+        .expect("unbounded tool proposals");
+    assert_eq!(
+        unbounded.tool_proposal_limits(),
+        signalbox_application::ToolProposalLimits {
+            max_requests: None,
+            max_argument_bytes: None,
+        }
+    );
+}
+
+#[test]
+fn workspace_instruction_finding_limit_rejects_zero() {
+    let text = format!(
+        "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = []\nmax_findings = 0\n"
+    );
+    assert!(HubModelConfiguration::parse(&text).is_err());
 }
 
 #[test]

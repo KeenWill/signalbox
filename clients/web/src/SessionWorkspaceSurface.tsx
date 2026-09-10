@@ -487,7 +487,7 @@ export function SessionWorkspaceSurface({
         </p>
       ) : session.isError ? (
         <p className="session-load-state" role="alert">
-          Session couldn't be loaded.
+          Session failed to load.
         </p>
       ) : displayedSession === undefined ? (
         <p className="session-load-state" role="status">
@@ -534,10 +534,10 @@ export function SessionWorkspaceSurface({
               {' · '}
               {enumLabel(displayedSession.descriptor.repository_watch.event_kind)}
               <details>
-                <summary>Trigger details</summary>
+                <summary>Dispatch details</summary>
                 <p>
                   Dispatch {displayedSession.descriptor.repository_watch.dispatch_id}
-                  {' · Step '}
+                  {' · Action '}
                   {displayedSession.descriptor.repository_watch.action_ordinal}
                 </p>
                 <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>
@@ -648,7 +648,7 @@ export function SessionWorkspaceSurface({
           </section>
           {synchronization.sessionId === sessionId && synchronization.drafts.length > 0 && (
             <section className="provider-drafts" aria-label="Assistant draft">
-              <span>Assistant is typing…</span>
+              <span>Assistant draft</span>
               {synchronization.drafts.map((draft) => (
                 <p key={draft.key}>{draft.content}</p>
               ))}
@@ -742,7 +742,7 @@ export function SessionWorkspaceSurface({
                             onComplete={() => timelineRef.current?.focus()}
                           />
                         ) : (
-                          <p>Timeline detail is unavailable.</p>
+                          <p>Timeline detail unavailable.</p>
                         )}
                       </div>
                     )}

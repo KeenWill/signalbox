@@ -656,11 +656,13 @@ impl<'a> Output<'a> {
             lifecycle_weeks,
             lifecycle_deadline_violations,
             session_supervision,
+            outbox_quarantines,
         } = counts;
         writeln!(
             self.stdout,
             "status lifecycle_weeks={lifecycle_weeks} \
-             nonterminal_past_deadline={lifecycle_deadline_violations} session_supervision={session_supervision}"
+             nonterminal_past_deadline={lifecycle_deadline_violations} \
+             session_supervision={session_supervision} outbox_quarantine={outbox_quarantines}"
         )
     }
 

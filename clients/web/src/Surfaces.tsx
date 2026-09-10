@@ -115,7 +115,7 @@ export function OverlaySurfaces({
       <DialogFrame
         open={overlay === 'palette'}
         title="Command palette"
-        description="Search and run commands."
+        description="Choose a command."
         onClose={close}
       >
         <div className="command-list">
@@ -159,7 +159,7 @@ export function OverlaySurfaces({
       <DialogFrame
         open={overlay === 'navigation'}
         title={navigationContent ? 'Product navigation' : 'Development scenarios'}
-        description={navigationContent ? 'Choose a page.' : 'Sample data for trying out the app.'}
+        description={navigationContent ? 'Choose a page.' : 'Scenarios use sample data.'}
         onClose={close}
       >
         {navigationContent ?? (

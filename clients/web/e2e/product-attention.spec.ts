@@ -330,13 +330,13 @@ test('opens and closes the attention inspector without a mouse and restores focu
   await page.goto('/attention')
 
   const approval = page.getByRole('button', {
-    name: new RegExp(`Needs approval.*${approvalSessionId}`),
+    name: new RegExp(`Approval required.*${approvalSessionId}`),
   })
   await approval.focus()
   await approval.press('Enter')
   const close = page.getByRole('button', { name: 'Close attention inspector' })
   await expect(close).toBeFocused()
-  await expect(page.getByRole('heading', { name: 'Needs approval', level: 2 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Approval required', level: 2 })).toBeVisible()
   await close.press('Escape')
   await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
   await expect(approval).toBeFocused()
@@ -355,7 +355,7 @@ test('replaces the current bounded page instead of accumulating attention histor
   await expect(page.getByRole('listitem')).toHaveCount(nextAttentionFixture.summaries.length)
   await expect(page.getByText(idleSessionId)).toBeVisible()
   await expect(page.getByText(approvalSessionId)).toBeHidden()
-  await expect(page.getByRole('button', { name: 'Live page' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'First page' })).toBeVisible()
   await expect(
     page.getByRole('heading', {
       name: `${nextAttentionFixture.summaries.length} ${nextAttentionFixture.summaries.length === 1 ? 'session' : 'sessions'}`,
@@ -370,12 +370,12 @@ test('returns to the live page after a paged read fails', async ({ page }) => {
   await page.goto('/attention')
 
   await page.getByRole('button', { name: /Next/ }).click()
-  await expect(page.getByRole('heading', { name: "Couldn't load Attention" })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Attention failed to load' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry' })).toBeFocused()
-  await page.getByRole('button', { name: 'Live page' }).click()
+  await page.getByRole('button', { name: 'First page' }).click()
 
   await expect(page.getByText(approvalSessionId)).toBeVisible()
-  await expect(page.getByRole('heading', { name: "Couldn't load Attention" })).toBeHidden()
+  await expect(page.getByRole('heading', { name: 'Attention failed to load' })).toBeHidden()
 })
 
 test('rejects a paged Attention response with a regressing cursor', async ({ page }) => {
@@ -384,8 +384,8 @@ test('rejects a paged Attention response with a regressing cursor', async ({ pag
 
   await page.getByRole('button', { name: /Next/ }).click()
 
-  await expect(page.getByRole('heading', { name: "Couldn't load Attention" })).toBeVisible()
-  await expect(page.getByText('The server sent an unexpected response.')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Attention failed to load' })).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response.')).toBeVisible()
 })
 
 test('advances the paged cursor floor after a successful read', async ({ page }) => {
@@ -398,7 +398,7 @@ test('advances the paged cursor floor after a successful read', async ({ page })
 
   await expect.poll(pagedRequests).toBe(2)
   await expect(page.getByText(idleSessionId)).toBeVisible()
-  await expect(page.getByRole('heading', { name: "Couldn't load Attention" })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Attention failed to load' })).toBeVisible()
 })
 
 test('closes the inspector with global Escape after focus leaves it', async ({ page }) => {
@@ -406,7 +406,7 @@ test('closes the inspector with global Escape after focus leaves it', async ({ p
   await page.goto('/attention')
 
   const approval = page.getByRole('button', {
-    name: new RegExp(`Needs approval.*${approvalSessionId}`),
+    name: new RegExp(`Approval required.*${approvalSessionId}`),
   })
   await approval.click()
   await page.getByRole('button', { name: 'Reconnect' }).focus()
@@ -424,7 +424,7 @@ test('moves focus to the page heading when refreshed data removes the selection'
   await page.goto('/attention')
 
   await page
-    .getByRole('button', { name: new RegExp(`Needs approval.*${approvalSessionId}`) })
+    .getByRole('button', { name: new RegExp(`Approval required.*${approvalSessionId}`) })
     .click()
   await page.getByRole('button', { name: 'Reconnect' }).click()
 
@@ -483,8 +483,8 @@ test('rejects a divergent equal-cursor HTTP snapshot after the follower starts',
   await installDivergentEqualCursorHttpScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByRole('heading', { name: "Couldn't load Attention" })).toBeVisible()
-  await expect(page.getByText('The server sent an unexpected response.')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Attention failed to load' })).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response.')).toBeVisible()
 })
 
 test('keeps the live projection when a refresh snapshot regresses', async ({ page }) => {

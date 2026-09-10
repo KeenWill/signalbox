@@ -570,17 +570,53 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn successor_compaction_rejects_an_unreachable_later_safe_boundary() {
-        assert!(super::successor_compaction_cannot_advance(
-            &[10, 100, 100],
-            &[(31, true), (32, false), (33, true)],
-            203,
-        ));
-        assert!(!super::successor_compaction_cannot_advance(
-            &[10, 100, 100],
-            &[(31, true), (32, false), (33, true)],
-            204,
-        ));
+    fn automatic_compaction_source_reserves_the_adapter_envelope_and_json_escaping() {
+        let configuration = crate::configuration::HubModelConfiguration::parse(
+            &crate::configuration::tests::CONFIGURATION.replace(
+                "Summarize the prior conversation faithfully for continuation.",
+                r#"Summarize \"quoted\" text and \n newlines."#,
+            ),
+        ).expect("the compaction configuration parses");
+        let selection = DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000001").expect("fixture selection"),
+        );
+        let window = 2048_u64;
+        let output = 256_u64;
+        let framing = configuration.compaction_request_bytes(selection, "x")
+            .expect("the request serializes") - 1;
+        let budget = window - output - framing;
+        let source = "\\\"\n".repeat(1024);
+        let raw_bounded = super::bounded_compaction_source(source.clone(), budget);
+        assert!(configuration.compaction_request_bytes(selection, &raw_bounded)
+            .expect("the request serializes") + output > window);
+        let bounded = super::bounded_compaction_request_source(&configuration, selection, source, budget)
+            .expect("the source fits the complete request budget");
+        assert!(bounded.contains("compaction text truncated"));
+        assert!(configuration.compaction_request_bytes(selection, &bounded)
+            .expect("the request serializes") + output <= window);
+    }
+
+    #[test]
+    fn oversized_compaction_source_retains_a_marked_utf8_prefix() {
+        let source = "🦀".repeat(269 * 1024 / 4);
+        let bounded = super::bounded_compaction_material(source, 1024);
+        assert!(bounded.len() <= 1024);
+        assert!(bounded.starts_with("🦀"));
+        assert!(bounded.contains("[compaction text truncated: retained "));
+        assert!(bounded.ends_with(" bytes]"));
+    }
+
+    #[test]
+    fn oversized_compaction_source_includes_the_last_exchange() {
+        let source = serde_json::json!([
+            { "content": "first exchange".repeat(1024) },
+            { "content": "last exchange".repeat(1024) },
+        ]).to_string();
+        let bounded = super::bounded_compaction_source(source, 1024);
+        assert!(bounded.len() <= 1024);
+        assert!(bounded.contains("first exchange"));
+        assert!(bounded.contains("last exchange"));
+        assert_eq!(bounded.matches("compaction text truncated").count(), 2);
     }
 
     #[test]

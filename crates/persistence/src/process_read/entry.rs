@@ -1,7 +1,8 @@
 use super::transcript_types::{ProcessToolExecutionResultDisposition, ProcessTranscriptEntry};
 use super::{
-    ProcessReadCorruption, ProcessReadError, decode_imported_source_speaker, decode_positive,
-    decode_process_tool_approval, decode_tool_result_disposition, project_imported_entry, required,
+    ProcessReadCorruption, ProcessReadError, decode_imported_source_speaker, decode_nonnegative,
+    decode_positive, decode_process_tool_approval, decode_tool_result_disposition,
+    project_imported_entry, required,
 };
 use crate::conversation_import_codec::decode_content;
 use crate::mapping::{ToolAttemptDispositionStorageKind, session_id_from_uuid};
@@ -571,19 +572,41 @@ pub(super) fn decode_transcript_entry(
             }
         } else if payload_kind == "tool_inadmissible" {
             let reason: Option<String> = row.try_get("transcript_inadmissible_reason")?;
-            if reason.as_deref() != Some("placement_lost") {
-                return Err(
-                    ProcessReadCorruption::Inconsistent("tool inadmissibility reason").into(),
-                );
-            }
+            let number = |field| -> Result<u64, ProcessReadError> {
+                Ok(decode_nonnegative(required(row, field)?, field)?)
+            };
+            let reason = match reason.as_deref() {
+                Some("placement_lost") => signalbox_domain::ToolInadmissibleReason::PlacementLost,
+                Some("proposal_limit_exceeded") => {
+                    signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded {
+                        limit: number("transcript_inadmissible_limit")?,
+                    }
+                }
+                Some("argument_bytes_exceeded") => {
+                    signalbox_domain::ToolInadmissibleReason::ArgumentBytesExceeded {
+                        limit: number("transcript_inadmissible_limit")?,
+                        bytes: number("transcript_inadmissible_argument_bytes")?,
+                    }
+                }
+                _ => {
+                    return Err(
+                        ProcessReadCorruption::Inconsistent("tool inadmissibility reason").into(),
+                    );
+                }
+            };
+            let error = reason.execution_error();
             ProcessTranscriptEntry::ToolInadmissible {
                 entry_index,
                 source_session,
                 entry,
                 request: ToolRequestId::from_uuid(request),
-                content: String::from(
-                    r#"{"error":{"detail":"placement_lost","kind":"execution_failed"}}"#,
-                ),
+                content: serde_json::json!({
+                    "error": {
+                        "kind": crate::tool_loop::encode_error_kind(error.kind()),
+                        "detail": error.detail().map(signalbox_domain::ToolExecutionErrorDetail::as_str),
+                    }
+                })
+                .to_string(),
             }
         } else {
             ProcessTranscriptEntry::ToolClosed {

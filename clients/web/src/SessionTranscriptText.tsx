@@ -27,7 +27,7 @@ function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextE
       <pre>{content}</pre>
       {(excerpt.offset_bytes !== '0' || excerpt.continuation != null) && (
         <small>
-          Showing from byte {excerpt.offset_bytes} of {excerpt.total_bytes}
+          From byte {excerpt.offset_bytes} of {excerpt.total_bytes}
         </small>
       )}
     </section>
@@ -60,11 +60,7 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
   if (body.type === 'event_fact' && body.kind === 'goal_turn_retired')
     return <p className="session-turn-outcome">{enumLabel(body.kind)}</p>
   if (body.type === 'event_fact' && body.kind === 'automatic_reconciliation_exhausted')
-    return (
-      <p className="session-turn-outcome">
-        Automatic reconciliation exhausted. Waiting for an operator decision.
-      </p>
-    )
+    return <p className="session-turn-outcome">Automatic reconciliation exhausted.</p>
   const excerpt =
     body.type === 'user_input' ? body.text : body.type === 'model_call' ? body.response : null
   if (!excerpt)
@@ -80,7 +76,7 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
       {body.type === 'user_input' && <AttachmentReferences attachments={body.attachments} />}
       {(excerpt.offset_bytes !== '0' || excerpt.continuation !== null) && (
         <small>
-          Showing from byte {excerpt.offset_bytes} of {excerpt.total_bytes}
+          From byte {excerpt.offset_bytes} of {excerpt.total_bytes}
         </small>
       )}
     </>
@@ -144,7 +140,7 @@ function TranscriptWindow({
       {transcript.isPending && <p>Loading transcript…</p>}
       {transcript.isError && (
         <p role="alert">
-          Couldn't load the transcript.{' '}
+          Transcript failed to load.{' '}
           <button type="button" onClick={() => void transcript.refetch()}>
             Retry transcript text
           </button>
