@@ -103,7 +103,8 @@ impl<Transport> GitPushTools<Transport> {
     }
 
     /// Sets the decoded byte limit for each pushed object and delta dependency.
-    /// `None` leaves object content unbounded, which is the default.
+    /// `None` leaves blob content unbounded, which is the default.
+    /// Commits, trees, and tags retain their structural byte limit.
     pub fn with_max_object_bytes(mut self, max_bytes: Option<usize>) -> Self {
         // The suite owns its executor exclusively until into_parts exposes it.
         #[allow(clippy::expect_used)]
