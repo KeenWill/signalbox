@@ -2391,29 +2391,45 @@ async fn run_hub_incarnation(
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let approval_judge_repository_watch = repository_watch_runtime.clone();
     let workflow_repository_watch = repository_watch_runtime.clone();
+    let mut termination_signals = TerminationSignals::new();
+    let (guard_ready, guarded_startup) = oneshot::channel();
+    let mut guard_loss = Box::pin(monitor_runtime_guard(&mut database, guard_ready));
     let mut repository_watch_worker = None;
     let reconstruct = async {
-        startup_goal_resumption_result(
-            goal_disposition
-                .reconcile_automatic_resumptions_after_restart()
-                .await,
-            guard_recovery.is_recovering(),
-        )?;
-        repository_watch_worker = match repository_watch_runtime {
-            Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
-            None => None,
-        };
-        configuration_reload
-            .recover()
-            .await
-            .map_err(|error| reload_recovery_failure(&error))
+        if guarded_startup.await.is_err() {
+            return GuardedAwait::GuardLost;
+        }
+        GuardedAwait::Completed(
+            async {
+                startup_goal_resumption_result(
+                    goal_disposition
+                        .reconcile_automatic_resumptions_after_restart()
+                        .await,
+                    guard_recovery.is_recovering(),
+                )?;
+                repository_watch_worker = match repository_watch_runtime {
+                    Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
+                    None => None,
+                };
+                configuration_reload
+                    .recover()
+                    .await
+                    .map_err(|error| reload_recovery_failure(&error))
+            }
+            .await,
+        )
     };
-    let recovery_failure = match await_while_guarded(&mut database, reconstruct).await {
+    let recovery_failure = match select! {
+        biased;
+        () = &mut guard_loss => GuardedAwait::GuardLost,
+        outcome = reconstruct => outcome,
+    } {
         GuardedAwait::Completed(Ok(())) => None,
         GuardedAwait::Completed(Err(error)) => Some(Err(error)),
         GuardedAwait::GuardLost => Some(Ok(ShutdownOutcome::GuardLost)),
     };
     if let Some(outcome) = recovery_failure {
+        drop(guard_loss);
         if matches!(outcome, Ok(ShutdownOutcome::GuardLost)) {
             if let Some(registry) = blob_store_registry.as_ref() {
                 registry.disarm_staging_sweep();
@@ -2459,6 +2475,7 @@ async fn run_hub_incarnation(
     let tool_catalog = match startup_tool_catalog {
         Ok(catalog) => catalog,
         Err(failure) => {
+            drop(guard_loss);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             let _ = repository_watch_shutdown.send(true);
             if let Some(worker) = repository_watch_worker {
@@ -2684,17 +2701,10 @@ async fn run_hub_incarnation(
     let supervision_pool = pool.clone();
     let supervision_nudge = eligibility_nudge.clone();
     let mut supervision_shutdown = process_shutdown.subscribe();
-    let mut termination_signals = TerminationSignals::new();
     let mut drain_interrupted = false;
     let mut outcome = {
-        let (guard_ready, guarded_startup) = oneshot::channel();
-        let guard_loss = monitor_runtime_guard(&mut database, guard_ready);
-        pin!(guard_loss);
         let mut cause = {
             let runtime = async {
-                if guarded_startup.await.is_err() {
-                    return RuntimeStopCause::GuardLost;
-                }
                 runtime_tasks.spawn(async move {
                     select! {
                         () = session_supervision.park_failed_sessions(supervision_pool, supervision_nudge) => {},
@@ -2935,6 +2945,8 @@ async fn run_hub_incarnation(
             completed_runtime_outcome(cause, drain)
         }
     };
+
+    drop(guard_loss);
 
     // A timed-out component may still have held a connection before its task
     // was aborted. Waiting for an ordinary pool drain here would silently
