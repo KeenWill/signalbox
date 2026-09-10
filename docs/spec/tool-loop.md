@@ -395,8 +395,8 @@ in-flight attempt acquires the gate and reloads the attempt before classifying
 prior-process crash loss. Interrupt handling acquires the same gate before its
 command transaction, and the durable attempt cannot remain in flight after the
 gate becomes available to an interrupt. An interrupt that waits behind executor
-work reloads the committed result before closing the batch, so it cannot strand
-an issued request or roll back its command.
+work reloads the complete committed result before closing the batch, so it
+cannot strand an issued request or roll back its command.
 
 If the executor returns an operator failure without trustworthy evidence after
 authorization, the service retains the gate and applies the attempt's
