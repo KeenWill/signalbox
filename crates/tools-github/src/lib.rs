@@ -2187,13 +2187,15 @@ impl GitHubApiTransport {
             .ok_or(GitHubTransportFailure::InvalidCredential)?;
         let authentication = authorization(credential.expose_bytes())
             .map_err(|_| GitHubTransportFailure::InvalidCredential)?;
-        let client = public_destination_client(&url, Some(timeout))
-            .await
-            .map_err(classify_destination_failure)?;
+        let (client, remaining) = destination_with_remaining_timeout(
+            timeout,
+            public_destination_client(&url, Some(timeout)),
+        )
+        .await?;
         let request = authenticated_request(&client, method, url, authentication, body);
         let response = match &self.app {
             Some(app) => {
-                app.send(request, Some(timeout))
+                app.send(request, Some(remaining))
                     .await
                     .map_err(|failure| match failure {
                         signalbox_github_transport::AppRequestFailure::Credential(_) => {
@@ -2371,6 +2373,21 @@ const fn classify_send_failure(is_connect: bool) -> GitHubTransportFailure {
     } else {
         GitHubTransportFailure::DispatchUnknown
     }
+}
+
+async fn destination_with_remaining_timeout(
+    timeout: Duration,
+    destination: impl Future<Output = Result<reqwest::Client, PublicDestinationClientError>>,
+) -> Result<(reqwest::Client, Duration), GitHubTransportFailure> {
+    let deadline = tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or(GitHubTransportFailure::PreDispatchInfrastructure)?;
+    let client = destination.await.map_err(classify_destination_failure)?;
+    let remaining = deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(GitHubTransportFailure::PreDispatchInfrastructure)?;
+    Ok((client, remaining))
 }
 
 const fn classify_destination_failure(
@@ -4295,6 +4312,48 @@ mod tests {
         assert_eq!(
             remaining_timeout(Instant::now()),
             Err(GitHubTransportFailure::DispatchUnknown),
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dns_resolution_consumes_the_app_request_budget() {
+        let started = tokio::time::Instant::now();
+        let (client, remaining) =
+            destination_with_remaining_timeout(Duration::from_secs(30), async {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                signalbox_github_transport::client(Some(Duration::from_secs(10)))
+                    .map_err(|_| PublicDestinationClientError::Infrastructure)
+            })
+            .await
+            .expect("offline destination resolution");
+        assert_eq!(remaining, Duration::from_secs(10));
+        // Arbitrary App identities; a pending key reader prevents any network request.
+        let app = signalbox_github_transport::AppAuthentication::new(
+            42,
+            73,
+            std::sync::Arc::new(|| Box::pin(std::future::pending())),
+        );
+        let response = app.send(client.get(GRAPHQL_URL), Some(remaining)).await;
+        assert!(matches!(
+            response,
+            Err(signalbox_github_transport::AppRequestFailure::Credential(
+                signalbox_github_transport::AppCredentialFailure::ExchangeRejected
+            ))
+        ));
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dns_exhausting_the_request_budget_fails_before_dispatch() {
+        let resolved = destination_with_remaining_timeout(Duration::from_secs(30), async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            signalbox_github_transport::client(None)
+                .map_err(|_| PublicDestinationClientError::Infrastructure)
+        })
+        .await;
+        assert_eq!(
+            resolved.err(),
+            Some(GitHubTransportFailure::PreDispatchInfrastructure)
         );
     }
 

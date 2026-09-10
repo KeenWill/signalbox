@@ -54,8 +54,9 @@ integration credentials do not participate in model-pool selection or
 quarantine.
 
 Installation-token preparation and refresh use the caller's configured request
-deadline, including time waiting for the shared cache. Token-exchange responses
-larger than 64 KiB are rejected as credential unavailability before decoding.
+deadline, including destination resolution and time waiting for the shared
+cache. Token-exchange responses larger than 64 KiB are rejected as credential
+unavailability before decoding.
 
 ## Design decisions
 
