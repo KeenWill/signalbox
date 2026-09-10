@@ -7150,3 +7150,80 @@ async fn administration_nested_under_configured_or_other_session_roots_is_refuse
         }
     }
 }
+
+#[tokio::test]
+async fn administration_nested_under_another_administration_is_refused() {
+    for inside_common in [false, true] {
+        for outer_binds_first in [false, true] {
+            let fixture = tempfile::tempdir().expect("nested administration fixture");
+            let configured = configured_workspace(fixture.path());
+            let first = session(FIRST_SESSION_IDENTITY);
+            let second = session(SECOND_SESSION_IDENTITY);
+            let roots = [
+                derivation(&configured).derived_path(first),
+                derivation(&configured).derived_path(second),
+            ];
+            let mut options = git2::RepositoryInitOptions::new();
+            options.external_template(false).initial_head("main");
+            for root in &roots {
+                fs::create_dir_all(root).expect("derived root");
+                git2::Repository::init_opts(root, &options).expect("empty repository");
+            }
+            let common = fixture.path().join("external-common");
+            fs::rename(roots[0].join(".git"), &common).expect("external common administration");
+            let administration = fixture.path().join("external-worktree");
+            fs::create_dir(&administration).expect("worktree administration");
+            fs::copy(common.join("HEAD"), administration.join("HEAD")).expect("worktree HEAD");
+            fs::write(
+                administration.join("commondir"),
+                format!("{}\n", common.display()),
+            )
+            .expect("common marker");
+            fs::write(
+                administration.join("gitdir"),
+                format!("{}\n", roots[0].join(".git").display()),
+            )
+            .expect("worktree backlink");
+            fs::write(
+                roots[0].join(".git"),
+                format!("gitdir: {}\n", administration.display()),
+            )
+            .expect("outer gitdir marker");
+            let container = if inside_common {
+                &common
+            } else {
+                &administration
+            };
+            let nested = container.join("refs/heads/holder");
+            fs::create_dir_all(nested.parent().expect("nested parent")).expect("nested parent");
+            fs::rename(roots[1].join(".git"), &nested).expect("nested administration");
+            fs::write(
+                roots[1].join(".git"),
+                format!("gitdir: {}\n", nested.display()),
+            )
+            .expect("inner gitdir marker");
+            for root in &roots {
+                signalbox_tools_git::LocalGitTools::try_new(
+                    LocalWorkspaceFileSystem,
+                    root,
+                    git_identity(),
+                )
+                .expect("each Git layout is individually valid");
+            }
+            let resolver = offline_workspace_instruction_root_resolver(&configured);
+            let (initial, conflicting) = if outer_binds_first {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            resolver
+                .resolve(initial)
+                .await
+                .expect("first disjoint workspace binds");
+            assert_eq!(
+                resolver.resolve(conflicting).await,
+                Err(WorkspaceInstructionRootResolutionError)
+            );
+        }
+    }
+}

@@ -81,8 +81,14 @@ impl ComposedWorkspaceIdentity {
 
     pub(super) fn shares_a_directory_with(&self, other: &Self) -> bool {
         self.contains_directory(other.root)
-            || self.administration_ancestors.contains(&other.root)
-            || other.administration_ancestors.contains(&self.root)
+            || self
+                .administration_ancestors
+                .iter()
+                .any(|ancestor| other.contains_directory(*ancestor))
+            || other
+                .administration_ancestors
+                .iter()
+                .any(|ancestor| self.contains_directory(*ancestor))
             || match other.common_administration {
                 Some(administration) => self.contains_directory(administration),
                 None => false,
