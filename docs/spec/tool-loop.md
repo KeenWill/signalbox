@@ -371,7 +371,8 @@ retained set a request still holds is never released. Every declaration a
 workspace-root-bound family advertises is a property of the family's code, not
 of the repository it binds. Local Git is the exception: it compiles the pinned
 repository's object format into its argument validators, and session composition
-refuses an object-format disagreement.
+refuses an object-format disagreement. Configured pushes use the same bound
+workspace.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`

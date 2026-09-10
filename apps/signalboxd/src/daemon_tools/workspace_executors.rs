@@ -512,9 +512,6 @@ where
                 .resolve_workspace_instruction_root(session)
                 .await
                 .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
-            if root != self.roots.derived_path(session) {
-                return Err(DaemonToolExecutorError::pre_dispatch());
-            }
             let filesystem = FileSystem::pin_further_root(&root)
                 .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
             let mut executor = WorkspaceBoundFamilies::git_push(

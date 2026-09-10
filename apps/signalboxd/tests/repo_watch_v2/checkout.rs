@@ -1675,9 +1675,16 @@ async fn commissioned_push_advances_only_its_retained_head_without_repository_wa
     assert_push_retained_fences(PushSessionOrigin::Commissioned).await
 }
 
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn commissioned_push_uses_its_bound_configured_workspace() -> Result<(), Box<dyn Error>> {
+    assert_push_retained_fences(PushSessionOrigin::CommissionedConfiguredRoot).await
+}
+
 enum PushSessionOrigin {
     RepositoryDispatch,
     Commissioned,
+    CommissionedConfiguredRoot,
 }
 
 async fn assert_push_retained_fences(origin: PushSessionOrigin) -> Result<(), Box<dyn Error>> {
@@ -1696,14 +1703,30 @@ async fn assert_push_retained_fences(origin: PushSessionOrigin) -> Result<(), Bo
             .is_none()
     );
     let credential = fixture.enable_push()?;
-    let session = match origin {
+    let (session, root) = match origin {
         PushSessionOrigin::RepositoryDispatch => {
             fixture.dispatch().await;
-            fixture.session().await
+            let session = fixture.session().await;
+            (session, fixture.root(session))
         }
-        PushSessionOrigin::Commissioned => fixture.commission_push().await?,
+        PushSessionOrigin::Commissioned => {
+            let session = fixture.commission_push().await?;
+            (session, fixture.root(session))
+        }
+        PushSessionOrigin::CommissionedConfiguredRoot => {
+            let session = fixture.commission_push().await?;
+            let configured = fixture
+                .sink
+                .models
+                .daemon_tools()
+                .expect("tools")
+                .workspace_root()
+                .to_owned();
+            std::fs::remove_dir_all(&configured)?;
+            std::fs::rename(fixture.root(session), &configured)?;
+            (session, configured)
+        }
     };
-    let root = fixture.root(session);
     let (catalog, executor) = fixture.push_tools().await?;
     let turn = TurnId::from_uuid(Uuid::now_v7());
     std::fs::write(root.join("review.txt"), "fixed by dispatched session\n")?;
