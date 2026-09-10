@@ -499,13 +499,15 @@ async fn workflow_observations_reuse_conditional_pages_and_invalidate_changed_re
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn workflow_observations_keep_the_configured_request_ceiling() -> Result<(), Box<dyn Error>> {
+async fn preflight_only_observations_keep_the_request_ceiling_when_replayed()
+-> Result<(), Box<dyn Error>> {
     let mut fixture = Fixture::new().await?;
     fixture.effects.observer.budget =
         NonZeroUsize::new(1).expect("one request allows only preflight");
     let input = fixture.input();
+    let first = fixture.run(&input).await?;
     assert_eq!(
-        fixture.run(&input).await?,
+        first,
         ObserveAnswer::Observed(ObservationResult {
             generation: 0,
             after: 0,
@@ -532,6 +534,25 @@ async fn workflow_observations_keep_the_configured_request_ceiling() -> Result<(
             .await?
             .generation,
         0
+    );
+    fixture
+        .effects
+        .observer
+        .io
+        .requests
+        .lock()
+        .expect("request log")
+        .clear();
+    assert_eq!(fixture.run(&input).await?, first);
+    assert!(
+        fixture
+            .effects
+            .observer
+            .io
+            .requests
+            .lock()
+            .expect("request log")
+            .is_empty()
     );
     Ok(())
 }

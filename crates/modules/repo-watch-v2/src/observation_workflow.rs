@@ -196,8 +196,12 @@ impl RepoWatchStore {
                 }
             };
         result.outcome = outcome;
-        sqlx::query("UPDATE repository_state SET observation_effect_result=$3 WHERE observation_effect_id=$1 AND observation_effect_input=$2")
+        let updated = sqlx::query("UPDATE repository_state SET observation_effect_result=$3 WHERE observation_effect_id=$1 AND observation_effect_input=$2")
             .bind(invocation.effect).bind(&invocation.input).bind(result.encode()).execute(&mut *transaction).await?;
+        if updated.rows_affected() == 0 {
+            sqlx::query("INSERT INTO workflow_effect_result(effect_id, method, effect_input, effect_result) VALUES ($1, 'repo.observe', $2, $3)")
+                .bind(invocation.effect).bind(&invocation.input).bind(result.encode()).execute(&mut *transaction).await?;
+        }
         transaction.commit().await?;
         Ok(result)
     }
