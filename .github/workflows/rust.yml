@@ -179,6 +179,26 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Fetch migration baseline trees
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          GH_TOKEN: ${{ github.token }}
+        shell: python3 {0}
+        run: |
+          import base64
+          import os
+          import subprocess
+
+          branches = list(dict.fromkeys(["main", os.environ["BASE_REF"]]))
+          for branch in branches:
+              subprocess.run(["git", "check-ref-format", f"refs/heads/{branch}"], check=True)
+          authorization = base64.b64encode(f"x-access-token:{os.environ['GH_TOKEN']}".encode()).decode()
+          environment = dict(os.environ, GIT_CONFIG_COUNT="1",
+                             GIT_CONFIG_KEY_0="http.extraheader",
+                             GIT_CONFIG_VALUE_0=f"AUTHORIZATION: basic {authorization}")
+          refspecs = [f"+refs/heads/{branch}:refs/remotes/origin/{branch}" for branch in branches]
+          subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", *refspecs],
+                         env=environment, check=True)
       - name: Use Python with Markdown exclusion support
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

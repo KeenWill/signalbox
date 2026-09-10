@@ -73,7 +73,7 @@ impl DaemonToolCatalog {
                 watch
                     .repositories()
                     .iter()
-                    .any(|repository| repository.git_push_enabled())
+                    .any(|repository| repository.admits_push())
             })
         {
             self.with_compiled_catalog(

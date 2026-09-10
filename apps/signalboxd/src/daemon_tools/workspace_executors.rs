@@ -537,6 +537,7 @@ where
                 commit,
                 super::git_push::ProcessGitPushTransport {
                     runner: self.exec_runner.clone(),
+                    credentials: crate::repo_watch_credentials::RepositoryWatchClientLoader::for_repository_push(&repository),
                     credential_file: repository
                         .push_credential_file()
                         .map(std::path::Path::to_owned),

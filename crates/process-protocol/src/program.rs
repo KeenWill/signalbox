@@ -32,6 +32,8 @@ pub enum ProgramGrant {
     EvalRecord,
     Blob,
     Register,
+    /// Checked repository-watch module operations.
+    RepoWatch,
 }
 
 /// Exact registration intent; native binary identity is supplied by the daemon.

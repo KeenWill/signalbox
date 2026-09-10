@@ -1,7 +1,11 @@
 //! Provisions the repository at the daemon's derived session root.
 
 use crate::{
-    daemon_tools::SessionWorkspaceRoots, repo_watch_credentials::RepositoryWatchClientLoader,
+    daemon_tools::SessionWorkspaceRoots,
+    repo_watch_credentials::{
+        GitCheckoutAuthentication, RepositoryWatchClientLoadError, RepositoryWatchClientLoader,
+        git_authentication_rejected,
+    },
 };
 use rustix::fs::{Mode, OFlags, mkdirat, openat};
 use signalbox_domain::{PullRequestEventContext, RepoWatchDispatchId, RepositorySlug, SessionId};
@@ -16,6 +20,11 @@ use std::{
     path::{Component, Path, PathBuf},
     time::Duration,
 };
+
+// One exec-family command budget covers preparation and all checkout Git commands.
+const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(300);
+// Matches push failure capture; checkout persists only the closed step and outcome.
+const AUTHENTICATION_CAPTURE_BYTES: usize = 64 * 1024;
 
 /// Closed provisioning steps are safe to persist and log.
 #[derive(Clone, Copy, Debug)]
@@ -134,6 +143,7 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
     pull_request: &PullRequestEventContext,
     credentials: &RepositoryWatchClientLoader,
 ) -> Result<(), CheckoutProvisioningFailed> {
+    let deadline = tokio::time::Instant::now() + CHECKOUT_TIMEOUT;
     if let Some(name) = &checkout.staged_name {
         // Git clone requires an empty directory; inode metadata survives publication without adding entries.
         #[cfg(target_os = "linux")]
@@ -157,10 +167,16 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
         checkout.staged_name = None;
     }
-    let authorization = credentials
-        .git_authorization()
-        .await
-        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Credential))?;
+    let mut authentication = tokio::time::timeout_at(
+        deadline,
+        credentials.git_authorization(remaining_checkout_timeout(
+            deadline,
+            CheckoutStep::Credential,
+        )?),
+    )
+    .await
+    .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Credential))?
+    .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Credential))?;
     let path = &checkout.path;
     let directory = &checkout.directory;
     // The descriptor remains open through every invocation; child cwd resolution
@@ -170,6 +186,7 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_CONFIG_GLOBAL", "/dev/null"),
         ("GIT_TERMINAL_PROMPT", "0"),
+        ("LC_ALL", "C"),
         ("GIT_CONFIG_COUNT", "4"),
         ("GIT_CONFIG_KEY_1", "credential.helper"),
         ("GIT_CONFIG_VALUE_1", ""),
@@ -181,7 +198,10 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
     .into_iter()
     .map(|(key, value)| (key.into(), value.into()))
     .collect();
-    environment.insert("GIT_CONFIG_VALUE_0".into(), authorization.into());
+    environment.insert(
+        "GIT_CONFIG_VALUE_0".into(),
+        authentication.authorization.clone().into(),
+    );
     if let Some(path) = std::env::var_os("PATH") {
         environment.insert("PATH".into(), path);
     }
@@ -195,9 +215,11 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
             git(
                 runner,
                 &working_directory,
-                &environment,
+                &mut environment,
                 CheckoutStep::Clone,
                 &["clone", "--no-checkout", "--", &repository_url, "."],
+                deadline,
+                Some((credentials, &mut authentication)),
             )
             .await?;
         }
@@ -219,15 +241,18 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
     git(
         runner,
         &working_directory,
-        &environment,
+        &mut environment,
         CheckoutStep::Fetch,
         &["fetch", "--", &head_url, pull_request.head_sha().as_str()],
+        deadline,
+        (pull_request.head_repository() == repository)
+            .then_some((credentials, &mut authentication)),
     )
     .await?;
     git(
         runner,
         &working_directory,
-        &environment,
+        &mut environment,
         CheckoutStep::Checkout,
         &[
             "checkout",
@@ -236,6 +261,8 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
             pull_request.head_sha().as_str(),
             "--",
         ],
+        deadline,
+        None,
     )
     .await?;
     // Use the standing path as the tools will, and reject directory replacement.
@@ -273,26 +300,88 @@ fn retain_dispatch_marker(checkout: &CheckoutDirectory) -> Result<(), CheckoutPr
     Ok(())
 }
 
+fn remaining_checkout_timeout(
+    deadline: tokio::time::Instant,
+    step: CheckoutStep,
+) -> Result<Duration, CheckoutProvisioningFailed> {
+    deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| CheckoutProvisioningFailed::at(step))
+}
+
 async fn git<Runner: ProcessRunner>(
     runner: &mut Runner,
     directory: &Path,
-    environment: &BTreeMap<OsString, OsString>,
+    environment: &mut BTreeMap<OsString, OsString>,
     step: CheckoutStep,
     arguments: &[&str],
+    deadline: tokio::time::Instant,
+    authentication: Option<(&RepositoryWatchClientLoader, &mut GitCheckoutAuthentication)>,
 ) -> Result<(), CheckoutProvisioningFailed> {
-    let result = runner
-        .run(ProcessRequest {
-            program: "git".into(),
-            arguments: arguments.iter().map(OsString::from).collect(),
-            working_directory: directory.to_owned(),
-            // Uses the exec family's maximum command duration; no checkout policy or config key.
-            timeout: Duration::from_secs(300),
-            capture_bytes: 0,
-            environment: environment.clone(),
-            environment_inheritance: ProcessEnvironment::Clear,
-            status_protocol: ProcessStatusProtocol::Direct,
-        })
-        .await;
+    let mut request = ProcessRequest {
+        program: "git".into(),
+        arguments: arguments.iter().map(OsString::from).collect(),
+        working_directory: directory.to_owned(),
+        timeout: remaining_checkout_timeout(deadline, step)?,
+        capture_bytes: if authentication.is_some() {
+            AUTHENTICATION_CAPTURE_BYTES
+        } else {
+            0
+        },
+        environment: environment.clone(),
+        environment_inheritance: ProcessEnvironment::Clear,
+        status_protocol: ProcessStatusProtocol::Direct,
+    };
+    let result = git_with_refresh(
+        runner,
+        &mut request,
+        step,
+        deadline,
+        |remaining| async move {
+            let Some((credentials, authentication)) = authentication else {
+                return Ok(None);
+            };
+            if credentials
+                .refresh_git_authorization(authentication, remaining)
+                .await?
+            {
+                Ok(Some(authentication.authorization.clone()))
+            } else {
+                Ok(None)
+            }
+        },
+    )
+    .await;
+    *environment = request.environment;
+    result
+}
+
+async fn git_with_refresh<
+    Refresh: std::future::Future<Output = Result<Option<String>, RepositoryWatchClientLoadError>>,
+>(
+    runner: &mut impl ProcessRunner,
+    request: &mut ProcessRequest,
+    step: CheckoutStep,
+    deadline: tokio::time::Instant,
+    refresh: impl FnOnce(Duration) -> Refresh,
+) -> Result<(), CheckoutProvisioningFailed> {
+    request.timeout = remaining_checkout_timeout(deadline, step)?;
+    let mut result = runner.run(request.clone()).await;
+    if git_authentication_rejected(&result) {
+        let remaining = remaining_checkout_timeout(deadline, CheckoutStep::Credential)?;
+        let refreshed = tokio::time::timeout_at(deadline, refresh(remaining))
+            .await
+            .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Credential))?
+            .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Credential))?;
+        if let Some(authorization) = refreshed {
+            request
+                .environment
+                .insert("GIT_CONFIG_VALUE_0".into(), authorization.into());
+            request.timeout = remaining_checkout_timeout(deadline, step)?;
+            result = runner.run(request.clone()).await;
+        }
+    }
     match result.outcome {
         ProcessOutcome::Exited { code: Some(0) } => Ok(()),
         outcome => Err(CheckoutProvisioningFailed {
@@ -589,13 +678,284 @@ fn remove_directory_entry(
     unlinkat(parent, name, AtFlags::REMOVEDIR)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
+    use signalbox_tools_exec::{CaptureCompleteness, ProcessOutput, ProcessRunResult};
     use std::{
         os::unix::fs::{MetadataExt, PermissionsExt},
         process::Command,
     };
+
+    #[derive(Clone, Default)]
+    struct RecordedRunner {
+        results: std::collections::VecDeque<ProcessRunResult>,
+        delays: std::collections::VecDeque<Duration>,
+        requests: Vec<ProcessRequest>,
+    }
+
+    impl ProcessRunner for RecordedRunner {
+        fn sandbox_launcher_program(&self) -> &Path {
+            Path::new("/unused/launcher")
+        }
+        fn sandbox_launcher_descriptor(&self) -> Option<i32> {
+            None
+        }
+        async fn bwrap_availability(
+            &mut self,
+            _: ProcessRequest,
+        ) -> signalbox_tools_exec::BwrapAvailability {
+            panic!("checkout does not probe bubblewrap")
+        }
+        async fn run(&mut self, request: ProcessRequest) -> ProcessRunResult {
+            self.requests.push(request);
+            if let Some(delay) = self.delays.pop_front() {
+                tokio::time::sleep(delay).await;
+            }
+            self.results.pop_front().expect("no extra checkout command")
+        }
+    }
+
+    fn process_result(code: i32, stderr: &str) -> ProcessRunResult {
+        ProcessRunResult {
+            outcome: ProcessOutcome::Exited { code: Some(code) },
+            stdout: ProcessOutput {
+                bytes: Vec::new(),
+                completeness: CaptureCompleteness::Complete,
+            },
+            stderr: ProcessOutput {
+                bytes: stderr.as_bytes().to_vec(),
+                completeness: CaptureCompleteness::Complete,
+            },
+        }
+    }
+
+    fn rejected_authentication() -> ProcessRunResult {
+        process_result(128, "fatal: Authentication failed: synthetic-secret")
+    }
+
+    fn checkout_request() -> ProcessRequest {
+        ProcessRequest {
+            program: "git".into(),
+            arguments: [
+                "clone",
+                "--no-checkout",
+                "--",
+                "https://github.com/fixture/project.git",
+                ".",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+            working_directory: "/unused/checkout".into(),
+            timeout: Duration::from_secs(300),
+            capture_bytes: AUTHENTICATION_CAPTURE_BYTES,
+            environment: BTreeMap::from([(
+                "GIT_CONFIG_VALUE_0".into(),
+                "old-authorization".into(),
+            )]),
+            environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::Direct,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn checkout_commands_share_the_budget_left_after_preparation_and_refresh() {
+        let started = tokio::time::Instant::now();
+        let deadline = started + Duration::from_secs(300);
+        let mut runner = RecordedRunner {
+            results: [
+                rejected_authentication(),
+                process_result(0, ""),
+                process_result(0, ""),
+            ]
+            .into(),
+            delays: [Duration::from_secs(20)].into(),
+            ..Default::default()
+        };
+        let mut request = checkout_request();
+        tokio::time::advance(Duration::from_secs(240)).await;
+        git_with_refresh(
+            &mut runner,
+            &mut request,
+            CheckoutStep::Clone,
+            deadline,
+            |remaining| async move {
+                assert_eq!(remaining, Duration::from_secs(40));
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                Ok(Some("new-authorization".to_owned()))
+            },
+        )
+        .await
+        .expect("refreshed clone succeeds");
+        assert_eq!(runner.requests[0].timeout, Duration::from_secs(60));
+        assert_eq!(runner.requests[1].timeout, Duration::from_secs(25));
+        assert_eq!(
+            runner.requests[1].environment[std::ffi::OsStr::new("GIT_CONFIG_VALUE_0")],
+            OsString::from("new-authorization")
+        );
+        tokio::time::advance(Duration::from_secs(20)).await;
+        git(
+            &mut runner,
+            &request.working_directory,
+            &mut request.environment,
+            CheckoutStep::Checkout,
+            &["checkout", "--", "retained-head"],
+            deadline,
+            None,
+        )
+        .await
+        .expect("local checkout fits the remaining budget");
+        assert_eq!(runner.requests[2].timeout, Duration::from_secs(5));
+        assert_eq!(started.elapsed(), Duration::from_secs(295));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_checkout_preparation_does_not_start_git() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        let mut runner = RecordedRunner::default();
+        let mut request = checkout_request();
+        tokio::time::advance(Duration::from_secs(300)).await;
+        let failure = git_with_refresh(
+            &mut runner,
+            &mut request,
+            CheckoutStep::Clone,
+            deadline,
+            |_| async { panic!("expired preparation cannot refresh") },
+        )
+        .await
+        .expect_err("expired checkout cannot dispatch");
+        assert_eq!(failure.step.as_str(), "clone");
+        assert_eq!(failure.status(), "not_started");
+        assert!(runner.requests.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_checkout_refresh_expires_without_a_retry() {
+        let started = tokio::time::Instant::now();
+        let deadline = started + Duration::from_secs(300);
+        let mut runner = RecordedRunner {
+            results: [rejected_authentication()].into(),
+            delays: [Duration::from_secs(250)].into(),
+            ..Default::default()
+        };
+        let mut request = checkout_request();
+        let failure = tokio::time::timeout(
+            Duration::from_secs(301),
+            git_with_refresh(
+                &mut runner,
+                &mut request,
+                CheckoutStep::Fetch,
+                deadline,
+                |remaining| async move {
+                    assert_eq!(remaining, Duration::from_secs(50));
+                    std::future::pending().await
+                },
+            ),
+        )
+        .await
+        .expect("refresh expires within the original deadline")
+        .expect_err("stalled refresh fails closed");
+        assert_eq!(failure.step.as_str(), "credential");
+        assert_eq!(runner.requests.len(), 1);
+        assert_eq!(started.elapsed(), Duration::from_secs(300));
+    }
+
+    #[tokio::test]
+    async fn a_second_checkout_authentication_rejection_retains_only_the_closed_failure() {
+        let mut runner = RecordedRunner {
+            results: [rejected_authentication(), rejected_authentication()].into(),
+            ..Default::default()
+        };
+        let mut request = checkout_request();
+        let failure = git_with_refresh(
+            &mut runner,
+            &mut request,
+            CheckoutStep::Fetch,
+            tokio::time::Instant::now() + Duration::from_secs(300),
+            |_| async { Ok(Some("new-authorization".to_owned())) },
+        )
+        .await
+        .expect_err("only one authentication retry is allowed");
+        assert_eq!(runner.requests.len(), 2);
+        assert_eq!(failure.status(), "exit:128");
+        assert!(!format!("{failure:?}").contains("synthetic-secret"));
+    }
+
+    #[tokio::test]
+    async fn file_authenticated_fetch_captures_bounded_failure_output_without_refreshing() {
+        let directory = tempfile::tempdir().expect("credential fixture");
+        let token_file = directory.path().join("token");
+        std::fs::write(&token_file, "synthetic-token").unwrap();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let credentials = RepositoryWatchClientLoader::for_git_push(token_file);
+        let mut authentication = credentials
+            .git_authorization(Duration::from_secs(300))
+            .await
+            .unwrap();
+        let mut environment = BTreeMap::from([(
+            "GIT_CONFIG_VALUE_0".into(),
+            authentication.authorization.clone().into(),
+        )]);
+        let mut runner = RecordedRunner {
+            results: [rejected_authentication()].into(),
+            ..Default::default()
+        };
+        git(
+            &mut runner,
+            Path::new("/unused/checkout"),
+            &mut environment,
+            CheckoutStep::Fetch,
+            &[
+                "fetch",
+                "--",
+                "https://github.com/fixture/project.git",
+                "retained-head",
+            ],
+            tokio::time::Instant::now() + Duration::from_secs(300),
+            Some((&credentials, &mut authentication)),
+        )
+        .await
+        .expect_err("file credentials have no App refresh");
+        assert_eq!(runner.requests.len(), 1);
+        assert_eq!(runner.requests[0].capture_bytes, 64 * 1024);
+        assert_eq!(
+            environment[std::ffi::OsStr::new("GIT_CONFIG_VALUE_0")],
+            OsString::from(authentication.authorization)
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_free_fetch_does_not_install_an_authorization_header_on_rejection() {
+        let mut runner = RecordedRunner {
+            results: [rejected_authentication()].into(),
+            ..Default::default()
+        };
+        let mut environment = BTreeMap::from([("GIT_CONFIG_VALUE_0".into(), "".into())]);
+        git(
+            &mut runner,
+            Path::new("/unused/checkout"),
+            &mut environment,
+            CheckoutStep::Fetch,
+            &[
+                "fetch",
+                "--",
+                "https://github.com/fork/project.git",
+                "retained-head",
+            ],
+            tokio::time::Instant::now() + Duration::from_secs(300),
+            None,
+        )
+        .await
+        .expect_err("unauthenticated rejection is final");
+        assert_eq!(runner.requests.len(), 1);
+        assert_eq!(runner.requests[0].capture_bytes, 0);
+        assert_eq!(
+            environment[std::ffi::OsStr::new("GIT_CONFIG_VALUE_0")],
+            OsString::from("")
+        );
+    }
 
     #[test]
     fn staging_is_recoverable_before_identity_retention() -> Result<(), Box<dyn std::error::Error>>

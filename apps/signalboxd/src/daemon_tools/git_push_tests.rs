@@ -327,6 +327,7 @@ while True:
     assert_eq!(retained_agent, agent);
     let transport = ProcessGitPushTransport {
         runner,
+        credentials: crate::repo_watch_credentials::RepositoryWatchClientLoader::for_git_push(key.clone()),
         credential_file: use_key.then_some(key),
         ssh_agent_socket: Some(retained_agent.into_os_string()),
         sandbox,
