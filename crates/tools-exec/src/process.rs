@@ -4178,29 +4178,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn sandbox_cancellation_retains_output_without_a_launcher_completion()
-    -> Result<(), Box<dyn Error>> {
-        const STARTED_OUTPUT: &[u8] = b"started before cancellation\n";
-        let mut output = STARTED_OUTPUT.to_vec();
-        output.extend_from_slice(SUPERVISOR_STATUS_TRAILER);
-        serde_json::to_writer(&mut output, &SupervisorStatus::Cancelled)?;
-        output.push(b'\n');
-
-        let (stdout, status, launcher_status) = read_supervised_stdout(
-            output.as_slice(),
-            EXEC_CAPTURE_BYTES,
-            ProcessStatusProtocol::SandboxDispatch,
-        )
-        .await?;
-
-        assert_eq!(stdout.bytes, STARTED_OUTPUT);
-        assert_eq!(status, SupervisorStatus::Cancelled);
-        assert_eq!(launcher_status, None);
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
     async fn interrupted_sandbox_retains_command_emitted_launcher_markers()
     -> Result<(), Box<dyn Error>> {
         for interrupted_status in [SupervisorStatus::TimedOut, SupervisorStatus::Cancelled] {

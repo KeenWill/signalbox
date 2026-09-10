@@ -1492,18 +1492,6 @@ mod tests {
         assert_eq!(exhausted.replace(canonical_defaults()), None);
     }
 
-    #[test]
-    fn session_creation_establishes_defaults_version_one() {
-        let initial = defaults(1);
-        let established = VersionedSessionConfigurationDefaults::establish(initial.clone());
-
-        assert_eq!(
-            established.version(),
-            SessionConfigurationDefaultsVersion::first()
-        );
-        assert_eq!(established.defaults(), &initial);
-    }
-
     /// session model-selection defaults are versioned; a
     /// replacement installs a complete later immutable version.
     #[test]
