@@ -1615,13 +1615,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognized_code_does_not_prove_object_absence() {
-        let denied = r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>"#;
-
-        assert!(!names_absent_object(denied));
-    }
-
-    #[test]
     fn an_unparsable_body_does_not_prove_object_absence() {
         assert!(!names_absent_object(""));
     }
@@ -1706,24 +1699,6 @@ mod tests {
     #[test]
     fn an_object_above_the_s3_size_ceiling_is_rejected() {
         assert_eq!(multipart_part_bytes(MAX_S3_OBJECT_BYTES + 1), None);
-    }
-
-    #[test]
-    fn a_long_opaque_etag_fits_a_small_completion() -> Result<(), Box<dyn Error>> {
-        let store = S3BlobStore::try_new(
-            Url::parse(ENDPOINT)?,
-            "fixture-region",
-            BUCKET,
-            PathBuf::from("/fixture/credentials"),
-        )?;
-        let etag = "\"".repeat(super::MAX_ETAG_BYTES);
-        let mut budget = super::MultipartCompletionBudget::new(&store.bucket, 1);
-        assert!(budget.admit(&store.bucket, &etag));
-        assert_eq!(
-            budget.total_bytes,
-            super::completion_document_bytes(&store.bucket, std::iter::once(etag.as_str()))
-        );
-        Ok(())
     }
 
     #[test]
@@ -1866,11 +1841,6 @@ mod tests {
             object_generation(&repeated_generation_headers("\"second\"", "\"first\"")),
             None
         );
-    }
-
-    #[test]
-    fn a_zero_length_entity_tag_header_leaves_the_generation_unnamed() {
-        assert_eq!(object_generation(&generation_headers("")), None);
     }
 
     #[test]

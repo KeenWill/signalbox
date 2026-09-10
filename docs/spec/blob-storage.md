@@ -299,6 +299,11 @@ Imported raw source records of [conversation-import](conversation-import.md)
 converge onto the blob catalog: the import satellite's content hash is an
 ordinary blob reference and the bytes live in a routed store.
 
+Workflow `blob.read` returns complete verified bytes for a digest within the
+existing direct-read range bound, traversal budget and deadline through the
+catalog and recorded stores. Evaluation corpus loading uses the same read path
+and checks the pinned SHA-256 digest before decoding case data.
+
 ## Planned
 
 - A `program_journal` storage class for over-threshold program journal payloads;

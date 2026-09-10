@@ -3262,22 +3262,6 @@ fn require_active(cancellation: &dyn CancellationSignal) -> Result<(), Processor
     }
 }
 
-#[cfg(test)]
-fn find_eocd(bytes: &[u8]) -> Option<usize> {
-    bytes
-        .windows(4)
-        .enumerate()
-        .find_map(|(offset, signature)| {
-            if signature != b"PK\x05\x06" {
-                return None;
-            }
-            let record = bytes.get(offset..)?;
-            let comment_length = usize::from(le_u16(record, 20).ok()?);
-            let expected_length = 22_usize.checked_add(comment_length)?;
-            (record.len() == expected_length).then_some(offset)
-        })
-}
-
 fn find_consistent_eocd(bytes: &[u8], suffix_start: u64) -> Option<usize> {
     bytes
         .windows(4)
@@ -4579,29 +4563,6 @@ mod tests {
         let result = extract_xml_text(xml, OfficeKind::Docx);
 
         assert!(matches!(result, Err(XmlIssue::Malformed)));
-    }
-
-    #[test]
-    fn eocd_scan_ignores_signature_bytes_inside_the_comment() {
-        let mut bytes = vec![0_u8; 22];
-        bytes[0..4].copy_from_slice(b"PK\x05\x06");
-        bytes[20..22].copy_from_slice(&8_u16.to_le_bytes());
-        bytes.extend_from_slice(b"PK\x05\x06tail");
-
-        assert_eq!(find_eocd(&bytes), Some(0));
-    }
-
-    #[test]
-    fn eocd_scan_skips_a_complete_false_record_inside_the_comment() {
-        let mut bytes = vec![0_u8; 22];
-        bytes[0..4].copy_from_slice(b"PK\x05\x06");
-        bytes[20..22].copy_from_slice(&22_u16.to_le_bytes());
-        let false_offset = bytes.len();
-        bytes.extend_from_slice(b"PK\x05\x06");
-        bytes.extend_from_slice(&[0_u8; 18]);
-
-        assert_eq!(find_eocd(&bytes), Some(0));
-        assert_ne!(find_eocd(&bytes), Some(false_offset));
     }
 
     #[test]

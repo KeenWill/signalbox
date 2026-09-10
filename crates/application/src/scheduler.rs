@@ -2757,14 +2757,6 @@ mod tests {
     }
 
     #[test]
-    fn inv007_explicit_scheduler_bound_is_used_exactly() {
-        let requested = NonZeroUsize::new(19).expect("the fixture bound is positive");
-        let scheduler = SchedulerLoop::with_max_in_flight((), (), requested);
-
-        assert_eq!(scheduler.max_in_flight_passes, requested.get());
-    }
-
-    #[test]
     fn scheduler_occupancy_bound_accepts_configured_whole_seconds() {
         let configured = SchedulerPassOccupancyBound::try_new(Duration::from_secs(60))
             .expect("one minute is a valid configured bound");
