@@ -6232,12 +6232,17 @@ fn an_absent_probe_without_a_record_is_not_stale() {
     assert!(!stale);
 }
 
-/// A configured binding walks through no derived parent.
+/// A recorded derived binding names the parent it walked through as well as
+/// the directories it bound, so a caller can tell that the component the
+/// classification accepted is still the one the pathname leads through.
 #[test]
-fn a_configured_binding_names_no_derived_parent() {
-    let binding = RecordedSessionBinding::ConfiguredRoot;
+fn a_derived_binding_names_the_parent_it_walked_through() {
+    let binding = RecordedSessionBinding::DerivedRoot {
+        identity: FIXTURE_BOUND_IDENTITY,
+        parent: FIXTURE_PARENT_IDENTITY,
+    };
 
-    assert_eq!(binding.derived_parent(), None);
+    assert_eq!(binding.derived_parent(), Some(FIXTURE_PARENT_IDENTITY));
 }
 
 /// A configured root with no lexical final component — `/srv/workspace/..`,
@@ -6267,13 +6272,16 @@ fn the_filesystem_root_has_no_derivation() {
     );
 }
 
-/// A configured binding pins no derived identity, so it never collides with
-/// a derived root another session composed.
+/// A recorded derived binding names the directory it bound, so a caller can
+/// tell a resumed workspace from a replacement at the same pathname.
 #[test]
-fn a_configured_binding_names_no_derived_identity() {
-    let binding = RecordedSessionBinding::ConfiguredRoot;
+fn a_derived_binding_names_the_identity_it_pinned() {
+    let binding = RecordedSessionBinding::DerivedRoot {
+        identity: FIXTURE_BOUND_IDENTITY,
+        parent: FIXTURE_PARENT_IDENTITY,
+    };
 
-    assert_eq!(binding.derived_identity(), None);
+    assert_eq!(binding.derived_identity(), Some(FIXTURE_BOUND_IDENTITY));
 }
 
 /// `<name>.sessions` bind-mounted onto the configured root is a real

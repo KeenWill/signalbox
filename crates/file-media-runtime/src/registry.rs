@@ -308,11 +308,6 @@ impl FileMediaRegistry {
         }
 
         if let Some(reader) = self.streaming_text_reader.as_ref() {
-            if request.source.byte_length().get() > self.ceilings.validation_source_bytes {
-                return Ok(FileInspection::Unknown {
-                    source: request.source,
-                });
-            }
             let declaration = self
                 .readers
                 .get(reader)
@@ -569,6 +564,20 @@ impl FileMediaRegistry {
         source: &dyn VerifiedBlobSource,
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
+        self.read_with_reader(processor, request, source, cancellation, None)
+            .await
+            .map(|(_, result)| result)
+    }
+
+    /// Repeats inspection and binds a continuation to the reader selected on its first page.
+    pub async fn read_with_reader(
+        &self,
+        processor: &dyn FileMediaProcessor,
+        request: FileReadRequest,
+        source: &dyn VerifiedBlobSource,
+        cancellation: &dyn crate::CancellationSignal,
+        expected_reader: Option<&ReaderIdentity>,
+    ) -> Result<(ReaderIdentity, FileReadResult), FileMediaFailure> {
         let initial_request = match &request.input {
             crate::FileReadInput::Initial { options } if read_options_fit(options) => true,
             crate::FileReadInput::Initial { .. } => {
@@ -602,6 +611,9 @@ impl FileMediaRegistry {
                 return Err(FileMediaFailure::EncryptedOrLocked { media_type });
             }
         };
+        if expected_reader.is_some_and(|expected| expected != validated.reader()) {
+            return Err(FileMediaFailure::InvalidViewArguments);
+        }
         let view = validated
             .views()
             .iter()
@@ -644,14 +656,15 @@ impl FileMediaRegistry {
                 cancellation,
             )
             .await?;
-        sanitize_read(
+        let result = sanitize_read(
             reader,
             view,
             self.ceilings,
             provider_container_entries,
             initial_request,
             raw,
-        )
+        )?;
+        Ok((validated.reader().clone(), result))
     }
 }
 

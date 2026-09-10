@@ -88,8 +88,12 @@ pub(super) fn credential_reference() -> ModelCallCredentialReference {
 }
 
 pub(super) fn rendered_text(content: UserContent) -> ModelUserContent {
-    render_model_user_content(content, |_| None)
-        .expect("text-only fixture needs no attachment catalog facts")
+    render_model_user_content(
+        identity(1, SemanticTranscriptEntryId::from_uuid),
+        content,
+        |_| None,
+    )
+    .expect("text-only fixture needs no attachment catalog facts")
 }
 
 pub(super) fn ready(request: PreparedModelCallRequest) -> PrepareModelCallOutcome {

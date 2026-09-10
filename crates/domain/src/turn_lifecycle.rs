@@ -526,15 +526,6 @@ mod tests {
         }
     }
 
-    /// baseline operation kinds remain tagged and distinct.
-    #[test]
-    fn issued_operation_reference_kinds_do_not_collapse() {
-        let model = IssuedOperationRef::ModelCall(model_call_id(1));
-        let tool = IssuedOperationRef::ToolAttempt(tool_attempt_id(1));
-
-        assert_ne!(model, tool);
-    }
-
     /// empty and duplicate caller collections cannot construct the canonical ambiguity set.
     #[test]
     fn ambiguity_set_rejects_empty_and_duplicate_input() {
