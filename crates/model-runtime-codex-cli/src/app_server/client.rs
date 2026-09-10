@@ -192,6 +192,8 @@ impl Client {
                     .items
                     .iter()
                     .any(item_precludes_non_acceptance);
+                self.activity.response_content_observed |=
+                    response.turn.items.iter().any(item_has_response_content);
                 self.check_turn(&response.turn.id)?;
                 self.phase = Phase::Running;
                 Ok(Event::Ignored)
@@ -236,12 +238,14 @@ impl Client {
                 let event: ItemTextDelta = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn_id)?;
                 self.activity.assistant_output_observed = true;
+                self.activity.response_content_observed |= !event.delta.is_empty();
                 Ok(Event::Delta(event))
             }
             "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
                 let event: ItemTextDelta = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn_id)?;
                 self.activity.assistant_output_observed = true;
+                self.activity.response_content_observed |= !event.delta.is_empty();
                 Ok(Event::Ignored)
             }
             "item/started" | "item/completed" => {
@@ -249,6 +253,7 @@ impl Client {
                 self.correlate(&event.thread_id, &event.turn_id)?;
                 self.activity.assistant_output_observed |=
                     item_precludes_non_acceptance(&event.item);
+                self.activity.response_content_observed |= item_has_response_content(&event.item);
                 if event.item.get("type").and_then(Value::as_str) == Some("agentMessage") {
                     let message = decode(&event.item)?;
                     Ok(Event::AgentMessage {
@@ -263,6 +268,11 @@ impl Client {
                 let event: TokenUsageUpdated = decode(params)?;
                 self.correlate(&event.thread_id, &event.turn_id)?;
                 let total = &event.token_usage.total;
+                self.activity.response_content_observed |=
+                    [total.output_tokens, total.reasoning_output_tokens]
+                        .into_iter()
+                        .flatten()
+                        .any(|count| count > 0);
                 if [
                     total.input_tokens,
                     total.cached_input_tokens,
@@ -290,6 +300,8 @@ impl Client {
                 self.correlate(&event.thread_id, &event.turn.id)?;
                 self.activity.assistant_output_observed |=
                     event.turn.items.iter().any(item_precludes_non_acceptance);
+                self.activity.response_content_observed |=
+                    event.turn.items.iter().any(item_has_response_content);
                 if event.turn.status == TurnStatus::InProgress {
                     return Ok(Event::Ignored);
                 }
@@ -298,6 +310,21 @@ impl Client {
             }
             _ => Ok(Event::Ignored),
         }
+    }
+}
+
+fn item_has_response_content(item: &Value) -> bool {
+    match item.get("type").and_then(Value::as_str) {
+        Some("agentMessage") => item
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        Some("reasoning") => ["summary", "content"].iter().any(|field| {
+            item.get(*field)
+                .and_then(Value::as_array)
+                .is_some_and(|parts| !parts.is_empty())
+        }),
+        _ => item_precludes_non_acceptance(item),
     }
 }
 

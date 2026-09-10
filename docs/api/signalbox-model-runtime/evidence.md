@@ -176,10 +176,21 @@ pub struct RefusalEvidence {
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
 ```
 
+## CredentialRejectionRecovery
+
+```rust
+pub enum CredentialRejectionRecovery {
+    Refreshed,
+    Unavailable,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::PartialEq, cmp::Eq
+```
+
 ## ProviderErrorEvidence
 
 ```rust
 pub struct ProviderErrorEvidence {
+    pub credential_recovery: option::Option<CredentialRejectionRecovery>,
     pub exchange: ExchangeFacts,
     pub reported_model: option::Option<ProviderReportedModel>,
     pub kind: ProviderErrorKind,
@@ -254,6 +265,7 @@ pub enum UnsentCause {
 
 ```rust
 pub struct BoundaryLossEvidence {
+    pub response_content_observed: bool,
     pub cause: LossCause,
     pub exchange: ExchangeFacts,
     pub reported_model: option::Option<ProviderReportedModel>,

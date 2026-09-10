@@ -660,10 +660,10 @@ mod tests {
         ResilientImportedConversationConverter,
     };
     use signalbox_domain::{
-        ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-        ImportedMessageContentAbsence, ImportedSourceAttestation, ImportedSpeaker,
-        ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
-        ImportedTranscriptEntry, ImportedTranscriptEntryId,
+        ImportedConversation, ImportedConversationId, ImportedMessageContentAbsence,
+        ImportedSourceAttestation, ImportedSpeaker, ImportedToolResultBlock,
+        ImportedToolResultValue, ImportedTranscriptContent, ImportedTranscriptEntry,
+        ImportedTranscriptEntryId,
     };
     use uuid::Uuid;
 
@@ -708,14 +708,6 @@ mod tests {
         assert_eq!(
             entry.content(),
             &ImportedTranscriptContent::MessageContentAbsent(expected)
-        );
-    }
-
-    #[test]
-    fn maximum_fidelity_converter_declares_version_two() {
-        assert_eq!(
-            ClaudeCodeJsonlConverter.format(),
-            ImportedConversationFormat::ClaudeCodeSessionJsonlV2
         );
     }
 

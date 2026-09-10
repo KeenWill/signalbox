@@ -38,10 +38,22 @@ pub struct DaemonFileMediaExecutor {
     registry: FileMediaRegistry,
     processor: SandboxedFileMediaProcessor,
     continuations: ContinuationAuthority,
+    models: Option<signalbox_model_provider_runtime::RuntimeModelCatalog>,
+    capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
 }
 
 impl DaemonFileMediaExecutor {
-    /// Composes the compiled text family after proving its exact worker isolation profile.
+    /// Uses the issuing call's durable serving target to enforce image presentation bounds.
+    pub fn with_model_configuration(
+        mut self,
+        configuration: &crate::HubModelConfiguration,
+    ) -> Self {
+        self.models = Some(configuration.runtime_model_catalog());
+        self.capabilities = configuration.runtime_model_capability_catalog();
+        self
+    }
+
+    /// Composes the compiled families after proving each worker isolation profile.
     pub async fn compose(
         pool: PgPool,
         stores: Arc<BlobStoreRegistry>,
@@ -52,27 +64,44 @@ impl DaemonFileMediaExecutor {
             .parent()
             .ok_or_else(DaemonToolExecutorError::pre_dispatch)?
             .join("signalbox-file-media-text-worker");
+        let image_worker = worker.with_file_name("signalbox-file-media-image-worker");
         let pdf_worker = worker.with_file_name("signalbox-file-media-pdf-worker");
-        Self::compose_with_workers(pool, stores, worker, pdf_worker).await
+        Self::compose_with_workers(pool, stores, worker, image_worker, pdf_worker).await
     }
 
     async fn compose_with_workers(
         pool: PgPool,
         stores: Arc<BlobStoreRegistry>,
         worker: std::path::PathBuf,
+        image_worker: std::path::PathBuf,
         pdf_worker: std::path::PathBuf,
     ) -> Result<(CompiledToolCatalog, Self), DaemonToolExecutorError> {
         let declaration = signalbox_file_media_adapters_text::text_family_declaration()
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
         let binding = WorkerBinding::try_new(worker, declaration.clone())
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        let mut declarations = vec![declaration];
+        let mut bindings = vec![binding];
+        {
+            let worker = image_worker;
+            let declaration = signalbox_file_media_adapters_image::image_family_declaration()
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+            bindings.push(
+                WorkerBinding::try_new(worker, declaration.clone())
+                    .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
+            );
+            declarations.push(declaration);
+        }
         let pdf = signalbox_file_media_adapter_pdf::declaration()
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
-        let pdf_binding = WorkerBinding::try_new(pdf_worker, pdf.clone())
-            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        bindings.push(
+            WorkerBinding::try_new(pdf_worker, pdf.clone())
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
+        );
+        declarations.push(pdf);
         let processor = SandboxedFileMediaProcessor::try_new(
             "/usr/bin/bwrap",
-            vec![binding, pdf_binding],
+            bindings,
             FileMediaProcessCeilings::version_one(),
         )
         .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
@@ -80,15 +109,14 @@ impl DaemonFileMediaExecutor {
         if isolation != ProcessorIsolation::Available {
             return Err(DaemonToolExecutorError::pre_dispatch());
         }
-        let registry = FileMediaRegistry::try_new(
-            vec![declaration, pdf],
-            FileMediaCeilings::version_one(),
-            isolation,
-        )
-        .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        let registry =
+            FileMediaRegistry::try_new(declarations, FileMediaCeilings::version_one(), isolation)
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
         let executor = Self {
             pool,
             stores,
+            models: None,
+            capabilities: signalbox_model_runtime::ModelCapabilityCatalog::empty(),
             registry,
             processor,
             continuations: ContinuationAuthority::generate()
@@ -115,11 +143,17 @@ impl DaemonFileMediaExecutor {
                 visibility: PostgresToolLoopRepository::new(self.pool.clone()),
                 catalog: BlobCatalogRepository::new(self.pool.clone()),
                 stores: Arc::clone(&self.stores),
+                models: self.models.clone(),
+                capabilities: self.capabilities.clone(),
             },
             self.processor.clone(),
             NeverCancelled,
             self.continuations.clone(),
         )
+        .with_artifact_publisher(Arc::new(DaemonArtifactPublisher {
+            stores: self.stores.clone(),
+            catalog: BlobCatalogRepository::new(self.pool.clone()),
+        }))
     }
 }
 
@@ -158,6 +192,34 @@ struct DaemonFileUseResolver {
     visibility: PostgresToolLoopRepository,
     catalog: BlobCatalogRepository,
     stores: Arc<BlobStoreRegistry>,
+    models: Option<signalbox_model_provider_runtime::RuntimeModelCatalog>,
+    capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
+}
+
+#[derive(Debug)]
+struct DaemonArtifactPublisher {
+    stores: Arc<BlobStoreRegistry>,
+    catalog: BlobCatalogRepository,
+}
+
+impl signalbox_file_media_provider_runtime::FileMediaArtifactPublisher for DaemonArtifactPublisher {
+    fn publish<'a>(
+        &'a self,
+        artifact: &'a signalbox_file_media_runtime::ValidatedMediaArtifact,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(), signalbox_tools_file_media::FileMediaServiceFailure>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(crate::blob_upload_runtime::publish_generated_artifact(
+            &self.stores,
+            &self.catalog,
+            artifact,
+        ))
+    }
 }
 
 impl FileUseResolver for DaemonFileUseResolver {
@@ -197,6 +259,27 @@ impl FileUseResolver for DaemonFileUseResolver {
                 .await
                 .map_err(catalog_resolution_error)?
                 .ok_or(FileUseResolutionError::BlobMissing)?;
+            let image_target = if let Some(models) = &self.models {
+                let target = self
+                    .visibility
+                    .file_use_target(self.request.as_ref().ok_or_else(invalid)?)
+                    .await
+                    .map_err(|error| {
+                        FileUseResolutionError::Operator(
+                            signalbox_tools_file_media::FileMediaExecutorError::from_error(&error),
+                        )
+                    })?;
+                let model = models.resolve(target).ok_or_else(invalid)?;
+                self.capabilities
+                    .resolve(&signalbox_model_runtime::ResolvedTarget::new(
+                        model.provider_model().to_owned(),
+                    ))
+                    .ok_or_else(invalid)?
+                    .image_presentation()
+                    .cloned()
+            } else {
+                None
+            };
             let length = NonZeroU64::new(entry.expected().byte_length()).ok_or_else(invalid)?;
             let UserContentPart::Attachment {
                 kind,
@@ -231,7 +314,8 @@ impl FileUseResolver for DaemonFileUseResolver {
                     stores: Arc::clone(&self.stores),
                 },
                 selector,
-            ))
+            )
+            .with_image_target(image_target))
         })
     }
 }
@@ -388,12 +472,20 @@ generated_artifact = "fixture"
                 .iter()
                 .any(|tool| tool.name().as_str() == "file_inspect")
         );
+        let image_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_image_worker")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| worker.with_file_name("signalbox-file-media-image-worker"));
         let pdf_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_pdf_worker")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| worker.with_file_name("signalbox-file-media-pdf-worker"));
-        let (family, executor) =
-            DaemonFileMediaExecutor::compose_with_workers(pool.clone(), stores, worker, pdf_worker)
-                .await?;
+        let (family, executor) = DaemonFileMediaExecutor::compose_with_workers(
+            pool.clone(),
+            stores,
+            worker,
+            image_worker,
+            pdf_worker,
+        )
+        .await?;
         let composed = base.with_compiled_catalog(family)?;
         let definitions = composed.definitions();
         assert_eq!(

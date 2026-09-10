@@ -262,9 +262,11 @@ pub enum ReadContinuation {
     },
 }
 
-/// Bounded typed-read result currently representable without durable media references.
+/// Bounded typed-read result or validated immutable media reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileReadResult {
+    /// Registry-admitted rich presentation with source and presented evidence.
+    Reference(crate::FileMediaReference),
     /// Admitted UTF-8 body.
     Text {
         /// Complete bounded body.
@@ -338,6 +340,29 @@ pub enum ProcessorValidationOutput {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProcessorReadOutput {
+    /// The image source is too large for direct presentation; retain its bounded metadata.
+    ImageDescription,
+    /// Derived encoded bytes travel separately from the control record.
+    GeneratedImage {
+        /// Claimed output media type, independently re-detected before publication.
+        media_type: String,
+        /// Claimed output provider identity.
+        provider: String,
+        /// Claimed output reader identity.
+        reader: String,
+        /// Claimed output reader revision.
+        revision: String,
+        /// Exact binary-channel length claimed by the worker.
+        byte_length: u64,
+        /// Bounded binary payload excluded from control-frame serialization.
+        #[serde(skip)]
+        bytes: Vec<u8>,
+    },
+    /// Requests direct presentation of the validated source without emitting its bytes.
+    DirectReference {
+        /// Untrusted output type, checked against detection and the view declaration.
+        media_type: String,
+    },
     /// Text body and continuation facts.
     Text {
         /// Untrusted text body.
