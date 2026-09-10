@@ -124,15 +124,19 @@ jobs:
         if: always()
         continue-on-error: true
         run: python3 scripts/measure_docker_resources.py report "$RUNNER_TEMP/docker-resources.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Report test-result reuse and retries
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 scripts/summarize_bazel_test_cache.py "$RUNNER_TEMP/postgres-events.jsonl" > "$RUNNER_TEMP/postgres-cache.md"
+          cat "$RUNNER_TEMP/postgres-cache.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain Docker resource samples
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: docker-resources-${{ github.run_attempt }}-${{ matrix.suite }}-${{ matrix.shard_index }}
-          path: ${{ runner.temp }}/docker-resources.json
+          path: |
+            ${{ runner.temp }}/docker-resources.json
+            ${{ runner.temp }}/postgres-cache.md
           retention-days: 7
-      - name: Report test-result reuse and retries
-        if: always()
-        continue-on-error: true
-        run: python3 scripts/summarize_bazel_test_cache.py "$RUNNER_TEMP/postgres-events.jsonl" >> "$GITHUB_STEP_SUMMARY"
