@@ -763,6 +763,18 @@ mod tests {
         ));
     }
 
+    /// Loss after physical dispatch is classified as commit-ambiguous
+    /// infrastructure failure.
+    #[test]
+    fn web_fetch_dispatch_unknown_is_commit_ambiguous() {
+        assert_eq!(
+            WebFetchExecutorError::DispatchUnknown.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
+    }
+
     /// Hostname resolution rejects a destination set containing only loopback
     /// addresses before request dispatch.
     #[tokio::test]
