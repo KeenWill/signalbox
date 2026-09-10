@@ -211,16 +211,25 @@ fn clear_stale_identity_pin(
     let Some(identity) = SocketIdentity::capture(&metadata, effective_user) else {
         return Err(LocalSocketError::PinnedIdentityMismatch);
     };
-    match fs::symlink_metadata(socket_path) {
+    let _probe_alias = match fs::symlink_metadata(socket_path) {
         Ok(public_metadata) => {
             if !identity.matches(&public_metadata, effective_user) {
                 return Err(LocalSocketError::PinnedIdentityMismatch);
             }
+            None
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::hard_link(&pin_path, socket_path).map_err(LocalSocketError::PinSocketIdentity)?;
+            Some(FailedBindCleanup::new(socket_path, identity))
+        }
         Err(error) => return Err(LocalSocketError::ReadExistingEntry(error)),
+    };
+    let public_metadata =
+        fs::symlink_metadata(socket_path).map_err(LocalSocketError::ReadExistingEntry)?;
+    if !identity.matches(&public_metadata, effective_user) {
+        return Err(LocalSocketError::PinnedIdentityMismatch);
     }
-    require_no_listener(&pin_path)?;
+    require_no_listener(socket_path)?;
     let revalidated_pin =
         fs::symlink_metadata(&pin_path).map_err(LocalSocketError::ReadPinnedIdentity)?;
     if !identity.matches(&revalidated_pin, effective_user) {
@@ -698,6 +707,18 @@ mod tests {
             Ok(Self(path))
         }
 
+        fn unaddressable_pin_socket_path(&self) -> PathBuf {
+            let mut arbitrary_name = String::from("s");
+            while rustix::net::SocketAddrUnix::new(super::identity_pin_path(
+                &self.path().join(&arbitrary_name),
+            ))
+            .is_ok()
+            {
+                arbitrary_name.push('s');
+            }
+            self.path().join(arbitrary_name)
+        }
+
         fn socket_path(&self) -> PathBuf {
             self.0.join("hub.sock")
         }
@@ -855,6 +876,84 @@ mod tests {
         drop(client);
         drop(server);
         listener.cleanup()?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_orphan_socket_with_an_unaddressable_pin_is_reclaimed()
+    -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        let path = directory.unaddressable_pin_socket_path();
+        let pin = super::identity_pin_path(&path);
+        assert!(rustix::net::SocketAddrUnix::new(&path).is_ok());
+        assert!(rustix::net::SocketAddrUnix::new(&pin).is_err());
+        let original = std::os::unix::net::UnixListener::bind(&path)?;
+        fs::hard_link(&path, &pin)?;
+        fs::remove_file(&path)?;
+        drop(original);
+        let listener = LocalProcessListener::bind(&path)?;
+        listener.cleanup()?;
+        assert!(!path.exists());
+        assert!(!pin.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_orphan_socket_with_an_unaddressable_pin_is_preserved()
+    -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        let path = directory.unaddressable_pin_socket_path();
+        let pin = super::identity_pin_path(&path);
+        assert!(rustix::net::SocketAddrUnix::new(&path).is_ok());
+        assert!(rustix::net::SocketAddrUnix::new(&pin).is_err());
+        let original = std::os::unix::net::UnixListener::bind(&path)?;
+        fs::hard_link(&path, &pin)?;
+        fs::remove_file(&path)?;
+        assert!(matches!(
+            LocalProcessListener::bind(&path),
+            Err(LocalSocketError::ExistingSocketLive)
+        ));
+        assert!(pin.exists());
+        assert!(!path.exists());
+        drop(original);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_public_socket_with_an_unaddressable_pin_is_reclaimed()
+    -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        let path = directory.unaddressable_pin_socket_path();
+        let pin = super::identity_pin_path(&path);
+        assert!(rustix::net::SocketAddrUnix::new(&path).is_ok());
+        assert!(rustix::net::SocketAddrUnix::new(&pin).is_err());
+        let original = std::os::unix::net::UnixListener::bind(&path)?;
+        fs::hard_link(&path, &pin)?;
+        drop(original);
+        let listener = LocalProcessListener::bind(&path)?;
+        listener.cleanup()?;
+        assert!(!path.exists());
+        assert!(!pin.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_public_socket_with_an_unaddressable_pin_is_preserved()
+    -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        let path = directory.unaddressable_pin_socket_path();
+        let pin = super::identity_pin_path(&path);
+        assert!(rustix::net::SocketAddrUnix::new(&path).is_ok());
+        assert!(rustix::net::SocketAddrUnix::new(&pin).is_err());
+        let original = std::os::unix::net::UnixListener::bind(&path)?;
+        fs::hard_link(&path, &pin)?;
+        assert!(matches!(
+            LocalProcessListener::bind(&path),
+            Err(LocalSocketError::ExistingSocketLive)
+        ));
+        assert!(pin.exists());
+        assert!(path.exists());
+        drop(original);
         Ok(())
     }
 

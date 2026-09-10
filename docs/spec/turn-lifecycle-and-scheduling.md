@@ -310,9 +310,9 @@ items without resuming them. Other sessions continue. Infrastructure failures
 stop initial startup visibly. During guard recovery, database failures
 throughout incarnation reconstruction, including repository-watch startup,
 continue reacquisition with the same capped backoff and elapsed bound, after
-closing the failed incarnation’s fenced pool. Migration validation and reload
-corruption failures stop recovery visibly. Recovery is idempotent, and a stale
-observation rolls back.
+closing the failed incarnation’s fenced pool. Migration validation, fence
+corruption, and reload corruption failures stop recovery visibly. Recovery is
+idempotent, and a stale observation rolls back.
 
 Every terminal transition of a source turn, whether by interrupt, model-call
 outcome, startup recovery, or the watchdog, reclassifies its pending steering

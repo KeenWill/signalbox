@@ -610,16 +610,40 @@ impl FatalRecoveryReporter {
         pool: sqlx::PgPool,
         nudge: signalbox_application::InProcessEligibilityNudge,
     ) {
+        let retry_delay = pool.options().get_acquire_timeout();
         let repository =
             signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(pool);
+        self.park_failed_sessions_with(retry_delay, nudge, |session, failure| {
+            let repository = repository.clone();
+            async move {
+                repository
+                    .record_supervision_failure(session, &failure)
+                    .await
+            }
+        })
+        .await;
+    }
+
+    async fn park_failed_sessions_with<Write, Outcome>(
+        &self,
+        retry_delay: std::time::Duration,
+        nudge: signalbox_application::InProcessEligibilityNudge,
+        mut write: Write,
+    ) where
+        Write: FnMut(SessionId, SessionExecutionFailure) -> Outcome,
+        Outcome: std::future::Future<
+                Output = Result<
+                    (),
+                    signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError,
+                >,
+            >,
+    {
         let mut changed = self.fatal_signal.subscribe();
         loop {
             let pending = changed.borrow_and_update().pending.clone();
             for (session, failure) in pending {
                 let result = self
-                    .record_session_failure(session, &nudge, || {
-                        repository.record_supervision_failure(session, &failure)
-                    })
+                    .record_session_failure(session, &nudge, || write(session, failure))
                     .await;
                 tracing::error!(
                     session = %session.as_uuid(),
@@ -629,8 +653,12 @@ impl FatalRecoveryReporter {
                     "session execution suspended for operator recovery"
                 );
             }
-            if changed.changed().await.is_err() {
-                return;
+            let retry_pending = !changed.borrow().pending.is_empty();
+            tokio::select! {
+                result = changed.changed() => {
+                    if result.is_err() { return; }
+                }
+                () = tokio::time::sleep(retry_delay), if retry_pending => {}
             }
         }
     }
@@ -4743,6 +4771,49 @@ mod tests {
             .record_session_failure(session, &nudge, || ready(Ok(())))
             .await
             .unwrap();
+        assert!(
+            !reporter
+                .fatal_signal
+                .borrow()
+                .pending
+                .contains_key(&session)
+        );
+        assert!(!execution.session_is_suspended(session));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supervision_retries_a_retained_request_without_another_notification() {
+        let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
+        let reporter = execution.recovery_reporter();
+        let session = SessionId::from_uuid(Uuid::from_u128(144));
+        reporter.report_session_recovery_required(session);
+        let (nudge, _source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
+        let mut outcomes = std::collections::VecDeque::from([
+            Err(
+                signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError::Database(
+                    sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+                ),
+            ),
+            Ok(()),
+        ]);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reporter.park_failed_sessions_with(
+                std::time::Duration::from_secs(1),
+                nudge,
+                |reported, _| {
+                    assert_eq!(reported, session);
+                    ready(
+                        outcomes
+                            .pop_front()
+                            .expect("acknowledgement removes the retry request"),
+                    )
+                },
+            ),
+        )
+        .await
+        .expect_err("the supervisor remains available after acknowledgement");
+        assert!(outcomes.is_empty());
         assert!(
             !reporter
                 .fatal_signal

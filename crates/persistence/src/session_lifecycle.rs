@@ -396,13 +396,25 @@ impl SessionLifecycleRepository {
             outcome,
             Err(SessionLifecycleRepositoryError::CommitAmbiguous(_))
         ) {
-            let recorded = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM session_supervision WHERE session_id = $1 AND supervision_id = $2)",
-            )
-            .bind(session_id_to_uuid(session))
-            .bind(supervision)
-            .fetch_one(&self.pool)
-            .await;
+            let recorded = reconcile_supervision_identity(
+                self.pool.options().get_acquire_timeout(),
+                || async {
+                    let mut transaction = self.pool.begin().await?;
+                    sqlx::query(lock_inventory::SESSION_LIFECYCLE_SESSION)
+                        .bind(session_id_to_uuid(session))
+                        .fetch_optional(&mut *transaction)
+                        .await?;
+                    let recorded = sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS(SELECT 1 FROM session_supervision WHERE session_id = $1 AND supervision_id = $2)",
+                    )
+                    .bind(session_id_to_uuid(session))
+                    .bind(supervision)
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                    transaction.rollback().await?;
+                    Ok(recorded)
+                },
+            ).await;
             if matches!(recorded, Ok(true)) {
                 return Ok(());
             }
@@ -2231,6 +2243,70 @@ where
 {
     row.try_get::<Option<T>, _>(field)?
         .ok_or_else(|| SessionLifecycleCorruption::Missing(field).into())
+}
+
+async fn reconcile_supervision_identity<Read, Outcome>(
+    retry_delay: std::time::Duration,
+    mut read: Read,
+) -> Result<bool, sqlx::Error>
+where
+    Read: FnMut() -> Outcome,
+    Outcome: std::future::Future<Output = Result<bool, sqlx::Error>>,
+{
+    loop {
+        let result = read().await;
+        let retry = match &result {
+            Err(sqlx::Error::Io(_) | sqlx::Error::Tls(_) | sqlx::Error::PoolTimedOut) => true,
+            Err(sqlx::Error::Database(error)) => error.code().is_some_and(|code| {
+                code.starts_with("08") || matches!(code.as_ref(), "57P01" | "57P02" | "57P03")
+            }),
+            _ => false,
+        };
+        if !retry {
+            return result;
+        }
+        tokio::time::sleep(retry_delay).await;
+    }
+}
+
+#[cfg(test)]
+mod supervision_identity_tests {
+    #[tokio::test]
+    async fn identity_reconciliation_survives_repeated_transport_failures() {
+        let mut outcomes = std::collections::VecDeque::from([
+            Err(sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into())),
+            Err(sqlx::Error::PoolTimedOut),
+            Ok(true),
+        ]);
+        let recorded = super::reconcile_supervision_identity(std::time::Duration::ZERO, || {
+            std::future::ready(
+                outcomes
+                    .pop_front()
+                    .expect("the successful read ends reconciliation"),
+            )
+        })
+        .await
+        .unwrap();
+        assert!(recorded);
+        assert!(outcomes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn identity_reconciliation_stops_on_a_closed_pool_or_invalid_query() {
+        for error in [
+            sqlx::Error::PoolClosed,
+            sqlx::Error::ColumnNotFound("fixture column".into()),
+        ] {
+            let mut error = Some(error);
+            let result = super::reconcile_supervision_identity(std::time::Duration::ZERO, || {
+                std::future::ready(Err(error
+                    .take()
+                    .expect("non-transient errors are not retried")))
+            })
+            .await;
+            assert!(result.is_err());
+        }
+    }
 }
 
 #[cfg(test)]

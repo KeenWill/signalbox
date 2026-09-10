@@ -445,6 +445,17 @@ impl fmt::Display for SanitizedStartupCause<'_> {
 /// cause cannot include configuration values, paths, credentials, or content.
 fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) -> HubRuntimeError {
     let mut error = HubRuntimeError::infrastructure(phase);
+    if let SanitizedStartupCause::Database(FencedHubDatabaseError::AdvanceFence(fence)) = &cause {
+        match fence {
+            signalbox_persistence::hub_fence::HubFenceError::Database(_) => {
+                error.database_failure = true;
+            }
+            signalbox_persistence::hub_fence::HubFenceError::Corruption(_) => {
+                error.database_failure = false;
+                error.failure_class = OperatorFailureClass::FailClosedCorruption;
+            }
+        }
+    }
     if let SanitizedStartupCause::BlobStorage(signalboxd::BlobStoreRegistryError::Catalog(
         catalog,
     )) = &cause
@@ -3672,6 +3683,37 @@ mod tests {
                 "{failure}"
             );
         }
+    }
+
+    #[test]
+    fn fence_recovery_surfaces_corruption_and_retries_database_failures() {
+        use signalbox_persistence::hub_fence::{HubFenceCorruption, HubFenceError};
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        let corrupt = signalboxd::FencedHubDatabaseError::AdvanceFence(HubFenceError::Corruption(
+            HubFenceCorruption::GenerationExhausted,
+        ));
+        let corrupt = super::erase_startup_cause(
+            RuntimePhase::DatabaseConnection,
+            super::SanitizedStartupCause::Database(&corrupt),
+        );
+        assert_eq!(
+            corrupt.failure_class,
+            OperatorFailureClass::FailClosedCorruption
+        );
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(corrupt), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == corrupt)
+        );
+        let unavailable = signalboxd::FencedHubDatabaseError::AdvanceFence(
+            HubFenceError::Database(sqlx::Error::PoolClosed),
+        );
+        let unavailable = super::erase_startup_cause(
+            RuntimePhase::DatabaseConnection,
+            super::SanitizedStartupCause::Database(&unavailable),
+        );
+        assert!(matches!(
+            super::recovery_incarnation_outcome(Err(unavailable), true),
+            GuardedIncarnationOutcome::Reacquire
+        ));
     }
 
     #[tokio::test]

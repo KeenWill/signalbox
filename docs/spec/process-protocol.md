@@ -101,12 +101,13 @@ effective user. A group- or other-writable ancestor is admitted only when it is
 sticky and its child is owned by the effective user. A daemon holds an exclusive
 lock beside the socket for its lifetime and pins the bound inode, and it unlinks
 a socket path only after revalidating that pin, so a restart never removes a
-live successor's socket. Stale-pin cleanup probes the owned pinned socket under
-the path lock and removes it only after connection refusal and inode
-revalidation. An absent public socket permits cleanup; a present public socket
-must match the pin. A live or inconclusive probe preserves it. The daemon admits
-only socket peers whose uid equals its effective uid. Remote access needs an
-authenticated identity and revocation design that does not exist, recorded in
+live successor's socket. Stale-pin cleanup probes the matching public socket
+path, temporarily linking an orphan pin there when needed, under the path lock
+and removes it only after connection refusal and inode revalidation. An absent
+public socket permits cleanup; a present public socket must match the pin. A
+live or inconclusive probe preserves it. The daemon admits only socket peers
+whose uid equals its effective uid. Remote access needs an authenticated
+identity and revocation design that does not exist, recorded in
 [open-questions.md](../open-questions.md).
 
 A denial on the wire requires a reason although the domain command admits its
