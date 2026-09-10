@@ -325,6 +325,21 @@ impl ImportedSessionRepository {
         .await
     }
 
+    /// Loads the bounded command and applied-result evidence for replay.
+    pub async fn load_applied(
+        &self,
+        command_id: DurableCommandId,
+    ) -> Result<
+        Option<(
+            CreateSessionFromImportedFrontier,
+            signalbox_domain::CreateSessionFromImportedFrontierAppliedResult,
+        )>,
+        ImportedSessionRepositoryError,
+    > {
+        let mut connection = self.pool.acquire().await?;
+        load_applied_from_connection(&mut connection, command_id).await
+    }
+
     async fn existing_outcome(
         &self,
         command: CreateSessionFromImportedFrontier,
@@ -335,17 +350,224 @@ impl ImportedSessionRepository {
                 command_id: command.command_id(),
             });
         }
-        let recorded = self.load(command.command_id()).await?.ok_or(
+        let (recorded, result) = self.load_applied(command.command_id()).await?.ok_or(
             ImportedSessionCorruption::Inconsistent("claimed imported creation disappeared"),
         )?;
-        Ok(if &command == recorded.command() {
-            CreateSessionFromImportedFrontierOutcome::Applied(recorded.applied_result())
+        Ok(if command == recorded {
+            CreateSessionFromImportedFrontierOutcome::Applied(result)
         } else {
             CreateSessionFromImportedFrontierOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             }
         })
     }
+}
+
+async fn load_applied_from_connection(
+    connection: &mut PgConnection,
+    command_id: DurableCommandId,
+) -> Result<
+    Option<(
+        CreateSessionFromImportedFrontier,
+        signalbox_domain::CreateSessionFromImportedFrontierAppliedResult,
+    )>,
+    ImportedSessionRepositoryError,
+> {
+    let row = sqlx::query(
+        "SELECT
+            d.command_kind AS registry_kind,
+            d.storage_version AS registry_version,
+            c.command_id AS typed_command_id,
+            c.command_kind AS typed_kind,
+            c.storage_version AS typed_version,
+            c.runner_selector_kind,
+            c.runner_selector_id,
+            c.runner_selector_class,
+            c.runner_directory_kind,
+            c.runner_directory,
+            c.runner_credential_profile,
+            c.runner_workspace_kind,
+            c.runner_repository,
+            c.runner_sandbox,
+            c.runner_permission_overrides,
+            c.imported_conversation_id AS command_conversation_id,
+            c.imported_frontier_entry_id AS command_frontier_entry_id,
+            c.imported_frontier_position AS command_frontier_position,
+            c.imported_relationship_kind AS command_relationship_kind,
+            c.creation_cause AS command_cause,
+            c.ancestry_kind AS command_ancestry,
+            c.initial_defaults_version,
+            c.model_selection_kind AS command_model_kind,
+            c.direct_model_selection_id AS command_direct_id,
+            c.model_alias_id AS command_alias_id,
+            c.dangerous_tool_auto_approval AS command_tool_auto_approval,
+            c.system_prompt AS command_system_prompt,
+            c.model_settings AS command_model_settings,
+            c.result_kind,
+            c.created_session_id AS result_session_id,
+            s.session_id AS stored_session_id,
+            s.creation_cause AS stored_cause,
+            s.ancestry_kind AS stored_ancestry,
+            s.imported_conversation_id AS stored_conversation_id,
+            s.imported_frontier_entry_id AS stored_frontier_entry_id,
+            s.imported_frontier_position AS stored_frontier_position,
+            s.imported_relationship_kind AS stored_relationship_kind,
+            v.session_id AS defaults_session_id,
+            v.version AS stored_defaults_version,
+            v.model_selection_kind AS stored_model_kind,
+            v.direct_model_selection_id AS stored_direct_id,
+            v.model_alias_id AS stored_alias_id,
+            v.dangerous_tool_auto_approval AS stored_tool_auto_approval,
+            v.system_prompt AS stored_system_prompt,
+            v.model_settings AS stored_model_settings,
+            placement_head.current_version AS current_placement_head_version,
+            current_placement.version AS current_placement_event_version,
+            EXISTS (
+                SELECT 1
+                  FROM session_placement_event AS later_placement
+                 WHERE later_placement.session_id = placement_head.session_id
+                   AND later_placement.version > placement_head.current_version
+            ) AS current_placement_later_event_exists,
+            initial_placement.version AS initial_placement_version,
+            initial_placement.prior_version AS initial_placement_prior_version,
+            initial_placement.event_kind AS initial_placement_event_kind,
+            initial_placement.placement_path AS initial_placement_path,
+            initial_placement.root_global_read_intent AS initial_placement_root_intent
+         FROM durable_command AS d
+         LEFT JOIN create_session_from_imported_frontier_command AS c
+           ON c.command_id = d.command_id
+         LEFT JOIN session AS s
+           ON s.session_id = c.created_session_id
+         LEFT JOIN session_defaults_version AS v
+           ON v.session_id = c.created_session_id
+          AND v.version = c.initial_defaults_version
+         LEFT JOIN session_current_placement AS placement_head
+           ON placement_head.session_id = c.created_session_id
+         LEFT JOIN session_placement_event AS current_placement
+           ON current_placement.session_id = placement_head.session_id
+          AND current_placement.version = placement_head.current_version
+         LEFT JOIN session_placement_event AS initial_placement
+           ON initial_placement.session_id = c.created_session_id
+          AND initial_placement.version = 1
+          AND initial_placement.provenance_command_id = c.command_id
+         WHERE d.command_id = $1",
+    )
+    .bind(durable_command_id_to_uuid(command_id))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let registry_kind: String = required(&row, "registry_kind")?;
+    if registry_kind != CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND {
+        return Err(ImportedSessionRepositoryError::DifferentCommandKind { command_id });
+    }
+    let registry_version = require_supported_version(&row, "registry_version")?;
+    let stored_command = durable_command_id_from_uuid(required(&row, "typed_command_id")?)
+        .map_err(|reason| ImportedSessionCorruption::InvalidCommandIdentity {
+            field: "typed command identity",
+            reason,
+        })?;
+    if stored_command != command_id {
+        return Err(ImportedSessionCorruption::Inconsistent("typed command identity").into());
+    }
+    require_spelling(
+        &row,
+        "typed_kind",
+        CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND,
+    )?;
+    let typed_version = require_supported_version(&row, "typed_version")?;
+    if registry_version != typed_version {
+        return Err(ImportedSessionCorruption::Inconsistent("command storage version").into());
+    }
+    require_spelling(&row, "command_cause", INTERACTIVE)?;
+    require_spelling(&row, "command_ancestry", IMPORTED_ANCESTRY)?;
+    require_spelling(&row, "result_kind", APPLIED)?;
+
+    let conversation =
+        ImportedConversationId::from_uuid(required(&row, "command_conversation_id")?);
+    let frontier = decode_frontier(
+        conversation,
+        required(&row, "command_frontier_entry_id")?,
+        required(&row, "command_frontier_position")?,
+        "command imported frontier",
+    )?;
+    let relationship = decode_relationship(required(&row, "command_relationship_kind")?)?;
+    let initial_version = decode_ordinal(&row, "initial_defaults_version")?;
+    if initial_version != SessionConfigurationDefaultsVersion::first() {
+        return Err(
+            ImportedSessionCorruption::Inconsistent("command initial defaults version").into(),
+        );
+    }
+    let command_model_settings: Value = required(&row, "command_model_settings")?;
+    let defaults = decode_versioned_selection(
+        required(&row, "command_model_kind")?,
+        row.try_get("command_direct_id")?,
+        row.try_get("command_alias_id")?,
+        StoredVersionedConfigurationFields {
+            dangerous_tool_auto_approval: required(&row, "command_tool_auto_approval")?,
+            system_prompt: row.try_get("command_system_prompt")?,
+            model_settings: command_model_settings,
+            storage_version: typed_version,
+        },
+        "command model selection",
+    )?;
+    let runner_placement =
+        <crate::creation_runner_placement::RunnerPlacementColumns as sqlx::FromRow<
+            sqlx::postgres::PgRow,
+        >>::from_row(&row)?
+        .decode(typed_version, RUNNER_PLACEMENT_FROM_STORAGE_VERSION)
+        .map_err(ImportedSessionCorruption::Inconsistent)?;
+    let command =
+        CreateSessionFromImportedFrontier::new(stored_command, frontier, relationship, defaults)
+            .with_runner_placement(runner_placement);
+    let result_session = session_id_from_uuid(required(&row, "result_session_id")?);
+    let stored_session = session_id_from_uuid(required(&row, "stored_session_id")?);
+    if result_session != stored_session {
+        return Err(ImportedSessionCorruption::Inconsistent("created session result").into());
+    }
+    let provenance = decode_stored_provenance(&row, conversation)?;
+    let expected_provenance = SessionCreationProvenance::new(
+        SessionCreationCause::Interactive,
+        TranscriptAncestry::ImportedConversation {
+            source_frontier: frontier,
+            relationship,
+        },
+    );
+    if provenance != expected_provenance {
+        return Err(ImportedSessionCorruption::Inconsistent("session provenance").into());
+    }
+    let defaults_session = session_id_from_uuid(required(&row, "defaults_session_id")?);
+    if defaults_session != result_session {
+        return Err(ImportedSessionCorruption::Inconsistent("session defaults owner").into());
+    }
+    let stored_defaults_version = decode_ordinal(&row, "stored_defaults_version")?;
+    if stored_defaults_version != SessionConfigurationDefaultsVersion::first() {
+        return Err(ImportedSessionCorruption::Inconsistent("stored defaults version").into());
+    }
+    let stored_model_settings: Value = required(&row, "stored_model_settings")?;
+    let stored_defaults = decode_versioned_selection(
+        required(&row, "stored_model_kind")?,
+        row.try_get("stored_direct_id")?,
+        row.try_get("stored_alias_id")?,
+        StoredVersionedConfigurationFields {
+            dangerous_tool_auto_approval: required(&row, "stored_tool_auto_approval")?,
+            system_prompt: row.try_get("stored_system_prompt")?,
+            model_settings: stored_model_settings,
+            storage_version: typed_version,
+        },
+        "stored model selection",
+    )?;
+    if stored_defaults != *command.initial_configuration_defaults() {
+        return Err(ImportedSessionCorruption::Inconsistent("stored session defaults").into());
+    }
+    validate_initial_placement_effect(&row)?;
+    Ok(Some((
+        command,
+        signalbox_domain::CreateSessionFromImportedFrontierAppliedResult::from_session(
+            result_session,
+        ),
+    )))
 }
 
 impl CreateSessionFromImportedFrontierTransaction for ImportedSessionRepository {

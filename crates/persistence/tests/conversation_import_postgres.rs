@@ -11,6 +11,7 @@ use std::{
     env,
     error::Error,
     fs,
+    io::{BufReader, Cursor},
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::Arc,
@@ -20,8 +21,11 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     ImportConversationError, ImportConversationOutcome, ImportConversationService,
     ImportedConversationConverter, ImportedConversationIdGenerator,
+    ImportedConversationStoreOutcome, StreamingResilientImportedConversationConverter,
 };
-use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
+use signalbox_conversation_import_claude_code::{
+    ClaudeCodeJsonlConverter, ResilientClaudeCodeJsonlConverter,
+};
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
     BlobDigest, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -36,7 +40,7 @@ use signalbox_persistence::{
     conversation_import::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
-        corrupt_integration_imported_blob,
+        StreamingImportedConversationReport, corrupt_integration_imported_blob,
     },
     conversation_import_discovery::{
         ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
@@ -1609,6 +1613,73 @@ async fn concurrent_reversed_raws_use_stable_blob_order() -> Result<(), Box<dyn 
     .fetch_one(&pool)
     .await?;
     assert_eq!(counts, (2, 2));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// concurrent streamed imports of one source resolve the durable winner.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_streamed_duplicates_return_inserted_and_already_imported()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let source = br#"{"type":"summary","value":"same"}"#.to_vec();
+    let first_repository = ImportedConversationRepository::new(pool.clone());
+    let second_repository = ImportedConversationRepository::new(pool.clone());
+    let first_source = source.clone();
+    let first = async move {
+        let candidate = ImportedConversationId::from_uuid(Uuid::from_u128(0x880));
+        let mut converter = ResilientClaudeCodeJsonlConverter;
+        let format = converter.format();
+        let records = converter.convert_resilient_from_reader(
+            candidate,
+            BufReader::new(Cursor::new(first_source)),
+            u64::MAX,
+            || ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x881)),
+        );
+        first_repository
+            .resolve_or_insert_stream(candidate, format, records)
+            .await
+    };
+    let second = async move {
+        let candidate = ImportedConversationId::from_uuid(Uuid::from_u128(0x890));
+        let mut converter = ResilientClaudeCodeJsonlConverter;
+        let format = converter.format();
+        let records = converter.convert_resilient_from_reader(
+            candidate,
+            BufReader::new(Cursor::new(source)),
+            u64::MAX,
+            || ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x891)),
+        );
+        second_repository
+            .resolve_or_insert_stream(candidate, format, records)
+            .await
+    };
+
+    let (first, second) = tokio::join!(first, second);
+    let reports = [
+        first.expect("the first streamed import resolves"),
+        second.expect("the second streamed import resolves"),
+    ];
+    let mut inserted = None;
+    let mut already_imported = None;
+    for report in &reports {
+        let StreamingImportedConversationReport::Imported { outcome, .. } = report else {
+            panic!("the valid source must produce an imported conversation")
+        };
+        match outcome {
+            ImportedConversationStoreOutcome::Inserted { conversation, .. } => {
+                inserted = Some(*conversation);
+            }
+            ImportedConversationStoreOutcome::AlreadyImported { conversation, .. } => {
+                already_imported = Some(*conversation);
+            }
+        }
+    }
+    assert_eq!(inserted, already_imported);
+    assert!(inserted.is_some());
 
     pool.close().await;
     drop(container);

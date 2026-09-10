@@ -338,9 +338,8 @@ async fn execute_continuation(
         state.pool.clone(),
         state.model_configuration.session_credential_pin(),
     );
-    match repository.load(request.command_id).await {
-        Ok(Some(recorded)) => {
-            let command = recorded.command();
+    match repository.load_applied(request.command_id).await {
+        Ok(Some((command, applied_result))) => {
             if command.imported_conversation() != request.conversation
                 || command.imported_frontier().through_entry() != request.entry
                 || command.imported_frontier().through_position() != request.position
@@ -349,7 +348,7 @@ async fn execute_continuation(
             {
                 return conflicting_reuse();
             }
-            return continuation_response(request, recorded.applied_result().session().into_uuid());
+            return continuation_response(request, applied_result.session().into_uuid());
         }
         Ok(None) => {}
         Err(ImportedSessionRepositoryError::DifferentCommandKind { .. }) => {

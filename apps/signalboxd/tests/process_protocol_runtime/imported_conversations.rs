@@ -260,6 +260,49 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
     runtime.stop().await
 }
 
+/// an inline import applies the configured raw-record ceiling before blob storage and reports the
+/// same content-silent converter rejection as the chunked path.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inline_record_above_blob_maximum_is_a_raw_record_rejection() -> Result<(), Box<dyn Error>>
+{
+    let runtime = RunningRuntime::start_with_blob_storage_maximum(96).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let source = ConversationImportSource::new(
+        format!(
+            "{{\"sessionId\":\"inline-limit\",\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{}\"}}}}",
+            "x".repeat(128)
+        )
+        .into_bytes(),
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            1,
+            ClientRequest::ImportConversation {
+                format: ConversationImportFormat::ClaudeCodeSessionJsonlV3,
+                source,
+            },
+        )
+        .await?;
+    let rejected = response_within(&mut connection).await?;
+    assert_eq!(
+        protocol_error_code(rejected.message()),
+        ErrorCode::InvalidRequest
+    );
+    assert_eq!(
+        protocol_error_detail(rejected.message()),
+        Some(RejectionDetail::ConversationImportConversionFailed {
+            class: ConversationImportRejectionClass::RawRecordTooLarge,
+            record_ordinal: Some(CanonicalU64::new(1)),
+        })
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// disconnect discards per-connection partial import state.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]

@@ -209,11 +209,11 @@ One transaction resolves or inserts a complete aggregate. Ingestion publishes
 and verifies every raw blob before that transaction, then registers the blob and
 replica rows in the same transaction that first references them. An accepted raw
 record cannot exceed `blob_storage.max_blob_bytes`; the complete source has no
-cumulative blob-byte ceiling. Chunked conversion rejects an oversized physical
-record before buffering or parsing beyond that per-record ceiling. One admitted
-import awaits at most one raw blob publication or verification at a time while
-holding the process-wide bulk-ingest permit; it never fans out concurrently.
-Writers acquire shared raw hashes and globally unique entry identities in their
+cumulative blob-byte ceiling. Conversion rejects an oversized physical record
+before buffering or parsing beyond that per-record ceiling. One admitted import
+awaits at most one raw blob publication or verification at a time while holding
+the process-wide bulk-ingest permit; it never fans out concurrently. Writers
+acquire shared raw hashes and globally unique entry identities in their
 respective sorted key order and store physical positions explicitly.
 
 Once a header exists, any hash mismatch, missing member, gap, duplicate entry

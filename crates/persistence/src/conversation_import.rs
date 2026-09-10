@@ -821,7 +821,7 @@ impl ImportedConversationRepository {
             });
         }
 
-        insert_streamed_conversation(
+        let inserted = insert_streamed_conversation(
             &mut staging,
             candidate,
             source_format,
@@ -838,6 +838,51 @@ impl ImportedConversationRepository {
         )
         .await
         .map_err(StreamingImportedConversationError::Repository)?;
+        if !inserted {
+            let existing = load_identity_by_source_digest(
+                &mut staging,
+                source_format,
+                converter_version,
+                source_digest,
+            )
+            .await
+            .map_err(ImportedConversationRepositoryError::from)
+            .map_err(StreamingImportedConversationError::Repository)?
+            .ok_or_else(|| {
+                StreamingImportedConversationError::Repository(
+                    ImportedConversationRepositoryError::IdentityCollision(
+                        ImportedConversationIdentityCollision::Conversation,
+                    ),
+                )
+            })?;
+            let equivalent = stream_staging_matches_existing(
+                &mut staging,
+                existing,
+                raw_count,
+                entry_count,
+                source_session_id.as_deref(),
+                display_title.as_deref(),
+            )
+            .await
+            .map_err(StreamingImportedConversationError::Repository)?;
+            if !equivalent {
+                return Err(StreamingImportedConversationError::Repository(
+                    ImportedConversationCorruption::ExistingSnapshotMismatch.into(),
+                ));
+            }
+            staging
+                .rollback()
+                .await
+                .map_err(ImportedConversationRepositoryError::from)
+                .map_err(StreamingImportedConversationError::Repository)?;
+            return Ok(StreamingImportedConversationReport::Imported {
+                outcome: ImportedConversationStoreOutcome::AlreadyImported {
+                    conversation: existing,
+                    source_digest,
+                },
+                dropped_records,
+            });
+        }
         staging
             .commit()
             .await
@@ -1464,7 +1509,7 @@ async fn insert_streamed_conversation(
     raw_source_bytes: u64,
     normalized_source_record_bytes: u64,
     normalized_entry_bytes: u64,
-) -> Result<(), ImportedConversationRepositoryError> {
+) -> Result<bool, ImportedConversationRepositoryError> {
     let inserted = sqlx::query(
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
@@ -1492,9 +1537,7 @@ async fn insert_streamed_conversation(
     .rows_affected()
         == 1;
     if !inserted {
-        return Err(ImportedConversationRepositoryError::IdentityCollision(
-            ImportedConversationIdentityCollision::Conversation,
-        ));
+        return Ok(false);
     }
     let identity_collision = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
@@ -1553,7 +1596,7 @@ async fn insert_streamed_conversation(
         normalized_entry_bytes,
     )
     .await?;
-    Ok(())
+    Ok(true)
 }
 
 async fn insert_raw_blob_references(

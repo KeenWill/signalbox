@@ -116,6 +116,16 @@ impl create_session_from_imported_frontier::ImportedSessionRepository {
         option::Option<signalbox_domain::ReconstitutedSessionCreationFromImportedFrontier>,
         create_session_from_imported_frontier::ImportedSessionRepositoryError,
     >;
+    pub async fn load_applied(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+    ) -> result::Result<
+        option::Option<(
+            signalbox_domain::CreateSessionFromImportedFrontier,
+            signalbox_domain::CreateSessionFromImportedFrontierAppliedResult,
+        )>,
+        create_session_from_imported_frontier::ImportedSessionRepositoryError,
+    >;
 }
 impl signalbox_application::CreateSessionFromImportedFrontierTransaction
     for create_session_from_imported_frontier::ImportedSessionRepository
