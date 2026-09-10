@@ -88,6 +88,18 @@ async fn load_scheduling_projection_inner(
         session.creation_provenance().ancestry(),
         TranscriptAncestry::ImportedConversation { .. }
     );
+    let load_complete_imported_seed = if imported_ancestry && !load_complete_imported_seed {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM context_compaction WHERE session_id = $1
+            )",
+        )
+        .bind(session_id_to_uuid(session_id))
+        .fetch_one(&mut *connection)
+        .await?
+    } else {
+        load_complete_imported_seed
+    };
     let imported_session = if imported_ancestry && load_complete_imported_seed {
         Some(
             crate::create_session_from_imported_frontier::load_complete_current(
@@ -3299,8 +3311,13 @@ async fn load_scheduling_projection_inner(
     if reconstructed.len() != stored_frontiers.len() {
         return Err(SubmitInputCorruption::Inconsistent("context frontier prefix cycle").into());
     }
+    let supplied_seed_frontier = imported_session
+        .as_ref()
+        .map(|imported| imported.seed_snapshot().frontier().snapshot().into_uuid())
+        .or(bounded_seed_frontier);
     let snapshots = scheduling_frontier_ids
         .iter()
+        .filter(|frontier| Some(**frontier) != supplied_seed_frontier)
         .map(|frontier| {
             reconstructed
                 .get(frontier)
