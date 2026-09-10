@@ -1,6 +1,6 @@
 //! Production browser adapter for bounded imported-conversation discovery.
 
-use std::{num::NonZeroU32, sync::Arc};
+use std::num::NonZeroU32;
 
 use axum::{
     Json, Router,
@@ -22,10 +22,7 @@ use signalbox_domain::{
     ModelSelectionRequest, SessionConfigurationDefaults,
 };
 use signalbox_persistence::{
-    conversation_import::{
-        ImportedConversationRepository, ImportedConversationRepositoryError,
-        ImportedRawBlobStorageError,
-    },
+    conversation_import::{ImportedConversationRepositoryError, ImportedRawBlobStorageError},
     conversation_import_discovery::{
         ImportedContinuationReference, ImportedConversationDescriptor,
         ImportedConversationDiscoveryError, ImportedConversationDiscoveryRepository,
@@ -51,8 +48,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    BlobStoreRegistry, HubModelConfiguration,
-    imported_source_blobs::ImportedSourceBlobStorage,
+    HubModelConfiguration,
     web_http::{
         application_error, decode_bounded_json, decode_bounded_utf8, transport_error,
         validate_json_mutation, validate_text_mutation,
@@ -68,28 +64,12 @@ const DEFAULT_IMPORT_WINDOW_RADIUS: u32 = 25;
 struct WebImportState {
     pool: PgPool,
     model_configuration: HubModelConfiguration,
-    imported_conversations: ImportedConversationRepository,
 }
 
-pub(crate) fn router(
-    pool: PgPool,
-    model_configuration: HubModelConfiguration,
-    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
-) -> Router {
-    // Continuations reconstitute the imported aggregate from immutable blob
-    // storage, so the browser adapter shares the daemon's publication adapter
-    // rather than reading raw bytes the database no longer holds.
-    let imported_conversations = ImportedConversationRepository::with_blob_storage(
-        pool.clone(),
-        Arc::new(ImportedSourceBlobStorage::new(
-            pool.clone(),
-            blob_store_registry,
-        )),
-    );
+pub(crate) fn router(pool: PgPool, model_configuration: HubModelConfiguration) -> Router {
     let state = WebImportState {
         pool,
         model_configuration,
-        imported_conversations,
     };
     let mutation = Router::new()
         .route("/{conversation}/continuations", post(continue_import))
@@ -354,10 +334,9 @@ async fn execute_continuation(
     state: &WebImportState,
     request: CanonicalContinuationRequest,
 ) -> Response {
-    let repository = ImportedSessionRepository::with_imported_conversations(
+    let repository = ImportedSessionRepository::new(
         state.pool.clone(),
         state.model_configuration.session_credential_pin(),
-        state.imported_conversations.clone(),
     );
     match repository.load(request.command_id).await {
         Ok(Some(recorded)) => {
@@ -581,7 +560,11 @@ fn domain_format(format: WebImportFormat) -> ImportedConversationFormat {
         WebImportFormat::ClaudeCodeSessionJsonlV2 => {
             ImportedConversationFormat::ClaudeCodeSessionJsonlV2
         }
+        WebImportFormat::ClaudeCodeSessionJsonlV3 => {
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV3
+        }
         WebImportFormat::CodexRolloutJsonlV1 => ImportedConversationFormat::CodexRolloutJsonlV1,
+        WebImportFormat::CodexRolloutJsonlV2 => ImportedConversationFormat::CodexRolloutJsonlV2,
     }
 }
 
@@ -593,7 +576,11 @@ fn web_format(format: ImportedConversationFormat) -> WebImportFormat {
         ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
             WebImportFormat::ClaudeCodeSessionJsonlV2
         }
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV3 => {
+            WebImportFormat::ClaudeCodeSessionJsonlV3
+        }
         ImportedConversationFormat::CodexRolloutJsonlV1 => WebImportFormat::CodexRolloutJsonlV1,
+        ImportedConversationFormat::CodexRolloutJsonlV2 => WebImportFormat::CodexRolloutJsonlV2,
     }
 }
 

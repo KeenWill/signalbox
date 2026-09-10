@@ -214,6 +214,34 @@ impl convert::From<blob::BlobCatalogRepositoryError>
 }
 ```
 
+## StreamingImportedConversationReport
+
+```rust
+pub enum StreamingImportedConversationReport<Failure> {
+    Imported {
+        outcome: signalbox_application::ImportedConversationStoreOutcome,
+        dropped_records: signalbox_application::ImportedConversationDropFacts,
+    },
+    NoValidRecords {
+        dropped_records: signalbox_application::ImportedConversationDropFacts,
+        first_failure: Failure,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## StreamingImportedConversationError
+
+```rust
+pub enum StreamingImportedConversationError<ConverterError> {
+    SourceRead,
+    Conversion(ConverterError),
+    ConverterContract,
+    Repository(conversation_import::ImportedConversationRepositoryError),
+}
+// derives: fmt::Debug
+```
+
 ## ImportedConversationRepository
 
 ```rust
@@ -241,11 +269,35 @@ impl conversation_import::ImportedConversationRepository {
         signalbox_application::ImportedConversationStoreOutcome,
         conversation_import::ImportedConversationRepositoryError,
     >;
+    pub async fn resolve_or_insert_stream<Records, Failure, ConverterError>(
+        &self,
+        candidate: signalbox_domain::ImportedConversationId,
+        format: signalbox_domain::ImportedConversationFormat,
+        records: Records,
+    ) -> result::Result<
+        conversation_import::StreamingImportedConversationReport<Failure>,
+        conversation_import::StreamingImportedConversationError<ConverterError>,
+    >
+    where
+        Records: iterator::Iterator<
+            Item = result::Result<
+                signalbox_application::ImportedConversationStreamItem<Failure>,
+                signalbox_application::StreamConversionError<ConverterError>,
+            >,
+        >;
     pub async fn load(
         &self,
         conversation: signalbox_domain::ImportedConversationId,
     ) -> result::Result<
         option::Option<signalbox_domain::ImportedConversation>,
+        conversation_import::ImportedConversationRepositoryError,
+    >;
+    pub async fn lookup_frontier(
+        &self,
+        conversation: signalbox_domain::ImportedConversationId,
+        position: signalbox_domain::ImportedTranscriptPosition,
+    ) -> result::Result<
+        option::Option<conversation_import::ImportedConversationFrontierLookup>,
         conversation_import::ImportedConversationRepositoryError,
     >;
 }
@@ -261,6 +313,17 @@ impl signalbox_application::ImportedConversationStore
         signalbox_application::ImportedConversationStoreOutcome,
         <Self as signalbox_application::ImportedConversationStore>::Error,
     >;
+}
+```
+
+## ImportedConversationFrontierLookup
+
+```rust
+pub struct ImportedConversationFrontierLookup {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl conversation_import::ImportedConversationFrontierLookup {
+    pub const fn frontier(self) -> option::Option<signalbox_domain::ImportedTranscriptFrontier>;
+    pub const fn last_position(self) -> signalbox_domain::ImportedTranscriptPosition;
 }
 ```
 

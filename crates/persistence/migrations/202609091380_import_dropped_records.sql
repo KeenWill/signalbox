@@ -7,6 +7,15 @@ SET dropped_record_count = 0;
 
 ALTER TABLE imported_conversation
     ALTER COLUMN dropped_record_count SET NOT NULL,
+    DROP CONSTRAINT imported_conversation_converter_version_supported,
+    ADD CONSTRAINT imported_conversation_converter_version_supported
+        CHECK (converter_version = ANY (ARRAY[1, 2, 3])),
+    DROP CONSTRAINT imported_conversation_format_version_supported,
+    ADD CONSTRAINT imported_conversation_format_version_supported
+        CHECK (
+            (source_format = 'claude_code_session_jsonl' AND converter_version = ANY (ARRAY[1, 2, 3]))
+            OR (source_format = 'codex_rollout_jsonl' AND converter_version = ANY (ARRAY[1, 2]))
+        ),
     ADD CONSTRAINT imported_conversation_dropped_record_count_u64
         CHECK (dropped_record_count BETWEEN 0 AND 18446744073709551615),
     ADD CONSTRAINT imported_conversation_first_dropped_position_positive_u64

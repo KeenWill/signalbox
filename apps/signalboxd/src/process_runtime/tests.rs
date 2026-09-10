@@ -12,7 +12,8 @@ pub(crate) mod tests {
     use signalbox_application::{
         EligibilityNudge, EligibilityNudgeOutcome, ImportConversationError,
         ImportedConversationConversionReport, ImportedConversationConverter,
-        ImportedConversationSkippedRecord, ResilientImportedConversationConverter,
+        ImportedConversationSkippedRecord, ImportedConversationStreamItem,
+        ResilientImportedConversationConverter,
         StreamConversionError, StreamingResilientImportedConversationConverter,
     };
     use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
@@ -1780,11 +1781,11 @@ pub(crate) mod tests {
     fn every_inactive_import_begin_requires_a_permit_while_blob_limits_remain() {
         let limit = 8;
         let oversized = ClientRequest::BeginConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
             declared_size_bytes: CanonicalU64::new(u64::try_from(limit + 1).expect("limit fits")),
         };
         let admitted = ClientRequest::BeginConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
             declared_size_bytes: CanonicalU64::new(u64::try_from(limit).expect("limit fits")),
         };
         let zero_blob = ClientRequest::BeginBlobUpload {
@@ -1892,7 +1893,7 @@ pub(crate) mod tests {
         let permit = Arc::new(Semaphore::new(1)).acquire_owned().await?;
         let mut pending = Some(
             pending_conversation_import(
-                signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+                signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
                 1,
                 0,
                 &[],
@@ -1940,7 +1941,7 @@ pub(crate) mod tests {
         let capacity = 1;
         let budget = Arc::new(Semaphore::new(capacity));
         let permit = Arc::clone(&budget).acquire_owned().await?;
-        let format = signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1;
+        let format = signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2;
         let source = b"partial".to_vec();
         let expected_source = source.clone();
         let declared_size_bytes = u64::try_from(source.len())?;
@@ -2005,7 +2006,7 @@ pub(crate) mod tests {
             .acquire_owned()
             .await?;
         let begin = ClientRequest::BeginConversationImport {
-            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
             declared_size_bytes: CanonicalU64::new(u64::try_from(capacity)?),
         };
         let import_requires_permit = super::conversation_import_request_requires_permit(
@@ -2102,7 +2103,7 @@ pub(crate) mod tests {
         let expected_size = u64::try_from(expected_source.len())?;
         let mut pending = Some(
             pending_conversation_import(
-                signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+                signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
                 expected_size,
                 0,
                 &[],
@@ -2152,7 +2153,7 @@ pub(crate) mod tests {
             &mut writer,
             ProtocolVersion::One,
             RequestId::try_new(1)?,
-            signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
             CanonicalU64::new(declared_size_bytes),
             Some(permit),
             Some(Instant::now()),
@@ -2199,7 +2200,7 @@ pub(crate) mod tests {
         let request_id = RequestId::try_new(1)?;
         let mut pending = Some(
             pending_conversation_import(
-                signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+                signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
                 declared_size_bytes,
                 actual_size_bytes,
                 &source,
@@ -2257,7 +2258,7 @@ pub(crate) mod tests {
         let budget = Arc::new(Semaphore::new(capacity));
         let permit = budget.clone().acquire_owned().await?;
         let pending = pending_conversation_import(
-            signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV2,
             4,
             2,
             b"pa",
@@ -2550,15 +2551,17 @@ pub(crate) mod tests {
             _conversation: ImportedConversationId,
             _source: Reader,
             _next_entry_id: NextEntryId,
-        ) -> Result<
-            ImportedConversationConversionReport<Self::RecordFailure>,
-            StreamConversionError<Self::Error>,
-        >
+        ) -> impl Iterator<
+            Item = Result<
+                ImportedConversationStreamItem<Self::RecordFailure>,
+                StreamConversionError<Self::Error>,
+            >,
+        > + Send
         where
-            Reader: std::io::BufRead,
-            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+            Reader: std::io::BufRead + Send,
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
         {
-            panic!("synthetic import worker panic")
+            std::iter::once_with(|| panic!("synthetic import worker panic"))
         }
     }
 
@@ -2630,27 +2633,31 @@ pub(crate) mod tests {
             _conversation: ImportedConversationId,
             mut source: Reader,
             _next_entry_id: NextEntryId,
-        ) -> Result<
-            ImportedConversationConversionReport<Self::RecordFailure>,
-            StreamConversionError<Self::Error>,
-        >
+        ) -> impl Iterator<
+            Item = Result<
+                ImportedConversationStreamItem<Self::RecordFailure>,
+                StreamConversionError<Self::Error>,
+            >,
+        > + Send
         where
-            Reader: std::io::BufRead,
-            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+            Reader: std::io::BufRead + Send,
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
         {
-            source
-                .fill_buf()
-                .map_err(|_| StreamConversionError::SourceRead)?;
-            self.0
-                .send(thread::current().id())
-                .map_err(|_| io::Error::other("the test thread receiver closed"))
-                .map_err(StreamConversionError::Conversion)?;
-            Ok(ImportedConversationConversionReport::NoValidRecords {
-                skipped_records: vec![ImportedConversationSkippedRecord::new(
+            let sender = self.0.clone();
+            std::iter::once_with(move || {
+                source
+                    .fill_buf()
+                    .map_err(|_| StreamConversionError::SourceRead)?;
+                sender
+                    .send(thread::current().id())
+                    .map_err(|_| io::Error::other("the test thread receiver closed"))
+                    .map_err(StreamConversionError::Conversion)?;
+                Ok(ImportedConversationStreamItem::Skipped(
+                    ImportedConversationSkippedRecord::new(
                     1,
                     SyntheticRecordFailure,
-                )]
-                .into_boxed_slice(),
+                    ),
+                ))
             })
         }
     }

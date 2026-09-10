@@ -278,8 +278,12 @@ pub enum WebImportFormat {
     ClaudeCodeSessionJsonlV1,
     /// Claude Code JSONL interpreted by Signalbox converter version 2.
     ClaudeCodeSessionJsonlV2,
+    /// Claude Code JSONL interpreted by Signalbox converter version 3.
+    ClaudeCodeSessionJsonlV3,
     /// Codex rollout JSONL interpreted by Signalbox converter version 1.
     CodexRolloutJsonlV1,
+    /// Codex rollout JSONL interpreted by Signalbox converter version 2.
+    CodexRolloutJsonlV2,
 }
 
 /// Bounded imports catalog request carried as query parameters. An exact

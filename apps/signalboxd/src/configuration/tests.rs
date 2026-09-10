@@ -2102,24 +2102,15 @@ fn approval_judge_rejects_an_unconfigured_direct_selection() {
 }
 
 #[test]
-fn retired_conversation_import_bound_names_the_rejected_key() {
+fn conversation_import_table_is_an_unknown_top_level_field() {
     let configured = CONFIGURATION.replace(
         "[compaction]",
         "[conversation_import]\nmax_source_bytes = 268435456\n\n[compaction]",
     );
 
-    let error = HubModelConfiguration::parse(&configured)
-        .expect_err("the removed import ceiling must fail configuration");
     assert_eq!(
-        error,
-        HubModelConfigurationError::RetiredField {
-            field: "conversation_import.max_source_bytes",
-        }
-    );
-    assert!(
-        error
-            .to_string()
-            .contains("conversation_import.max_source_bytes")
+        HubModelConfiguration::parse(&configured).err(),
+        Some(HubModelConfigurationError::UnknownField)
     );
 }
 

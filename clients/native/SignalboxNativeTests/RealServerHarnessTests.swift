@@ -144,7 +144,7 @@ final class RealServerHarnessTests: XCTestCase {
     let client = realServerClient(socketPath: socketPath)
     let importExchange = try await client.open(
       .importConversation(
-        format: .codexRolloutJSONLV1,
+        format: .codexRolloutJSONLV2,
         source: RealServerFixture.importedRollout
       )
     )

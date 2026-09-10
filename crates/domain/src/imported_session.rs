@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use crate::{
     ContextFrontierId, CreateSessionFromImportedFrontier, ImportedConversation,
     ImportedConversationId, ImportedSessionRelationship, ImportedSessionSeed,
+    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptContent,
     ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
     InitialSession, ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
@@ -206,87 +207,192 @@ impl CreateSessionFromImportedFrontier {
             ));
         };
 
-        let generated_identities = prefix
-            .iter()
-            .map(|_| next_semantic_entry_id())
-            .collect::<Vec<_>>();
+        prepare_imported_prefix(
+            self,
+            session,
+            seed_frontier,
+            &mut next_semantic_entry_id,
+            prefix.iter().map(|entry| {
+                (
+                    entry.identity(),
+                    entry.source_speaker().clone(),
+                    entry.content().clone(),
+                )
+            }),
+        )
+    }
+
+    /// Checks and materializes an already validated normalized imported prefix.
+    ///
+    /// This boundary lets persistence seed a session without reconstructing the
+    /// raw audit-source aggregate.
+    pub fn prepare_normalized<NextSemanticEntryId>(
+        self,
+        imported_entries: &[ImportedTranscriptEntryInput],
+        session: SessionId,
+        seed_frontier: ContextFrontierId,
+        mut next_semantic_entry_id: NextSemanticEntryId,
+    ) -> Result<
+        PreparedCreateSessionFromImportedFrontier,
+        CreateSessionFromImportedFrontierPreparationError,
+    >
+    where
+        NextSemanticEntryId: FnMut() -> SemanticTranscriptEntryId,
+    {
+        fn fail(
+            command: CreateSessionFromImportedFrontier,
+            session: SessionId,
+            seed_frontier: ContextFrontierId,
+            failure: CreateSessionFromImportedFrontierPreparationFailure,
+        ) -> CreateSessionFromImportedFrontierPreparationError {
+            CreateSessionFromImportedFrontierPreparationError {
+                rejected: Box::new((command, session, seed_frontier, failure)),
+            }
+        }
+
+        let frontier = self.imported_frontier();
+        let expected_count = usize::try_from(frontier.through_position().as_u64()).ok();
+        let mut expected_position = ImportedTranscriptPosition::first();
         let mut seen = BTreeSet::new();
-        if let Some(entry) = generated_identities
-            .iter()
-            .copied()
-            .find(|entry| !seen.insert(*entry))
-        {
+        let valid_prefix = expected_count == Some(imported_entries.len())
+            && imported_entries
+                .last()
+                .map(ImportedTranscriptEntryInput::identity)
+                == Some(frontier.through_entry())
+            && imported_entries.iter().enumerate().all(|(index, entry)| {
+                let valid = entry.conversation() == frontier.conversation()
+                    && entry.position() == expected_position
+                    && seen.insert(entry.identity());
+                if index + 1 < imported_entries.len() {
+                    let Some(next) = expected_position.checked_next() else {
+                        return false;
+                    };
+                    expected_position = next;
+                }
+                valid
+            });
+        if !valid_prefix {
             return Err(fail(
                 self,
                 session,
                 seed_frontier,
-                CreateSessionFromImportedFrontierPreparationFailure::DuplicateSemanticEntryIdentity {
-                    entry,
-                },
+                CreateSessionFromImportedFrontierPreparationFailure::ImportedFrontierNotFound,
             ));
         }
 
-        let semantic_entries = prefix
-            .iter()
-            .zip(generated_identities)
-            .map(|(imported, identity)| {
-                SemanticTranscriptEntry::from_validated_parts(
-                    identity,
-                    session,
-                    SemanticTranscriptEntryPayload::Imported {
-                        imported_entry: imported.identity(),
-                        source_speaker: imported.source_speaker().clone(),
-                        content: imported.content().clone(),
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-        let ordered_entries = semantic_entries
-            .iter()
-            .map(SemanticTranscriptEntry::reference)
-            .collect();
-        let seed_snapshot = match ResolvedContextFrontierSnapshot::try_from_candidate(
+        prepare_imported_prefix(
+            self,
             session,
             seed_frontier,
-            ordered_entries,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                let crate::context_frontier::ContextFrontierSnapshotConstructionRejection::DuplicateEntry {
+            &mut next_semantic_entry_id,
+            imported_entries.iter().map(|entry| {
+                (
+                    entry.identity(),
+                    entry.source_speaker().clone(),
+                    entry.content().clone(),
+                )
+            }),
+        )
+    }
+}
+
+fn prepare_imported_prefix<NextSemanticEntryId, Entries>(
+    command: CreateSessionFromImportedFrontier,
+    session: SessionId,
+    seed_frontier: ContextFrontierId,
+    next_semantic_entry_id: &mut NextSemanticEntryId,
+    entries: Entries,
+) -> Result<
+    PreparedCreateSessionFromImportedFrontier,
+    CreateSessionFromImportedFrontierPreparationError,
+>
+where
+    NextSemanticEntryId: FnMut() -> SemanticTranscriptEntryId,
+    Entries: ExactSizeIterator<
+        Item = (
+            ImportedTranscriptEntryId,
+            ImportedSourceAttestation<ImportedSpeaker>,
+            ImportedTranscriptContent,
+        ),
+    >,
+{
+    let fail = |command, failure| CreateSessionFromImportedFrontierPreparationError {
+        rejected: Box::new((command, session, seed_frontier, failure)),
+    };
+    let generated_identities = (0..entries.len())
+        .map(|_| next_semantic_entry_id())
+        .collect::<Vec<_>>();
+    let mut seen = BTreeSet::new();
+    if let Some(entry) = generated_identities
+        .iter()
+        .copied()
+        .find(|entry| !seen.insert(*entry))
+    {
+        return Err(fail(
+            command,
+            CreateSessionFromImportedFrontierPreparationFailure::DuplicateSemanticEntryIdentity {
+                entry,
+            },
+        ));
+    }
+
+    let semantic_entries = entries
+        .zip(generated_identities)
+        .map(|((imported_entry, source_speaker, content), identity)| {
+            SemanticTranscriptEntry::from_validated_parts(
+                identity,
+                session,
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker,
+                    content,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let ordered_entries = semantic_entries
+        .iter()
+        .map(SemanticTranscriptEntry::reference)
+        .collect();
+    let seed_snapshot = match ResolvedContextFrontierSnapshot::try_from_candidate(
+        session,
+        seed_frontier,
+        ordered_entries,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let crate::context_frontier::ContextFrontierSnapshotConstructionRejection::DuplicateEntry {
                     entry,
                 } = error.rejection();
-                return Err(fail(
-                    self,
-                    session,
-                    seed_frontier,
-                    CreateSessionFromImportedFrontierPreparationFailure::DuplicateSemanticEntryIdentity {
+            return Err(fail(
+                command,
+                CreateSessionFromImportedFrontierPreparationFailure::DuplicateSemanticEntryIdentity {
                         entry: entry.entry(),
                     },
-                ));
-            }
-        };
-        let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::Interactive,
-            TranscriptAncestry::ImportedConversation {
-                source_frontier: self.imported_frontier(),
-                relationship: self.relationship(),
-            },
-        );
-        let initial_session = InitialSession::from_validated_imported_creation(
-            session,
-            provenance,
-            self.establish_initial_defaults(),
-        );
+            ));
+        }
+    };
+    let provenance = SessionCreationProvenance::new(
+        SessionCreationCause::Interactive,
+        TranscriptAncestry::ImportedConversation {
+            source_frontier: command.imported_frontier(),
+            relationship: command.relationship(),
+        },
+    );
+    let initial_session = InitialSession::from_validated_imported_creation(
+        session,
+        provenance,
+        command.establish_initial_defaults(),
+    );
 
-        Ok(PreparedCreateSessionFromImportedFrontier {
-            command: self,
-            session: initial_session,
-            semantic_entries: semantic_entries.into_boxed_slice(),
-            seed_snapshot,
-            imported_seed: ImportedSessionSeed::from_validated_parts(session, seed_frontier),
-            applied_result: CreateSessionFromImportedFrontierAppliedResult { session },
-        })
-    }
+    Ok(PreparedCreateSessionFromImportedFrontier {
+        command,
+        session: initial_session,
+        semantic_entries: semantic_entries.into_boxed_slice(),
+        seed_snapshot,
+        imported_seed: ImportedSessionSeed::from_validated_parts(session, seed_frontier),
+        applied_result: CreateSessionFromImportedFrontierAppliedResult { session },
+    })
 }
 
 /// One stored imported-session-seed row supplied to checked reconstitution.
@@ -1615,7 +1721,7 @@ pub struct CreateSessionFromImportedFrontierReconstitutionInput {
     defaults_session: SessionId,
     defaults_version: SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
-    imported_conversation: ImportedConversation,
+    imported_entries: Vec<ImportedTranscriptEntryInput>,
     seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
     seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
     semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
@@ -1632,7 +1738,7 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
-        imported_conversation: ImportedConversation,
+        imported_entries: Vec<ImportedTranscriptEntryInput>,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
         semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
@@ -1645,7 +1751,7 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
-            imported_conversation,
+            imported_entries,
             seed_records,
             seed_snapshots,
             semantic_entries,
@@ -1700,10 +1806,10 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
                 CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsMismatch,
             ));
         }
-        let projection = match validate_imported_seed_projection(
+        let projection = match validate_normalized_imported_seed_projection(
             self.session,
             self.provenance,
-            &self.imported_conversation,
+            &self.imported_entries,
             &self.seed_records,
             &self.seed_snapshots,
             &self.semantic_entries,
@@ -1768,9 +1874,9 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
         &self.defaults
     }
 
-    /// Borrows the supplied immutable imported aggregate.
-    pub const fn imported_conversation(&self) -> &ImportedConversation {
-        &self.imported_conversation
+    /// Borrows the supplied normalized imported prefix.
+    pub fn imported_entries(&self) -> &[ImportedTranscriptEntryInput] {
+        &self.imported_entries
     }
 
     /// Borrows all supplied candidate seed rows.
@@ -2058,7 +2164,7 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             defaults,
-            conversation.clone(),
+            normalized_entries(conversation),
             seeds,
             snapshots,
             semantic_entries,
@@ -2107,26 +2213,32 @@ mod tests {
             current.defaults_version,
             current.defaults,
             current.placement,
-            conversation
-                .entries()
-                .iter()
-                .map(|entry| {
-                    ImportedTranscriptEntryInput::new(
-                        entry.identity(),
-                        entry.conversation(),
-                        entry.position(),
-                        entry.raw_record_position(),
-                        entry.record_entry_position(),
-                        entry.source_speaker().clone(),
-                        entry.content().clone(),
-                        entry.source().clone(),
-                    )
-                })
-                .collect(),
+            normalized_entries(conversation),
             current.seed_records,
             current.seed_snapshots,
             current.semantic_entries,
         )
+    }
+
+    fn normalized_entries(
+        conversation: &ImportedConversation,
+    ) -> Vec<ImportedTranscriptEntryInput> {
+        conversation
+            .entries()
+            .iter()
+            .map(|entry| {
+                ImportedTranscriptEntryInput::new(
+                    entry.identity(),
+                    entry.conversation(),
+                    entry.position(),
+                    entry.raw_record_position(),
+                    entry.record_entry_position(),
+                    entry.source_speaker().clone(),
+                    entry.content().clone(),
+                    entry.source().clone(),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -2339,6 +2451,25 @@ mod tests {
             &conversation.entries()[1],
             session,
         );
+    }
+
+    #[test]
+    fn normalized_preparation_does_not_require_raw_source_records() {
+        let conversation = conversation(1);
+        let command = command_for(&conversation);
+        let entries = normalized_entries(&conversation);
+        let mut next = 1_u128;
+
+        let prepared = command
+            .prepare_normalized(&entries, session_id(3), context_frontier_id(4), || {
+                let identity = semantic_transcript_entry_id(next);
+                next += 1;
+                identity
+            })
+            .expect("the normalized selected prefix prepares without audit bytes");
+
+        assert_eq!(prepared.semantic_entries().len(), entries.len());
+        assert_eq!(next, 3);
     }
 
     /// mismatched target identities fail before any semantic identity is generated or command

@@ -154,7 +154,7 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
             ProtocolVersion::One,
             1,
             ClientRequest::ImportConversation {
-                format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
+                format: ConversationImportFormat::ClaudeCodeSessionJsonlV3,
                 source: source.clone(),
             },
         )
@@ -179,7 +179,7 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
             ProtocolVersion::One,
             2,
             ClientRequest::BeginConversationImport {
-                format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
+                format: ConversationImportFormat::ClaudeCodeSessionJsonlV3,
                 declared_size_bytes,
             },
         )
@@ -267,7 +267,7 @@ async fn disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dyn Er
             ProtocolVersion::One,
             1,
             ClientRequest::BeginConversationImport {
-                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                format: ConversationImportFormat::CodexRolloutJsonlV2,
                 declared_size_bytes,
             },
         )
@@ -303,7 +303,7 @@ async fn disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dyn Er
             ProtocolVersion::One,
             3,
             ClientRequest::BeginConversationImport {
-                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                format: ConversationImportFormat::CodexRolloutJsonlV2,
                 declared_size_bytes,
             },
         )
@@ -656,7 +656,7 @@ async fn selects_the_codex_rollout_converter() -> Result<(), Box<dyn Error>> {
             ProtocolVersion::One,
             1,
             ClientRequest::ImportConversation {
-                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                format: ConversationImportFormat::CodexRolloutJsonlV2,
                 source,
             },
         )
@@ -680,7 +680,7 @@ async fn selects_the_codex_rollout_converter() -> Result<(), Box<dyn Error>> {
         .expect("the successful operation inserted its imported conversation");
     assert_eq!(
         stored.format(),
-        ImportedConversationFormat::CodexRolloutJsonlV1
+        ImportedConversationFormat::CodexRolloutJsonlV2
     );
 
     drop(connection);
@@ -753,7 +753,7 @@ async fn lists_native_and_imported_conversations() -> Result<(), Box<dyn Error>>
             ProtocolVersion::One,
             30,
             ClientRequest::ImportConversation {
-                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                format: ConversationImportFormat::CodexRolloutJsonlV2,
                 source,
             },
         )
@@ -812,7 +812,7 @@ async fn lists_native_and_imported_conversations() -> Result<(), Box<dyn Error>>
         imported_conversation_id,
         title: Some(title),
         entry_count,
-        source_format: ImportedConversationSourceFormat::CodexRolloutJsonlV1,
+        source_format: ImportedConversationSourceFormat::CodexRolloutJsonlV2,
     } = imported
     else {
         panic!("fixture expected imported conversation summary");

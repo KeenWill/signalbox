@@ -826,11 +826,11 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let outcome = match format {
-        ConversationImportFormat::ClaudeCodeSessionJsonlV2 => {
-            execute_import(ClaudeCodeJsonlConverter, source, repository).await
+        ConversationImportFormat::ClaudeCodeSessionJsonlV3 => {
+            execute_import(ResilientClaudeCodeJsonlConverter, source, repository).await
         }
-        ConversationImportFormat::CodexRolloutJsonlV1 => {
-            execute_import(CodexRolloutJsonlConverter, source, repository).await
+        ConversationImportFormat::CodexRolloutJsonlV2 => {
+            execute_import(ResilientCodexRolloutJsonlConverter, source, repository).await
         }
     };
     drop(import_permit);
@@ -1141,21 +1141,7 @@ where
                 InternalDiagnostic::ConversationImportContractDefect,
             ),
         },
-        ImportConversationError::Store(ImportedConversationRepositoryError::Database(_)) => {
-            OperationalImportError::Database
-        }
-        ImportConversationError::Store(ImportedConversationRepositoryError::BlobCatalog(
-            signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_),
-        )) => OperationalImportError::Database,
-        ImportConversationError::Store(ImportedConversationRepositoryError::BlobCatalog(
-            signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_),
-        )) => OperationalImportError::Unavailable,
-        ImportConversationError::Store(ImportedConversationRepositoryError::BlobStorage(
-            ImportedRawBlobStorageError::Unavailable,
-        )) => OperationalImportError::Unavailable,
-        ImportConversationError::Store(error) => {
-            OperationalImportError::Internal(imported_conversation_internal_diagnostic(&error))
-        }
+        ImportConversationError::Store(error) => operational_import_repository_error(error),
         ImportConversationError::ConverterIdentityMismatch { .. }
         | ImportConversationError::ConverterFormatMismatch { .. }
         | ImportConversationError::ConverterEntryIdentitySequenceMismatch
@@ -1166,8 +1152,28 @@ where
     }
 }
 
+fn operational_import_repository_error(
+    error: ImportedConversationRepositoryError,
+) -> OperationalImportError {
+    match error {
+        ImportedConversationRepositoryError::Database(_) => OperationalImportError::Database,
+        ImportedConversationRepositoryError::BlobCatalog(
+            signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_),
+        ) => OperationalImportError::Database,
+        ImportedConversationRepositoryError::BlobCatalog(
+            signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_),
+        ) => OperationalImportError::Unavailable,
+        ImportedConversationRepositoryError::BlobStorage(
+            ImportedRawBlobStorageError::Unavailable,
+        ) => OperationalImportError::Unavailable,
+        error => {
+            OperationalImportError::Internal(imported_conversation_internal_diagnostic(&error))
+        }
+    }
+}
+
 pub(super) async fn execute_import<Converter>(
-    converter: Converter,
+    mut converter: Converter,
     source: ConversationImportSource,
     repository: ImportedConversationRepository,
 ) -> Result<CompletedImport, OperationalImportError>
@@ -1179,22 +1185,89 @@ where
     let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         runtime.block_on(async move {
-            let mut service = ImportConversationService::new(
-                UuidV7ImportedConversationIdGenerator,
-                converter,
-                repository,
-            );
             let report = match source {
                 ConversationImportSource::Inline(source) => {
-                    service.execute_resilient(&source).await
+                    let mut service = ImportConversationService::new(
+                        UuidV7ImportedConversationIdGenerator,
+                        converter,
+                        repository,
+                    );
+                    service
+                        .execute_resilient(&source)
+                        .await
+                        .map_err(operational_import_error)?
                 }
                 ConversationImportSource::Spooled(source) => {
-                    service
-                        .execute_resilient_from_reader(BufReader::new(source))
+                    let mut ids = UuidV7ImportedConversationIdGenerator;
+                    let candidate = ids.next_conversation_id();
+                    let format = converter.format();
+                    let records = converter.convert_resilient_from_reader(
+                        candidate,
+                        BufReader::new(source),
+                        || ids.next_entry_id(),
+                    );
+                    match repository
+                        .resolve_or_insert_stream(candidate, format, records)
                         .await
+                        .map_err(|error| match error {
+                            StreamingImportedConversationError::SourceRead => {
+                                OperationalImportError::Unavailable
+                            }
+                            StreamingImportedConversationError::Conversion(error) => {
+                                match error.disposition() {
+                                    ConversionFailureDisposition::Rejected(evidence) => {
+                                        OperationalImportError::InvalidSource(evidence)
+                                    }
+                                    ConversionFailureDisposition::Internal => {
+                                        OperationalImportError::Internal(
+                                            InternalDiagnostic::ConversationImportContractDefect,
+                                        )
+                                    }
+                                }
+                            }
+                            StreamingImportedConversationError::ConverterContract => {
+                                OperationalImportError::Internal(
+                                    InternalDiagnostic::ConversationImportContractDefect,
+                                )
+                            }
+                            StreamingImportedConversationError::Repository(error) => {
+                                operational_import_repository_error(error)
+                            }
+                        })? {
+                        StreamingImportedConversationReport::Imported {
+                            outcome,
+                            dropped_records,
+                        } => {
+                            let outcome = match outcome {
+                                ImportedConversationStoreOutcome::Inserted {
+                                    conversation, ..
+                                } => ImportConversationOutcome::Inserted { conversation },
+                                ImportedConversationStoreOutcome::AlreadyImported {
+                                    conversation,
+                                    ..
+                                } => ImportConversationOutcome::AlreadyImported { conversation },
+                            };
+                            return Ok(CompletedImport {
+                                outcome,
+                                dropped_records,
+                            });
+                        }
+                        StreamingImportedConversationReport::NoValidRecords {
+                            first_failure,
+                            ..
+                        } => match first_failure.disposition() {
+                            ConversionFailureDisposition::Rejected(evidence) => {
+                                return Err(OperationalImportError::InvalidSource(evidence));
+                            }
+                            ConversionFailureDisposition::Internal => {
+                                return Err(OperationalImportError::Internal(
+                                    InternalDiagnostic::ConversationImportContractDefect,
+                                ));
+                            }
+                        },
+                    }
                 }
-            }
-            .map_err(operational_import_error)?;
+            };
             match report {
                 ImportConversationReport::Imported {
                     outcome,
@@ -1285,11 +1358,8 @@ where
     let model_selection = domain_model_selection(wire_request.initial_model_selection);
     let caller_model_settings = domain_model_settings_overlay(wire_request.model_settings);
     let through_position = wire_request.through_position;
-    let repository = ImportedSessionRepository::with_imported_conversations(
-        pool.clone(),
-        model_configuration.session_credential_pin(),
-        imported_conversations.clone(),
-    );
+    let repository =
+        ImportedSessionRepository::new(pool.clone(), model_configuration.session_credential_pin());
 
     match repository.load(command_id).await {
         Ok(Some(recorded)) => {
@@ -1410,8 +1480,11 @@ where
         )
         .await;
     };
-    let conversation = match imported_conversations.load(conversation_id).await {
-        Ok(Some(conversation)) => conversation,
+    let lookup = match imported_conversations
+        .lookup_frontier(conversation_id, position)
+        .await
+    {
+        Ok(Some(lookup)) => lookup,
         Ok(None) => {
             return write_error(
                 writer,
@@ -1453,10 +1526,7 @@ where
             .await;
         }
     };
-    let Some(frontier) = conversation
-        .frontiers()
-        .find(|frontier| frontier.through_position() == position)
-    else {
+    let Some(frontier) = lookup.frontier() else {
         return write_error(
             writer,
             version,
@@ -1464,13 +1534,12 @@ where
             imported_position_out_of_range(
                 wire_request.conversation,
                 through_position,
-                last_imported_position(&conversation),
+                lookup.last_position().as_u64(),
             ),
         )
         .await;
     };
-    let last_position = last_imported_position(&conversation);
-    let repository = repository.with_preloaded_conversation(conversation);
+    let last_position = lookup.last_position().as_u64();
 
     let model_settings = match validate_session_model_settings(
         model_configuration,
@@ -1628,17 +1697,6 @@ where
             .await
         }
     }
-}
-
-/// Returns the greatest selectable imported position on a loaded aggregate.
-///
-/// An imported conversation's normalized entry sequence is nonempty and its
-/// positions are contiguous from one, so the entry count is that bound.
-pub(super) fn last_imported_position(conversation: &ImportedConversation) -> u64 {
-    conversation
-        .entries()
-        .last()
-        .map_or(0, |entry| entry.position().as_u64())
 }
 
 /// Names the absent target as an imported conversation rather than a session.

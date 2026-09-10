@@ -954,8 +954,8 @@ public struct SignalboxConversationCursor: Codable, Equatable, Sendable {
 }
 
 public enum SignalboxConversationImportFormat: String, Codable, Equatable, Sendable {
-  case claudeCodeSessionJSONLV2 = "claude_code_session_jsonl_v2"
-  case codexRolloutJSONLV1 = "codex_rollout_jsonl_v1"
+  case claudeCodeSessionJSONLV3 = "claude_code_session_jsonl_v3"
+  case codexRolloutJSONLV2 = "codex_rollout_jsonl_v2"
 }
 
 public enum SignalboxImportedSessionRelationship: String, Codable, Equatable, Sendable {
@@ -2221,14 +2221,18 @@ public struct SignalboxModelAliasSummary: Decodable, Equatable, Identifiable, Se
 public enum SignalboxImportedConversationSourceFormat: Decodable, Equatable, Sendable {
   case claudeCodeSessionJSONLV1
   case claudeCodeSessionJSONLV2
+  case claudeCodeSessionJSONLV3
   case codexRolloutJSONLV1
+  case codexRolloutJSONLV2
   case unknown(String)
 
   public var rawValue: String {
     switch self {
     case .claudeCodeSessionJSONLV1: return "claude_code_session_jsonl_v1"
     case .claudeCodeSessionJSONLV2: return "claude_code_session_jsonl_v2"
+    case .claudeCodeSessionJSONLV3: return "claude_code_session_jsonl_v3"
     case .codexRolloutJSONLV1: return "codex_rollout_jsonl_v1"
+    case .codexRolloutJSONLV2: return "codex_rollout_jsonl_v2"
     case .unknown(let value): return value
     }
   }
@@ -2238,7 +2242,9 @@ public enum SignalboxImportedConversationSourceFormat: Decodable, Equatable, Sen
     switch value {
     case "claude_code_session_jsonl_v1": self = .claudeCodeSessionJSONLV1
     case "claude_code_session_jsonl_v2": self = .claudeCodeSessionJSONLV2
+    case "claude_code_session_jsonl_v3": self = .claudeCodeSessionJSONLV3
     case "codex_rollout_jsonl_v1": self = .codexRolloutJSONLV1
+    case "codex_rollout_jsonl_v2": self = .codexRolloutJSONLV2
     default: self = .unknown(value)
     }
   }

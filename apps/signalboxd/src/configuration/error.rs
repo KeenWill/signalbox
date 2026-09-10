@@ -162,11 +162,6 @@ pub enum HubModelConfigurationError {
     MissingCompaction,
     /// An unrecognized root or table field was present.
     UnknownField,
-    /// A removed configuration field was still present.
-    RetiredField {
-        /// Exact dotted field name.
-        field: &'static str,
-    },
     /// A required field had the wrong TOML type or was absent.
     InvalidField,
     /// A configured identity was not a UUID.
@@ -270,12 +265,6 @@ impl fmt::Display for HubModelConfigurationError {
             return write!(
                 formatter,
                 "model configuration contains invalid numeric bound `{field}`"
-            );
-        }
-        if let Self::RetiredField { field } = self {
-            return write!(
-                formatter,
-                "model configuration contains retired field `{field}`"
             );
         }
         if let Self::InvalidRepositoryWatchRule { rule, reason } = self {
@@ -408,7 +397,6 @@ impl fmt::Display for HubModelConfigurationError {
             Self::DuplicateToolFamily => "model configuration repeats a daemon tool family",
             Self::MissingCompaction => "model configuration has no compaction settings",
             Self::UnknownField => "model configuration contains an unknown field",
-            Self::RetiredField { .. } => "model configuration contains a retired field",
             Self::InvalidField => "model configuration has a missing or mistyped field",
             Self::InvalidIdentity => "model configuration contains an invalid identity",
             Self::UnsupportedAdapter { .. } => "model configuration names an unsupported adapter",

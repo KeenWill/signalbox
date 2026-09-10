@@ -8,8 +8,9 @@ use std::{error::Error, fmt, io::BufRead};
 
 use signalbox_application::{
     ImportedConversationConversionReport, ImportedConversationConverter,
-    ImportedConversationSkippedRecord, ResilientImportedConversationConverter,
-    StreamConversionError, StreamingResilientImportedConversationConverter,
+    ImportedConversationSkippedRecord, ImportedConversationStreamItem,
+    ResilientImportedConversationConverter, StreamConversionError,
+    StreamingResilientImportedConversationConverter,
 };
 use signalbox_conversation_import_json::{
     JsonFailure, JsonlRecordReadFailure, one_based_ordinal, parse_record, read_jsonl_records,
@@ -27,11 +28,17 @@ use signalbox_domain::{
     imported_text_attestation, unique_imported_structured_field,
 };
 
-const FORMAT: ImportedConversationFormat = ImportedConversationFormat::CodexRolloutJsonlV1;
+const STRICT_FORMAT: ImportedConversationFormat = ImportedConversationFormat::CodexRolloutJsonlV1;
+const RESILIENT_FORMAT: ImportedConversationFormat =
+    ImportedConversationFormat::CodexRolloutJsonlV2;
 
 /// Codex rollout JSONL converter version 1.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CodexRolloutJsonlConverter;
+
+/// Codex rollout JSONL resilient converter version 2.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResilientCodexRolloutJsonlConverter;
 
 /// Content-silent reason a complete Codex rollout conversion failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -160,7 +167,7 @@ impl ImportedConversationConverter for CodexRolloutJsonlConverter {
     type Error = CodexRolloutJsonlConversionError;
 
     fn format(&self) -> ImportedConversationFormat {
-        FORMAT
+        STRICT_FORMAT
     }
 
     fn convert<NextEntryId>(
@@ -187,11 +194,46 @@ impl ImportedConversationConverter for CodexRolloutJsonlConverter {
             .into_iter()
             .map(|record| prepare_record(record.line(), record.bytes()))
             .collect::<Result<Vec<_>, _>>()?;
-        build_conversation(conversation, prepared, next_entry_id)
+        build_conversation(STRICT_FORMAT, conversation, prepared, next_entry_id)
     }
 }
 
-impl ResilientImportedConversationConverter for CodexRolloutJsonlConverter {
+impl ImportedConversationConverter for ResilientCodexRolloutJsonlConverter {
+    type Error = CodexRolloutJsonlConversionError;
+
+    fn format(&self) -> ImportedConversationFormat {
+        RESILIENT_FORMAT
+    }
+
+    fn convert<NextEntryId>(
+        &mut self,
+        conversation: ImportedConversationId,
+        source: &[u8],
+        next_entry_id: NextEntryId,
+    ) -> Result<ImportedConversation, Self::Error>
+    where
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+    {
+        let records = split_jsonl_records(source).map_err(|_| position_error())?;
+        if records.is_empty() {
+            return Err(conversion_error(
+                CodexRolloutJsonlConversionFailure::EmptySource,
+            ));
+        }
+        if let Some(blank) = records.iter().find(|record| record.bytes().is_empty()) {
+            return Err(conversion_error(
+                CodexRolloutJsonlConversionFailure::BlankLine { line: blank.line() },
+            ));
+        }
+        let prepared = records
+            .into_iter()
+            .map(|record| prepare_record(record.line(), record.bytes()))
+            .collect::<Result<Vec<_>, _>>()?;
+        build_conversation(RESILIENT_FORMAT, conversation, prepared, next_entry_id)
+    }
+}
+
+impl ResilientImportedConversationConverter for ResilientCodexRolloutJsonlConverter {
     type RecordFailure = CodexRolloutJsonlConversionFailure;
 
     fn convert_resilient<NextEntryId>(
@@ -233,7 +275,8 @@ impl ResilientImportedConversationConverter for CodexRolloutJsonlConverter {
                 skipped_records: skipped_records.into_boxed_slice(),
             });
         }
-        let conversation = build_conversation(conversation, prepared, next_entry_id)?;
+        let conversation =
+            build_conversation(RESILIENT_FORMAT, conversation, prepared, next_entry_id)?;
         Ok(ImportedConversationConversionReport::Converted {
             conversation,
             skipped_records: skipped_records.into_boxed_slice(),
@@ -241,66 +284,83 @@ impl ResilientImportedConversationConverter for CodexRolloutJsonlConverter {
     }
 }
 
-impl StreamingResilientImportedConversationConverter for CodexRolloutJsonlConverter {
+impl StreamingResilientImportedConversationConverter for ResilientCodexRolloutJsonlConverter {
     fn convert_resilient_from_reader<Reader, NextEntryId>(
         &mut self,
         conversation: ImportedConversationId,
         source: Reader,
         next_entry_id: NextEntryId,
-    ) -> Result<
-        ImportedConversationConversionReport<Self::RecordFailure>,
-        StreamConversionError<Self::Error>,
-    >
+    ) -> impl Iterator<
+        Item = Result<
+            ImportedConversationStreamItem<Self::RecordFailure>,
+            StreamConversionError<Self::Error>,
+        >,
+    > + Send
     where
-        Reader: BufRead,
-        NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        Reader: BufRead + Send,
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
     {
-        let mut prepared = Vec::new();
-        let mut skipped_records = Vec::new();
+        let mut records = read_jsonl_records(source);
+        let mut next_entry_id = next_entry_id;
         let mut saw_record = false;
-        for record in read_jsonl_records(source) {
-            let record = match record {
-                Ok(record) => record,
-                Err(JsonlRecordReadFailure::SourceRead) => {
-                    return Err(StreamConversionError::SourceRead);
+        let mut finished = false;
+        std::iter::from_fn(move || {
+            if finished {
+                return None;
+            }
+            let record = match records.next() {
+                Some(Ok(record)) => record,
+                Some(Err(JsonlRecordReadFailure::SourceRead)) => {
+                    finished = true;
+                    return Some(Err(StreamConversionError::SourceRead));
                 }
-                Err(JsonlRecordReadFailure::PositionExhausted) => {
-                    return Err(StreamConversionError::Conversion(position_error()));
+                Some(Err(JsonlRecordReadFailure::PositionExhausted)) => {
+                    finished = true;
+                    return Some(Err(StreamConversionError::Conversion(position_error())));
+                }
+                None if !saw_record => {
+                    finished = true;
+                    return Some(Err(StreamConversionError::Conversion(conversion_error(
+                        CodexRolloutJsonlConversionFailure::EmptySource,
+                    ))));
+                }
+                None => {
+                    finished = true;
+                    return None;
                 }
             };
             saw_record = true;
             let line = record.line();
             let bytes = record.into_bytes();
             if bytes.is_empty() {
-                skipped_records.push(ImportedConversationSkippedRecord::new(
-                    line,
-                    CodexRolloutJsonlConversionFailure::BlankLine { line },
-                ));
-                continue;
+                return Some(Ok(ImportedConversationStreamItem::Skipped(
+                    ImportedConversationSkippedRecord::new(
+                        line,
+                        CodexRolloutJsonlConversionFailure::BlankLine { line },
+                    ),
+                )));
             }
             match prepare_owned_record(line, bytes) {
-                Ok(record) => prepared.push(record),
-                Err(error) => skipped_records.push(ImportedConversationSkippedRecord::new(
-                    line,
-                    record_local_failure(error).map_err(StreamConversionError::Conversion)?,
-                )),
+                Ok(record) => Some(
+                    build_conversation(
+                        RESILIENT_FORMAT,
+                        conversation,
+                        vec![record],
+                        &mut next_entry_id,
+                    )
+                    .map(ImportedConversationStreamItem::Converted)
+                    .map_err(StreamConversionError::Conversion),
+                ),
+                Err(error) => match record_local_failure(error) {
+                    Ok(failure) => Some(Ok(ImportedConversationStreamItem::Skipped(
+                        ImportedConversationSkippedRecord::new(line, failure),
+                    ))),
+                    Err(error) => {
+                        finished = true;
+                        Some(Err(StreamConversionError::Conversion(error)))
+                    }
+                },
             }
-        }
-        if !saw_record {
-            return Err(StreamConversionError::Conversion(conversion_error(
-                CodexRolloutJsonlConversionFailure::EmptySource,
-            )));
-        }
-        if prepared.is_empty() {
-            return Ok(ImportedConversationConversionReport::NoValidRecords {
-                skipped_records: skipped_records.into_boxed_slice(),
-            });
-        }
-        let conversation = build_conversation(conversation, prepared, next_entry_id)
-            .map_err(StreamConversionError::Conversion)?;
-        Ok(ImportedConversationConversionReport::Converted {
-            conversation,
-            skipped_records: skipped_records.into_boxed_slice(),
         })
     }
 }
@@ -341,6 +401,7 @@ fn prepare_owned_record(
 }
 
 fn build_conversation<NextEntryId>(
+    format: ImportedConversationFormat,
     conversation: ImportedConversationId,
     prepared: Vec<PreparedRecord>,
     mut next_entry_id: NextEntryId,
@@ -382,7 +443,7 @@ where
             }
         }
     }
-    ImportedConversation::from_converted_records(conversation, FORMAT, raws, entries).map_err(
+    ImportedConversation::from_converted_records(conversation, format, raws, entries).map_err(
         |error| CodexRolloutJsonlConversionError {
             failure: CodexRolloutJsonlConversionFailure::InvalidAggregate(error.failure()),
         },
@@ -1028,7 +1089,8 @@ mod tests {
 
     use signalbox_application::{
         ImportedConversationConversionReport, ImportedConversationConverter,
-        ResilientImportedConversationConverter, StreamingResilientImportedConversationConverter,
+        ImportedConversationStreamItem, ResilientImportedConversationConverter,
+        StreamingResilientImportedConversationConverter,
     };
     use signalbox_domain::{
         ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -1039,7 +1101,10 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use super::{CodexRolloutJsonlConversionFailure, CodexRolloutJsonlConverter};
+    use super::{
+        CodexRolloutJsonlConversionFailure, CodexRolloutJsonlConverter,
+        ResilientCodexRolloutJsonlConverter,
+    };
 
     fn conversation() -> ImportedConversationId {
         ImportedConversationId::from_uuid(Uuid::from_u128(1))
@@ -1066,6 +1131,14 @@ mod tests {
         assert_eq!(
             CodexRolloutJsonlConverter.format(),
             ImportedConversationFormat::CodexRolloutJsonlV1
+        );
+    }
+
+    #[test]
+    fn resilient_converter_declares_codex_rollout_version_two() {
+        assert_eq!(
+            ResilientCodexRolloutJsonlConverter.format(),
+            ImportedConversationFormat::CodexRolloutJsonlV2
         );
     }
 
@@ -1447,7 +1520,7 @@ mod tests {
         .concat();
         let mut next_identity = 100_u128;
 
-        let report = CodexRolloutJsonlConverter
+        let report = ResilientCodexRolloutJsonlConverter
             .convert_resilient(conversation(), &source, || {
                 let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(next_identity));
                 next_identity = next_identity
@@ -1457,7 +1530,7 @@ mod tests {
             })
             .expect("record-local failures must not abort resilient conversion");
         let mut streamed_next_identity = 100_u128;
-        let streamed_report = CodexRolloutJsonlConverter
+        let streamed_records = ResilientCodexRolloutJsonlConverter
             .convert_resilient_from_reader(
                 conversation(),
                 BufReader::with_capacity(4, Cursor::new(&source)),
@@ -1471,9 +1544,24 @@ mod tests {
                     identity
                 },
             )
+            .collect::<Result<Vec<_>, _>>()
             .expect("streamed record-local failures must not abort conversion");
 
-        assert_eq!(streamed_report, report);
+        assert_eq!(streamed_records.len(), 6);
+        assert_eq!(
+            streamed_records
+                .iter()
+                .filter(|record| matches!(record, ImportedConversationStreamItem::Converted(_)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            streamed_records
+                .iter()
+                .filter(|record| matches!(record, ImportedConversationStreamItem::Skipped(_)))
+                .count(),
+            4
+        );
         let ImportedConversationConversionReport::Converted {
             conversation: imported,
             skipped_records,
@@ -1513,7 +1601,7 @@ mod tests {
 
     #[test]
     fn resilient_conversion_reports_when_no_record_is_valid() {
-        let report = CodexRolloutJsonlConverter
+        let report = ResilientCodexRolloutJsonlConverter
             .convert_resilient(conversation(), b"\n{", || {
                 panic!("rejected records must not consume an entry identity")
             })
@@ -1538,7 +1626,7 @@ mod tests {
 
     #[test]
     fn resilient_empty_source_remains_a_fatal_error() {
-        let error = CodexRolloutJsonlConverter
+        let error = ResilientCodexRolloutJsonlConverter
             .convert_resilient(conversation(), b"", || {
                 panic!("empty source must not consume an entry identity")
             })

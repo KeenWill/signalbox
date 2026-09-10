@@ -2937,6 +2937,7 @@ final class ProcessProtocolTests: XCTestCase {
       conversation.displayTitle,
       ProcessProtocolFixture.untitledImportedConversationLabel
     )
+    XCTAssertEqual(conversation.importedSourceFormat, .codexRolloutJSONLV2)
   }
 
   func testPublicFrameDecoderRejectsOversizedInputBeforeScanning() {
@@ -3625,7 +3626,7 @@ private enum ProcessProtocolFixture {
         "imported_conversation_id":"33333333-3333-4333-8333-333333333333",
         "title":null,
         "entry_count":"1",
-        "source_format":"codex_rollout_jsonl_v1"
+        "source_format":"codex_rollout_jsonl_v2"
       }
       """.utf8
     )

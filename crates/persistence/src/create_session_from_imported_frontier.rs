@@ -1,7 +1,5 @@
 //! Atomic PostgreSQL creation and checked loading for imported-seeded sessions.
 
-use std::sync::Arc;
-
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::{
@@ -13,19 +11,20 @@ use signalbox_domain::{
     CreateSessionFromImportedFrontierPreparationFailure,
     CreateSessionFromImportedFrontierReconstitutionFailure,
     CreateSessionFromImportedFrontierReconstitutionInput, DirectModelSelection, DurableCommandId,
-    ImportedConversation, ImportedConversationId, ImportedSessionNormalizedReconstitutionInput,
+    ImportedConversationId, ImportedSessionNormalizedReconstitutionInput,
     ImportedSessionReconstitutionFailure, ImportedSessionRelationship,
     ImportedSessionSeedHeaderReconstitutionInput, ImportedSessionSeedReconstitutionInput,
     ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptContent,
-    ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
-    ModelAlias, ModelSelectionRequest, PreparedCreateSessionFromImportedFrontier,
-    ReconstitutedImportedSession, ReconstitutedSessionCreationFromImportedFrontier,
-    ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
-    SemanticTranscriptEntryRef, Session, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionPlacement, SessionPlacementEventKind, SessionPlacementReconstitutionFacts,
-    SessionPlacementVersion, TranscriptAncestry, VersionedSessionPlacement,
+    ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptFrontier,
+    ImportedTranscriptPosition, ModelAlias, ModelSelectionRequest,
+    PreparedCreateSessionFromImportedFrontier, ReconstitutedImportedSession,
+    ReconstitutedSessionCreationFromImportedFrontier, ResolvedContextFrontierReconstitutionInput,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionPlacement, SessionPlacementEventKind,
+    SessionPlacementReconstitutionFacts, SessionPlacementVersion, TranscriptAncestry,
+    VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -186,37 +185,15 @@ impl ImportedSessionRepositoryError {
 pub struct ImportedSessionRepository {
     pool: PgPool,
     credential_pin: crate::SessionCredentialPin,
-    imported_conversations: conversation_import::ImportedConversationRepository,
-    preloaded_conversation: Option<Arc<ImportedConversation>>,
 }
 
 impl ImportedSessionRepository {
     /// Uses the supplied pool for claim-first creation and checked replay.
-    pub fn with_imported_conversations(
-        pool: PgPool,
-        credential_pin: crate::SessionCredentialPin,
-        imported_conversations: conversation_import::ImportedConversationRepository,
-    ) -> Self {
+    pub fn new(pool: PgPool, credential_pin: crate::SessionCredentialPin) -> Self {
         Self {
             pool,
             credential_pin,
-            imported_conversations,
-            preloaded_conversation: None,
         }
-    }
-
-    /// Reuses an imported conversation already loaded and verified by the caller.
-    pub fn with_preloaded_conversation(mut self, conversation: ImportedConversation) -> Self {
-        self.preloaded_conversation = Some(Arc::new(conversation));
-        self
-    }
-
-    /// Uses the deterministic integration-store fixture.
-    #[cfg(feature = "postgres-integration")]
-    pub fn new(pool: PgPool, credential_pin: crate::SessionCredentialPin) -> Self {
-        let imported_conversations =
-            conversation_import::ImportedConversationRepository::new(pool.clone());
-        Self::with_imported_conversations(pool, credential_pin, imported_conversations)
     }
 
     /// Handles one canonical imported-frontier creation atomically.
@@ -237,26 +214,12 @@ impl ImportedSessionRepository {
             transaction.rollback().await?;
             return self.existing_outcome(command, kind).await;
         }
-        transaction.rollback().await?;
-
-        let conversation = match self.preloaded_conversation.as_ref() {
-            Some(conversation) if conversation.id() == command.imported_conversation() => {
-                Some(Arc::clone(conversation))
-            }
-            _ => self
-                .imported_conversations
-                .load(command.imported_conversation())
+        let frontier = command.imported_frontier();
+        let Some(imported_entries) =
+            conversation_import::load_normalized_prefix_from_connection(&mut transaction, frontier)
                 .await
                 .map_err(map_imported_conversation_error)?
-                .map(Arc::new),
-        };
-        let mut transaction = self.pool.begin().await?;
-        if let Some(kind) = inspect_registry(&mut transaction, command_id).await? {
-            transaction.rollback().await?;
-            return self.existing_outcome(command, kind).await;
-        }
-
-        let Some(conversation) = conversation else {
+        else {
             transaction.rollback().await?;
             return Ok(
                 CreateSessionFromImportedFrontierOutcome::ImportedConversationNotFound {
@@ -264,7 +227,13 @@ impl ImportedSessionRepository {
                 },
             );
         };
-        if conversation.prefix(command.imported_frontier()).is_none() {
+        if imported_entries.len()
+            != usize::try_from(frontier.through_position().as_u64()).unwrap_or(usize::MAX)
+            || imported_entries
+                .last()
+                .map(ImportedTranscriptEntryInput::identity)
+                != Some(frontier.through_entry())
+        {
             transaction.rollback().await?;
             return Ok(
                 CreateSessionFromImportedFrontierOutcome::ImportedFrontierNotFound {
@@ -302,8 +271,8 @@ impl ImportedSessionRepository {
             return self.existing_outcome(command, kind).await;
         }
 
-        let prepared = match command.prepare(
-            &conversation,
+        let prepared = match command.prepare_normalized(
+            &imported_entries,
             session,
             seed_frontier,
             &mut next_semantic_entry_id,
@@ -356,20 +325,13 @@ impl ImportedSessionRepository {
         ))?;
         drop(connection);
 
-        let conversation_id = ImportedConversationId::from_uuid(conversation_id);
-        let conversation = match self.preloaded_conversation.as_ref() {
-            Some(conversation) if conversation.id() == conversation_id => Arc::clone(conversation),
-            _ => Arc::new(
-                self.imported_conversations
-                    .load(conversation_id)
-                    .await
-                    .map_err(map_imported_conversation_error)?
-                    .ok_or(ImportedSessionCorruption::Missing("imported conversation"))?,
-            ),
-        };
-
         let mut connection = self.pool.acquire().await?;
-        load_creation_from_connection(&mut connection, command_id, &conversation).await
+        load_creation_from_connection(
+            &mut connection,
+            command_id,
+            ImportedConversationId::from_uuid(conversation_id),
+        )
+        .await
     }
 
     async fn existing_outcome(
@@ -664,7 +626,7 @@ async fn insert_prepared(
 async fn load_creation_from_connection(
     connection: &mut PgConnection,
     command_id: DurableCommandId,
-    conversation: &ImportedConversation,
+    conversation: ImportedConversationId,
 ) -> Result<Option<ReconstitutedSessionCreationFromImportedFrontier>, ImportedSessionRepositoryError>
 {
     let row = sqlx::query(
@@ -782,7 +744,7 @@ async fn load_creation_from_connection(
 
     let command_conversation =
         ImportedConversationId::from_uuid(required(&row, "command_conversation_id")?);
-    if command_conversation != conversation.id() {
+    if command_conversation != conversation {
         return Err(
             ImportedSessionCorruption::Inconsistent("imported conversation identity").into(),
         );
@@ -846,7 +808,20 @@ async fn load_creation_from_connection(
         "stored model selection",
     )?;
     validate_initial_placement_effect(&row)?;
-    let projection = load_seed_projection(connection, stored_session, conversation).await?;
+    let imported_entries =
+        conversation_import::load_normalized_prefix_from_connection(connection, command_frontier)
+            .await?
+            .ok_or(ImportedSessionCorruption::Missing("imported conversation"))?;
+    let projection = load_seed_projection_from_entries(
+        connection,
+        stored_session,
+        conversation,
+        &imported_entries
+            .iter()
+            .map(ImportedSeedEntryView::from)
+            .collect::<Vec<_>>(),
+    )
+    .await?;
 
     CreateSessionFromImportedFrontierReconstitutionInput::new(
         command,
@@ -856,7 +831,7 @@ async fn load_creation_from_connection(
         defaults_session,
         defaults_version,
         defaults,
-        conversation.clone(),
+        imported_entries,
         projection.seed_records,
         projection.seed_snapshots,
         projection.semantic_entries,
@@ -1103,23 +1078,6 @@ impl<'entry> From<&'entry ImportedTranscriptEntryInput> for ImportedSeedEntryVie
     }
 }
 
-async fn load_seed_projection(
-    connection: &mut PgConnection,
-    session: SessionId,
-    conversation: &ImportedConversation,
-) -> Result<SeedProjection, ImportedSessionRepositoryError> {
-    let entries = conversation
-        .entries()
-        .iter()
-        .map(|entry| ImportedSeedEntryView {
-            identity: entry.identity(),
-            source_speaker: entry.source_speaker(),
-            content: entry.content(),
-        })
-        .collect::<Vec<_>>();
-    load_seed_projection_from_entries(connection, session, conversation.id(), &entries).await
-}
-
 async fn load_seed_projection_from_entries(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1277,7 +1235,7 @@ async fn load_seed_projection_from_entries(
 
 fn decode_stored_provenance(
     row: &PgRow,
-    conversation: &ImportedConversation,
+    conversation: ImportedConversationId,
 ) -> Result<SessionCreationProvenance, ImportedSessionRepositoryError> {
     require_spelling(row, "stored_cause", INTERACTIVE)?;
     require_spelling(row, "stored_ancestry", IMPORTED_ANCESTRY)?;
@@ -1289,7 +1247,7 @@ fn decode_stored_provenance(
     )?;
     let stored_conversation =
         ImportedConversationId::from_uuid(required(row, "stored_conversation_id")?);
-    if stored_conversation != conversation.id() {
+    if stored_conversation != conversation {
         return Err(ImportedSessionCorruption::Inconsistent("stored imported conversation").into());
     }
     Ok(SessionCreationProvenance::new(
@@ -1302,20 +1260,20 @@ fn decode_stored_provenance(
 }
 
 fn decode_frontier(
-    conversation: &ImportedConversation,
+    conversation: ImportedConversationId,
     entry: Uuid,
     position: Decimal,
     field: &'static str,
-) -> Result<signalbox_domain::ImportedTranscriptFrontier, ImportedSessionRepositoryError> {
+) -> Result<ImportedTranscriptFrontier, ImportedSessionRepositoryError> {
     let entry = ImportedTranscriptEntryId::from_uuid(entry);
-    let frontier = conversation
-        .frontier_for_entry(entry)
-        .ok_or(ImportedSessionCorruption::Inconsistent(field))?;
     let position = positive_u64(position, field)?;
-    if frontier.through_position().as_u64() != position {
-        return Err(ImportedSessionCorruption::Inconsistent(field).into());
-    }
-    Ok(frontier)
+    let position = ImportedTranscriptPosition::try_from_u64(position)
+        .ok_or(ImportedSessionCorruption::Inconsistent(field))?;
+    Ok(ImportedTranscriptFrontier::from_parts(
+        conversation,
+        entry,
+        position,
+    ))
 }
 
 fn encode_relationship(relationship: ImportedSessionRelationship) -> &'static str {

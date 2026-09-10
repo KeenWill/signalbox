@@ -124,13 +124,13 @@ fn reconciliation_rejection_details_have_exact_closed_shapes()
 #[test]
 fn import_source_requires_canonical_padded_base64() {
     assert_client_malformed(
-        r#"{"version":1,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA"}}"#,
+        r#"{"version":1,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v2","source":"AA"}}"#,
     );
     assert_client_malformed(
-        r#"{"version":1,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AB=="}}"#,
+        r#"{"version":1,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v2","source":"AB=="}}"#,
     );
     assert_client_malformed(
-        r#"{"version":1,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA==="}}"#,
+        r#"{"version":1,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v2","source":"AA==="}}"#,
     );
 }
 

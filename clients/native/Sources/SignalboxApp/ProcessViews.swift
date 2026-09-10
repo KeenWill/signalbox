@@ -1359,8 +1359,12 @@ private struct ProcessImportedConversationScreen: View {
       "Claude Code JSONL v1"
     case .claudeCodeSessionJSONLV2:
       "Claude Code JSONL v2"
+    case .claudeCodeSessionJSONLV3:
+      "Claude Code JSONL v3"
     case .codexRolloutJSONLV1:
       "Codex rollout JSONL v1"
+    case .codexRolloutJSONLV2:
+      "Codex rollout JSONL v2"
     case .unknown(let value):
       SignalboxProcessPresentation.retainedLabel(
         "Unrecognized format (\(value))"

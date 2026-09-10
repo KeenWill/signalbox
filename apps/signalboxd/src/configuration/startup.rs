@@ -30,15 +30,6 @@ pub(super) fn parse_startup(
     content: &str,
     document: &DocumentMut,
 ) -> Result<ParsedStartup, HubModelConfigurationError> {
-    if document
-        .get("conversation_import")
-        .and_then(|item| item.as_table())
-        .is_some_and(|table| table.contains_key("max_source_bytes"))
-    {
-        return Err(HubModelConfigurationError::RetiredField {
-            field: "conversation_import.max_source_bytes",
-        });
-    }
     reject_unknown_fields(
         document.as_table(),
         &[

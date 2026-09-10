@@ -808,10 +808,10 @@ pub enum CanonicalValueError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationImportFormat {
-    /// Claude Code session JSONL under Signalbox converter version two.
-    ClaudeCodeSessionJsonlV2,
-    /// Codex rollout JSONL under Signalbox converter version one.
-    CodexRolloutJsonlV1,
+    /// Claude Code session JSONL under Signalbox converter version three.
+    ClaudeCodeSessionJsonlV3,
+    /// Codex rollout JSONL under Signalbox converter version two.
+    CodexRolloutJsonlV2,
 }
 
 /// Content-silent reason an imported-conversation converter rejected source.

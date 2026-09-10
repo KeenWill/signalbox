@@ -379,7 +379,7 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
-        imported_conversation: ImportedConversation,
+        imported_entries: vec::Vec<ImportedTranscriptEntryInput>,
         seed_records: vec::Vec<ImportedSessionSeedReconstitutionInput>,
         seed_snapshots: vec::Vec<ResolvedContextFrontierReconstitutionInput>,
         semantic_entries: vec::Vec<SemanticTranscriptEntryReconstitutionInput>,
@@ -397,7 +397,7 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
     pub const fn defaults_session(&self) -> SessionId;
     pub const fn defaults_version(&self) -> SessionConfigurationDefaultsVersion;
     pub const fn defaults(&self) -> &SessionConfigurationDefaults;
-    pub const fn imported_conversation(&self) -> &ImportedConversation;
+    pub fn imported_entries(&self) -> &[ImportedTranscriptEntryInput];
     pub fn seed_records(&self) -> &[ImportedSessionSeedReconstitutionInput];
     pub fn seed_snapshots(&self) -> &[ResolvedContextFrontierReconstitutionInput];
     pub fn semantic_entries(&self) -> &[SemanticTranscriptEntryReconstitutionInput];

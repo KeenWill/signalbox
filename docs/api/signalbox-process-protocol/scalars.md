@@ -505,8 +505,8 @@ impl error::Error for CanonicalValueError {
 
 ```rust
 pub enum ConversationImportFormat {
-    ClaudeCodeSessionJsonlV2,
-    CodexRolloutJsonlV1,
+    ClaudeCodeSessionJsonlV3,
+    CodexRolloutJsonlV2,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```

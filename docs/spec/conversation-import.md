@@ -33,21 +33,19 @@ reach a model.
 bytes into a checked aggregate. A converter consumes the bytes, one
 caller-supplied conversation identity, and a total lazy callback that supplies
 entry identities; it declares a closed `ImportedConversationFormat` carrying
-both the source family and the Signalbox converter version. Two converters
-exist. `ClaudeCodeJsonlConverter` reads Claude Code session JSONL and produces
-converter version 2; stored version-1 snapshots keep the version-1
-interpretation. `CodexRolloutJsonlConverter` reads Codex rollout JSONL and
-produces converter version 1.
+both the source family and the Signalbox converter version. Strict Claude Code
+conversion uses version 2 and resilient ingestion uses version 3. Strict Codex
+rollout conversion uses version 1 and resilient ingestion uses version 2.
 
-`ImportConversationService` runs a converter and calls the append-only Postgres
-import store once, after complete conversion. The store keeps raw bytes in the
-blob store under their content hash ([blob-storage](blob-storage.md)) and the
-header, raw-record occurrences, and normalized entries in relational tables.
-Each header also records a display title derived once from the preserved
-records, so the unified conversation listing in
-[process-protocol](process-protocol.md) can show imported rows by name. When no
-preserved record yields a title, the header records the underivable state and
-carries none.
+`ImportConversationService` runs bounded in-frame conversion. Chunked conversion
+feeds one accepted or dropped record at a time to the append-only Postgres
+import store. The store keeps raw bytes in the blob store under their content
+hash ([blob-storage](blob-storage.md)) and the header, raw-record occurrences,
+and normalized entries in relational tables. Each header also records a display
+title derived once from the preserved records, so the unified conversation
+listing in [process-protocol](process-protocol.md) can show imported rows by
+name. When no preserved record yields a title, the header records the
+underivable state and carries none.
 
 Three surfaces reach the store. The user terminal imports one named file or
 every candidate file under a directory; a source that fits one frame is sent as
@@ -192,10 +190,9 @@ commit, abort, a conversion rejection, and disconnect. An already-in-progress
 refusal leaves the existing assembly available for append, commit, or explicit
 abort. Appends write bounded request chunks directly to the private file spool,
 so retained assembly memory does not grow with source size. Commit checks the
-declared byte count and supplies the spooled source to the same converter and
-`ImportConversationService` behavior as the single-shot path. A database failure
-is reported as an ambiguous commit, so the operator may retry the exact format
-and source bytes.
+declared byte count and incrementally converts and stores the spooled source. A
+database failure is reported as an ambiguous commit, so the operator may retry
+the exact format and source bytes.
 
 The inspection read exposes no imported content a transcript snapshot does not
 already carry, and adds nothing for events, tools, results, thinking, media,

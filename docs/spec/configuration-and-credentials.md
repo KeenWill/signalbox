@@ -97,16 +97,16 @@ duration policies use Jiff's friendly unsigned-duration syntax.
 `max_review_findings_per_run` must be finite and no greater than its domain
 bound. A finite `max_blob_replica_count` must admit the durable catalog's full
 store bound. Disabling reconciliation requires an unbounded nudge buffer.
-Conversation import admits no source-size setting; a document naming
-`conversation_import.max_source_bytes` is invalid and reports that exact key.
-`repository_watch_webhook_retention` must be positive and finite and governs
-authenticated webhook `expires_at` and merged-pull-request baseline retention as
-described in [repository watch](repo-watch.md). `codex_cli_version_probe_bound`
-bounds a credential-free startup probe of the configured Codex executable, and a
-missing, malformed, zero, unsuccessful, or mismatched probe fails configuration
-before the socket opens. One valid document yields correlated immutable
-in-memory catalogs: the domain `ModelTargetCatalog` for execution-time target
-resolution and the `RuntimeModelCatalog` for the provider bridge. The optional
+Conversation import admits no source-size setting; a `conversation_import` table
+is rejected by the closed top-level schema. `repository_watch_webhook_retention`
+must be positive and finite and governs authenticated webhook `expires_at` and
+merged-pull-request baseline retention as described in
+[repository watch](repo-watch.md). `codex_cli_version_probe_bound` bounds a
+credential-free startup probe of the configured Codex executable, and a missing,
+malformed, zero, unsuccessful, or mismatched probe fails configuration before
+the socket opens. One valid document yields correlated immutable in-memory
+catalogs: the domain `ModelTargetCatalog` for execution-time target resolution
+and the `RuntimeModelCatalog` for the provider bridge. The optional
 `repository_watch_poll_request_budget` defaults to 100 and accepts integers from
 2 through 1,000, including the quota preflight request in each attempt.
 

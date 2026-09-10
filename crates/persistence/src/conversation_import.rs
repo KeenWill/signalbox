@@ -8,19 +8,22 @@ use std::{
     sync::Arc,
 };
 
+use futures_util::TryStreamExt;
 use rust_decimal::Decimal;
 use signalbox_application::{
     ImportedConversationDropFacts, ImportedConversationStore, ImportedConversationStoreOutcome,
+    ImportedConversationStreamItem, StreamConversionError,
 };
 use signalbox_blob_store::{BlobObjectKey, BlobStoreName, ExpectedBlob};
 use signalbox_domain::{
     BlobDigest, ImportedConversation, ImportedConversationDisplayTitle, ImportedConversationFormat,
     ImportedConversationId, ImportedConversationReconstitutionFailure,
     ImportedConversationReconstitutionInput, ImportedConversationSourceDigest,
-    ImportedRawRecordConversionDigest, ImportedRawRecordHash, ImportedRawRecordPosition,
-    ImportedRawSourceRecordReconstitutionInput, ImportedRecordEntryPosition,
-    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptEntryId,
-    ImportedTranscriptEntryInput, ImportedTranscriptFrontier, ImportedTranscriptPosition,
+    ImportedConversationSourceDigestBuilder, ImportedRawRecordConversionDigest,
+    ImportedRawRecordHash, ImportedRawRecordPosition, ImportedRawSourceRecordReconstitutionInput,
+    ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSpeaker,
+    ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptFrontier,
+    ImportedTranscriptPosition,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -41,8 +44,10 @@ const STORAGE_VERSION: i16 = 1;
 const CLAUDE_CODE_FORMAT: &str = "claude_code_session_jsonl";
 const CLAUDE_CODE_VERSION_ONE: i16 = 1;
 const CLAUDE_CODE_VERSION_TWO: i16 = 2;
+const CLAUDE_CODE_VERSION_THREE: i16 = 3;
 const CODEX_FORMAT: &str = "codex_rollout_jsonl";
 const CODEX_VERSION_ONE: i16 = 1;
+const CODEX_VERSION_TWO: i16 = 2;
 const TRANSCRIPT_ENTRY_IDENTITY_UNIQUE: &str = "imported_transcript_entry_identity_unique";
 pub(crate) const DISPLAY_TITLE_STATE_DERIVED: &str = "derived";
 pub(crate) const DISPLAY_TITLE_STATE_UNDERIVABLE: &str = "underivable";
@@ -371,6 +376,38 @@ pub enum ImportedConversationRepositoryError {
     Corruption(#[source] ImportedConversationCorruption),
 }
 
+/// Bounded result of incrementally converting and storing one source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamingImportedConversationReport<Failure> {
+    /// At least one accepted record became durable or resolved an exact duplicate.
+    Imported {
+        /// Durable insertion or duplicate outcome.
+        outcome: ImportedConversationStoreOutcome,
+        /// Exact bounded summary of rejected physical records.
+        dropped_records: ImportedConversationDropFacts,
+    },
+    /// Every physical record was rejected.
+    NoValidRecords {
+        /// Exact bounded summary of rejected physical records.
+        dropped_records: ImportedConversationDropFacts,
+        /// Content-silent reason for the first rejected record.
+        first_failure: Failure,
+    },
+}
+
+/// Failure while incrementally converting or storing one source.
+#[derive(Debug)]
+pub enum StreamingImportedConversationError<ConverterError> {
+    /// The file-backed source could not be read completely.
+    SourceRead,
+    /// The converter rejected the source outside a record-local boundary.
+    Conversion(ConverterError),
+    /// A streamed converter violated its checked-record contract.
+    ConverterContract,
+    /// Durable staging or insertion failed.
+    Repository(ImportedConversationRepositoryError),
+}
+
 impl From<sqlx::Error> for ImportedConversationRepositoryError {
     fn from(error: sqlx::Error) -> Self {
         if error
@@ -544,6 +581,266 @@ impl ImportedConversationRepository {
         })
     }
 
+    /// Converts no collection at EOF: each checked single-record aggregate is
+    /// blob-published and staged before the iterator advances.
+    pub async fn resolve_or_insert_stream<Records, Failure, ConverterError>(
+        &self,
+        candidate: ImportedConversationId,
+        format: ImportedConversationFormat,
+        records: Records,
+    ) -> Result<
+        StreamingImportedConversationReport<Failure>,
+        StreamingImportedConversationError<ConverterError>,
+    >
+    where
+        Records: Iterator<
+            Item = Result<
+                ImportedConversationStreamItem<Failure>,
+                StreamConversionError<ConverterError>,
+            >,
+        >,
+    {
+        let mut staging = None;
+
+        let mut raw_count = 0_u64;
+        let mut entry_count = 0_u64;
+        let mut dropped_count = 0_u64;
+        let mut first_dropped_line = None;
+        let mut first_failure = None;
+        let mut raw_source_bytes = 0_u64;
+        let mut normalized_source_record_bytes = 0_u64;
+        let mut normalized_entry_bytes = 0_u64;
+        let mut title_candidates: [Option<String>; 3] = [None, None, None];
+        let mut source_session_id: Option<Vec<u8>> = None;
+        let mut source_session_conflict = false;
+
+        for record in records {
+            let record = match record {
+                Ok(record) => record,
+                Err(StreamConversionError::SourceRead) => {
+                    return Err(StreamingImportedConversationError::SourceRead);
+                }
+                Err(StreamConversionError::Conversion(error)) => {
+                    return Err(StreamingImportedConversationError::Conversion(error));
+                }
+            };
+            let conversation = match record {
+                ImportedConversationStreamItem::Skipped(skipped) => {
+                    dropped_count = dropped_count
+                        .checked_add(1)
+                        .ok_or(StreamingImportedConversationError::ConverterContract)?;
+                    if first_dropped_line.is_none() {
+                        first_dropped_line = Some(skipped.source_line());
+                        first_failure = Some(skipped.into_parts().1);
+                    }
+                    continue;
+                }
+                ImportedConversationStreamItem::Converted(conversation) => conversation,
+            };
+            if conversation.id() != candidate
+                || conversation.format() != format
+                || conversation.raw_records().len() != 1
+            {
+                return Err(StreamingImportedConversationError::ConverterContract);
+            }
+            if staging.is_none() {
+                let mut transaction = self
+                    .pool
+                    .begin()
+                    .await
+                    .map_err(ImportedConversationRepositoryError::from)
+                    .map_err(StreamingImportedConversationError::Repository)?;
+                create_stream_staging(&mut transaction)
+                    .await
+                    .map_err(StreamingImportedConversationError::Repository)?;
+                staging = Some(transaction);
+            }
+            for (slot, derived) in title_candidates.iter_mut().zip(
+                ImportedConversationDisplayTitle::derive_candidates(&conversation),
+            ) {
+                if slot.is_none() {
+                    *slot = derived.map(ImportedConversationDisplayTitle::into_string);
+                }
+            }
+            for entry in conversation.entries() {
+                if let ImportedSourceAttestation::Attested(session) =
+                    entry.source().source_session_id()
+                {
+                    let session = session.as_str().as_bytes();
+                    match source_session_id.as_deref() {
+                        None => source_session_id = Some(session.to_vec()),
+                        Some(existing) if existing == session => {}
+                        Some(_) => source_session_conflict = true,
+                    }
+                }
+            }
+
+            let encoded = EncodedConversation::from_domain(&conversation)
+                .map_err(StreamingImportedConversationError::Repository)?;
+            let [raw] = encoded.raws.as_slice() else {
+                return Err(StreamingImportedConversationError::ConverterContract);
+            };
+            let publications = publish_raw_blobs(self.blob_storage.as_ref(), &encoded.raws)
+                .await
+                .map_err(StreamingImportedConversationError::Repository)?;
+            let mut registration = self
+                .pool
+                .begin()
+                .await
+                .map_err(ImportedConversationRepositoryError::from)
+                .map_err(StreamingImportedConversationError::Repository)?;
+            register_raw_blobs(&mut registration, &publications)
+                .await
+                .map_err(StreamingImportedConversationError::Repository)?;
+            registration
+                .commit()
+                .await
+                .map_err(ImportedConversationRepositoryError::from)
+                .map_err(StreamingImportedConversationError::Repository)?;
+
+            raw_count = raw_count
+                .checked_add(1)
+                .ok_or(StreamingImportedConversationError::ConverterContract)?;
+            let record_entry_count = u64::try_from(encoded.entries.len())
+                .map_err(|_| StreamingImportedConversationError::ConverterContract)?;
+            if record_entry_count == 0 {
+                return Err(StreamingImportedConversationError::ConverterContract);
+            }
+            raw_source_bytes = raw_source_bytes
+                .checked_add(
+                    u64::try_from(raw.bytes.len())
+                        .map_err(|_| StreamingImportedConversationError::ConverterContract)?,
+                )
+                .ok_or(StreamingImportedConversationError::ConverterContract)?;
+            normalized_source_record_bytes = normalized_source_record_bytes
+                .checked_add(
+                    u64::try_from(raw.normalized.len())
+                        .map_err(|_| StreamingImportedConversationError::ConverterContract)?,
+                )
+                .ok_or(StreamingImportedConversationError::ConverterContract)?;
+            let transaction = staging
+                .as_mut()
+                .ok_or(StreamingImportedConversationError::ConverterContract)?;
+            stage_stream_raw(transaction, raw_count, raw, record_entry_count)
+                .await
+                .map_err(StreamingImportedConversationError::Repository)?;
+            for entry in &encoded.entries {
+                entry_count = entry_count
+                    .checked_add(1)
+                    .ok_or(StreamingImportedConversationError::ConverterContract)?;
+                normalized_entry_bytes = normalized_entry_bytes
+                    .checked_add(
+                        u64::try_from(entry.content.len())
+                            .ok()
+                            .and_then(|content| {
+                                u64::try_from(entry.source.len())
+                                    .ok()
+                                    .and_then(|source| content.checked_add(source))
+                            })
+                            .ok_or(StreamingImportedConversationError::ConverterContract)?,
+                    )
+                    .ok_or(StreamingImportedConversationError::ConverterContract)?;
+                stage_stream_entry(transaction, entry_count, raw_count, entry)
+                    .await
+                    .map_err(StreamingImportedConversationError::Repository)?;
+            }
+        }
+
+        let dropped_records =
+            ImportedConversationDropFacts::try_new(dropped_count, first_dropped_line)
+                .ok_or(StreamingImportedConversationError::ConverterContract)?;
+        if raw_count == 0 {
+            let first_failure =
+                first_failure.ok_or(StreamingImportedConversationError::ConverterContract)?;
+            return Ok(StreamingImportedConversationReport::NoValidRecords {
+                dropped_records,
+                first_failure,
+            });
+        }
+        if entry_count == 0 {
+            return Err(StreamingImportedConversationError::ConverterContract);
+        }
+        let mut staging = staging.ok_or(StreamingImportedConversationError::ConverterContract)?;
+
+        let source_digest = stream_source_digest(&mut staging, format, raw_count)
+            .await
+            .map_err(StreamingImportedConversationError::Repository)?;
+        let display_title = title_candidates.into_iter().flatten().next();
+        if source_session_conflict {
+            source_session_id = None;
+        }
+        let (source_format, converter_version) = encode_format(format);
+        if let Some(existing) = load_identity_by_source_digest(
+            &mut staging,
+            source_format,
+            converter_version,
+            source_digest,
+        )
+        .await
+        .map_err(ImportedConversationRepositoryError::from)
+        .map_err(StreamingImportedConversationError::Repository)?
+        {
+            let equivalent = stream_staging_matches_existing(
+                &mut staging,
+                existing,
+                raw_count,
+                entry_count,
+                source_session_id.as_deref(),
+                display_title.as_deref(),
+                dropped_records,
+            )
+            .await
+            .map_err(StreamingImportedConversationError::Repository)?;
+            if !equivalent {
+                return Err(StreamingImportedConversationError::Repository(
+                    ImportedConversationCorruption::ExistingSnapshotMismatch.into(),
+                ));
+            }
+            staging
+                .commit()
+                .await
+                .map_err(ImportedConversationRepositoryError::from)
+                .map_err(StreamingImportedConversationError::Repository)?;
+            return Ok(StreamingImportedConversationReport::Imported {
+                outcome: ImportedConversationStoreOutcome::AlreadyImported {
+                    conversation: existing,
+                    source_digest,
+                },
+                dropped_records,
+            });
+        }
+
+        insert_streamed_conversation(
+            &mut staging,
+            candidate,
+            source_format,
+            converter_version,
+            source_digest,
+            raw_count,
+            entry_count,
+            source_session_id.as_deref(),
+            display_title.as_deref(),
+            dropped_records,
+            raw_source_bytes,
+            normalized_source_record_bytes,
+            normalized_entry_bytes,
+        )
+        .await
+        .map_err(StreamingImportedConversationError::Repository)?;
+        staging
+            .commit()
+            .await
+            .map_err(ImportedConversationRepositoryError::from)
+            .map_err(StreamingImportedConversationError::Repository)?;
+        Ok(StreamingImportedConversationReport::Imported {
+            outcome: ImportedConversationStoreOutcome::Inserted {
+                conversation: candidate,
+                source_digest,
+            },
+            dropped_records,
+        })
+    }
+
     /// Loads one complete snapshot, returning `None` only for an absent header.
     pub async fn load(
         &self,
@@ -556,6 +853,79 @@ impl ImportedConversationRepository {
             Some(projection) => self.finish_projection(projection).await.map(Some),
             None => Ok(None),
         }
+    }
+
+    /// Resolves one imported entry position without loading normalized content
+    /// or raw audit bytes.
+    pub async fn lookup_frontier(
+        &self,
+        conversation: ImportedConversationId,
+        position: ImportedTranscriptPosition,
+    ) -> Result<Option<ImportedConversationFrontierLookup>, ImportedConversationRepositoryError>
+    {
+        let row = sqlx::query(
+            "SELECT target.imported_transcript_entry_id AS target_entry_id,
+                    conversation.declared_entry_count,
+                    inventory.actual_entry_count,
+                    inventory.inventory_is_complete,
+                    inventory.last_position
+               FROM imported_conversation AS conversation
+               CROSS JOIN LATERAL (
+                   SELECT COUNT(*)::numeric AS actual_entry_count,
+                          COUNT(*)::numeric = conversation.declared_entry_count
+                          AND MIN(imported_entry_position) = 1
+                          AND MAX(imported_entry_position) =
+                              conversation.declared_entry_count
+                              AS inventory_is_complete,
+                          MAX(imported_entry_position) AS last_position
+                     FROM imported_transcript_entry
+                    WHERE imported_conversation_id =
+                          conversation.imported_conversation_id
+               ) AS inventory
+               LEFT JOIN imported_transcript_entry AS target
+                 ON target.imported_conversation_id =
+                        conversation.imported_conversation_id
+                AND target.imported_entry_position = $2
+              WHERE conversation.imported_conversation_id = $1",
+        )
+        .bind(conversation.into_uuid())
+        .bind(Decimal::from(position.as_u64()))
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let declared_entry_count = positive_u64(row.try_get("declared_entry_count")?)
+            .map_err(|reason| invalid_ordinal_with_reason("declared entry count", reason))?;
+        let actual_entry_count = u64::try_from(row.try_get::<Decimal, _>("actual_entry_count")?)
+            .map_err(|_| invalid_ordinal("actual entry count"))?;
+        if !row.try_get::<bool, _>("inventory_is_complete")? {
+            return Err(ImportedConversationCorruption::Domain(
+                ImportedConversationReconstitutionFailure::DeclaredEntryCountMismatch {
+                    declared: declared_entry_count,
+                    actual: usize::try_from(actual_entry_count)
+                        .map_err(|_| invalid_ordinal("actual entry count"))?,
+                },
+            )
+            .into());
+        }
+        let last_position = decode_entry_position(
+            row.try_get::<Option<Decimal>, _>("last_position")?
+                .ok_or_else(|| invalid_ordinal("last imported entry position"))?,
+        )?;
+        let frontier = row
+            .try_get::<Option<Uuid>, _>("target_entry_id")?
+            .map(|entry| {
+                ImportedTranscriptFrontier::from_parts(
+                    conversation,
+                    ImportedTranscriptEntryId::from_uuid(entry),
+                    position,
+                )
+            });
+        Ok(Some(ImportedConversationFrontierLookup {
+            frontier,
+            last_position,
+        }))
     }
 
     async fn resolve_existing_snapshot(
@@ -595,6 +965,25 @@ impl ImportedConversationRepository {
         projection: StoredConversationProjection,
     ) -> Result<ImportedConversation, ImportedConversationRepositoryError> {
         finish_projection(self.blob_storage.as_ref(), projection).await
+    }
+}
+
+/// Bounded result of resolving an imported transcript position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImportedConversationFrontierLookup {
+    frontier: Option<ImportedTranscriptFrontier>,
+    last_position: ImportedTranscriptPosition,
+}
+
+impl ImportedConversationFrontierLookup {
+    /// Returns the frontier at the requested position, when it exists.
+    pub const fn frontier(self) -> Option<ImportedTranscriptFrontier> {
+        self.frontier
+    }
+
+    /// Returns the final imported transcript position.
+    pub const fn last_position(self) -> ImportedTranscriptPosition {
+        self.last_position
     }
 }
 
@@ -873,6 +1262,292 @@ async fn register_raw_blobs(
         )
         .await?;
     }
+    Ok(())
+}
+
+async fn create_stream_staging(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), ImportedConversationRepositoryError> {
+    sqlx::query(
+        "CREATE TEMP TABLE signalbox_import_stream_raw (
+            raw_record_position numeric(20,0) PRIMARY KEY,
+            content_hash bytea NOT NULL,
+            conversion_digest bytea NOT NULL,
+            normalized_value_encoding bytea NOT NULL,
+            declared_entry_count numeric(20,0) NOT NULL
+         ) ON COMMIT DROP",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "CREATE TEMP TABLE signalbox_import_stream_entry (
+            imported_entry_position numeric(20,0) PRIMARY KEY,
+            imported_transcript_entry_id uuid NOT NULL UNIQUE,
+            raw_record_position numeric(20,0) NOT NULL,
+            record_entry_position numeric(20,0) NOT NULL,
+            source_speaker_kind text NOT NULL,
+            content_encoding bytea NOT NULL,
+            source_metadata_encoding bytea NOT NULL
+         ) ON COMMIT DROP",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn stage_stream_raw(
+    transaction: &mut Transaction<'_, Postgres>,
+    position: u64,
+    raw: &EncodedRawRecord,
+    declared_entry_count: u64,
+) -> Result<(), ImportedConversationRepositoryError> {
+    sqlx::query(
+        "INSERT INTO signalbox_import_stream_raw
+            (raw_record_position, content_hash, conversion_digest,
+             normalized_value_encoding, declared_entry_count)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(Decimal::from(position))
+    .bind(raw.content_hash.as_bytes().as_slice())
+    .bind(raw.conversion_digest.as_bytes().as_slice())
+    .bind(&raw.normalized)
+    .bind(Decimal::from(declared_entry_count))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn stage_stream_entry(
+    transaction: &mut Transaction<'_, Postgres>,
+    position: u64,
+    raw_position: u64,
+    entry: &EncodedEntry,
+) -> Result<(), ImportedConversationRepositoryError> {
+    sqlx::query(
+        "INSERT INTO signalbox_import_stream_entry
+            (imported_entry_position, imported_transcript_entry_id,
+             raw_record_position, record_entry_position, source_speaker_kind,
+             content_encoding, source_metadata_encoding)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(Decimal::from(position))
+    .bind(entry.identity.into_uuid())
+    .bind(Decimal::from(raw_position))
+    .bind(Decimal::from(entry.within_position.as_u64()))
+    .bind(entry.source_speaker)
+    .bind(&entry.content)
+    .bind(&entry.source)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn stream_source_digest(
+    transaction: &mut Transaction<'_, Postgres>,
+    format: ImportedConversationFormat,
+    raw_count: u64,
+) -> Result<ImportedConversationSourceDigest, ImportedConversationRepositoryError> {
+    let mut builder = ImportedConversationSourceDigestBuilder::new(format, raw_count);
+    let mut rows = sqlx::query(
+        "SELECT content_hash
+           FROM signalbox_import_stream_raw
+          ORDER BY raw_record_position",
+    )
+    .fetch(&mut **transaction);
+    while let Some(row) = rows.try_next().await? {
+        let bytes: Vec<u8> = row.try_get("content_hash")?;
+        let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+            ImportedConversationCorruption::InvalidDigestSize("streamed raw-record hash")
+        })?;
+        if !builder.push(ImportedRawRecordHash::from_bytes(bytes)) {
+            return Err(invalid_ordinal("streamed raw-record count"));
+        }
+    }
+    builder
+        .finish()
+        .ok_or_else(|| invalid_ordinal("streamed raw-record count"))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_staging_matches_existing(
+    transaction: &mut Transaction<'_, Postgres>,
+    conversation: ImportedConversationId,
+    raw_count: u64,
+    entry_count: u64,
+    source_session_id: Option<&[u8]>,
+    display_title: Option<&str>,
+    dropped_records: ImportedConversationDropFacts,
+) -> Result<bool, ImportedConversationRepositoryError> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM imported_conversation
+              WHERE imported_conversation_id = $1
+                AND declared_raw_record_count = $2
+                AND declared_entry_count = $3
+                AND source_session_id IS NOT DISTINCT FROM $4
+                AND display_title IS NOT DISTINCT FROM $5
+                AND dropped_record_count = $6
+                AND first_dropped_record_position IS NOT DISTINCT FROM $7
+         )
+         AND NOT EXISTS (
+             (SELECT raw_record_position, content_hash, conversion_digest,
+                     normalized_value_encoding, declared_entry_count
+                FROM signalbox_import_stream_raw
+              EXCEPT
+              SELECT raw_record_position, content_hash, conversion_digest,
+                     normalized_value_encoding, declared_entry_count
+                FROM imported_conversation_raw_record
+               WHERE imported_conversation_id = $1)
+             UNION ALL
+             (SELECT raw_record_position, content_hash, conversion_digest,
+                     normalized_value_encoding, declared_entry_count
+                FROM imported_conversation_raw_record
+               WHERE imported_conversation_id = $1
+              EXCEPT
+              SELECT raw_record_position, content_hash, conversion_digest,
+                     normalized_value_encoding, declared_entry_count
+                FROM signalbox_import_stream_raw)
+         )
+         AND NOT EXISTS (
+             (SELECT imported_entry_position,
+                     raw_record_position, record_entry_position, source_speaker_kind,
+                     content_encoding, source_metadata_encoding
+                FROM signalbox_import_stream_entry
+              EXCEPT
+              SELECT imported_entry_position,
+                     raw_record_position, record_entry_position, source_speaker_kind,
+                     content_encoding, source_metadata_encoding
+                FROM imported_transcript_entry
+               WHERE imported_conversation_id = $1)
+             UNION ALL
+             (SELECT imported_entry_position,
+                     raw_record_position, record_entry_position, source_speaker_kind,
+                     content_encoding, source_metadata_encoding
+                FROM imported_transcript_entry
+               WHERE imported_conversation_id = $1
+              EXCEPT
+              SELECT imported_entry_position,
+                     raw_record_position, record_entry_position, source_speaker_kind,
+                     content_encoding, source_metadata_encoding
+                FROM signalbox_import_stream_entry)
+         )",
+    )
+    .bind(conversation.into_uuid())
+    .bind(Decimal::from(raw_count))
+    .bind(Decimal::from(entry_count))
+    .bind(source_session_id)
+    .bind(display_title)
+    .bind(Decimal::from(dropped_records.count()))
+    .bind(dropped_records.first_source_line().map(Decimal::from))
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(Into::into)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_streamed_conversation(
+    transaction: &mut Transaction<'_, Postgres>,
+    candidate: ImportedConversationId,
+    format: &str,
+    converter_version: i16,
+    source_digest: ImportedConversationSourceDigest,
+    raw_count: u64,
+    entry_count: u64,
+    source_session_id: Option<&[u8]>,
+    display_title: Option<&str>,
+    dropped_records: ImportedConversationDropFacts,
+    raw_source_bytes: u64,
+    normalized_source_record_bytes: u64,
+    normalized_entry_bytes: u64,
+) -> Result<(), ImportedConversationRepositoryError> {
+    let inserted = sqlx::query(
+        "INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, source_session_id,
+             declared_raw_record_count, declared_entry_count,
+             display_title, display_title_state, dropped_record_count,
+             first_dropped_record_position)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(candidate.into_uuid())
+    .bind(STORAGE_VERSION)
+    .bind(format)
+    .bind(converter_version)
+    .bind(source_digest.as_bytes().as_slice())
+    .bind(source_session_id)
+    .bind(Decimal::from(raw_count))
+    .bind(Decimal::from(entry_count))
+    .bind(display_title)
+    .bind(resolved_display_title_state(display_title))
+    .bind(Decimal::from(dropped_records.count()))
+    .bind(dropped_records.first_source_line().map(Decimal::from))
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected()
+        == 1;
+    if !inserted {
+        return Err(ImportedConversationRepositoryError::IdentityCollision(
+            ImportedConversationIdentityCollision::Conversation,
+        ));
+    }
+    let identity_collision = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM signalbox_import_stream_entry AS staged
+               JOIN imported_transcript_entry AS durable
+                 ON durable.imported_transcript_entry_id = staged.imported_transcript_entry_id
+         )",
+    )
+    .fetch_one(&mut **transaction)
+    .await?;
+    if identity_collision {
+        return Err(ImportedConversationRepositoryError::IdentityCollision(
+            ImportedConversationIdentityCollision::TranscriptEntry,
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO imported_raw_source_record (content_hash)
+         SELECT DISTINCT content_hash FROM signalbox_import_stream_raw
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO imported_conversation_raw_record
+            (imported_conversation_id, raw_record_position, content_hash,
+             conversion_digest, normalized_value_encoding, declared_entry_count)
+         SELECT $1, raw_record_position, content_hash, conversion_digest,
+                normalized_value_encoding, declared_entry_count
+           FROM signalbox_import_stream_raw
+          ORDER BY raw_record_position",
+    )
+    .bind(candidate.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO imported_transcript_entry
+            (imported_conversation_id, imported_entry_position,
+             imported_transcript_entry_id, raw_record_position,
+             record_entry_position, source_speaker_kind, content_encoding,
+             source_metadata_encoding)
+         SELECT $1, imported_entry_position, imported_transcript_entry_id,
+                raw_record_position, record_entry_position, source_speaker_kind,
+                content_encoding, source_metadata_encoding
+           FROM signalbox_import_stream_entry
+          ORDER BY imported_entry_position",
+    )
+    .bind(candidate.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    insert_size_totals(
+        transaction,
+        candidate,
+        raw_source_bytes,
+        normalized_source_record_bytes,
+        normalized_entry_bytes,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1484,7 +2159,11 @@ pub(crate) fn encode_format(format: ImportedConversationFormat) -> (&'static str
         ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
             (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_TWO)
         }
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV3 => {
+            (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_THREE)
+        }
         ImportedConversationFormat::CodexRolloutJsonlV1 => (CODEX_FORMAT, CODEX_VERSION_ONE),
+        ImportedConversationFormat::CodexRolloutJsonlV2 => (CODEX_FORMAT, CODEX_VERSION_TWO),
     }
 }
 
@@ -1499,7 +2178,11 @@ pub(crate) fn decode_format(
         (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_TWO) => {
             Ok(ImportedConversationFormat::ClaudeCodeSessionJsonlV2)
         }
+        (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_THREE) => {
+            Ok(ImportedConversationFormat::ClaudeCodeSessionJsonlV3)
+        }
         (CODEX_FORMAT, CODEX_VERSION_ONE) => Ok(ImportedConversationFormat::CodexRolloutJsonlV1),
+        (CODEX_FORMAT, CODEX_VERSION_TWO) => Ok(ImportedConversationFormat::CodexRolloutJsonlV2),
         (_, version) if format == CLAUDE_CODE_FORMAT => {
             Err(ImportedConversationCorruption::Unsupported {
                 field: "converter version",
@@ -1671,12 +2354,13 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{
-        BlobDigest, CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE, CLAUDE_CODE_VERSION_TWO,
-        CODEX_FORMAT, CODEX_VERSION_ONE, EncodedEntry, EncodedRawRecord, ExpectedBlob,
-        ImportedConversationFormat, ImportedRawRecordConversionDigest, ImportedRawRecordHash,
-        ImportedRawRecordPosition, ImportedRecordEntryPosition, ImportedTranscriptEntryId,
-        ImportedTranscriptPosition, decode_format, distinct_expected_blobs, encode_format,
-        entries_in_key_order, raw_blobs_in_key_order,
+        BlobDigest, CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE, CLAUDE_CODE_VERSION_THREE,
+        CLAUDE_CODE_VERSION_TWO, CODEX_FORMAT, CODEX_VERSION_ONE, CODEX_VERSION_TWO, EncodedEntry,
+        EncodedRawRecord, ExpectedBlob, ImportedConversationFormat,
+        ImportedRawRecordConversionDigest, ImportedRawRecordHash, ImportedRawRecordPosition,
+        ImportedRecordEntryPosition, ImportedTranscriptEntryId, ImportedTranscriptPosition,
+        decode_format, distinct_expected_blobs, encode_format, entries_in_key_order,
+        raw_blobs_in_key_order,
     };
 
     fn encoded_raw(key: u8) -> EncodedRawRecord {
@@ -1712,6 +2396,10 @@ mod tests {
             (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_TWO)
         );
         assert_eq!(
+            encode_format(ImportedConversationFormat::ClaudeCodeSessionJsonlV3),
+            (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_THREE)
+        );
+        assert_eq!(
             decode_format(CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE)
                 .expect("version one remains readable"),
             ImportedConversationFormat::ClaudeCodeSessionJsonlV1
@@ -1720,6 +2408,11 @@ mod tests {
             decode_format(CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_TWO)
                 .expect("version two remains readable"),
             ImportedConversationFormat::ClaudeCodeSessionJsonlV2
+        );
+        assert_eq!(
+            decode_format(CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_THREE)
+                .expect("version three is readable"),
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV3
         );
     }
 
@@ -1730,9 +2423,18 @@ mod tests {
             (CODEX_FORMAT, CODEX_VERSION_ONE)
         );
         assert_eq!(
+            encode_format(ImportedConversationFormat::CodexRolloutJsonlV2),
+            (CODEX_FORMAT, CODEX_VERSION_TWO)
+        );
+        assert_eq!(
             decode_format(CODEX_FORMAT, CODEX_VERSION_ONE)
                 .expect("Codex rollout version one remains readable"),
             ImportedConversationFormat::CodexRolloutJsonlV1
+        );
+        assert_eq!(
+            decode_format(CODEX_FORMAT, CODEX_VERSION_TWO)
+                .expect("Codex rollout version two is readable"),
+            ImportedConversationFormat::CodexRolloutJsonlV2
         );
     }
 

@@ -2579,12 +2579,12 @@ fn import_transport_selects_single_shot_only_when_the_exact_frame_fits()
     let request_id = RequestId::try_new(1)?;
 
     assert!(source_fits_single_shot_import(
-        ConversationImportFormat::CodexRolloutJsonlV1,
+        ConversationImportFormat::CodexRolloutJsonlV2,
         small_source,
         request_id,
     )?);
     assert!(!source_fits_single_shot_import(
-        ConversationImportFormat::CodexRolloutJsonlV1,
+        ConversationImportFormat::CodexRolloutJsonlV2,
         &oversized_source,
         request_id,
     )?);
@@ -2647,7 +2647,7 @@ async fn large_file_import_streams_exact_bounded_assembly_and_commits() -> Resul
         assert_eq!(
             begin.request(),
             &ClientRequest::BeginConversationImport {
-                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                format: ConversationImportFormat::CodexRolloutJsonlV2,
                 declared_size_bytes: CanonicalU64::new(
                     u64::try_from(expected_source.len()).map_err(io::Error::other)?,
                 ),
@@ -2738,7 +2738,7 @@ async fn large_file_import_streams_exact_bounded_assembly_and_commits() -> Resul
 
     let outcome = import_conversation_file(
         &mut client,
-        ConversationImportFormat::CodexRolloutJsonlV1,
+        ConversationImportFormat::CodexRolloutJsonlV2,
         source_file,
     )
     .await?;

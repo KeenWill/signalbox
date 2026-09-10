@@ -19,17 +19,17 @@ use signalbox_application::{
     CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
     EligibilityNudge, ImportConversationError, ImportConversationOutcome, ImportConversationReport,
-    ImportConversationService, ImportedConversationDropFacts, InProcessEligibilityNudge,
-    InProcessToolDispatchGate, ListConversationsService, ListSessionMetadataService,
-    LoadSessionMetadataService, OperatorFailureClass, OverrideDeniedToolRequestService,
-    PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
-    ReplaceSessionMetadataService, ReviewPassCompletionStatus, ReviewWorkflowCommand,
-    ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
-    ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
-    SessionMetadataListQuery, SessionTimelineEventKind,
-    StreamingResilientImportedConversationConverter, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, SubmitInputTransaction, UpdateSessionPlacementOutcome,
+    ImportConversationService, ImportedConversationDropFacts, ImportedConversationIdGenerator,
+    ImportedConversationStoreOutcome, InProcessEligibilityNudge, InProcessToolDispatchGate,
+    ListConversationsService, ListSessionMetadataService, LoadSessionMetadataService,
+    OperatorFailureClass, OverrideDeniedToolRequestService, PromptMemberStatement,
+    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
+    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
+    ReviewPassCompletionStatus, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
+    ReviewWorkflowCommandResult, ReviewWorkflowCommandService, ReviewWorkflowOperation,
+    ReviewWorkflowOperationKind, SessionMetadataListItem, SessionMetadataListQuery,
+    SessionTimelineEventKind, StreamingResilientImportedConversationConverter, SubmitInputOutcome,
+    SubmitInputRequest, SubmitInputService, SubmitInputTransaction, UpdateSessionPlacementOutcome,
     UpdateSessionPlacementRequest, UpdateSessionPlacementService,
     UuidV7CommissionedDispatchIdGenerator, UuidV7CreateSessionFromImportedFrontierIdGenerator,
     UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
@@ -37,11 +37,12 @@ use signalbox_application::{
 };
 use signalbox_blob_store::ExpectedBlob;
 use signalbox_conversation_import_claude_code::{
-    ClaudeCodeJsonlConversionError, ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConverter,
+    ClaudeCodeJsonlConversionError, ClaudeCodeJsonlConversionFailure,
+    ResilientClaudeCodeJsonlConverter,
 };
 use signalbox_conversation_import_codex::{
     CodexRolloutJsonlConversionError, CodexRolloutJsonlConversionFailure,
-    CodexRolloutJsonlConverter,
+    ResilientCodexRolloutJsonlConverter,
 };
 use signalbox_domain::{
     AcceptedInputId, Actor, BranchName, CancelledModelCallTurnIdentities, CommandPrincipal,
@@ -57,7 +58,7 @@ use signalbox_domain::{
     FrozenModelSelection, Goal, GoalBlockProvenance, GoalBlockedReasonKind,
     GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult, GoalEvent,
     GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
-    ImportedConversation, ImportedConversationFormat, ImportedConversationId,
+    ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
     ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
     ImportedTranscriptEntryInput, ImportedTranscriptPosition, ModelAlias, ModelCallId,
@@ -117,7 +118,8 @@ use signalbox_persistence::{
     },
     conversation_import::{
         ImportedConversationRepository, ImportedConversationRepositoryError,
-        ImportedRawBlobStorageError,
+        ImportedRawBlobStorageError, StreamingImportedConversationError,
+        StreamingImportedConversationReport,
     },
     conversation_listing::{ConversationListingRepository, ConversationListingRepositoryError},
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},

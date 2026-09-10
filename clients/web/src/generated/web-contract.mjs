@@ -1227,8 +1227,18 @@ const schemas = {
             "type": "string"
           },
           {
+            "const": "claude_code_session_jsonl_v3",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 3.",
+            "type": "string"
+          },
+          {
             "const": "codex_rollout_jsonl_v1",
             "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v2",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 2.",
             "type": "string"
           }
         ]
@@ -1757,8 +1767,18 @@ const schemas = {
             "type": "string"
           },
           {
+            "const": "claude_code_session_jsonl_v3",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 3.",
+            "type": "string"
+          },
+          {
             "const": "codex_rollout_jsonl_v1",
             "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v2",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 2.",
             "type": "string"
           }
         ]
@@ -1904,8 +1924,18 @@ const schemas = {
             "type": "string"
           },
           {
+            "const": "claude_code_session_jsonl_v3",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 3.",
+            "type": "string"
+          },
+          {
             "const": "codex_rollout_jsonl_v1",
             "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v2",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 2.",
             "type": "string"
           }
         ]
