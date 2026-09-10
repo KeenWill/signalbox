@@ -790,6 +790,10 @@ impl ObjectSource {
         let pack = &self.packs[pack_index];
         while let Some((offset, size)) = entries.pop() {
             self.check_deadline()?;
+            let limit = crate::limits::object_byte_limit(self.max_object_bytes, content.kind);
+            if size > limit {
+                return Err(LocalGitFailure::Repository);
+            }
             let mut file = pack_file.try_clone().map_err(rejected)?;
             file.seek(SeekFrom::Start(offset)).map_err(rejected)?;
             let mut decoder = compressed_decoder(
@@ -799,7 +803,6 @@ impl ObjectSource {
             );
             let delta = ObjectContent::decode(&mut decoder, size, ObjectType::Blob, self.deadline)?;
             drop(decoder);
-            let limit = crate::limits::object_byte_limit(self.max_object_bytes, content.kind);
             content = content.apply_delta(delta.file, Some(limit), self.deadline)?;
         }
         if file_snapshot_identity(&pack_file.metadata().map_err(rejected)?)
