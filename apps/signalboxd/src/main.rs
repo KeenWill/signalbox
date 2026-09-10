@@ -1988,6 +1988,7 @@ async fn run_hub_incarnation(
     let (execution_supervisor, fatal_execution) = FatalExecutionSupervisor::new(());
     let scan_supervision = execution_supervisor.recovery_reporter();
     let scan_pool = pool.clone();
+    let scan_nudge = eligibility_nudge.clone();
     let scan_approval_wait_wakeups = approval_wait_wakeups.clone();
     let startup = migrate_scan_then_schedule(
         async {
@@ -2021,7 +2022,11 @@ async fn run_hub_incarnation(
                     )
                 })?;
             let outcome = scan_supervision
-                .scan_startup_sessions(PostgresStartupScanRepository::new(scan_pool))
+                .scan_and_park_startup_sessions(
+                    PostgresStartupScanRepository::new(scan_pool.clone()),
+                    scan_pool,
+                    scan_nudge,
+                )
                 .await
                 .map_err(|error| {
                     let failure_class = error.operator_failure_class();
@@ -4398,7 +4403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_session_failures_reach_scheduling_after_scanning_other_sessions() {
+    async fn startup_scan_retains_scoped_failures_without_requesting_process_recovery() {
         use signalbox_persistence::startup::{StartupScanCorruption, StartupScanRepositoryError};
         for (label, failure, operator_write_fails, suspended) in [
             (
@@ -4443,31 +4448,12 @@ mod tests {
                 operator_write_fails,
                 recovered: Arc::clone(&recovered),
             };
-            let result = migrate_scan_then_schedule(
-                ready(Ok(())),
-                async {
-                    reporter
-                        .scan_startup_sessions(repository)
-                        .await
-                        .map(|_| ())
-                        .map_err(|error| {
-                            HubRuntimeError::startup_scan(
-                                error.operator_failure_class(),
-                                error.session(),
-                                None,
-                            )
-                        })
-                },
-                || async {
-                    tokio::select! {
-                        biased;
-                        () = signal.wait_for_process_recovery() => RuntimePhase::Runtime,
-                        phase = ready(RuntimePhase::Scheduling) => phase,
-                    }
-                },
-            )
-            .await;
-            assert_eq!(result, Ok(RuntimePhase::Scheduling), "{label}");
+            reporter.scan_startup_sessions(repository).await.unwrap();
+            tokio::select! {
+                biased;
+                () = signal.wait_for_process_recovery() => panic!("{label}: scoped failure requested process recovery"),
+                () = ready(()) => {}
+            }
             assert_eq!(*recovered.lock().unwrap(), [failed, healthy], "{label}");
             assert_eq!(signal.is_triggered(), suspended, "{label}");
         }

@@ -5685,10 +5685,15 @@ async fn startup_corrupt_session_retains_operator_item_without_process_recovery(
         .execute(&fixture.pool)
         .await?;
     let (supervisor, signal) = signalboxd::FatalExecutionSupervisor::new(());
+    let (nudge, _source) = InProcessEligibilityWorkSource::new(NoReconciliationHints);
 
     let outcome = supervisor
         .recovery_reporter()
-        .scan_startup_sessions(PostgresStartupScanRepository::new(fixture.pool.clone()))
+        .scan_and_park_startup_sessions(
+            PostgresStartupScanRepository::new(fixture.pool.clone()),
+            fixture.pool.clone(),
+            nudge,
+        )
         .await?;
 
     assert_eq!(outcome.skipped_corrupt_sessions(), &[fixture.session]);
@@ -5709,5 +5714,151 @@ async fn startup_corrupt_session_retains_operator_item_without_process_recovery(
         () = signal.wait_for_process_recovery() => panic!("session corruption stopped scheduling"),
         () = std::future::ready(()) => {}
     }
+    Ok(())
+}
+
+struct FailedStartupOperatorWrite {
+    session: SessionId,
+    unavailable: PostgresStartupScanRepository,
+    failed: Option<tokio::sync::oneshot::Sender<OperatorFailureClass>>,
+}
+
+impl signalbox_application::StartupScanRepository for FailedStartupOperatorWrite {
+    type Error = signalbox_persistence::startup::StartupScanRepositoryError;
+
+    async fn sessions(&mut self) -> Result<Box<[SessionId]>, Self::Error> {
+        Ok(Box::new([self.session]))
+    }
+
+    async fn recover<Generator>(
+        &mut self,
+        _session: SessionId,
+        _identities: signalbox_domain::AcceptedInputTurnFailureIdentities,
+        _ids: &mut Generator,
+    ) -> Result<signalbox_application::StartupScanSessionOutcome, Self::Error>
+    where
+        Generator: signalbox_application::StartupScanIdGenerator + Send,
+    {
+        Err(
+            signalbox_persistence::startup::StartupScanCorruption::Missing("session projection")
+                .into(),
+        )
+    }
+
+    async fn record_corrupt_session(
+        &mut self,
+        session: SessionId,
+        error: &Self::Error,
+    ) -> Result<(), Self::Error> {
+        let result = self
+            .unavailable
+            .record_corrupt_session(session, error)
+            .await;
+        self.failed
+            .take()
+            .expect("startup attempts its initial operator write once")
+            .send(
+                result
+                    .as_ref()
+                    .expect_err("the closed pool rejects the initial operator write")
+                    .operator_failure_class(),
+            )
+            .expect("the startup observer remains available");
+        result
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_waits_for_failed_operator_write_to_commit_before_launching_runtime()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::session_lifecycle::SessionLifecycleRepository;
+
+    // Arbitrary database-local key held by the test until the parking commit may finish.
+    const PARK_COMMIT_LOCK: i64 = 158;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    // Only the integer fixture lock key is interpolated into this DDL.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION hold_startup_parking_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_advisory_xact_lock({PARK_COMMIT_LOCK}); RETURN NEW; END $$;
+         CREATE CONSTRAINT TRIGGER hold_startup_parking_commit
+         AFTER INSERT ON session_supervision DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW EXECUTE FUNCTION hold_startup_parking_commit();"
+    )))
+    .execute(&fixture.pool)
+    .await?;
+    let mut commit_gate = fixture.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(PARK_COMMIT_LOCK)
+        .execute(&mut *commit_gate)
+        .await?;
+    let unavailable = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://fixture:fixture@localhost/fixture")?;
+    unavailable.close().await;
+    let (failed, failure) = tokio::sync::oneshot::channel();
+    let repository = FailedStartupOperatorWrite {
+        session: fixture.session,
+        unavailable: PostgresStartupScanRepository::new(unavailable),
+        failed: Some(failed),
+    };
+    let (supervisor, signal) = signalboxd::FatalExecutionSupervisor::new(());
+    let reporter = supervisor.recovery_reporter();
+    let (nudge, _source) = InProcessEligibilityWorkSource::new(NoReconciliationHints);
+    let lifecycle = SessionLifecycleRepository::new(fixture.pool.clone());
+    let runtime = async {
+        let outcome = reporter
+            .scan_and_park_startup_sessions(repository, fixture.pool.clone(), nudge)
+            .await?;
+        let session = fixture.session;
+        let lifecycle = lifecycle.clone();
+        let observed = tokio::spawn(async move { lifecycle.load(session).await }).await??;
+        Ok::<_, Box<dyn Error>>((outcome, observed.unwrap()))
+    };
+    tokio::pin!(runtime);
+    tokio::select! {
+        biased;
+        _ = &mut runtime => panic!("runtime launched before failed operator parking committed"),
+        failure = failure => assert_eq!(failure?, OperatorFailureClass::Infrastructure { commit_ambiguous: false }),
+    }
+    let blocked_commit = async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                 AND NOT granted AND objid::bigint = $1
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))",
+            )
+            .bind(PARK_COMMIT_LOCK)
+            .fetch_one(&fixture.pool)
+            .await?;
+            if waiting {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = &mut runtime => panic!("runtime launched while the parking transaction was uncommitted"),
+        result = timeout(Duration::from_secs(10), blocked_commit) => result??,
+    }
+    assert!(signal.is_triggered());
+    assert!(
+        !lifecycle
+            .load(fixture.session)
+            .await?
+            .unwrap()
+            .state()
+            .is_parked()
+    );
+    commit_gate.commit().await?;
+    let (outcome, observed) = timeout(Duration::from_secs(10), runtime).await??;
+    assert_eq!(outcome.skipped_corrupt_sessions(), &[fixture.session]);
+    assert!(observed.state().is_parked());
+    assert!(observed.supervision_failure().unwrap().pending);
+    assert_eq!(
+        observed.supervision_failure().unwrap().class,
+        OperatorFailureClass::FailClosedCorruption
+    );
+    assert!(!signal.is_triggered());
     Ok(())
 }

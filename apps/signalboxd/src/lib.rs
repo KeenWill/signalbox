@@ -552,6 +552,35 @@ pub struct FatalRecoveryReporter {
 }
 
 impl FatalRecoveryReporter {
+    /// Completes startup recovery only after scoped failures are parked durably.
+    pub async fn scan_and_park_startup_sessions<Repository>(
+        &self,
+        repository: Repository,
+        pool: sqlx::PgPool,
+        nudge: signalbox_application::InProcessEligibilityNudge,
+    ) -> Result<
+        signalbox_application::StartupScanOutcome,
+        signalbox_application::StartupScanError<Repository::Error>,
+    >
+    where
+        Repository: signalbox_application::StartupScanRepository + Send,
+        Repository::Error: Send + Sync,
+    {
+        let outcome = self.scan_startup_sessions(repository).await?;
+        let mut changed = self.fatal_signal.subscribe();
+        tokio::select! {
+            () = self.park_failed_sessions(pool, nudge) => {}
+            () = async {
+                while !changed.borrow_and_update().pending.is_empty() {
+                    if changed.changed().await.is_err() {
+                        return;
+                    }
+                }
+            } => {}
+        }
+        Ok(outcome)
+    }
+
     /// Scans startup sessions, retaining scoped failures for operator parking.
     pub async fn scan_startup_sessions<Repository>(
         &self,

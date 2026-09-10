@@ -309,17 +309,18 @@ without automatic repair. Operator status exposes both kinds of pending
 supervision item. Successful startup reconstitution settles repaired terminal
 items without resuming them. Other sessions continue. Session-scoped recovery
 failures, including failed operator-item writes, remain suspended in the
-execution supervisor while operator parking retries. Only failures without
-session scope stop initial startup visibly. Fenced migrations and the startup
-scan run under guard monitoring, including operator-item identity
-reconciliation. Observed guard loss starts the recovery clock even while pool
-drain waits, so the elapsed bound and shutdown can interrupt that wait. During
-guard recovery, unscoped database failures throughout incarnation
-reconstruction, including repository-watch startup, continue reacquisition with
-the same capped backoff and elapsed bound, after closing the failed
-incarnation’s fenced pool. Migration validation, fence corruption, and reload
-corruption failures stop recovery visibly. Recovery is idempotent, and a stale
-observation rolls back.
+execution supervisor while operator parking retries. Runtime components that
+read durable lifecycle state launch only after those failures are parked
+durably. Only failures without session scope stop initial startup visibly.
+Fenced migrations and the startup scan run under guard monitoring, including
+operator-item identity reconciliation. Observed guard loss starts the recovery
+clock even while pool drain waits, so the elapsed bound and shutdown can
+interrupt that wait. During guard recovery, unscoped database failures
+throughout incarnation reconstruction, including repository-watch startup,
+continue reacquisition with the same capped backoff and elapsed bound, after
+closing the failed incarnation’s fenced pool. Migration validation, fence
+corruption, and reload corruption failures stop recovery visibly. Recovery is
+idempotent, and a stale observation rolls back.
 
 Every terminal transition of a source turn, whether by interrupt, model-call
 outcome, startup recovery, or the watchdog, reclassifies its pending steering
