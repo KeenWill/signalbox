@@ -8,7 +8,7 @@ pub use continuation::repository_watch_continuation_test_request;
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityNudge, EligibilityPass, InProcessEligibilityNudge,
     ModelCallInputTokenCount, ModelCallInputTokenCounter, OperatorFailureClass,
-    SchedulerPassExpiryHandler, ToolCatalog,
+    SchedulerPassExpiryHandler, ToolCatalog, ToolContinuationIdentities,
 };
 use signalbox_domain::{
     AcceptedInputTurnActivationIdentities, ContextFrontierId, DirectModelSelection,
@@ -24,6 +24,7 @@ use signalbox_persistence::{
         CommitCompactionFailurePreviewOutcome, CommitCountedAttachmentFailurePreviewOutcome,
         PreparedActivationPreview, StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
     },
+    tool_loop::ToolLoopRepositoryError,
 };
 
 use crate::{
@@ -72,6 +73,13 @@ pub enum ReportedUsageCompactionError {
         /// Closed operator cause retained across error erasure.
         cause_code: &'static str,
     },
+    /// Closing an active checkpoint after compaction preparation failed.
+    CheckpointFailureClosure {
+        /// Selected active turn.
+        turn: TurnId,
+        /// Typed tool-continuation failure.
+        source: ToolLoopRepositoryError,
+    },
     /// Closing the selected turn after compaction failure could not commit.
     CompactionFailureClosure {
         /// Selected queued turn.
@@ -89,9 +97,9 @@ impl ReportedUsageCompactionError {
             Self::Model { turn, .. }
             | Self::Render(turn)
             | Self::ContextWindowUnavailable(turn) => Some(*turn),
-            Self::Compaction { turn, .. } | Self::CompactionFailureClosure { turn, .. } => {
-                Some(*turn)
-            }
+            Self::Compaction { turn, .. }
+            | Self::CompactionFailureClosure { turn, .. }
+            | Self::CheckpointFailureClosure { turn, .. } => Some(*turn),
         }
     }
 }
@@ -109,6 +117,7 @@ impl Error for ReportedUsageCompactionError {
             Self::Continuation(error) => Some(error),
             Self::Model { source, .. } => Some(source),
             Self::CompactionFailureClosure { source, .. } => Some(source),
+            Self::CheckpointFailureClosure { source, .. } => Some(source),
             Self::Render(_) | Self::ContextWindowUnavailable(_) | Self::Compaction { .. } => None,
         }
     }
@@ -124,6 +133,7 @@ impl ClassifyOperatorFailure for ReportedUsageCompactionError {
             Self::ContextWindowUnavailable(_) => OperatorFailureClass::CallerOrHubBug,
             Self::Compaction { failure_class, .. } => *failure_class,
             Self::CompactionFailureClosure { source, .. } => source.operator_failure_class(),
+            Self::CheckpointFailureClosure { source, .. } => source.operator_failure_class(),
         }
     }
 
@@ -136,6 +146,7 @@ impl ClassifyOperatorFailure for ReportedUsageCompactionError {
             Self::ContextWindowUnavailable(_) => "reported_usage_context_window_unavailable",
             Self::Compaction { cause_code, .. } => cause_code,
             Self::CompactionFailureClosure { source, .. } => source.operator_failure_cause_code(),
+            Self::CheckpointFailureClosure { source, .. } => source.operator_failure_cause_code(),
         }
     }
 }
@@ -252,8 +263,9 @@ impl ReportedUsageCompaction {
         session: SessionId,
         observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
     ) -> Result<(), ReportedUsageCompactionError> {
-        let checkpoint = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid)>(
-            "SELECT turn.turn_id, COALESCE(call.direct_model_selection_id, call.frozen_alias_selected_direct_id)
+        let checkpoint = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, uuid::Uuid, uuid::Uuid)>(
+            "SELECT turn.turn_id, COALESCE(call.direct_model_selection_id, call.frozen_alias_selected_direct_id),
+                    turn.compaction_frontier_id, turn.active_tool_round_call_id
                FROM turn_lifecycle AS turn
                JOIN model_call AS call ON call.model_call_id = turn.active_tool_round_call_id
               WHERE turn.session_id = $1 AND turn.state_kind = 'active'
@@ -268,10 +280,10 @@ impl ReportedUsageCompaction {
         .map_err(|error| ReportedUsageCompactionError::Continuation(
             ContinuationCompactionError::Database(error),
         ))?;
-        if let Some((turn, selection)) = checkpoint {
+        if let Some((turn, selection, checkpoint, producing_call)) = checkpoint {
             self.enqueue_continuation(session).await?;
             let turn = TurnId::from_uuid(turn);
-            compact_automatically(
+            let result = compact_automatically(
                 &self.model_calls,
                 &self.model_configuration,
                 &self.compaction_model,
@@ -281,12 +293,53 @@ impl ReportedUsageCompaction {
                 observe_prepared,
                 self.blob_registry.as_deref(),
             )
-            .await
-            .map_err(|error| ReportedUsageCompactionError::Compaction {
-                turn,
-                failure_class: error.operator_failure_class(),
-                cause_code: error.operator_failure_cause_code(),
-            })?;
+            .await;
+            if let Err(error) = result {
+                let failure_class = error.operator_failure_class();
+                let cause_code = error.operator_failure_cause_code();
+                if !matches!(
+                    error,
+                    crate::process_runtime::AutomaticContextCompactionError::AttachmentUnavailable
+                ) && failure_class
+                    != (OperatorFailureClass::Infrastructure {
+                        commit_ambiguous: true,
+                    })
+                {
+                    self.model_calls
+                        .tool_loop_repository()
+                        .fail_compaction_checkpoint(
+                            session,
+                            turn,
+                            ModelCallId::from_uuid(producing_call),
+                            ContextFrontierId::from_uuid(checkpoint),
+                            ToolContinuationIdentities::new(
+                                Vec::new(),
+                                ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+                                ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+                                FailedModelCallTurnIdentities::new(
+                                    SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+                                    ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+                                ),
+                                ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+                            ),
+                            |_| {
+                                (
+                                    SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+                                    TurnId::from_uuid(uuid::Uuid::now_v7()),
+                                )
+                            },
+                        )
+                        .await
+                        .map_err(|source| {
+                            ReportedUsageCompactionError::CheckpointFailureClosure { turn, source }
+                        })?;
+                }
+                return Err(ReportedUsageCompactionError::Compaction {
+                    turn,
+                    failure_class,
+                    cause_code,
+                });
+            }
         }
         self.enqueue_continuation(session).await?;
         self.compact_if_needed_for(session, observe_prepared, false)

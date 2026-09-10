@@ -51,26 +51,12 @@ BEGIN
             ''failed tool-loop turn % lacks its exact terminal execution cause''',
         '    ) AND NOT (
         lifecycle.terminal_cause_kind = ''context_compaction_failed''
-        AND EXISTS (
+        AND NOT EXISTS (
             SELECT 1
               FROM compact_session_command AS command
-              JOIN context_compaction_model_call AS call
-                ON call.model_call_id = command.model_call_id
-               AND call.session_id = command.session_id
-              LEFT JOIN context_compaction AS summary
-                ON summary.context_compaction_id = command.result_context_compaction_id
-               AND summary.session_id = command.session_id
-              LEFT JOIN semantic_transcript_entry AS entry
-                ON entry.source_session_id = summary.session_id
-               AND entry.semantic_entry_id = summary.summary_entry_id
              WHERE command.session_id = lifecycle.session_id
                AND command.automatic_for_turn_id = lifecycle.turn_id
-               AND call.state_kind = ''terminal''
-               AND context_frontier_preserves_prefix(lifecycle.session_id,
-                   call.source_frontier_id, lifecycle.terminal_frontier_id)
-               AND (command.result_kind = ''failed''
-                   OR (command.result_kind = ''applied''
-                       AND octet_length(entry.context_summary_value) = 1))
+               AND command.result_kind = ''pending''
         )
     ) THEN
         RAISE EXCEPTION
