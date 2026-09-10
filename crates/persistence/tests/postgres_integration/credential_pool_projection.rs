@@ -240,7 +240,7 @@ async fn unavailable_pool_members_are_skipped_before_preparation_and_can_exhaust
 async fn member_availability_migration_backfills_existing_call_policy_id()
 -> Result<(), Box<dyn Error>> {
     const SEED: u128 = 0x4604_3000;
-    const MIGRATION: i64 = 202609090480;
+    const MIGRATION: i64 = 202609091420;
     let (container, pool, _) = unmigrated_postgres().await?;
     let previous = sqlx::migrate::Migrator::with_migrations(
         signalbox_persistence::MIGRATOR
