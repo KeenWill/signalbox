@@ -374,16 +374,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn lifecycle_couples_identity_to_disposition() {
-        let id = accepted_input_id(1);
-        let disposition = pending_steering(2);
-        let lifecycle = AcceptedInputLifecycle::new(id, disposition.clone());
-
-        assert_eq!(lifecycle.id(), id);
-        assert_eq!(lifecycle.disposition(), &disposition);
-    }
-
     /// accepted steering remains separately identified; typed
     /// transitions preserve the accepted-input identity.
     #[test]

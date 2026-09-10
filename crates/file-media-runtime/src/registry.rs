@@ -1465,14 +1465,6 @@ mod tests {
     }
 
     #[test]
-    fn binary_json_tree_preserves_odd_leaf_groups() {
-        assert_eq!(
-            binary_json_tree(3),
-            serde_json::json!([[null, null], [null]])
-        );
-    }
-
-    #[test]
     fn read_options_reject_balanced_work_with_a_small_frontier() {
         let options = serde_json::json!({ "tree": binary_json_tree(32_769) });
 

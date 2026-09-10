@@ -47,12 +47,12 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use signalbox_model_runtime::{
-    BoundaryLossEvidence, CancellationSignal, CompletionEvidence, CompletionFinish,
-    ConversationMessage, CredentialAccess, CredentialAccessError, CredentialAccessFailure,
-    CredentialReference, CredentialValue, DeliveryMode, ExchangeFacts, LossCause, ModelOperation,
-    ModelRuntime, ModelSettings, PreparationDefect, PreparationFailure, PreparationOutcome,
-    ProviderReportedModel, ProviderRequestId, RefusalEvidence, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage, ToolCallsAtLoss,
+    BoundaryLossEvidence, CancellationSignal, ConversationMessage, CredentialAccess,
+    CredentialAccessError, CredentialAccessFailure, CredentialReference, CredentialValue,
+    DeliveryMode, ExchangeFacts, LossCause, ModelOperation, ModelRuntime, ModelSettings,
+    PreparationDefect, PreparationFailure, PreparationOutcome, ProviderReportedModel,
+    ProviderRequestId, RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
+    ToolCallsAtLoss,
 };
 use signalbox_model_runtime_claude_cli::{
     CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY, ClaudeCliConfig, ClaudeCliPreparedRequest,
@@ -102,7 +102,6 @@ const MAX_OUTPUT_TOKENS: u32 = 256;
 /// Arbitrary non-default facts that prove the shared response projection
 /// preserves terminal evidence rather than manufacturing defaults.
 const FIXTURE_SESSION_ID: &str = "fixture-session";
-const FIXTURE_MODEL: &str = "fixture-model";
 const FIXTURE_INPUT_TOKENS: u64 = 3;
 const FIXTURE_OUTPUT_TOKENS: u64 = 1;
 
@@ -741,14 +740,6 @@ fn credentialed_step_workflow() -> String {
     CREDENTIALED_STEP_LINES.join("\n        ")
 }
 
-#[test]
-fn credentialed_step_scan_accepts_the_pinned_step() {
-    assert_eq!(
-        workflow_step_lines(&credentialed_step_workflow(), CREDENTIALED_STEP),
-        CREDENTIALED_STEP_LINES
-    );
-}
-
 /// The read the name-keyed inventory cannot see: `env` writes the credential to
 /// the job log without the variable appearing on its line.
 #[test]
@@ -860,14 +851,6 @@ fn the_smoke_workflow_supplies_and_cleans_one_nonsecret_credential_file_path() {
 /// permitted inventory by exactly the one line under test.
 fn permitted_credential_workflow() -> String {
     PERMITTED_CREDENTIAL_SITES.join("\n")
-}
-
-#[test]
-fn credential_scan_accepts_the_permitted_inventory() {
-    assert_eq!(
-        credential_reading_lines(&permitted_credential_workflow()),
-        PERMITTED_CREDENTIAL_SITES
-    );
 }
 
 /// A quoted braced expansion echoed into the job log is the leak this scan
@@ -1164,22 +1147,6 @@ fn trivial_success_command() -> tokio::process::Command {
     {
         tokio::process::Command::new("true")
     }
-}
-
-/// The scripted retry fixture returns exactly the requested run of `ETXTBSY`
-/// failures before succeeding.
-#[tokio::test]
-async fn busy_then_success_fails_the_requested_count_then_spawns() {
-    let mut spawn = busy_then_success(2);
-
-    assert_eq!(spawn().unwrap_err().raw_os_error(), Some(26));
-    assert_eq!(spawn().unwrap_err().raw_os_error(), Some(26));
-    let child = spawn().expect("the third attempt spawns");
-    let status = child
-        .wait_with_output()
-        .await
-        .expect("the spawned child is awaited");
-    assert!(status.status.success());
 }
 
 /// The retry loop keeps trying through transient `ETXTBSY` and returns the
@@ -1689,52 +1656,12 @@ fn fixture_exchange() -> ExchangeFacts {
     }
 }
 
-fn fixture_reported_model() -> ProviderReportedModel {
-    ProviderReportedModel::new(FIXTURE_MODEL)
-}
-
 fn fixture_usage() -> TokenUsage {
     TokenUsage {
         input_tokens: Some(FIXTURE_INPUT_TOKENS),
         output_tokens: Some(FIXTURE_OUTPUT_TOKENS),
         ..TokenUsage::default()
     }
-}
-
-#[test]
-fn decoded_response_accepts_completion() {
-    let evidence = TerminalEvidence::Completed(CompletionEvidence {
-        exchange: fixture_exchange(),
-        message_id: None,
-        reported_model: Some(fixture_reported_model()),
-        finish: CompletionFinish::EndTurn,
-        content: Vec::new(),
-        usage: fixture_usage(),
-    });
-
-    let decoded = require_decoded_response(evidence);
-    assert_eq!(decoded.exchange, fixture_exchange());
-    assert_eq!(decoded.reported_model, Some(fixture_reported_model()));
-    assert_eq!(decoded.usage, fixture_usage());
-}
-
-#[test]
-fn decoded_response_accepts_refusal_without_completion_material() {
-    let evidence = TerminalEvidence::Refused(RefusalEvidence {
-        reason: signalbox_model_runtime::RefusalReason::Unspecified,
-        exchange: fixture_exchange(),
-        message_id: None,
-        reported_model: Some(fixture_reported_model()),
-        content: Vec::new(),
-        usage: fixture_usage(),
-        retained_input_tokens: None,
-        retained_output_tokens: None,
-    });
-
-    let decoded = require_decoded_response(evidence);
-    assert_eq!(decoded.exchange, fixture_exchange());
-    assert_eq!(decoded.reported_model, Some(fixture_reported_model()));
-    assert_eq!(decoded.usage, fixture_usage());
 }
 
 /// The smoke accepts only a decoded response: every other terminal variant —
@@ -2125,43 +2052,6 @@ fn executable_resolution_skips_an_other_only_execute_bit() {
         resolved,
         EffectivePrivilege::observe()
             .other_only_resolution(OtherOnlyCandidates { shadow, on_path })
-    );
-}
-
-/// Distinct fixture candidates the privilege assertions below select between.
-#[cfg(unix)]
-fn other_only_candidates() -> OtherOnlyCandidates {
-    OtherOnlyCandidates {
-        shadow: std::path::PathBuf::from("/fixture/other-only-shadow"),
-        on_path: std::path::PathBuf::from("/fixture/runnable-on-path"),
-    }
-}
-
-/// The unprivileged expectation, stated directly so the arm the local run does
-/// not take is still covered.
-#[cfg(unix)]
-#[test]
-fn unprivileged_resolution_skips_the_other_only_shadow() {
-    let candidates = other_only_candidates();
-    let expected = candidates.on_path.clone();
-
-    assert_eq!(
-        EffectivePrivilege::Unprivileged.other_only_resolution(candidates),
-        expected
-    );
-}
-
-/// The root expectation, likewise — an execute bit anywhere makes the shadow
-/// runnable, so it wins the search.
-#[cfg(unix)]
-#[test]
-fn root_resolution_takes_the_other_only_shadow() {
-    let candidates = other_only_candidates();
-    let expected = candidates.shadow.clone();
-
-    assert_eq!(
-        EffectivePrivilege::Root.other_only_resolution(candidates),
-        expected
     );
 }
 

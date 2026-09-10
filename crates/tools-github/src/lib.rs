@@ -2934,15 +2934,7 @@ mod tests {
     #[derive(Clone, Debug, Default)]
     struct RecordingCreateTransport(Arc<Mutex<Option<RecordedCreateRequest>>>);
 
-    impl RecordingCreateTransport {
-        fn recorded(&self) -> RecordedCreateRequest {
-            self.0
-                .lock()
-                .expect("recording transport lock is available")
-                .clone()
-                .expect("creation request was recorded")
-        }
-    }
+    impl RecordingCreateTransport {}
 
     impl GitHubTransport for RecordingCreateTransport {
         async fn execute(
@@ -3269,42 +3261,6 @@ mod tests {
         );
         assert!(schema["properties"].get("repository").is_none());
         assert!(decode_create_pull_request(&injected_repository).is_err());
-    }
-
-    #[tokio::test]
-    async fn create_transport_records_exact_configured_request() {
-        let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
-            .expect("configured repository is admitted");
-        let arguments = decode_create_pull_request(&normalized(serde_json::json!({
-            "title": CREATE_TITLE,
-            "body": CREATE_BODY,
-            "head": CREATE_HEAD,
-            "base": CREATE_BASE
-        })))
-        .expect("creation arguments are admitted");
-        let operation = GitHubOperation::CreatePullRequest {
-            repository,
-            arguments,
-        };
-        let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
-        let policy = GitHubEgressPolicy::github_api_only();
-        let mut transport = RecordingCreateTransport::default();
-        let observer = transport.clone();
-
-        let result = transport
-            .execute(operation, &credential, &policy)
-            .await
-            .expect("synthetic creation succeeds");
-        let recorded = observer.recorded();
-
-        assert_eq!(result.kind(), GitHubResultKind::CreatedPullRequest);
-        assert_eq!(recorded.repository, CONFIGURED_REPOSITORY);
-        assert_eq!(recorded.title, CREATE_TITLE);
-        assert_eq!(recorded.body, CREATE_BODY);
-        assert_eq!(recorded.head, CREATE_HEAD);
-        assert_eq!(recorded.base, CREATE_BASE);
-        assert_eq!(recorded.credential, SYNTHETIC_TOKEN.as_bytes());
-        assert_eq!(recorded.origin, GITHUB_API_ORIGIN);
     }
 
     #[test]

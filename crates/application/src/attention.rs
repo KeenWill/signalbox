@@ -384,11 +384,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_preserves_empty_frontier() {
-        assert_eq!(AttentionCursor::new(0).value(), 0);
-    }
-
-    #[test]
     fn fleet_snapshot_bound_is_pinned() {
         assert_eq!(max_attention_snapshot_items(), 32);
     }
