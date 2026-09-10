@@ -637,7 +637,7 @@ fn blob_read_error_response(error: crate::blob_read_runtime::BlobReadError) -> R
     use crate::blob_read_runtime::BlobReadError;
     match error {
         BlobReadError::NotFound => runtime_error_response(WebBlobRuntimeError::NotFound),
-        BlobReadError::RangeOutOfBounds { .. } => application_error(
+        BlobReadError::RangeOutOfBounds => application_error(
             StatusCode::RANGE_NOT_SATISFIABLE,
             "blob_range_not_satisfiable",
             "blob byte range is not satisfiable",
