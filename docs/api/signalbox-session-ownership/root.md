@@ -962,6 +962,10 @@ impl LifecycleEventSource {
         option::Option<offset_date_time::OffsetDateTime>,
         signalbox_persistence::outbox::OutboxDispatchError,
     >;
+    pub async fn session_pushed(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<bool, signalbox_persistence::outbox::OutboxDispatchError>;
     pub async fn next(
         &self,
     ) -> result::Result<

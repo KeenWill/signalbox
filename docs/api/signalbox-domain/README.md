@@ -20,7 +20,7 @@
 | git_remote | 4 | 0 | 2 | [git_remote](git_remote.md) |
 | goal | 27 | 0 | 0 | [goal](goal.md) |
 | goal_command | 5 | 0 | 0 | [goal_command](goal_command.md) |
-| imported_conversation | 32 | 0 | 5 | [imported_conversation](imported_conversation.md) |
+| imported_conversation | 33 | 0 | 5 | [imported_conversation](imported_conversation.md) |
 | imported_session | 20 | 0 | 0 | [imported_session](imported_session.md) |
 | model_call | 12 | 0 | 0 | [model_call](model_call.md) |
 | model_execution | 57 | 0 | 0 | [model_execution](model_execution.md) |

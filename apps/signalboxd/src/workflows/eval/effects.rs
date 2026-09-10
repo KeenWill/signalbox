@@ -189,6 +189,17 @@ pub struct EvaluationEffects {
     rejected: bool,
 }
 impl EvaluationEffects {
+    pub(crate) fn recovery_for(request: &signalbox_domain::EffectRequest) -> EffectRecovery {
+        if request.capability() == ProgramCapability::Judge
+            && request.method() == "evaluate"
+            && decode::<TrialRequest>(request.payload().as_bytes()).is_ok()
+        {
+            EffectRecovery::Ambiguous
+        } else {
+            EffectRecovery::Idempotent
+        }
+    }
+
     pub fn new(services: EvalServices) -> Self {
         Self {
             services,
@@ -282,14 +293,7 @@ impl EvaluationEffects {
 
 impl EffectExecutor for EvaluationEffects {
     fn recovery(&self, request: &signalbox_domain::EffectRequest) -> EffectRecovery {
-        if request.capability() == ProgramCapability::Judge
-            && request.method() == "evaluate"
-            && decode::<TrialRequest>(request.payload().as_bytes()).is_ok()
-        {
-            EffectRecovery::Ambiguous
-        } else {
-            EffectRecovery::Idempotent
-        }
+        Self::recovery_for(request)
     }
     fn adopt<'a>(
         &'a mut self,
@@ -490,31 +494,41 @@ pub(super) fn decode_selected(
     manifest: &EvalManifest,
     bytes: &[u8],
 ) -> Result<CorpusAnswer, EvalFailure> {
-    let cases: Vec<Case> = match manifest.format {
-        CorpusFormat::Offline => signalbox_approval_judge_eval::decode_corpus(&bytes)
-            .map_err(failure)?
-            .cases
-            .into_iter()
-            .map(Case::Offline)
-            .collect(),
-        CorpusFormat::Live => std::str::from_utf8(&bytes)
-            .map_err(failure)?
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str(line).map(Case::Live))
-            .collect::<Result<_, _>>()
-            .map_err(failure)?,
+    let selected = match manifest.format {
+        CorpusFormat::Offline => {
+            let cases = signalbox_approval_judge_eval::decode_corpus(bytes)
+                .map_err(failure)?
+                .cases;
+            manifest
+                .cases
+                .iter()
+                .map(|position| {
+                    cases
+                        .get(*position as usize)
+                        .cloned()
+                        .map(Case::Offline)
+                        .ok_or_else(|| failure("selected corpus case missing"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        CorpusFormat::Live => {
+            let lines = std::str::from_utf8(bytes)
+                .map_err(failure)?
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>();
+            manifest
+                .cases
+                .iter()
+                .map(|position| {
+                    let line = lines
+                        .get(*position as usize)
+                        .ok_or_else(|| failure("selected corpus case missing"))?;
+                    serde_json::from_str(line).map(Case::Live).map_err(failure)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
     };
-    let selected = manifest
-        .cases
-        .iter()
-        .map(|position| {
-            cases
-                .get(*position as usize)
-                .cloned()
-                .ok_or_else(|| failure("selected corpus case missing"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     let mut live_names = std::collections::BTreeSet::new();
     for case in &selected {
         if let Case::Live(case) = case
@@ -535,7 +549,7 @@ pub(super) fn decode_selected(
         .collect::<String>();
     Ok(CorpusAnswer {
         cases: selected,
-        corpus_digest: stable_digest(&bytes),
+        corpus_digest: stable_digest(bytes),
         rendered_digest: stable_digest(rendered.as_bytes()),
     })
 }

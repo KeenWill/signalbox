@@ -30,6 +30,9 @@ pub(crate) async fn prepare(
                 responses: Vec<RecordedResponse>,
             }
             let bytes = blobs.read(digest.into_digest()).await?;
+            if signalbox_domain::BlobDigest::digest(&bytes) != digest.into_digest() {
+                return Err(invalid("recorded-response digest mismatch".into()));
+            }
             let responses: Responses =
                 serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
             Some(responses.responses)
@@ -72,6 +75,9 @@ pub(crate) async fn prepare(
         .parse()
         .map_err(|error: signalbox_domain::BlobDigestParseError| invalid(error.to_string()))?;
     let bytes = blobs.read(digest).await?;
+    if signalbox_domain::BlobDigest::digest(&bytes) != digest {
+        return Err(invalid("corpus digest mismatch".into()));
+    }
     let corpus = super::effects::decode_selected(&manifest, &bytes)?;
     let composition = if configuration.daemon_tools().is_some() {
         crate::DaemonToolComposition::WithMappedFamilies

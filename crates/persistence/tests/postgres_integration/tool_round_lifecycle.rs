@@ -1032,6 +1032,116 @@ async fn completed_continuation_fixture(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn stop_credential_wait_after_tool_result_preserves_the_result_and_pending_steer()
+-> Result<(), Box<dyn Error>> {
+    use super::model_call_execution_and_recovery::credential_wait::park_policy;
+    // Synthetic identities separate the completed tool round from its parked continuation.
+    const SEED: u128 = 0x1380_0000;
+    const MEMBER: &str = "stopped-continuation-member";
+    let (_container, pool, _) = migrated_postgres().await?;
+    let (fixture, repository) = completed_continuation_fixture(&pool, SEED).await?;
+    let target: Uuid = sqlx::query_scalar(
+        "SELECT pinned_provider_model_identity_id FROM turn_lifecycle WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query("INSERT INTO credential_pool_transient_exclusion (observation_model_call_id, credential_reference, cause_kind, reset_at) VALUES ($1,$2,'overloaded',transaction_timestamp() + interval '1 hour')")
+        .bind(fixture.call.into_uuid()).bind(MEMBER).execute(&pool).await?;
+    let repository = repository.with_credential_pools(std::collections::HashMap::from([(
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(target)),
+        park_policy("stopped-continuation-pool", &[MEMBER]),
+    )]));
+    let result_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 0x26));
+    let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(SEED + 0x31));
+    let result = repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![result_entry],
+                ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0x27)),
+                ModelCallId::from_uuid(Uuid::from_u128(SEED + 0x28)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0x2b)),
+            ),
+            |_| panic!("no steering before the wait"),
+        )
+        .await?;
+    let signalbox_application::PrepareToolContinuationOutcome::CredentialWait(wait) = result else {
+        panic!("the tool continuation must park: {result:?}");
+    };
+    let inputs = SubmitInputRepository::new(pool.clone());
+    inputs
+        .handle(
+            input_with_delivery(
+                SEED + 0x30,
+                SEED + 1,
+                "retain this scope clarification",
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.turn,
+                },
+            ),
+            steering_input,
+            None,
+        )
+        .await?;
+    let stopped = inputs
+        .handle(
+            input_with_delivery(
+                SEED + 0x32,
+                SEED + 1,
+                "stop the parked continuation",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(SEED + 0x33)),
+            Some(TurnId::from_uuid(Uuid::from_u128(SEED + 0x34))),
+        )
+        .await?;
+    assert!(matches!(
+        stopped,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let ended: (String, Uuid) = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind, waiting.consumed_by_attempt_id FROM turn_lifecycle lifecycle JOIN credential_availability_wait waiting USING (turn_id) WHERE waiting.wait_attempt_id = $1",
+    ).bind(wait.attempt().into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(ended.0, "cancelled");
+    assert_ne!(ended.1, wait.attempt().into_uuid());
+    let result_entries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resolve_context_frontier_members($1, (SELECT terminal_frontier_id FROM turn_lifecycle WHERE turn_id = $2)) WHERE semantic_entry_id = $3",
+    ).bind(fixture.session.into_uuid()).bind(fixture.turn.into_uuid())
+        .bind(result_entry.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(
+        result_entries, 1,
+        "cancellation retains the completed tool result"
+    );
+    let steering: (String, String) = sqlx::query_as(
+        "SELECT accepted.disposition_kind, turn.state_kind FROM accepted_input accepted JOIN turn_lifecycle turn ON turn.turn_id = accepted.origin_turn_id WHERE accepted.accepted_input_id = $1",
+    )
+    .bind(steering_input.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        steering,
+        (
+            "reclassified_as_turn_origin".to_owned(),
+            "queued".to_owned()
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn frontier_writer_reservations_cover_counted_pool_failure() -> Result<(), Box<dyn Error>> {
     assert_preview_failure_reservation(PreviewFailureWriter::Counted).await
 }
@@ -6308,5 +6418,75 @@ async fn image_result_commit_is_atomic_and_terminal_reference_is_immutable()
         signalbox_application::RetainedToolAttemptObservationStatus::AlreadyCommitted
     );
     assert!(sqlx::query("UPDATE tool_attempt SET result_media_reference = jsonb_set(result_media_reference, '{byte_length}', '65') WHERE attempt_id = $1").bind(attempt.into_uuid()).execute(&pool).await.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_watch_push_evidence_requires_a_completed_configured_push()
+-> Result<(), Box<dyn Error>> {
+    let (_database, pool, _) = migrated_postgres().await?;
+    let reader = OutboxConsumerReader::new(pool.clone(), OutboxConsumer::RepoWatch);
+    let result = ToolResultContent::Text(
+        ToolResultText::try_new("confirmed push".to_owned()).expect("fixture result"),
+    );
+    let failed = ToolAttemptObservation::KnownFailed {
+        error: ToolExecutionError::new(ToolExecutionErrorKind::ResultContainsNull, None),
+    };
+    for (seed, tool, observation, expected) in [
+        (
+            0x820_1000,
+            "git_push_configured",
+            ToolAttemptObservation::Completed {
+                result: result.clone(),
+            },
+            true,
+        ),
+        (
+            0x820_2000,
+            "file_read",
+            ToolAttemptObservation::Completed { result },
+            false,
+        ),
+        (0x820_3000, "git_push_configured", failed, false),
+    ] {
+        let (fixture, _, _, request) =
+            checkpoint_confirmed_tool_round(&pool, seed, tool, "{}").await?;
+        let repository = PostgresToolLoopRepository::new(pool.clone());
+        repository
+            .decide(
+                decide_tool_request(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    request,
+                    ToolApprovalDecision::Approve,
+                ),
+                || TurnAttemptId::from_uuid(Uuid::now_v7()),
+            )
+            .await?;
+        let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+        repository
+            .prepare_next_attempt(
+                fixture.session,
+                fixture.turn,
+                attempt,
+                ToolEffectClass::ExternalEffect,
+            )
+            .await?;
+        let authorized = repository
+            .authorize_attempt(fixture.session, fixture.turn, attempt)
+            .await?;
+        assert!(
+            !reader.session_pushed(fixture.session).await?,
+            "in-flight {tool}"
+        );
+        repository
+            .commit_observation(authorized.executor_fence().bind(observation))
+            .await?;
+        assert_eq!(
+            reader.session_pushed(fixture.session).await?,
+            expected,
+            "{tool}, fixture {seed}"
+        );
+    }
     Ok(())
 }

@@ -1875,7 +1875,8 @@ fn reconstitute(
         ),
         (CurrentTurnAttemptState::Prepared, None)
             if !running_tool_round
-                || (running_tool_continuation && uncommitted_tool_result_projection)
+                || (running_tool_continuation
+                    && (uncommitted_tool_result_projection || input.availability_successor))
     ) || matches!(
         (
             current_attempt.state(),

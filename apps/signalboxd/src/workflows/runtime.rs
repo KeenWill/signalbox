@@ -104,15 +104,18 @@ pub(super) enum WorkflowWake {
     Cancel(ProgramRunId),
 }
 
+type EvalComposition = Arc<dyn Fn() -> Result<EvalServices, LiveDeliveryFailure> + Send + Sync>;
+
 /// One runner per fenced daemon; only this runner starts its run attempts.
 pub struct WorkflowRuntime {
+    service: WorkflowService,
     pool: PgPool,
     host: WorkflowHost,
     journal: ProgramJournalRepository,
     registrations: ProgramRegistrationRepository,
     wake: mpsc::UnboundedReceiver<WorkflowWake>,
     repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
-    eval: Option<EvalServices>,
+    eval: Option<EvalComposition>,
     eval_ready: Arc<AtomicBool>,
 }
 
@@ -129,28 +132,42 @@ impl WorkflowRuntime {
         let journal = ProgramJournalRepository::new(pool.clone());
         let host = WorkflowHost::new(journal.clone());
         #[cfg(target_os = "linux")]
-        let (host, clock_executable, eval_executable) = {
+        let (host, clock_executable, observation_executable, eval_executable) = {
             let catalog = compiled_catalog()?;
             let executable = catalog
                 .executable(CLOCK_ENTRY, CLOCK_REVISION)
                 .ok_or(WorkflowRuntimeError::NativeUnavailable)?;
+            let observation = catalog
+                .executable(
+                    super::repo_watch::observe::OBSERVE_ENTRY,
+                    super::repo_watch::observe::OBSERVE_REVISION,
+                )
+                .ok_or(WorkflowRuntimeError::NativeUnavailable)?;
             let eval = catalog.executable(super::eval::EVAL_ENTRY, super::eval::EVAL_REVISION);
-            (host.with_native_catalog(catalog), Some(executable), eval)
+            (
+                host.with_native_catalog(catalog),
+                Some(executable),
+                Some(observation),
+                eval,
+            )
         };
         #[cfg(not(target_os = "linux"))]
-        let (clock_executable, eval_executable) = (None, None);
+        let (clock_executable, observation_executable, eval_executable) = (None, None, None);
         let registrations = ProgramRegistrationRepository::new(pool.clone());
         let (wake, receiver) = mpsc::unbounded_channel();
         let eval_ready = Arc::new(AtomicBool::new(false));
+        let service = WorkflowService {
+            registrations: admission,
+            wake,
+            clock_executable,
+            observation_executable,
+            eval_executable,
+            eval_ready: eval_ready.clone(),
+        };
         Ok((
-            WorkflowService {
-                registrations: admission,
-                wake,
-                clock_executable,
-                eval_executable,
-                eval_ready: eval_ready.clone(),
-            },
+            service.clone(),
             Self {
+                service,
                 pool,
                 host,
                 journal,
@@ -168,13 +185,19 @@ impl WorkflowRuntime {
         mut self,
         runtime: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
     ) -> Self {
+        if let Some(runtime) = &runtime {
+            runtime.set_workflow_service(self.service.clone());
+        }
         self.repository_watch = runtime;
         self
     }
 
-    /// Supplies host-owned corpus, blob and judge services for evaluation runs.
-    pub fn with_eval(mut self, services: EvalServices) -> Self {
-        self.eval = Some(services);
+    /// Composes host-owned evaluation services from one configuration snapshot per attempt.
+    pub fn with_eval(
+        mut self,
+        compose: impl Fn() -> Result<EvalServices, LiveDeliveryFailure> + Send + Sync + 'static,
+    ) -> Self {
+        self.eval = Some(Arc::new(compose));
         self.eval_ready.store(true, Ordering::Release);
         self
     }
@@ -416,7 +439,7 @@ fn cancellable_attempt<P: LiveDeliverySource + Send + 'static>(
     run: ProgramRunId,
     primitives: P,
     repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
-    eval: Option<EvalServices>,
+    eval: Option<EvalComposition>,
     cancelled: oneshot::Receiver<()>,
 ) -> AttemptJob {
     Box::new(move || {
@@ -443,7 +466,7 @@ fn attempt<P: LiveDeliverySource + 'static>(
     run: ProgramRunId,
     mut primitives: P,
     repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
-    eval: Option<EvalServices>,
+    eval: Option<EvalComposition>,
 ) -> Pin<Box<dyn Future<Output = Result<ProgramRunId, WorkflowRuntimeError>>>> {
     Box::pin(async move {
         let mut effects = RuntimeEffects::new(repository_watch, journal.clone(), eval);

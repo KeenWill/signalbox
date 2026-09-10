@@ -4,7 +4,7 @@
 //! JSON number spellings in Signalbox's source-neutral structured-value
 //! algebra.
 
-use std::{error::Error, fmt, str};
+use std::{error::Error, fmt, io::BufRead, str};
 
 use serde::{
     Deserialize as _,
@@ -61,6 +61,159 @@ impl Error for JsonlRecordSplitFailure {}
 pub struct JsonlRecord<'source> {
     line: u64,
     bytes: &'source [u8],
+}
+
+/// Content-silent reason a streamed JSONL source could not be enumerated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JsonlRecordReadFailure {
+    /// The source reader failed.
+    SourceRead,
+    /// A one-based physical line number could not be represented.
+    PositionExhausted,
+    /// One physical record exceeded its configured byte ceiling.
+    RecordTooLarge {
+        /// One-based physical line number.
+        line: u64,
+    },
+}
+
+impl fmt::Display for JsonlRecordReadFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("streamed JSONL record splitting failed")
+    }
+}
+
+impl Error for JsonlRecordReadFailure {}
+
+/// One owned physical JSONL record read from a stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedJsonlRecord {
+    line: u64,
+    bytes: Vec<u8>,
+}
+
+impl OwnedJsonlRecord {
+    /// Returns the one-based physical source line.
+    pub const fn line(&self) -> u64 {
+        self.line
+    }
+
+    /// Returns the exact record bytes without its line delimiter.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+/// Reads physical JSONL records without materializing the complete source.
+pub fn read_jsonl_records(
+    source: impl BufRead,
+    maximum_record_bytes: u64,
+) -> impl Iterator<Item = Result<OwnedJsonlRecord, JsonlRecordReadFailure>> {
+    JsonlRecordReader {
+        source,
+        maximum_record_bytes,
+        next_line: 1,
+        finished: false,
+    }
+}
+
+struct JsonlRecordReader<Reader> {
+    source: Reader,
+    maximum_record_bytes: u64,
+    next_line: u64,
+    finished: bool,
+}
+
+impl<Reader> Iterator for JsonlRecordReader<Reader>
+where
+    Reader: BufRead,
+{
+    type Item = Result<OwnedJsonlRecord, JsonlRecordReadFailure>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        loop {
+            let available = match self.source.fill_buf() {
+                Ok(available) => available,
+                Err(_) => {
+                    self.finished = true;
+                    return Some(Err(JsonlRecordReadFailure::SourceRead));
+                }
+            };
+            if available.is_empty() {
+                self.finished = true;
+                if bytes.is_empty() {
+                    return None;
+                }
+                if u64::try_from(bytes.len())
+                    .ok()
+                    .is_none_or(|length| length > self.maximum_record_bytes)
+                {
+                    return Some(Err(JsonlRecordReadFailure::RecordTooLarge {
+                        line: self.next_line,
+                    }));
+                }
+                return Some(Ok(OwnedJsonlRecord {
+                    line: self.next_line,
+                    bytes,
+                }));
+            }
+
+            if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
+                let segment = &available[..newline];
+                let combined = u64::try_from(bytes.len()).ok().and_then(|length| {
+                    u64::try_from(segment.len())
+                        .ok()
+                        .and_then(|segment| length.checked_add(segment))
+                });
+                let trailing_cr =
+                    segment.last().copied().or_else(|| bytes.last().copied()) == Some(b'\r');
+                let record_length = combined.and_then(|length| {
+                    if trailing_cr {
+                        length.checked_sub(1)
+                    } else {
+                        Some(length)
+                    }
+                });
+                if record_length.is_none_or(|length| length > self.maximum_record_bytes) {
+                    self.finished = true;
+                    return Some(Err(JsonlRecordReadFailure::RecordTooLarge {
+                        line: self.next_line,
+                    }));
+                }
+                bytes.extend_from_slice(segment);
+                self.source.consume(newline + 1);
+                if trailing_cr {
+                    bytes.pop();
+                }
+                let line = self.next_line;
+                let Some(next_line) = line.checked_add(1) else {
+                    self.finished = true;
+                    return Some(Err(JsonlRecordReadFailure::PositionExhausted));
+                };
+                self.next_line = next_line;
+                return Some(Ok(OwnedJsonlRecord { line, bytes }));
+            }
+
+            let available_length = available.len();
+            let combined = u64::try_from(bytes.len()).ok().and_then(|length| {
+                u64::try_from(available_length)
+                    .ok()
+                    .and_then(|available| length.checked_add(available))
+            });
+            if combined.is_none_or(|length| length > self.maximum_record_bytes.saturating_add(1)) {
+                self.finished = true;
+                return Some(Err(JsonlRecordReadFailure::RecordTooLarge {
+                    line: self.next_line,
+                }));
+            }
+            bytes.extend_from_slice(available);
+            self.source.consume(available_length);
+        }
+    }
 }
 
 impl<'source> JsonlRecord<'source> {
@@ -295,11 +448,46 @@ mod tests {
     use signalbox_domain::{ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText};
 
     use super::{
-        JsonFailure, JsonlRecordSplitFailure, one_based_ordinal, parse_record, split_jsonl_records,
+        JsonFailure, JsonlRecordSplitFailure, one_based_ordinal, parse_record, read_jsonl_records,
+        split_jsonl_records,
     };
 
     const FIRST_RECORD: &[u8] = b"first";
     const FINAL_RECORD: &[u8] = b"last";
+
+    #[test]
+    fn streamed_records_preserve_physical_lines_without_trailing_empty_record() {
+        let records = read_jsonl_records(&b"first\r\n\nlast\n"[..], 5)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the in-memory reader cannot fail");
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].line(), 1);
+        assert_eq!(records[0].clone().into_bytes(), b"first");
+        assert_eq!(records[1].line(), 2);
+        assert_eq!(records[1].clone().into_bytes(), b"");
+        assert_eq!(records[2].line(), 3);
+        assert_eq!(records[2].clone().into_bytes(), b"last");
+    }
+
+    #[test]
+    fn streamed_record_limit_is_checked_before_parsing() {
+        let mut records = read_jsonl_records(
+            std::io::BufReader::with_capacity(2, &b"abc\r\nabcd\n"[..]),
+            3,
+        );
+
+        let first = records
+            .next()
+            .expect("first record")
+            .expect("three-byte CRLF record is admitted");
+        assert_eq!(first.into_bytes(), b"abc");
+        assert_eq!(
+            records.next().expect("oversized second record"),
+            Err(super::JsonlRecordReadFailure::RecordTooLarge { line: 2 })
+        );
+        assert!(records.next().is_none());
+    }
 
     #[test]
     fn preserves_object_member_order() {

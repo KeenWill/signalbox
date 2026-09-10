@@ -5,7 +5,6 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | approval_judge | 10 | 0 | 1 | [approval_judge](approval_judge.md) |
-| approval_judge_eval | 5 | 0 | 2 | [approval_judge_eval](approval_judge_eval.md) |
 | attention | 5 | 0 | 0 | [attention](attention.md) |
 | automatic_reconciliation | 2 | 0 | 1 | [automatic_reconciliation](automatic_reconciliation.md) |
 | blob | 7 | 0 | 0 | [blob](blob.md) |
@@ -14,8 +13,8 @@
 | context_compaction | 11 | 0 | 0 | [context_compaction](context_compaction.md) |
 | context_compaction_continuation | 2 | 0 | 0 | [context_compaction_continuation](context_compaction_continuation.md) |
 | convergence_sweep | 9 | 0 | 0 | [convergence_sweep](convergence_sweep.md) |
-| conversation_import | 10 | 1 | 2 | [conversation_import](conversation_import.md) |
-| conversation_import_discovery | 15 | 0 | 0 | [conversation_import_discovery](conversation_import_discovery.md) |
+| conversation_import | 13 | 1 | 2 | [conversation_import](conversation_import.md) |
+| conversation_import_discovery | 17 | 0 | 0 | [conversation_import_discovery](conversation_import_discovery.md) |
 | conversation_listing | 4 | 0 | 0 | [conversation_listing](conversation_listing.md) |
 | create_session | 4 | 0 | 0 | [create_session](create_session.md) |
 | create_session_from_imported_frontier | 4 | 0 | 0 | [create_session_from_imported_frontier](create_session_from_imported_frontier.md) |
@@ -49,7 +48,7 @@
 | session_credentials | 5 | 0 | 2 | [session_credentials](session_credentials.md) |
 | session_deadline | 4 | 0 | 0 | [session_deadline](session_deadline.md) |
 | session_delegation | 14 | 0 | 0 | [session_delegation](session_delegation.md) |
-| session_lifecycle | 5 | 0 | 0 | [session_lifecycle](session_lifecycle.md) |
+| session_lifecycle | 7 | 0 | 0 | [session_lifecycle](session_lifecycle.md) |
 | session_lifecycle_command | 3 | 0 | 0 | [session_lifecycle_command](session_lifecycle_command.md) |
 | session_live | 2 | 0 | 0 | [session_live](session_live.md) |
 | session_metadata | 5 | 0 | 0 | [session_metadata](session_metadata.md) |
@@ -60,7 +59,7 @@
 | startup | 4 | 0 | 0 | [startup](startup.md) |
 | submit_input | 5 | 0 | 0 | [submit_input](submit_input.md) |
 | termination_receipt | 2 | 0 | 1 | [termination_receipt](termination_receipt.md) |
-| test_support | 3 | 0 | 6 | [test_support](test_support.md) |
+| test_support | 3 | 0 | 7 | [test_support](test_support.md) |
 | tool_loop | 4 | 0 | 0 | [tool_loop](tool_loop.md) |
 | turn_liveness | 5 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | usage | 3 | 0 | 1 | [usage](usage.md) |

@@ -23,7 +23,8 @@ mod tests;
 pub use format::ImportedConversationFormat;
 
 pub use digest::{
-    ImportedConversationSourceDigest, ImportedRawRecordConversionDigest, ImportedRawRecordHash,
+    ImportedConversationSourceDigest, ImportedConversationSourceDigestBuilder,
+    ImportedRawRecordConversionDigest, ImportedRawRecordHash,
 };
 
 pub use structured_value::{

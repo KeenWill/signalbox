@@ -905,6 +905,9 @@ where
         let execution = self.execution.clone();
         let occupancy_recovery = self.occupancy_recovery.clone();
         async move {
+            if execution.session_is_suspended(session) {
+                return Ok(());
+            }
             let occupancy_tracking = occupancy_recovery
                 .as_ref()
                 .map(|recovery| recovery.resume_turn_observer(session));
@@ -933,7 +936,7 @@ where
                 drop(compaction_window);
                 if let Err(error) = compacted {
                     let error = ContextGuardedTurnPassError::ReportedUsageCompaction(error);
-                    report_guarded_ambiguity(&execution, &error);
+                    report_guarded_ambiguity(&execution, session, &error);
                     return Err(error);
                 }
             }
@@ -982,7 +985,10 @@ where
                             }
                             CommitActivationPreviewOutcome::Activated(activated) => {
                                 if activated.session() != session {
-                                    execution.report_post_activation_failure();
+                                    execution.report_post_activation_failure(session, crate::SessionExecutionFailure {
+                                        class: OperatorFailureClass::CallerOrHubBug,
+                                        cause_code: "activation_session_mismatch",
+                                    });
                                     return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
                                 }
                                 observe_turn(activated.turn());
@@ -1123,7 +1129,10 @@ where
                                 }
                                 CommitActivationPreviewOutcome::Activated(activated) => {
                                     if activated.session() != session {
-                                        execution.report_post_activation_failure();
+                                        execution.report_post_activation_failure(session, crate::SessionExecutionFailure {
+                                        class: OperatorFailureClass::CallerOrHubBug,
+                                        cause_code: "activation_session_mismatch",
+                                    });
                                         return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
                                     }
                                     observe_turn(activated.turn());
@@ -1301,7 +1310,10 @@ where
                         }
                         CommitActivationPreviewOutcome::Activated(activated) => {
                             if activated.session() != session {
-                                execution.report_post_activation_failure();
+                                execution.report_post_activation_failure(session, crate::SessionExecutionFailure {
+                                        class: OperatorFailureClass::CallerOrHubBug,
+                                        cause_code: "activation_session_mismatch",
+                                    });
                                 return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
                             }
                             observe_turn(activated.turn());
@@ -1323,7 +1335,7 @@ where
             }
             .await;
             if let Err(error) = &outcome {
-                report_guarded_ambiguity(&execution, error);
+                report_guarded_ambiguity(&execution, session, error);
             }
             outcome?;
             if let Some(compaction) = &reported_usage_compaction {
@@ -1376,6 +1388,7 @@ fn guarded_failure_stage<CountError, ExecutionError>(
 /// [`ActivatedTurnExecution`] already owns how its own failures are supervised.
 fn report_guarded_ambiguity<CountError, Execution>(
     execution: &Execution,
+    session: SessionId,
     error: &ContextGuardedTurnPassError<CountError, Execution::Error>,
 ) where
     CountError: ClassifyOperatorFailure,
@@ -1384,7 +1397,7 @@ fn report_guarded_ambiguity<CountError, Execution>(
     if matches!(error, ContextGuardedTurnPassError::Execution { .. }) {
         return;
     }
-    report_ambiguous_commit(execution, error);
+    report_ambiguous_commit(execution, session, error);
 }
 
 /// Creates the selected turn's child span under scheduler session work.
@@ -1793,7 +1806,11 @@ mod tests {
     fn ambiguous_guarded_activation_commit_reports_post_activation_failure() {
         let (execution, signal) = supervised();
 
-        report_guarded_ambiguity(&execution, &ambiguous_activation());
+        report_guarded_ambiguity(
+            &execution,
+            SessionId::from_uuid(uuid::Uuid::from_u128(9)),
+            &ambiguous_activation(),
+        );
 
         assert!(signal.is_triggered());
     }
@@ -1806,7 +1823,11 @@ mod tests {
         let (execution, signal) = supervised();
 
         let error = ambiguous_compaction();
-        report_guarded_ambiguity(&execution, &error);
+        report_guarded_ambiguity(
+            &execution,
+            SessionId::from_uuid(uuid::Uuid::from_u128(9)),
+            &error,
+        );
 
         assert_eq!(
             error.operator_failure_cause_code(),
@@ -1829,7 +1850,11 @@ mod tests {
             },
         };
 
-        report_guarded_ambiguity(&execution, &error);
+        report_guarded_ambiguity(
+            &execution,
+            SessionId::from_uuid(uuid::Uuid::from_u128(9)),
+            &error,
+        );
 
         assert!(!signal.is_triggered());
     }
@@ -1846,7 +1871,11 @@ mod tests {
             source: CommitAmbiguousFailure,
         };
 
-        report_guarded_ambiguity(&execution, &error);
+        report_guarded_ambiguity(
+            &execution,
+            SessionId::from_uuid(uuid::Uuid::from_u128(9)),
+            &error,
+        );
 
         assert!(!signal.is_triggered());
     }

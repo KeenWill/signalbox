@@ -26,9 +26,9 @@ judge binding in its immutable run input. At least one selected case is
 required. Trials follow case order, then repeat order, with a maximum of 1,000
 calls. Offline scoring requires one repeat. `corpus.load` reads and preflights
 every selected case before provider work, rejecting duplicate selected live case
-names; `judge.evaluate` addresses a trial ordinal in that retained manifest. The
-attempt reuses its decoded, preflighted corpus across trials; recovery reloads
-it once when needed.
+names. Only selected live JSONL rows are decoded. `judge.evaluate` addresses a
+trial ordinal in that retained manifest. The attempt reuses its decoded,
+preflighted corpus across trials; recovery reloads it once when needed.
 
 The host adapters reuse the catalog's verified blob reads and `judge_eval_case`.
 Judge answers retain call identity, rendered-request digest, binding and
@@ -57,11 +57,12 @@ insertion. Sealing does not determine workflow terminal status.
 
 The daemon composes Corpus, Judge, Blob and EvalRecord adapters when blob
 storage is available. Evaluation launch resolves the judge binding and encodes
-the exact immutable manifest before generic workflow start. Recorded responses
-are pinned in that manifest, one per trial, and execute through the same judge
-adapter without provider access. The process read command returns byte ranges of
-the sealed scorecard. The typed TypeScript fixture uses the same effect records;
-token counts and pull-request identities use decimal strings.
+the exact immutable manifest before generic workflow start. Each attempt
+composes its adapters from the installed configuration snapshot. Recorded
+responses are pinned in that manifest, one per trial, and execute through the
+same judge adapter without provider access. The process read command returns
+byte ranges of the sealed scorecard. The typed TypeScript fixture uses the same
+effect records; token counts and pull-request identities use decimal strings.
 
 ## Design decisions
 

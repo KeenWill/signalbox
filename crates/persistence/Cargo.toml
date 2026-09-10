@@ -15,6 +15,7 @@ postgres-integration = ["dep:testcontainers-modules", "test-support"]
 test-support = []
 
 [dependencies]
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 signalbox-newtype = { path = "../newtype" }
 rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
 serde = { version = "1.0.219", features = ["derive"] }
