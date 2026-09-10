@@ -86,16 +86,21 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
             (SELECT count(*)
                FROM queued_input_origin
               WHERE session_id = $1
-                AND goal_turn_is_scheduling_relevant(
-                    session_id, turn_id
-                )) AS queue_count,
+                AND (goal_turn_is_scheduling_relevant(session_id, turn_id)
+                     OR EXISTS (
+                        SELECT 1 FROM turn_lifecycle AS retired
+                         WHERE retired.session_id = queued_input_origin.session_id
+                           AND retired.turn_id = queued_input_origin.turn_id
+                           AND retired.state_kind = 'terminal'
+                           AND retired.terminal_disposition_kind = 'retired'
+                     ))) AS queue_count,
             (SELECT count(*)
                FROM turn_lifecycle
               WHERE session_id = $1
                 AND origin_kind = 'accepted_input'
-                AND goal_turn_is_scheduling_relevant(
-                    session_id, turn_id
-                )) AS lifecycle_count",
+                AND (goal_turn_is_scheduling_relevant(session_id, turn_id)
+                     OR (state_kind = 'terminal'
+                         AND terminal_disposition_kind = 'retired'))) AS lifecycle_count",
     )
     .bind(session_id_to_uuid(session_id))
     .fetch_one(&mut *connection)
@@ -231,9 +236,9 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
            ON runner_recovery_effect.turn_id = turn.turn_id
           AND runner_recovery_effect.session_id = turn.session_id
         WHERE queued.session_id = $1
-          AND goal_turn_is_scheduling_relevant(
-                queued.session_id, queued.turn_id
-          )
+          AND (goal_turn_is_scheduling_relevant(queued.session_id, queued.turn_id)
+               OR (turn.state_kind = 'terminal'
+                   AND turn.terminal_disposition_kind = 'retired'))
         ORDER BY queued.acceptance_position",
     )
     .bind(session_id_to_uuid(session_id))

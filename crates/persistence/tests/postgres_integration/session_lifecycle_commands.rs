@@ -383,6 +383,22 @@ async fn lifecycle_stop_settles_an_awaiting_delegated_approval_turn() -> Result<
         panic!("the closure interrupt must settle the parked turn");
     };
 
+    let preview = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            fixture.session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                TurnAttemptId::from_uuid(next_test_submit_uuid()),
+            ),
+        )
+        .await;
+    assert!(
+        matches!(preview, Ok(None)),
+        "closed session preview: {preview:?}"
+    );
+
     let approval: (String, String, Option<String>, String) = sqlx::query_as(
         "SELECT approval.decision_kind, approval.decision_source,
                 approval.denial_reason, command.issuer_kind
