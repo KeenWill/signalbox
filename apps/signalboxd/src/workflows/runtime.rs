@@ -179,7 +179,7 @@ impl WorkflowRuntime {
         self
     }
 
-    /// Owns non-Send isolate/root futures on one local executor and joins it on shutdown.
+    /// Owns each run's non-Send isolate/root future on its thread and joins on shutdown.
     pub async fn run(self, shutdown: impl Future<Output = ()>) -> Result<(), WorkflowRuntimeError> {
         self.run_with_primitives(shutdown, |events| DaemonPrimitives {
             durable: DurablePrimitives::new(events, SystemPrimitiveClock),
@@ -187,7 +187,7 @@ impl WorkflowRuntime {
         .await
     }
 
-    async fn run_with_primitives<P: LiveDeliverySource + 'static>(
+    async fn run_with_primitives<P: LiveDeliverySource + Send + 'static>(
         self,
         shutdown: impl Future<Output = ()>,
         primitives: impl Fn(RuntimeEvents) -> P + Send + 'static,
@@ -218,13 +218,15 @@ impl WorkflowRuntime {
         }
     }
 
-    async fn drive<P: LiveDeliverySource + 'static>(
+    async fn drive<P: LiveDeliverySource + Send + 'static>(
         mut self,
         stopped: oneshot::Receiver<()>,
         primitives: impl Fn(RuntimeEvents) -> P,
     ) -> Result<(), WorkflowRuntimeError> {
         let mut receipt_effects =
             RuntimeEffects::new(self.repository_watch.clone(), self.journal.clone(), None);
+        let mut active = BTreeMap::new();
+        let mut attempts = FuturesUnordered::new();
         let execution = async {
             receipt_effects
                 .acknowledge()
@@ -240,8 +242,6 @@ impl WorkflowRuntime {
                 journal: self.journal.clone(),
                 wake,
             };
-            let mut active = BTreeMap::new();
-            let mut attempts = FuturesUnordered::new();
             for run in self.registrations.unfinished_runs().await? {
                 let (cancel, cancelled) = oneshot::channel();
                 active.insert(run, Some(cancel));
@@ -284,7 +284,11 @@ impl WorkflowRuntime {
                 }
             }
         };
-        let result = interruptible(execution, stopped).await.unwrap_or(Ok(()));
+        let mut result = interruptible(execution, stopped).await.unwrap_or(Ok(()));
+        active.clear();
+        while let Some(completed) = attempts.next().await {
+            result = result.and(completed.map(|_| ()));
+        }
         receipt_effects
             .acknowledge()
             .await
@@ -307,7 +311,7 @@ impl Drop for StopWorkflow {
     }
 }
 
-fn cancellable_attempt<P: LiveDeliverySource + 'static>(
+fn cancellable_attempt<P: LiveDeliverySource + Send + 'static>(
     host: WorkflowHost,
     journal: ProgramJournalRepository,
     run: ProgramRunId,
@@ -317,18 +321,39 @@ fn cancellable_attempt<P: LiveDeliverySource + 'static>(
     cancelled: oneshot::Receiver<()>,
 ) -> Pin<Box<dyn Future<Output = Result<ProgramRunId, WorkflowRuntimeError>>>> {
     Box::pin(async move {
-        let mut receipts = RuntimeEffects::new(repository_watch.clone(), journal.clone(), None);
-        let result = interruptible(
-            attempt(host, journal, run, primitives, repository_watch, eval),
-            cancelled,
-        )
-        .await
-        .unwrap_or(Ok(run));
-        receipts
-            .acknowledge()
-            .await
-            .map_err(WorkflowRuntimeError::Receipt)?;
-        result
+        let (finished, completion) = oneshot::channel();
+        // V8 enters an owned isolate at construction and exits it at drop.
+        // Overlapping attempts must keep those lifetimes on separate threads.
+        let worker = std::thread::Builder::new()
+            .name("workflow-attempt".into())
+            .spawn(move || {
+                let executor = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(WorkflowRuntimeError::Runtime)?;
+                let result = executor.block_on(async move {
+                    let mut receipts =
+                        RuntimeEffects::new(repository_watch.clone(), journal.clone(), None);
+                    let result = interruptible(
+                        attempt(host, journal, run, primitives, repository_watch, eval),
+                        cancelled,
+                    )
+                    .await
+                    .unwrap_or(Ok(run));
+                    receipts
+                        .acknowledge()
+                        .await
+                        .map_err(WorkflowRuntimeError::Receipt)?;
+                    result
+                });
+                let _ = finished.send(());
+                result
+            })
+            .map_err(WorkflowRuntimeError::Runtime)?;
+        let _ = completion.await;
+        worker.join().map_err(|_| {
+            WorkflowRuntimeError::Runtime(std::io::Error::other("workflow attempt thread panicked"))
+        })?
     })
 }
 
@@ -707,6 +732,65 @@ mod tests {
             fn drop(&mut self) {
                 let _ = self.finished.send(());
             }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_concurrent_javascript_attempts_resume_their_own_isolates()
+        -> Result<(), Box<dyn Error>> {
+            let (_database, pool, _) =
+                signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+            let journal = ProgramJournalRepository::new(pool.clone());
+            let (service, runner) = WorkflowRuntime::new(pool.clone())?;
+            let registration = service.register_javascript(
+                ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                javascript_request(
+                    "import { now } from '@signalbox/program-sdk/v1'; export default async input => { await now(input); return input; }".into(),
+                    ProgramGrants::new([ProgramCapability::Time]),
+                ),
+            ).await?;
+            let (selected, mut selections) = mpsc::unbounded_channel();
+            let (finished, mut finishes) = mpsc::unbounded_channel();
+            let (stop, stopped) = oneshot::channel();
+            let task = tokio::spawn(runner.run_with_primitives(
+                async {
+                    let _ = stopped.await;
+                },
+                move |_| SelectedClock {
+                    selected: selected.clone(),
+                    finished: finished.clone(),
+                },
+            ));
+            let mut runs = Vec::new();
+            let mut releases = Vec::new();
+            for input in 1_u8..=10 {
+                let run = ProgramRunId::from_uuid(Uuid::now_v7());
+                service.start(run, registration.id, &[input]).await?;
+                runs.push((run, input));
+                releases.push(
+                    tokio::time::timeout(TEST_TIMEOUT, selections.recv())
+                        .await?
+                        .unwrap(),
+                );
+            }
+            for release in releases {
+                release.send(()).unwrap();
+            }
+            for (run, input) in runs {
+                assert_eq!(
+                    result(&journal, run).await,
+                    InlineFramePayload::new(vec![input])
+                );
+                let retained = journal.load(run).await?.unwrap();
+                assert_eq!(retained.entries().len(), 4);
+                tokio::time::timeout(TEST_TIMEOUT, finishes.recv())
+                    .await?
+                    .unwrap();
+            }
+            stop.send(()).unwrap();
+            task.await??;
+            pool.close().await;
+            Ok(())
         }
 
         struct ObservedWait {

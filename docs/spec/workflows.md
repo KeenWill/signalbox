@@ -139,7 +139,8 @@ deliveries. JavaScript loading or execution errors, stalled programs, child
 registration conflicts and unavailable granted effects record a per-run
 `ProgramError` fault; other runs continue and restart retains that outcome.
 Recovery retries an unanswered unavailable effect into the same fault. A
-concurrent terminal outcome is preserved.
+concurrent terminal outcome is preserved. Each active run owns a thread that
+shutdown joins.
 
 The Linux compiled catalog includes `clock` revision `1`: its input is a
 big-endian u64, and its result concatenates that input and a journaled
