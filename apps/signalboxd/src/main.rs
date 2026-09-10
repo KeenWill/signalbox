@@ -1687,6 +1687,7 @@ async fn run_hub_incarnation(
     let mut database = FencedHubDatabase::connect_production(
         configuration.database_url(),
         fenced_pool_min_connections,
+        guard_recovery.clone(),
     )
     .await
     .map_err(|error| {
@@ -1695,12 +1696,12 @@ async fn run_hub_incarnation(
             FencedHubDatabaseError::ParseOptions(_)
             | FencedHubDatabaseError::ConnectBootstrap(_)
             | FencedHubDatabaseError::AcquireGuard(_)
+            | FencedHubDatabaseError::GuardLost(_)
             | FencedHubDatabaseError::AdvanceFence(_)
             | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
         };
         erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
-    })?
-    .with_recovery_observer(guard_recovery.clone());
+    })?;
     let pool = database.pool().clone();
     let fenced_pool_floor_pool = pool.clone();
     match await_while_guarded(&mut database, migrate_hub_database(&pool)).await {

@@ -446,3 +446,155 @@ async fn shutdown_interrupts_a_lost_guard_pool_drain_without_an_elapsed_bound()
     drop(container);
     Ok(())
 }
+
+async fn observe_construction_guard_loss(
+    control: &PgPool,
+    database_url: &str,
+    blocker_pid: i32,
+) -> Result<(), Box<dyn Error>> {
+    use signalboxd::guard_recovery::{
+        GuardRecoveryPolicy, GuardedIncarnationOutcome, run_guarded_incarnations,
+    };
+    use std::time::Duration;
+
+    let options =
+        local_test_connection_options(database_url)?.application_name("construction-under-test");
+    let construction = run_guarded_incarnations(
+        GuardRecoveryPolicy::new(Duration::from_millis(10), Duration::from_millis(20), None)
+            .expect("positive ascending recovery delays are valid"),
+        |observer| {
+            let options = options.clone();
+            async move {
+                assert!(!observer.is_recovering());
+                let result = FencedHubDatabase::connect_with_observer(
+                    options,
+                    Some(1),
+                    Some(observer.clone()),
+                )
+                .await;
+                assert!(
+                    matches!(
+                        result,
+                        Err(signalboxd::FencedHubDatabaseError::GuardLost(_))
+                    ),
+                    "{result:?}"
+                );
+                assert!(
+                    observer.is_recovering(),
+                    "construction must start recovery on the first incarnation"
+                );
+                GuardedIncarnationOutcome::Finished(())
+            }
+        },
+        std::future::pending(),
+    );
+    let terminate = async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                 WHERE application_name = 'construction-under-test'
+                   AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(blocker_pid)
+            .fetch_one(control)
+            .await?;
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let guard_pid: i32 = sqlx::query_scalar(
+            "SELECT DISTINCT l.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+             WHERE a.application_name = 'construction-under-test'
+               AND l.locktype = 'advisory' AND l.objsubid = 2 AND l.granted",
+        )
+        .fetch_one(control)
+        .await?;
+        sqlx::query("SELECT pg_terminate_backend($1)")
+            .bind(guard_pid)
+            .execute(control)
+            .await?;
+        Ok::<_, sqlx::Error>(())
+    };
+    let (constructed, terminated) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(construction, terminate)
+    })
+    .await?;
+    assert_eq!(constructed, Ok(()));
+    terminated?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn guard_loss_during_fence_initialization_starts_recovery() -> Result<(), Box<dyn Error>> {
+    use sqlx::migrate::Migrate;
+    let (_container, control, url) = postgres().await?;
+    let mut blocker = control.acquire().await?;
+    blocker.lock().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+
+    observe_construction_guard_loss(&control, &url, blocker_pid).await?;
+
+    blocker.unlock().await?;
+    drop(blocker);
+    let recovered =
+        FencedHubDatabase::connect_with(local_test_connection_options(&url)?, None).await?;
+    recovered.close().await?;
+    control.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn guard_loss_during_fence_advance_starts_recovery() -> Result<(), Box<dyn Error>> {
+    let (_container, control, url) = postgres().await?;
+    signalbox_persistence::hub_fence::initialize_hub_fence(&control).await?;
+    let mut blocker = control.begin().await?;
+    sqlx::query("SELECT generation FROM hub_fence_state FOR UPDATE")
+        .execute(&mut *blocker)
+        .await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+
+    observe_construction_guard_loss(&control, &url, blocker_pid).await?;
+
+    blocker.rollback().await?;
+    let recovered =
+        FencedHubDatabase::connect_with(local_test_connection_options(&url)?, None).await?;
+    recovered.close().await?;
+    control.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn guard_loss_during_fenced_pool_construction_starts_recovery() -> Result<(), Box<dyn Error>>
+{
+    let (_container, control, url) = postgres().await?;
+    signalbox_persistence::hub_fence::initialize_hub_fence(&control).await?;
+    // hub_fence::advisory_key uses this namespace on both halves of the generation key.
+    let namespace: i64 = 1_396_852_273;
+    let mut blocker = control.acquire().await?;
+    sqlx::query(
+        "SELECT pg_advisory_lock((generation::bigint + 1) # (($1 << 32) | $1)) FROM hub_fence_state",
+    ).bind(namespace).execute(&mut *blocker).await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+
+    observe_construction_guard_loss(&control, &url, blocker_pid).await?;
+
+    sqlx::query("SELECT pg_advisory_unlock_all()")
+        .execute(&mut *blocker)
+        .await?;
+    drop(blocker);
+    let recovered =
+        FencedHubDatabase::connect_with(local_test_connection_options(&url)?, None).await?;
+    recovered.close().await?;
+    control.close().await;
+    Ok(())
+}

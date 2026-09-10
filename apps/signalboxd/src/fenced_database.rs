@@ -28,16 +28,15 @@ pub struct FencedHubDatabase {
 }
 
 impl FencedHubDatabase {
-    /// Opens a production database, establishes the singleton guard, fences the
-    /// prior generation, and returns only the new fenced pool with the optional
-    /// deployment-owned connection floor.
+    /// Observes guard loss throughout production fence and pool construction.
     pub async fn connect_production(
         database_url: &str,
         min_connections: Option<u32>,
+        observer: crate::guard_recovery::GuardRecoveryObserver,
     ) -> Result<Self, FencedHubDatabaseError> {
         let options = production_connection_options(database_url)
             .map_err(FencedHubDatabaseError::ParseOptions)?;
-        Self::connect_with(options, min_connections).await
+        Self::connect_with_observer(options, min_connections, Some(observer)).await
     }
 
     /// Establishes one guarded incarnation using already parsed connection
@@ -46,32 +45,71 @@ impl FencedHubDatabase {
         options: PgConnectOptions,
         min_connections: Option<u32>,
     ) -> Result<Self, FencedHubDatabaseError> {
+        Self::connect_with_observer(options, min_connections, None).await
+    }
+
+    /// Observes guard loss from acquisition through fence and pool construction.
+    pub async fn connect_with_observer(
+        options: PgConnectOptions,
+        min_connections: Option<u32>,
+        recovery: Option<crate::guard_recovery::GuardRecoveryObserver>,
+    ) -> Result<Self, FencedHubDatabaseError> {
         let bootstrap = PgPoolOptions::new()
-            .max_connections(1)
+            // Fence initialization and exact-session observation run concurrently.
+            .max_connections(2)
             .connect_with(options.clone())
             .await
             .map_err(FencedHubDatabaseError::ConnectBootstrap)?;
         let mut guard = SingleHubGuard::acquire(&bootstrap)
             .await
             .map_err(FencedHubDatabaseError::AcquireGuard)?;
-        initialize_hub_fence(&bootstrap)
-            .await
-            .map_err(FencedHubDatabaseError::InitializeFence)?;
-        let mut advanced_fence = advance_hub_fence(guard.connection_mut())
-            .await
-            .map_err(FencedHubDatabaseError::AdvanceFence)?;
+        let monitor = guard.monitor_construction(bootstrap.clone());
+        let construction = async {
+            initialize_hub_fence(&bootstrap)
+                .await
+                .map_err(FencedHubDatabaseError::InitializeFence)?;
+            let mut advanced_fence = advance_hub_fence(guard.connection_mut())
+                .await
+                .map_err(FencedHubDatabaseError::AdvanceFence)?;
+            let pool = advanced_fence
+                .connect_pool(options, min_connections)
+                .await
+                .map_err(FencedHubDatabaseError::ConnectFencedPool)?;
+            Ok((pool, advanced_fence.generation()))
+        };
+        let constructed = tokio::select! {
+            biased;
+            error = monitor => {
+                if let Some(observer) = &recovery {
+                    observer.guard_lost();
+                }
+                Err(FencedHubDatabaseError::GuardLost(error))
+            },
+            result = construction => result,
+        };
+        // A construction error can win the race with the observation query.
+        let checked = guard.check().await;
+        if matches!(constructed, Err(FencedHubDatabaseError::GuardLost(_))) || checked.is_err() {
+            if let Some(observer) = &recovery {
+                observer.guard_lost();
+            }
+            if let Ok((pool, _)) = constructed {
+                pool.close().await;
+            }
+            bootstrap.close().await;
+            return Err(FencedHubDatabaseError::GuardLost(
+                checked
+                    .err()
+                    .unwrap_or(SingleHubGuardError::GuardLost(None)),
+            ));
+        }
         bootstrap.close().await;
-        let pool = advanced_fence
-            .connect_pool(options, min_connections)
-            .await
-            .map_err(FencedHubDatabaseError::ConnectFencedPool)?;
-        let generation = advanced_fence.generation();
-        drop(advanced_fence);
+        let (pool, generation) = constructed?;
         Ok(Self {
             guard: Some(guard),
             pool,
             generation,
-            recovery: None,
+            recovery,
         })
     }
 
@@ -211,6 +249,8 @@ pub enum FencedHubDatabaseError {
     ConnectBootstrap(sqlx::Error),
     /// The database-scoped singleton guard could not be established.
     AcquireGuard(SingleHubGuardError),
+    /// The acquired singleton guard was lost during database construction.
+    GuardLost(SingleHubGuardError),
     /// Migrations through the fence-establishing boundary failed.
     InitializeFence(MigrateError),
     /// The prior generation could not be fenced and advanced.
@@ -225,6 +265,7 @@ impl fmt::Display for FencedHubDatabaseError {
             Self::ParseOptions(_) => "database connection options are invalid",
             Self::ConnectBootstrap(_) => "the hub bootstrap database connection failed",
             Self::AcquireGuard(_) => "the database-scoped hub guard failed",
+            Self::GuardLost(_) => "the hub guard was lost during database construction",
             Self::InitializeFence(_) => "the hub fence migration boundary failed",
             Self::AdvanceFence(_) => "the prior hub generation could not be fenced",
             Self::ConnectFencedPool(_) => "the fenced hub database pool could not connect",
@@ -238,7 +279,7 @@ impl Error for FencedHubDatabaseError {
             Self::ParseOptions(error)
             | Self::ConnectBootstrap(error)
             | Self::ConnectFencedPool(error) => Some(error),
-            Self::AcquireGuard(error) => Some(error),
+            Self::AcquireGuard(error) | Self::GuardLost(error) => Some(error),
             Self::InitializeFence(error) => Some(error),
             Self::AdvanceFence(error) => Some(error),
         }

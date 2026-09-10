@@ -332,7 +332,10 @@ the runtime. Fencing locks the singleton, waits on the prior generation's
 exclusive advisory lock until its pooled sessions end, and advances the row. It
 acquires the matching session-level lock before commit and holds it through
 construction of the new pool. `fenced_pool_options` caps connections at
-`FENCED_POOL_MAX_CONNECTIONS` and accepts an optional minimum.
+`FENCED_POOL_MAX_CONNECTIONS` and accepts an optional minimum. Construction
+monitors the exact singleton guard through a separate bootstrap connection; loss
+during fence initialization, advancement, or pool construction starts guard
+recovery before startup can be admitted.
 
 Guard reacquisition in one process closes the old pool before releasing its
 guard connection and advances the generation before constructing a replacement
