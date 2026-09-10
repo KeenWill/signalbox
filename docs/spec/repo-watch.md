@@ -338,7 +338,10 @@ GET requests and GraphQL observation queries. It receives no database handle.
 The daemon's repository-specific client loader rereads the configured credential
 file on each load, or resolves the selected App profile's shared installation
 token cache, and returns only an authenticated client handle. Credential and
-client-construction failures have distinct redacted error classes.
+client-construction failures have distinct redacted error classes. App responses
+scrub the token used for that response, including its JSON-escaped form, from
+observation text and retained validators before poll-cache and PR-state
+persistence.
 
 The module's dedicated PostgreSQL login role owns `mod_repo_watch`, has no
 membership path back to the core identity, and has no table privileges in

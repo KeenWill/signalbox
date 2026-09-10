@@ -175,25 +175,95 @@ pub(crate) fn with_app_authentication(
                 std::sync::Arc::new(move |request, path| {
                     let app = app.clone();
                     Box::pin(async move {
-                        app.send(request, None)
-                            .await
-                            .map_err(|failure| match failure {
-                                signalbox_github_transport::AppRequestFailure::Credential(_) => {
-                                    GitHubClientError::InvalidCredential
-                                }
-                                signalbox_github_transport::AppRequestFailure::Request(source) => {
-                                    GitHubClientError::Request {
-                                        path,
+                        let response =
+                            app.send(request, None)
+                                .await
+                                .map_err(|failure| match failure {
+                                    signalbox_github_transport::AppRequestFailure::Credential(
+                                        _,
+                                    ) => GitHubClientError::InvalidCredential,
+                                    signalbox_github_transport::AppRequestFailure::Request(
+                                        source,
+                                    ) => GitHubClientError::Request {
+                                        path: path.clone(),
                                         status: None,
                                         source,
-                                    }
-                                }
-                            })
+                                    },
+                                })?;
+                        let credential = signalbox_github_transport::response_credential(&response)
+                            .ok_or(GitHubClientError::InvalidCredential)?
+                            .to_vec();
+                        scrub_app_response(response, &path, &credential).await
                     })
                 });
             send
         });
     client.with_request_sender(sender)
+}
+
+async fn scrub_app_response(
+    response: reqwest::Response,
+    path: &str,
+    credential: &[u8],
+) -> Result<reqwest::Response, GitHubClientError> {
+    let status = response.status();
+    if !status.is_success() {
+        return Ok(response);
+    }
+    let token = std::str::from_utf8(credential)
+        .ok()
+        .filter(|token| !token.is_empty())
+        .ok_or(GitHubClientError::InvalidCredential)?;
+    let encoded = serde_json::Value::String(token.to_owned()).to_string();
+    let escaped = &encoded[1..encoded.len() - 1];
+    let mut sanitized = http::Response::new(String::new());
+    *sanitized.status_mut() = status;
+    *sanitized.version_mut() = response.version();
+    *sanitized.headers_mut() = response.headers().clone();
+    for header in sanitized.headers_mut().values_mut() {
+        if let Ok(text) = header.to_str() {
+            *header =
+                reqwest::header::HeaderValue::from_str(&redact_app_token(text, token, escaped))
+                    .map_err(|_| GitHubClientError::InvalidCredential)?;
+        }
+    }
+    let mut value: serde_json::Value =
+        response
+            .json()
+            .await
+            .map_err(|source| GitHubClientError::Request {
+                path: path.to_owned(),
+                status: Some(status),
+                source,
+            })?;
+    scrub_app_json(&mut value, token, escaped);
+    *sanitized.body_mut() = value.to_string();
+    sanitized
+        .headers_mut()
+        .remove(reqwest::header::CONTENT_LENGTH);
+    Ok(sanitized.into())
+}
+
+fn redact_app_token(text: &str, token: &str, escaped: &str) -> String {
+    text.replace(escaped, "[redacted]")
+        .replace(token, "[redacted]")
+}
+
+fn scrub_app_json(value: &mut serde_json::Value, token: &str, escaped: &str) {
+    match value {
+        serde_json::Value::String(text) => *text = redact_app_token(text, token, escaped),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                scrub_app_json(value, token, escaped);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for value in object.values_mut() {
+                scrub_app_json(value, token, escaped);
+            }
+        }
+        _ => {}
+    }
 }
 
 impl signalbox_module_repo_watch_v2::provider::RepositoryClientLoader
@@ -325,6 +395,120 @@ mod tests {
         RepositoryWatchClientLoader,
     };
     use signalbox_model_runtime::CredentialReference;
+
+    // Distinct generations exercise response-scoped redaction after a refresh.
+    const INITIAL_TOKEN: &str = "initial-installation-token";
+    const RESPONSE_TOKEN: &str = "refreshed\"installation\\token";
+    const OBSERVATION_PATH: &str = "/repos/fixture/project/pulls";
+
+    fn observation_client(body: serde_json::Value) -> super::GitHubClient {
+        super::GitHubClient::try_new("repository-watch-fixture", INITIAL_TOKEN)
+            .expect("fixture client")
+            .with_request_sender(Some(std::sync::Arc::new(move |_request, path| {
+                let body = body.to_string();
+                Box::pin(async move {
+                    let response = http::Response::builder()
+                        .status(200)
+                        .header("etag", format!("revision-{RESPONSE_TOKEN}"))
+                        .header("last-modified", "Wed, 09 Sep 2026 12:00:00 GMT")
+                        .header("link", "<https://api.github.com/next>; rel=\"next\"")
+                        .header("x-ratelimit-remaining", "14987")
+                        .header("content-length", body.len())
+                        .body(body)
+                        .expect("fixture response");
+                    super::scrub_app_response(response.into(), &path, RESPONSE_TOKEN.as_bytes())
+                        .await
+                })
+            })))
+    }
+
+    #[tokio::test]
+    async fn rest_observations_scrub_the_response_token_before_cache_ingestion() {
+        let encoded = serde_json::Value::String(RESPONSE_TOKEN.to_owned()).to_string();
+        let escaped = &encoded[1..encoded.len() - 1];
+        let client = observation_client(serde_json::json!([{
+            "title": format!("title {RESPONSE_TOKEN}"),
+            "body": format!("escaped {escaped}"),
+        }]));
+        let page = client
+            .conditional_page(OBSERVATION_PATH, None)
+            .await
+            .expect("sanitized page");
+        let signalbox_module_repo_watch_v2::github::ConditionalPage::Modified {
+            body,
+            validators,
+            has_next,
+        } = page
+        else {
+            panic!("the successful response supplies a replacement snapshot");
+        };
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("valid cached JSON");
+        assert_eq!(
+            value,
+            serde_json::json!([{
+                "title": "title [redacted]", "body": "escaped [redacted]",
+            }])
+        );
+        assert_eq!(validators.etag.as_deref(), Some("revision-[redacted]"));
+        assert_eq!(
+            validators.last_modified.as_deref(),
+            Some("Wed, 09 Sep 2026 12:00:00 GMT")
+        );
+        assert!(has_next);
+        assert_eq!(
+            client.rest_quota().await.expect("App quota header"),
+            Some(14987)
+        );
+    }
+
+    #[tokio::test]
+    async fn graphql_observations_scrub_the_response_token_before_pr_state_ingestion() {
+        let client = observation_client(serde_json::json!({
+            "data": {"repository": {"pullRequests": {"nodes": [{
+                "title": RESPONSE_TOKEN, "body": format!("body {RESPONSE_TOKEN}"),
+            }]}}},
+        }));
+        let body = client
+            .graphql(b"{}".to_vec())
+            .await
+            .expect("sanitized GraphQL response");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("valid observation JSON");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "data": {"repository": {"pullRequests": {"nodes": [{
+                    "title": "[redacted]", "body": "body [redacted]",
+                }]}}},
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_app_observations_fail_before_ingestion() {
+        let response = http::Response::new(format!("not JSON: {RESPONSE_TOKEN}"));
+        let failure =
+            super::scrub_app_response(response.into(), OBSERVATION_PATH, RESPONSE_TOKEN.as_bytes())
+                .await
+                .expect_err("malformed observations cannot reach persistence");
+        assert!(matches!(
+            failure,
+            GitHubClientError::Request {
+                status: Some(reqwest::StatusCode::OK),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn unchanged_app_pages_do_not_require_a_json_body() {
+        let response = http::Response::builder().status(304).body("").unwrap();
+        let response =
+            super::scrub_app_response(response.into(), OBSERVATION_PATH, RESPONSE_TOKEN.as_bytes())
+                .await
+                .expect("unchanged responses retain their status");
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_MODIFIED);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn push_app_lookup_expires_at_the_supplied_push_budget() {
