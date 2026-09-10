@@ -460,9 +460,7 @@ impl PostgresModelCallRepository {
                                         octet_length(jsonb_build_object('error', jsonb_build_object(
                                         'kind', 'denied', 'detail', decision.denial_reason))::text)
                                     WHEN 'tool_inadmissible' THEN
-                                        octet_length(jsonb_build_object('error', jsonb_build_object(
-                                            'kind', 'execution_failed',
-                                            'detail', result_request.inadmissible_reason))::text)
+                                        octet_length(jsonb_build_object('error', tool_inadmissible_error(result_request.inadmissible_reason, result_request.inadmissible_limit, result_request.inadmissible_argument_bytes))::text)
                                     WHEN 'delegated_task' THEN
                                         COALESCE(octet_length(task.task_content), 0)
                                     WHEN 'delegation_message' THEN

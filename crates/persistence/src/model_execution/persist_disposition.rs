@@ -205,11 +205,31 @@ pub(super) async fn persist_tool_round_entries(
             signalbox_domain::ToolArgumentsKind::Undecodable => "undecodable",
         };
         let approval_posture = tool_approval_posture_to_str(request.approval_posture());
+        let (reason, limit, argument_bytes) = match request.inadmissible_reason() {
+            None => (None, None, None),
+            Some(signalbox_domain::ToolInadmissibleReason::PlacementLost) => {
+                (Some("placement_lost"), None, None)
+            }
+            Some(signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded { limit }) => (
+                Some("proposal_limit_exceeded"),
+                Some(Decimal::from(limit)),
+                None,
+            ),
+            Some(signalbox_domain::ToolInadmissibleReason::ArgumentBytesExceeded {
+                limit,
+                bytes,
+            }) => (
+                Some("argument_bytes_exceeded"),
+                Some(Decimal::from(limit)),
+                Some(Decimal::from(bytes)),
+            ),
+        };
         sqlx::query(
             "INSERT INTO tool_request
                 (request_id, session_id, turn_id, producing_model_call_id,
-                 request_ordinal, tool_name, arguments_kind, arguments_text, approval_posture)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 request_ordinal, tool_name, arguments_kind, arguments_text, approval_posture,
+                 resolution_kind, inadmissible_reason, inadmissible_limit, inadmissible_argument_bytes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(tool_request_id_to_uuid(request.id()))
         .bind(session_id_to_uuid(request.session()))
@@ -220,6 +240,10 @@ pub(super) async fn persist_tool_round_entries(
         .bind(arguments_kind)
         .bind(request.arguments().as_str())
         .bind(approval_posture)
+        .bind(reason.map(|_| "closed_inadmissible"))
+        .bind(reason)
+        .bind(limit)
+        .bind(argument_bytes)
         .execute(&mut *connection)
         .await?;
     }

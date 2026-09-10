@@ -101,7 +101,8 @@ pub use tool_settings::{
 };
 use tool_settings::{
     parse_approval_judge, parse_daemon_tool_settings, parse_git_identity,
-    parse_tool_approval_postures, parse_tool_mappings, parse_workspace_instruction_configuration,
+    parse_tool_approval_postures, parse_tool_mappings, parse_tool_proposal_limits,
+    parse_workspace_instruction_configuration,
 };
 
 #[derive(Clone)]
@@ -157,6 +158,7 @@ pub struct HubModelConfiguration {
     blob_storage: Option<BlobStorageConfiguration>,
     file_media: bool,
     workspace_instructions: WorkspaceInstructionConfiguration,
+    tool_proposal_limits: signalbox_application::ToolProposalLimits,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,6 +204,7 @@ impl HubModelConfiguration {
             approval_judge_selection,
             convergence,
             workspace_instructions,
+            tool_proposal_limits,
             mappings,
             session_credential_pin,
             fallback_credential_profile,
@@ -650,6 +653,7 @@ impl HubModelConfiguration {
             blob_storage,
             file_media,
             workspace_instructions,
+            tool_proposal_limits,
         })
     }
 
@@ -798,6 +802,7 @@ impl HubModelConfiguration {
                     u64::from(definition.max_output_tokens()),
                     u64::from(definition.context_window_tokens()),
                 )
+                .with_max_tool_requests(self.tool_proposal_limits.max_requests)
                 .with_compaction_prompt_bytes(self.compaction_prompt.len() as u64)
                 .with_request_overhead(
                     fixed.saturating_sub(1) as u64,
@@ -1344,6 +1349,11 @@ impl HubModelConfiguration {
     /// Returns explicitly configured daemon tool dependencies, when present.
     pub const fn daemon_tools(&self) -> Option<&DaemonToolConfiguration> {
         self.daemon_tools.as_ref()
+    }
+
+    /// Configured admission caps for each model response's tool proposals.
+    pub const fn tool_proposal_limits(&self) -> signalbox_application::ToolProposalLimits {
+        self.tool_proposal_limits
     }
 
     /// Returns explicit roots whose content is discoverable but not eligible by default.
