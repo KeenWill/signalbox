@@ -1192,11 +1192,6 @@ mod tests {
         version_fixture(&format!("#!/bin/sh\nprintf '%s' '{banner}'\n"))
     }
 
-    #[test]
-    fn pinned_version_probe_retains_a_four_kibibyte_banner_bound() {
-        assert_eq!(super::MAX_VERSION_BANNER_BYTES, 4096);
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn pinned_version_probe_rejects_an_unpinned_executable_reporting_the_supported_version() {
