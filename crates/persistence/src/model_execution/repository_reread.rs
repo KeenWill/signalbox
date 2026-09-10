@@ -327,7 +327,7 @@ impl PostgresModelCallRepository {
                         manifest.manifest_hash_algorithm
                             AS instruction_manifest_hash_algorithm,
                         manifest.manifest_hash AS instruction_manifest_hash,
-                        discovery.scan_complete AS instruction_discovery_complete
+                        discovery.instruction_discovery_id
                    FROM model_call AS call
               LEFT JOIN turn_instruction_manifest AS manifest
                      ON manifest.turn_instruction_manifest_id = call.turn_instruction_manifest_id

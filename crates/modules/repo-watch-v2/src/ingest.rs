@@ -325,6 +325,11 @@ pub trait RepositoryTask: Send {
         &mut self,
         producer: EventProducer,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Drains task-owned work after the polling future has been interrupted.
+    fn shutdown(&mut self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 /// Runs start-to-start polls and coalesced webhook wakes without overlapping attempts.
@@ -337,11 +342,11 @@ pub async fn run_repository_task(
     let mut next_start = Instant::now();
     loop {
         if *shutdown.borrow() {
-            return;
+            break;
         }
         let producer = tokio::select! {
             biased;
-            _ = shutdown.changed() => return,
+            _ = shutdown.changed() => break,
             () = sleep_until(next_start) => EventProducer::Poll,
             () = wake.notified() => EventProducer::Webhook,
         };
@@ -349,12 +354,13 @@ pub async fn run_repository_task(
             next_start = Instant::now() + interval;
         }
         tokio::select! {
-            _ = shutdown.changed() => return,
+            _ = shutdown.changed() => break,
             result = task.poll(producer) => {
                 if let Err(error) = result { tracing::warn!(%error, ?producer, "repository-watch observation failed"); }
             }
         }
     }
+    task.shutdown().await;
 }
 
 pub(crate) async fn queue_webhook_pulls(

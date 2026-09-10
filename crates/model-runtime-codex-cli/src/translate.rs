@@ -9,6 +9,11 @@ use signalbox_model_runtime::{
     PreparationFailure, ToolChoice,
 };
 
+/// Measures the complete adapter request, including instructions and tool declarations.
+pub fn serialized_request_bytes<C>(operation: &ModelOperation<C>) -> Option<usize> {
+    Some(translate(operation).ok()?.prompt.len())
+}
+
 pub(crate) struct TranslatedOperation {
     pub(crate) prompt: Vec<u8>,
     pub(crate) images: Vec<crate::app_server::frame::UserInput>,
