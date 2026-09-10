@@ -221,62 +221,26 @@ fn retry_event(
         .iter()
         .any(|t| t.state() == RepoWatchThreadState::Open);
     let conflicting = current.mergeable_state() == MergeableState::Conflicting;
+    if !(conflicting || unresolved || failing) {
+        return None;
+    }
     let kind = match previous.kind() {
-        RepoWatchEventKindV1::MergeableStateChanged { .. } if conflicting => {
+        RepoWatchEventKindV1::MergeableStateChanged { .. } => {
             RepoWatchEventKindV1::MergeableStateChanged {
                 current: current.mergeable_state(),
             }
         }
-        RepoWatchEventKindV1::MergeableStateChanged { .. } => return None,
-        RepoWatchEventKindV1::Labeled { label }
-            if current.context().labels().contains(label)
-                && (conflicting || unresolved || failing) =>
-        {
-            previous.kind().clone()
+        RepoWatchEventKindV1::Labeled { label } if !current.context().labels().contains(label) => {
+            return None;
         }
-        RepoWatchEventKindV1::ChecksCompleted { .. } if failing || unresolved => {
-            RepoWatchEventKindV1::ChecksCompleted {
-                outcome: if failing {
-                    ChecksOutcome::Failure
-                } else {
-                    ChecksOutcome::Success
-                },
-            }
-        }
-        RepoWatchEventKindV1::ReviewSubmitted { reviewer, .. } if unresolved => {
-            let review = current
-                .reviews()
-                .iter()
-                .rev()
-                .find(|r| r.reviewer() == reviewer)?;
-            RepoWatchEventKindV1::ReviewSubmitted {
-                reviewer: reviewer.clone(),
-                state: review.state()?,
-                commit: review.commit().clone(),
-            }
-        }
-        RepoWatchEventKindV1::ThreadOpened { .. } if unresolved => {
-            RepoWatchEventKindV1::ThreadOpened {
-                thread: current
-                    .threads()
-                    .iter()
-                    .find(|t| t.state() == RepoWatchThreadState::Open)?
-                    .thread()
-                    .clone(),
-            }
-        }
-        RepoWatchEventKindV1::CheckRunCompleted { name, .. } if failing => {
-            RepoWatchEventKindV1::CheckRunCompleted {
-                name: name.clone(),
-                conclusion: current
-                    .completed_check_runs()
-                    .iter()
-                    .find(|c| c.name() == name && failing_conclusion(c.conclusion()))?
-                    .conclusion(),
-            }
-        }
-        RepoWatchEventKindV1::BaseAdvanced { .. } if conflicting => previous.kind().clone(),
-        _ => return None,
+        RepoWatchEventKindV1::ChecksCompleted { .. } => RepoWatchEventKindV1::ChecksCompleted {
+            outcome: if failing {
+                ChecksOutcome::Failure
+            } else {
+                ChecksOutcome::Success
+            },
+        },
+        _ => previous.kind().clone(),
     };
     let event = RepoWatchEvent::try_pull_request(
         previous.id(),
@@ -385,6 +349,78 @@ mod tests {
                 &[RepoWatchPullRequestState::try_new(current).expect("pull")]
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn unresolved_threads_keep_a_resolved_conflict_dispatch_eligible() {
+        let (rule, event) = origin(RepoWatchEventKindV1::MergeableStateChanged {
+            current: MergeableState::Conflicting,
+        });
+        let mut current = input();
+        current.mergeable_state = MergeableState::Mergeable;
+        current.threads = vec![RepoWatchThreadObservation::new(
+            ReviewThreadId::try_new("remaining-review".to_owned()).expect("thread"),
+            RepoWatchThreadState::Open,
+        )];
+        let retry = retry_event(
+            &rule,
+            &event,
+            &[RepoWatchPullRequestState::try_new(current).expect("pull")],
+        )
+        .expect("unfinished review work");
+        assert_eq!(
+            retry.kind(),
+            &RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Mergeable
+            }
+        );
+    }
+
+    #[test]
+    fn failing_checks_keep_a_resolved_conflict_dispatch_eligible() {
+        use signalbox_session_ownership::{
+            GitHubObjectId, RepoWatchCheckCompletionGeneration, RepoWatchCheckSuiteObservation,
+        };
+        let (rule, event) = origin(RepoWatchEventKindV1::MergeableStateChanged {
+            current: MergeableState::Conflicting,
+        });
+        let mut current = input();
+        current.mergeable_state = MergeableState::Mergeable;
+        current.completed_check_suites = vec![RepoWatchCheckSuiteObservation::new(
+            GitHubObjectId::new(NonZeroU64::MIN),
+            RepoWatchCheckCompletionGeneration::try_new("remaining-failure".to_owned())
+                .expect("generation"),
+            ChecksOutcome::Failure,
+        )];
+        assert!(
+            retry_event(
+                &rule,
+                &event,
+                &[RepoWatchPullRequestState::try_new(current).expect("pull")]
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn a_conflict_keeps_a_passed_checks_dispatch_eligible() {
+        let (rule, event) = origin(RepoWatchEventKindV1::ChecksCompleted {
+            outcome: ChecksOutcome::Failure,
+        });
+        let mut current = input();
+        current.mergeable_state = MergeableState::Conflicting;
+        let retry = retry_event(
+            &rule,
+            &event,
+            &[RepoWatchPullRequestState::try_new(current).expect("pull")],
+        )
+        .expect("unfinished merge work");
+        assert_eq!(
+            retry.kind(),
+            &RepoWatchEventKindV1::ChecksCompleted {
+                outcome: ChecksOutcome::Success
+            }
         );
     }
 
