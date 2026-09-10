@@ -36,6 +36,10 @@ pub(super) fn projected_entries(
         ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
             project_claude_code_record(normalized, ClaudeCodeProjectionVersion::Two)
         }
-        ImportedConversationFormat::CodexRolloutJsonlV1 => project_codex_record(normalized),
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV3 => {
+            project_claude_code_record(normalized, ClaudeCodeProjectionVersion::Two)
+        }
+        ImportedConversationFormat::CodexRolloutJsonlV1
+        | ImportedConversationFormat::CodexRolloutJsonlV2 => project_codex_record(normalized),
     }
 }

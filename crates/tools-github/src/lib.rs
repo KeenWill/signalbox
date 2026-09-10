@@ -682,8 +682,7 @@ struct MetadataContract;
 impl ToolContract for MetadataContract {
     type Arguments = PullRequestArguments;
     const NAME: &'static str = PULL_REQUEST_METADATA_NAME;
-    const DESCRIPTION: &'static str =
-        "Returns bounded metadata and exact base/head revisions for one GitHub pull request.";
+    const DESCRIPTION: &'static str = "Returns bounded metadata, exact base/head revisions, and mergeable (true, false, or null while GitHub computes it) for one GitHub pull request. This read does not require a convergence policy.";
 }
 
 struct DiffContract;
@@ -2572,6 +2571,13 @@ fn normalize_metadata(
     if required_u64(object, "number")? != u64::from(expected_number.get()) {
         return Err(invalid_response(None));
     }
+    let mergeable = required(object, "mergeable")?;
+    if !matches!(
+        mergeable,
+        serde_json::Value::Bool(_) | serde_json::Value::Null
+    ) {
+        return Err(invalid_response(None));
+    }
     let base = required_object(required(object, "base")?)?;
     let head = required_object(required(object, "head")?)?;
     let title = checked_text(required_string(object, "title")?, TextPresence::Required)?;
@@ -2588,6 +2594,7 @@ fn normalize_metadata(
         "body": body,
         "state": state,
         "draft": required_bool(object, "draft")?,
+        "mergeable": mergeable,
         "author": author,
         "base_ref": checked_text(required_string(base, "ref")?, TextPresence::Required)?,
         "base_revision": checked_revision(required_string(base, "sha")?)?,
@@ -3181,6 +3188,7 @@ mod tests {
         serde_json::json!({
             "number": PULL_REQUEST_NUMBER,
             "changed_files": CHANGED_FILES,
+            "mergeable": true,
             "title": "Exact revision repository reads",
             "body": "Synthetic body",
             "state": "open",
@@ -3856,6 +3864,54 @@ mod tests {
         assert_eq!(parsed["base_revision"], BASE_REVISION);
         assert_eq!(parsed["head_revision"], HEAD_REVISION);
         assert_eq!(parsed["number"], PULL_REQUEST_NUMBER);
+    }
+
+    #[test]
+    fn metadata_preserves_provider_mergeability() {
+        let number =
+            PullRequestNumber::try_from(PULL_REQUEST_NUMBER).expect("fixture number is admitted");
+        for mergeable in [
+            serde_json::Value::Bool(true),
+            serde_json::Value::Bool(false),
+            serde_json::Value::Null,
+        ] {
+            let mut response = metadata_response();
+            response["mergeable"] = mergeable.clone();
+
+            let parsed = normalize_metadata(&response, number).expect("mergeability is admitted");
+
+            assert_eq!(parsed["mergeable"], mergeable);
+            assert_eq!(parsed["head_revision"], response["head"]["sha"]);
+        }
+    }
+
+    #[test]
+    fn metadata_rejects_malformed_mergeability() {
+        let number =
+            PullRequestNumber::try_from(PULL_REQUEST_NUMBER).expect("fixture number is admitted");
+        let mut response = metadata_response();
+        response["mergeable"] = serde_json::json!("true");
+
+        assert_eq!(
+            normalize_metadata(&response, number),
+            Err(invalid_response(None))
+        );
+    }
+
+    #[test]
+    fn metadata_requires_the_nullable_mergeability_member() {
+        let number =
+            PullRequestNumber::try_from(PULL_REQUEST_NUMBER).expect("fixture number is admitted");
+        let mut response = metadata_response();
+        response
+            .as_object_mut()
+            .expect("fixture is an object")
+            .remove("mergeable");
+
+        assert_eq!(
+            normalize_metadata(&response, number),
+            Err(invalid_response(None))
+        );
     }
 
     #[test]

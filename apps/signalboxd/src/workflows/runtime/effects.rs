@@ -17,7 +17,7 @@ pub(super) trait AttemptEffects: EffectExecutor {
 pub(super) struct RuntimeEffects {
     repository_watch: Option<RepositoryWatchRuntime>,
     journal: ProgramJournalRepository,
-    eval: Option<EvaluationEffects>,
+    eval: Option<Result<EvaluationEffects, LiveDeliveryFailure>>,
     pub(super) rejected: Option<ProgramCapability>,
 }
 
@@ -25,12 +25,12 @@ impl RuntimeEffects {
     pub(super) fn new(
         repository_watch: Option<RepositoryWatchRuntime>,
         journal: ProgramJournalRepository,
-        eval: Option<EvalServices>,
+        eval: Option<EvalComposition>,
     ) -> Self {
         Self {
             repository_watch,
             journal,
-            eval: eval.map(EvaluationEffects::new),
+            eval: eval.map(|compose| compose().map(EvaluationEffects::new)),
             rejected: None,
         }
     }
@@ -64,8 +64,8 @@ impl EffectExecutor for RuntimeEffects {
         }
         if RepoWatchRequest::decode(request).is_some() && self.repository_watch.is_some() {
             effects::recovery(request)
-        } else if let Some(eval) = &self.eval {
-            eval.recovery(request)
+        } else if self.eval.is_some() {
+            EvaluationEffects::recovery_for(request)
         } else {
             EffectRecovery::Idempotent
         }
@@ -91,6 +91,9 @@ impl EffectExecutor for RuntimeEffects {
                 return self.classify(result, invocation.request.capability());
             }
             if let Some(eval) = &mut self.eval {
+                let eval = eval
+                    .as_mut()
+                    .map_err(|error| LiveDeliveryFailure::new(error.to_string()))?;
                 let result = eval.adopt(invocation).await;
                 self.rejected = eval.rejected().then_some(invocation.request.capability());
                 return result;
@@ -118,6 +121,9 @@ impl EffectExecutor for RuntimeEffects {
                 return self.classify(result, invocation.request.capability());
             }
             if let Some(eval) = &mut self.eval {
+                let eval = eval
+                    .as_mut()
+                    .map_err(|error| LiveDeliveryFailure::new(error.to_string()))?;
                 let result = eval.execute(invocation).await;
                 self.rejected = eval.rejected().then_some(invocation.request.capability());
                 return result;

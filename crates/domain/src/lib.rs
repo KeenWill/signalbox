@@ -15,6 +15,7 @@ mod context_compaction;
 mod context_frontier;
 mod credential_availability;
 mod delivery_request;
+pub mod evaluation;
 mod fatal_mismatch;
 mod git_remote;
 mod goal;
@@ -109,16 +110,17 @@ pub use imported_conversation::{
     ImportedConversation, ImportedConversationDisplayTitle, ImportedConversationDisplayTitleError,
     ImportedConversationFormat, ImportedConversationReconstitutionError,
     ImportedConversationReconstitutionFailure, ImportedConversationReconstitutionInput,
-    ImportedConversationSourceDigest, ImportedJsonNumber, ImportedJsonNumberError,
-    ImportedMediaSource, ImportedMessageContentAbsence, ImportedRawRecordConversionDigest,
-    ImportedRawRecordHash, ImportedRawRecordPosition, ImportedRawSourceRecord,
-    ImportedRawSourceRecordReconstitutionInput, ImportedRecordEntryPosition,
-    ImportedSourceAttestation, ImportedSourceMetadata, ImportedSpeaker,
-    ImportedStructuredFieldError, ImportedStructuredObjectMember, ImportedStructuredValue,
-    ImportedText, ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
-    ImportedTranscriptEntry, ImportedTranscriptEntryInput, ImportedTranscriptFrontier,
-    ImportedTranscriptPosition, imported_bool_attestation, imported_string_structured_attestation,
-    imported_structured_attestation, imported_text_attestation, unique_imported_structured_field,
+    ImportedConversationSourceDigest, ImportedConversationSourceDigestBuilder, ImportedJsonNumber,
+    ImportedJsonNumberError, ImportedMediaSource, ImportedMessageContentAbsence,
+    ImportedRawRecordConversionDigest, ImportedRawRecordHash, ImportedRawRecordPosition,
+    ImportedRawSourceRecord, ImportedRawSourceRecordReconstitutionInput,
+    ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSourceMetadata,
+    ImportedSpeaker, ImportedStructuredFieldError, ImportedStructuredObjectMember,
+    ImportedStructuredValue, ImportedText, ImportedToolResultBlock, ImportedToolResultValue,
+    ImportedTranscriptContent, ImportedTranscriptEntry, ImportedTranscriptEntryInput,
+    ImportedTranscriptFrontier, ImportedTranscriptPosition, imported_bool_attestation,
+    imported_string_structured_attestation, imported_structured_attestation,
+    imported_text_attestation, unique_imported_structured_field,
 };
 pub use imported_session::{
     BoundedImportedSessionReconstitutionError, BoundedImportedSessionReconstitutionFailure,

@@ -259,7 +259,13 @@ component; repository scope keys the repository; rule scope spans repositories.
 Each key belongs to one rule revision. A live dispatch suppresses later matching
 facts. Nonsticky session termination releases its action; cooldown begins when
 the last action releases. A sticky stop keeps redispatch suppressed for that
-key.
+key. After the latest dispatch ends nonsticky without a durably completed
+configured push, repository watch retries that rule and pull request after its
+cooldown while the latest observed matching condition remains: a conflicting
+merge, unresolved review threads, or failing checks. Retries use the current
+pull-request context, retain their preceding dispatch and evaluated event
+context, and pass through the existing singleton and dispatch admission limits;
+they do not create GitHub change events.
 
 Goal commissioning or resumption releases the dispatched session's held start
 gate. A user-stopped goal issues a parent-only sticky stop. An achieved session
@@ -268,14 +274,15 @@ event commissions a fresh session and goal under the rule's cooldown. A close or
 merge fact with a repository event ordinal after the dispatch event issues a
 parent-only sticky stop for its live dispatched session, with
 `pull_request_closed` or `pull_request_merged` retained as the ledger reason; an
-already terminal session is left alone. Reactions check durable core terminal
-facts before recording retirement or submitting its stop, including facts still
-pending at the module cursor. Retirement scans retain discovered terminal times
-on the dispatch ledger. A queued retirement whose session has ended is rejected
-locally as `session_already_terminal`. Reactions retain their original rule and
-action even after configuration removes the rule. The module commits lifecycle
-effects before advancing its application cursor; the daemon acknowledges the
-corresponding seam event afterward.
+already terminal session is left alone. For retries, the close or merge fact
+must also be recorded no earlier than dispatch issuance. Reactions check durable
+core terminal facts before recording retirement or submitting its stop,
+including facts still pending at the module cursor. Retirement scans retain
+discovered terminal times on the dispatch ledger. A queued retirement whose
+session has ended is rejected locally as `session_already_terminal`. Reactions
+retain their original rule and action even after configuration removes the rule.
+The module commits lifecycle effects before advancing its application cursor;
+the daemon acknowledges the corresponding seam event afterward.
 
 Pull-request dispatch atomically creates the session with a provisioning hold
 that public start and ownership releases cannot clear. Input accepted during
