@@ -225,6 +225,21 @@ fn retry_event(
         return None;
     }
     let kind = match previous.kind() {
+        RepoWatchEventKindV1::HeadChanged {
+            previous: before,
+            current: dispatched,
+        } => RepoWatchEventKindV1::HeadChanged {
+            previous: if current.context().head_sha() == dispatched {
+                before
+            } else {
+                dispatched
+            }
+            .clone(),
+            current: current.context().head_sha().clone(),
+        },
+        RepoWatchEventKindV1::BaseAdvanced { .. } => RepoWatchEventKindV1::BaseAdvanced {
+            branch: current.context().base_branch().clone(),
+        },
         RepoWatchEventKindV1::MergeableStateChanged { .. } => {
             RepoWatchEventKindV1::MergeableStateChanged {
                 current: current.mergeable_state(),
@@ -280,7 +295,11 @@ mod tests {
     use std::num::NonZeroU64;
 
     fn context(labels: Vec<LabelName>) -> PullRequestEventContext {
-        PullRequestEventContext::new(PullRequestEventContextInput {
+        PullRequestEventContext::new(context_input(labels))
+    }
+
+    fn context_input(labels: Vec<LabelName>) -> PullRequestEventContextInput {
+        PullRequestEventContextInput {
             number: PullRequestNumber::new(NonZeroU64::MIN),
             head_sha: CommitSha::try_new("1111111111111111111111111111111111111111".to_owned())
                 .expect("head"),
@@ -293,7 +312,7 @@ mod tests {
             labels,
             draft: false,
             author: None,
-        })
+        }
     }
 
     fn input() -> RepoWatchPullRequestStateInput {
@@ -336,6 +355,68 @@ mod tests {
         )
         .expect("rule");
         (rule, event)
+    }
+
+    #[test]
+    fn head_change_retries_track_the_latest_observed_head() {
+        let before = CommitSha::try_new("2222222222222222222222222222222222222222".to_owned())
+            .expect("previous head");
+        let dispatched = context(vec![]).head_sha().clone();
+        let advanced = CommitSha::try_new("3333333333333333333333333333333333333333".to_owned())
+            .expect("advanced head");
+        let (rule, event) = origin(RepoWatchEventKindV1::HeadChanged {
+            previous: before.clone(),
+            current: dispatched.clone(),
+        });
+        for (head, previous) in [
+            (advanced, dispatched.clone()),
+            (before.clone(), dispatched.clone()),
+            (dispatched, before),
+        ] {
+            let mut current = input();
+            current.context = PullRequestEventContext::new(PullRequestEventContextInput {
+                head_sha: head.clone(),
+                ..context_input(vec![])
+            });
+            current.mergeable_state = MergeableState::Conflicting;
+            let retry = retry_event(
+                &rule,
+                &event,
+                &[RepoWatchPullRequestState::try_new(current).expect("pull")],
+            )
+            .expect("unfinished merge retries at the observed head");
+            assert_eq!(
+                retry.kind(),
+                &RepoWatchEventKindV1::HeadChanged {
+                    previous,
+                    current: head,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn base_advance_retries_track_the_latest_target_branch() {
+        let (rule, event) = origin(RepoWatchEventKindV1::BaseAdvanced {
+            branch: context(vec![]).base_branch().clone(),
+        });
+        let base = BranchName::try_new("release".to_owned()).expect("new target branch");
+        let mut current = input();
+        current.context = PullRequestEventContext::new(PullRequestEventContextInput {
+            base_branch: base.clone(),
+            ..context_input(vec![])
+        });
+        current.mergeable_state = MergeableState::Conflicting;
+        let retry = retry_event(
+            &rule,
+            &event,
+            &[RepoWatchPullRequestState::try_new(current).expect("pull")],
+        )
+        .expect("unfinished merge retries after retargeting");
+        assert_eq!(
+            retry.kind(),
+            &RepoWatchEventKindV1::BaseAdvanced { branch: base }
+        );
     }
 
     #[test]
