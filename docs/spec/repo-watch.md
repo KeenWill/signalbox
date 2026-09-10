@@ -379,14 +379,16 @@ retains its stable effect identity, exact request and accepted event range on
 `repository_state`, including unchanged observations. The receipt accumulates
 completed stages and records the attempt's success, partial or failure outcome;
 interruption between stages retains a partial result. Observation execution and
-adoption serialize per repository. A successor adopts the receipt before
-provider configuration or another fetch, and exact durable journal delivery
-moves its binding to `workflow_effect_result` before releasing the pending slot
-for the next observation in either mode. Completed observation bindings remain
-recoverable after later observations; changed input conflicts. A finalized
-attempt with no committed frontier stage retains its result there directly. An
-unanswered effect without a receipt is ambiguous. Shutdown cancels admitted
-observation runs and drains their provider work.
+adoption serialize per repository. Observation leases share one
+single-connection pool across store clones, separate from the pool used by
+frontier commits. A successor adopts the receipt before provider configuration
+or another fetch, and exact durable journal delivery moves its binding to
+`workflow_effect_result` before releasing the pending slot for the next
+observation in either mode. Completed observation bindings remain recoverable
+after later observations; changed input conflicts. A finalized attempt with no
+committed frontier stage retains its result there directly. An unanswered effect
+without a receipt is ambiguous. Shutdown cancels admitted observation runs and
+drains their provider work.
 
 The v2 crate depends on the session ownership crate as its only Signalbox
 dependency. It consumes the seam's lifecycle events and emits only the seam's

@@ -682,6 +682,7 @@ impl From<sqlx::Error> for StoreError {
 #[derive(Clone, Debug)]
 pub struct RepoWatchStore {
     pool: PgPool,
+    observation_locks: PgPool,
     measurements: measurements::Measurements,
     observation_invocation: Option<std::sync::Arc<observation_workflow::ObservationInvocation>>,
 }
@@ -695,7 +696,14 @@ struct WebhookReplayRecord {
 impl RepoWatchStore {
     /// Uses a pool already confined to the repository-watch role and schema.
     pub fn new(module_pool: PgPool) -> Self {
+        let observation_locks = module_pool
+            .options()
+            .clone()
+            .min_connections(0)
+            .max_connections(1)
+            .connect_lazy_with(module_pool.connect_options().as_ref().clone());
         Self {
+            observation_locks,
             pool: module_pool,
             measurements: measurements::Measurements::default(),
             observation_invocation: None,
