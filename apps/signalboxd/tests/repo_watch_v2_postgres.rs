@@ -60,6 +60,8 @@ mod checkout;
 mod provider_identity;
 #[path = "repo_watch_v2/retirement.rs"]
 mod retirement;
+#[path = "repo_watch_v2/retry.rs"]
+mod retry;
 #[path = "repo_watch_v2/workflows.rs"]
 mod workflows;
 
