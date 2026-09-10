@@ -1319,6 +1319,7 @@ async fn failed_automatic_compaction_closes_turn_call_free() -> Result<(), Box<d
     let ordinary_probe = ordinary_runtime.clone();
     let summary_runtime = ScriptedModel::single(Script::delivering(
         TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            credential_recovery: None,
             exchange: ExchangeFacts::default(),
             reported_model: None,
             kind: ProviderErrorKind::Unrecognized,

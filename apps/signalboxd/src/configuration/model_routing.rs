@@ -51,20 +51,6 @@ pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
 
 pub(super) const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
 
-/// One provider-availability cause a pool trigger can react to.
-///
-/// Only these three carry proof that the request was not accepted, so only they
-/// can authorize an availability successor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AvailabilityCause {
-    /// The account's quota for the period is spent.
-    QuotaExhausted,
-    /// The provider rate limited this request.
-    RateLimited,
-    /// The provider reported itself overloaded.
-    Overloaded,
-}
-
 /// Adapter implementations this daemon build can construct.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ModelAdapter {
@@ -128,36 +114,6 @@ impl ModelAdapter {
         match self {
             Self::CodexCli => true,
             Self::Anthropic | Self::ClaudeCli | Self::OpenAi => false,
-        }
-    }
-
-    /// Reports whether this adapter can supply the typed proof that a provider
-    /// rejected a request before accepting it for one exact availability cause,
-    /// which is what authorizes an availability successor.
-    ///
-    /// Only a decoded native error envelope carries that proof, and each adapter
-    /// names native tokens for only some causes
-    /// (`docs/spec/runtime-substrate.md`); a status-derived fallback carries
-    /// none. Anthropic maps `rate_limit_error` and `overloaded_error` but has no
-    /// quota token, and OpenAI maps `rate_limit_exceeded`/`rate_limit_error` and
-    /// `insufficient_quota` but reaches overload only by status. Codex
-    /// uses a typed failed-turn closure with no retry or assistant activity
-    /// to prove non-acceptance for its eligible error variants. Claude Code
-    /// exposes no equivalent proof. Listing every pair rather than matching
-    /// on a group makes a later adapter state its own
-    /// answer.
-    pub(crate) const fn proves_non_acceptance(self, cause: AvailabilityCause) -> bool {
-        match (self, cause) {
-            (Self::Anthropic, AvailabilityCause::RateLimited | AvailabilityCause::Overloaded) => {
-                true
-            }
-            (Self::Anthropic, AvailabilityCause::QuotaExhausted) => false,
-            (Self::OpenAi, AvailabilityCause::RateLimited | AvailabilityCause::QuotaExhausted) => {
-                true
-            }
-            (Self::OpenAi, AvailabilityCause::Overloaded) => false,
-            (Self::CodexCli, _) => true,
-            (Self::ClaudeCli, _) => false,
         }
     }
 

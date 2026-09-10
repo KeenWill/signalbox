@@ -133,7 +133,10 @@ where
         }
         body.extend_from_slice(chunk);
         if body.len() == limit {
-            let extent = if has_more_response_bytes(&mut stream).await? {
+            let extent = if has_more_response_bytes(&mut stream)
+                .await
+                .map_err(|_| WebFetchTransportFailure::DispatchUnknown)?
+            {
                 ResponseExtent::Truncated
             } else {
                 ResponseExtent::Complete

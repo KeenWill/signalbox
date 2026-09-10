@@ -158,6 +158,7 @@ impl<C: Clone> EventDecoder<C> {
         if let Some((method, error)) = self.rejection.take() {
             if input_too_large(method, &error) {
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    credential_recovery: None,
                     exchange: self.exchange,
                     reported_model: None,
                     kind: ProviderErrorKind::RequestTooLarge,
@@ -223,6 +224,7 @@ impl<C: Clone> EventDecoder<C> {
                 }
                 exchange.http_status = info.and_then(|info| info.http_status());
                 TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    credential_recovery: None,
                     exchange,
                     reported_model: None,
                     kind,
@@ -243,7 +245,15 @@ impl<C: Clone> EventDecoder<C> {
     }
 
     pub(crate) fn boundary_loss(self, cause: LossCause) -> TerminalEvidence {
-        boundary_loss_before_envelope(self.exchange, self.usage, cause)
+        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: self.client.activity.response_content_observed,
+            cause,
+            exchange: self.exchange,
+            reported_model: None,
+            finish_reported: None,
+            tool_calls: ToolCallsAtLoss::Unobserved,
+            usage: self.usage,
+        })
     }
 
     pub(crate) fn boundary_loss_unless_provider_failure(
@@ -639,6 +649,7 @@ fn boundary_loss_with_finish(
     cause: LossCause,
 ) -> TerminalEvidence {
     TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+        response_content_observed: false,
         cause,
         exchange,
         reported_model: None,
@@ -764,7 +775,7 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
 #[cfg(test)]
 mod passthrough_tests {
     use super::*;
-    use crate::app_server::frame::{TextInput, TextInputKind, ThreadOptions, TurnInput};
+    use crate::app_server::frame::{ThreadOptions, TurnInput, UserInput};
     use serde_json::json;
 
     #[test]
@@ -795,6 +806,7 @@ Finish with one short summary of the commit and the thread ids.
         ];
         for delivery in [DeliveryMode::Buffered, DeliveryMode::Streamed] {
             let translated = TranslatedOperation {
+                images: Vec::new(),
                 prompt: prior_user_content.as_bytes().to_vec(),
                 declared_tools: calls
                     .iter()
@@ -810,8 +822,7 @@ Finish with one short summary of the commit and the thread ids.
                     service_tier: None,
                 },
                 TurnInput {
-                    input: vec![TextInput {
-                        kind: TextInputKind::Text,
+                    input: vec![UserInput::Text {
                         text: prior_user_content.into(),
                     }],
                     output_schema: json!({"type":"object"}),

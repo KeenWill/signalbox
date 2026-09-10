@@ -21,6 +21,7 @@ test-support = [
 signalbox-file-media-runtime = { path = "../../crates/file-media-runtime" }
 signalbox-file-media-processor-runtime = { path = "../../crates/file-media-processor-runtime" }
 signalbox-file-media-provider-runtime = { path = "../../crates/file-media-provider-runtime" }
+signalbox-file-media-adapters-image = { path = "../../crates/file-media-adapters-image" }
 signalbox-file-media-adapters-text = { path = "../../crates/file-media-adapters-text" }
 signalbox-tools-file-media = { path = "../../crates/tools-file-media" }
 

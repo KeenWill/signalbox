@@ -4425,3 +4425,58 @@ mod attachment_rejection_tests {
         );
     }
 }
+
+/// Stored content arm of a completed tool attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolResultContentStorageKind {
+    Text,
+    Media,
+}
+pub(crate) const fn tool_result_content_to_str(kind: ToolResultContentStorageKind) -> &'static str {
+    match kind {
+        ToolResultContentStorageKind::Text => "text",
+        ToolResultContentStorageKind::Media => "media",
+    }
+}
+pub(crate) fn tool_result_content_from_str(value: &str) -> Option<ToolResultContentStorageKind> {
+    match value {
+        "text" => Some(ToolResultContentStorageKind::Text),
+        "media" => Some(ToolResultContentStorageKind::Media),
+        _ => None,
+    }
+}
+/// Stored presentation kind of a validated media reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MediaPresentationStorageKind {
+    Image,
+}
+pub(crate) const fn media_presentation_to_str(kind: MediaPresentationStorageKind) -> &'static str {
+    match kind {
+        MediaPresentationStorageKind::Image => "image",
+    }
+}
+pub(crate) fn media_presentation_from_str(value: &str) -> Option<MediaPresentationStorageKind> {
+    match value {
+        "image" => Some(MediaPresentationStorageKind::Image),
+        _ => None,
+    }
+}
+pub(crate) const fn media_validation_to_str(
+    evidence: signalbox_domain::MediaValidationEvidence,
+) -> &'static str {
+    match evidence {
+        signalbox_domain::MediaValidationEvidence::StrongSignature => "strong_signature",
+        signalbox_domain::MediaValidationEvidence::StructuralValidation => "structural_validation",
+    }
+}
+pub(crate) fn media_validation_from_str(
+    value: &str,
+) -> Option<signalbox_domain::MediaValidationEvidence> {
+    match value {
+        "strong_signature" => Some(signalbox_domain::MediaValidationEvidence::StrongSignature),
+        "structural_validation" => {
+            Some(signalbox_domain::MediaValidationEvidence::StructuralValidation)
+        }
+        _ => None,
+    }
+}
