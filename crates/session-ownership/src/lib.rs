@@ -286,6 +286,11 @@ impl LifecycleEventSource {
         self.reader.session_terminal_at(session).await
     }
 
+    /// Reports a durably completed configured push in the dispatched session.
+    pub async fn session_pushed(&self, session: SessionId) -> Result<bool, OutboxDispatchError> {
+        self.reader.session_pushed(session).await
+    }
+
     /// Reads the next module-visible event without advancing its cursor.
     ///
     /// Core-only event families are acknowledged internally and skipped. A
