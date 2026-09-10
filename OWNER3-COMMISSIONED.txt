@@ -1,0 +1,1 @@
+Disposable configured push fixture.
