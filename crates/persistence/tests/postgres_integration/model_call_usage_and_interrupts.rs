@@ -4711,6 +4711,22 @@ async fn compacted_attachment_cannot_authorize_blob_read() -> Result<(), Box<dyn
         )
         .await?;
     let tools = PostgresToolLoopRepository::new(pool.clone());
+    let batch = tools
+        .load_active_batch(fixture.session, authorized.turn())
+        .await?
+        .expect("compacted fixture tool batch");
+    assert!(
+        tools
+            .resolve_visible_attachment(&batch.requests()[0], compacted_digest, None)
+            .await?
+            .is_none()
+    );
+    assert!(
+        tools
+            .resolve_visible_attachment(&batch.requests()[0], visible_digest, None)
+            .await?
+            .is_some()
+    );
     let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
     let turn = authorized.turn();
     tools

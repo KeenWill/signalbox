@@ -615,8 +615,9 @@ fn attachment_heap_content_spends_the_budget_before_rendering() {
     let request = super::support::prepared_execution_with_content_fixture(content)
         .resume_prepared_call()
         .expect("fixture call resumes");
-    // The canonical stub is 2,242 bytes at u64::MAX, plus two 255-byte metadata values.
-    let expected_heap_bytes = 2_752;
+    // The reserved stub is 2,296 bytes at u64::MAX and ordinal 255, plus two
+    // 255-byte metadata values. Rendering ordinal zero uses two fewer bytes.
+    let expected_heap_bytes = 2_806;
     let representation_bytes = request.frontier_entries().count()
         * std::mem::size_of::<super::ModelConversationMessage>()
         + std::mem::size_of::<super::ModelUserContentPart>();
@@ -633,7 +634,7 @@ fn attachment_heap_content_spends_the_budget_before_rendering() {
     .expect("the exact retained allocation fits");
     assert_eq!(
         rendered_content_bytes(operation.messages()),
-        expected_heap_bytes
+        expected_heap_bytes - 2
     );
     assert_eq!(
         PreparedModelOperation::render_within(

@@ -7,6 +7,11 @@ destination=${1:-"$pin_dir/bin"}
 release=$(jq -er '.release' "$manifest")
 asset=$(jq -er '.asset' "$manifest")
 sha256=$(jq -er '.sha256' "$manifest")
+executable_release=$(jq -er '.executableRelease' "$manifest")
+if [[ "$release" != "$executable_release" ]]; then
+  printf 'archive and executable releases differ in %s\n' "$manifest" >&2
+  exit 1
+fi
 staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
 curl --fail --location --retry 3 \

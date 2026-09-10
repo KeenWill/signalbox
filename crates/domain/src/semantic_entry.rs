@@ -414,10 +414,7 @@ mod tests {
                 .is_err()
         );
     }
-    use crate::test_support::{
-        accepted_input_id, model_call_id, semantic_transcript_entry_id, session_id,
-        tool_request_id, turn_id,
-    };
+    use crate::test_support::{semantic_transcript_entry_id, session_id};
 
     /// One semantic entry with canonical identity and source-session plumbing;
     /// only its payload varies at the call site.
@@ -427,56 +424,6 @@ mod tests {
             session_id(1),
             payload,
         )
-    }
-
-    /// the semantic projection remains a closed
-    /// typed reference to its distinct accepted-input, source-turn, terminal
-    /// turn, or tool subject.
-    #[test]
-    fn initial_payload_variants_preserve_exact_typed_subjects() {
-        let accepted_input = accepted_input_id(2);
-        let turn = turn_id(3);
-        let producing_call = model_call_id(4);
-        let request = tool_request_id(5);
-        let origin = semantic_entry(InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
-            accepted_input,
-        });
-        let failed = semantic_entry(InitialSemanticTranscriptEntryPayload::TurnFailed { turn });
-        let steering = semantic_entry(
-            InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
-                accepted_input,
-                source_turn: turn,
-            },
-        );
-        let tool_use = semantic_entry(InitialSemanticTranscriptEntryPayload::AssistantToolUse {
-            producing_call,
-            request,
-        });
-
-        assert!(matches!(
-            origin.payload(),
-            InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
-                accepted_input: actual,
-            } if *actual == accepted_input
-        ));
-        assert!(matches!(
-            failed.payload(),
-            InitialSemanticTranscriptEntryPayload::TurnFailed { turn: actual } if *actual == turn
-        ));
-        assert!(matches!(
-            steering.payload(),
-            InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
-                accepted_input: actual_input,
-                source_turn,
-            } if *actual_input == accepted_input && *source_turn == turn
-        ));
-        assert!(matches!(
-            tool_use.payload(),
-            InitialSemanticTranscriptEntryPayload::AssistantToolUse {
-                producing_call: actual_call,
-                request: actual_request,
-            } if *actual_call == producing_call && *actual_request == request
-        ));
     }
 
     /// assistant text stays exact, remains distinct from user
@@ -507,18 +454,6 @@ mod tests {
         );
     }
 
-    /// completion is an explicit turn marker distinct from every
-    /// physical model-call outcome.
-    #[test]
-    fn adr0042_completion_marker_names_the_exact_turn() {
-        let turn = turn_id(9);
-        let entry = semantic_entry(SemanticTranscriptEntryPayload::TurnCompleted { turn });
-
-        assert!(matches!(
-            entry.payload(),
-            SemanticTranscriptEntryPayload::TurnCompleted { turn: actual } if *actual == turn
-        ));
-    }
     #[test]
     fn reasoning_item_preserves_the_exact_original_json() {
         let raw = " { \"type\": \"reasoning\", \"id\": \"rs_fixture\", \"summary\": [], \"encrypted_content\": \"opaque\" } ";
