@@ -150,7 +150,7 @@ fn source_failure(error: BlobReadError) -> MediaPreparationFailure {
         BlobReadError::Unavailable => MediaPreparationFailure::Unavailable,
         BlobReadError::Missing | BlobReadError::NotFound => MediaPreparationFailure::Missing,
         BlobReadError::Corrupt => MediaPreparationFailure::BlobCorrupt,
-        BlobReadError::Integrity | BlobReadError::RangeOutOfBounds { .. } => {
+        BlobReadError::Integrity | BlobReadError::RangeOutOfBounds => {
             MediaPreparationFailure::Corrupt
         }
     }
