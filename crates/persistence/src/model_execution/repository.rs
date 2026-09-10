@@ -52,7 +52,7 @@ impl PostgresModelCallRepository {
             runner_recovery: None,
             credential_families: None,
             credential_pools: HashMap::new(),
-            same_credential_attempt_bound: NonZeroUsize::MIN,
+            same_credential_attempt_bound: Some(NonZeroUsize::MIN),
             cache_inclusive_input_targets: HashSet::new(),
             continuation_usage_limits: HashMap::new(),
         }
@@ -135,8 +135,8 @@ impl PostgresModelCallRepository {
         self
     }
 
-    /// Bounds recorded attempts on one credential within a turn.
-    pub fn with_same_credential_attempt_bound(mut self, bound: NonZeroUsize) -> Self {
+    /// Bounds recorded calls for transient-failure retry on one credential; `None` is unbounded.
+    pub fn with_same_credential_attempt_bound(mut self, bound: Option<NonZeroUsize>) -> Self {
         self.same_credential_attempt_bound = bound;
         self
     }

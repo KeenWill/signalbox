@@ -692,6 +692,7 @@ async fn failed_continuation_compaction_closes_the_successor_without_retrying()
         exhausted_continuation(&runtime, ContinuationSession::RepositoryWatch).await?;
     let summary = ScriptedModel::single(Script::delivering(TerminalEvidence::ProviderError(
         ProviderErrorEvidence {
+            credential_recovery: None,
             exchange: ExchangeFacts::default(),
             reported_model: None,
             kind: ProviderErrorKind::Unrecognized,

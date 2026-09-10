@@ -561,6 +561,7 @@ pub fn redact_evidence(
             if let Some(error_token) = provider_item_credential_error(&completion.content, api_key)
             {
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    credential_recovery: None,
                     exchange: redact_exchange(completion.exchange, api_key),
                     reported_model: completion.reported_model.map(|model| {
                         ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
@@ -593,6 +594,7 @@ pub fn redact_evidence(
         TerminalEvidence::Refused(mut refusal) => {
             if let Some(error_token) = provider_item_credential_error(&refusal.content, api_key) {
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    credential_recovery: None,
                     exchange: redact_exchange(refusal.exchange, api_key),
                     reported_model: refusal.reported_model.map(|model| {
                         ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
@@ -1352,6 +1354,7 @@ mod tests {
     fn provider_error_redaction_covers_every_provider_controlled_field() {
         let key = credential("key_loop");
         let evidence = TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            credential_recovery: None,
             exchange: ExchangeFacts {
                 provider_request_id: Some(ProviderRequestId::new("request-key_loop")),
                 http_status: Some(400),
@@ -1465,6 +1468,7 @@ mod tests {
     fn boundary_loss_redaction_covers_exchange_finish_model_and_detail() {
         let key = credential("key_loop");
         let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: true,
             cause: LossCause::ResponseUnintelligible {
                 detail: "decode-key_loop".to_string(),
             },
@@ -1514,6 +1518,7 @@ mod tests {
         let key = credential("key_loop");
         let stage = crate::ResponseEnvelopeRejectionStage::ToolCallId;
         let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: true,
             cause: LossCause::ResponseEnvelopeRejected {
                 stage,
                 detail: "decode-key_loop".into(),
@@ -1587,6 +1592,7 @@ mod tests {
     fn interrupted_stream_transport_detail_is_redacted() {
         let key = credential("key_loop");
         let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: true,
             cause: LossCause::StreamEndedWithoutTerminalMarker {
                 interruption: StreamInterruption::TransportFailure(TransportFacts::new(
                     "stream-key_loop",
@@ -3800,6 +3806,7 @@ mod tests {
     fn native_error_code_is_credential_sanitized() {
         let key = credential("key_loop");
         let evidence = TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            credential_recovery: None,
             exchange: ExchangeFacts::default(),
             reported_model: None,
             kind: ProviderErrorKind::Unrecognized,

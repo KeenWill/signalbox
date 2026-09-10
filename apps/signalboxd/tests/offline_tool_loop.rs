@@ -869,6 +869,7 @@ async fn model_call_history_count(
 
 fn provider_error_script() -> Script {
     Script::delivering(TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        credential_recovery: None,
         exchange: ExchangeFacts::default(),
         reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
         kind: ProviderErrorKind::ProviderInternal,

@@ -102,7 +102,7 @@ fn handshake_creates_one_ephemeral_read_only_thread_and_one_turn() {
 }
 
 #[test]
-fn failed_turns_classify_only_the_typed_error_variant() {
+fn failed_turns_classify_the_typed_error_and_http_status() {
     use FailureClass::{PolicyRefusal, Provider};
     use ProviderErrorKind::*;
     let cases = [
@@ -131,12 +131,17 @@ fn failed_turns_classify_only_the_typed_error_variant() {
         ),
         (
             json!({"httpConnectionFailed":{"httpStatusCode":429}}),
-            Provider(Unrecognized),
+            Provider(RateLimited),
             true,
         ),
         (
             json!({"responseStreamConnectionFailed":{"httpStatusCode":503}}),
-            Provider(Unrecognized),
+            Provider(Overloaded),
+            true,
+        ),
+        (
+            json!({"responseStreamConnectionFailed":{"httpStatusCode":529}}),
+            Provider(Overloaded),
             true,
         ),
         (
@@ -150,12 +155,12 @@ fn failed_turns_classify_only_the_typed_error_variant() {
         (json!("sandboxError"), Provider(Unrecognized), false),
         (
             json!({"responseStreamDisconnected":{"httpStatusCode":401}}),
-            Provider(Unrecognized),
+            Provider(CredentialRejected),
             false,
         ),
         (
             json!({"responseTooManyFailedAttempts":{"httpStatusCode":429}}),
-            Provider(Unrecognized),
+            Provider(RateLimited),
             false,
         ),
         (
@@ -227,7 +232,7 @@ fn future_tags_and_http_statuses_are_retained_as_facts() {
     assert_eq!(known.http_status(), Some(429));
     assert_eq!(
         classify(Some(&known)),
-        FailureClass::Provider(ProviderErrorKind::Unrecognized)
+        FailureClass::Provider(ProviderErrorKind::RateLimited)
     );
 }
 
@@ -272,6 +277,16 @@ fn retry_telemetry_cannot_close_a_turn_or_prove_non_acceptance() {
             proof
         );
     }
+}
+
+#[test]
+fn input_usage_alone_does_not_mark_response_content_observed() {
+    let mut client = running();
+    client.receive(&peer::notification("thread/tokenUsage/updated", json!({"tokenUsage":{"total":{
+        "inputTokens":1,"cachedInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0,"totalTokens":1
+    }}}))).expect("input-only usage");
+    assert!(!client.activity.response_content_observed);
+    assert!(client.activity.assistant_output_observed);
 }
 
 #[test]
