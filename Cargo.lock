@@ -4424,6 +4424,7 @@ dependencies = [
  "serde_stacker",
  "signalbox-file-media-processor-runtime",
  "signalbox-file-media-runtime",
+ "signalbox-test-bin",
  "tokio",
 ]
 
@@ -4455,9 +4456,14 @@ dependencies = [
 name = "signalbox-file-media-provider-runtime"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
+ "ring",
+ "serde",
+ "serde_json",
  "signalbox-domain",
  "signalbox-file-media-runtime",
  "signalbox-tools-file-media",
+ "tokio",
 ]
 
 [[package]]
@@ -5003,6 +5009,10 @@ dependencies = [
  "signalbox-conversation-import-codex",
  "signalbox-derive",
  "signalbox-domain",
+ "signalbox-file-media-adapters-text",
+ "signalbox-file-media-processor-runtime",
+ "signalbox-file-media-provider-runtime",
+ "signalbox-file-media-runtime",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
  "signalbox-model-runtime-anthropic",
@@ -5021,6 +5031,7 @@ dependencies = [
  "signalbox-tools-code-host",
  "signalbox-tools-conversations",
  "signalbox-tools-exec",
+ "signalbox-tools-file-media",
  "signalbox-tools-git",
  "signalbox-tools-github",
  "signalbox-tools-plan",

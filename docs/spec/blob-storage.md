@@ -275,13 +275,15 @@ exactly one line ending in `parts=<json>`, the canonical compact ordered parts
 array with its fixed member order.
 
 A rendered accepted input shows the model each attachment as a bounded textual
-stub naming kind, media type, filename, byte length, and digest, never the
-bytes. At preparation the daemon derives an allow-set from the attachment stubs
-in the rendered frontier; a catalogued digest outside that set is unauthorized.
-A digest absent from the frontier, a turn byte reservation past 2,097,152, or a
-turn read reservation past 64 closes the prepared attempt as a known failure
-with an exact fixed detail. Both durable counters charge once by tool-request
-identity before authorization, and replay never charges twice.
+stub naming kind, media type, filename, byte length, digest, and a visible-part
+selector consisting of the semantic entry identity and zero-based part ordinal,
+never the bytes. At preparation the daemon derives an allow-set from the
+attachment stubs in the rendered frontier; a catalogued digest outside that set
+is unauthorized. For blob reads, a digest absent from the frontier, a turn byte
+reservation past 2,097,152, or a turn read reservation past 64 closes the
+prepared attempt as a known failure with an exact fixed detail. Both durable
+counters charge once by tool-request identity before authorization, and replay
+never charges twice.
 
 Before a prepared call crosses durable send authorization, preparation streams
 and verifies the length and SHA-256 of at least one recorded replica for every
