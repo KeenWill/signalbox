@@ -45,6 +45,9 @@ or caller-selected path. The suite never searches the current directory,
 ancestors, environment, home directory, or process-global Git state for a
 repository.
 
+Commit trees are rebuilt from the validated staged index entries; optional index
+tree caches do not supply objects to the commit.
+
 Live administration reads are implemented in the authority layer rather than
 through a path-based repository API, because such an API cannot express the
 descriptor-pinned, no-follow, bounded-read contract.
