@@ -1973,7 +1973,8 @@ async fn run_hub_incarnation(
             .workspace_instructions()
             .roots()
             .to_vec(),
-    );
+    )
+    .with_discovery_limits(model_configuration.workspace_instructions().limits());
     let checkout_runner = tools.process_runner();
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
@@ -2591,6 +2592,7 @@ async fn run_hub_incarnation(
             runtime_models.clone(),
             diagnostic_model_identity_limit,
         )
+        .with_tool_proposal_limits(model_configuration.tool_proposal_limits())
         .with_text_delta_sink(text_deltas.clone())
         .with_invocation_process_observer(pass_invocation_processes.clone());
         let counter = AttachmentPreparingModelCallProvider::for_counting(
@@ -2609,7 +2611,13 @@ async fn run_hub_incarnation(
         .with_runner_recovery(runner_recovery.clone())
         .with_same_credential_attempt_bound(same_credential_attempt_bound)
         .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
-        .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
+        .with_continuation_usage_limits(
+            model_configuration
+                .tool_continuation_usage_limits(&signalbox_application::ToolCatalog::definitions(
+                    &tool_catalog,
+                ))
+                .map_err(signalboxd::model_catalog_runtime::ModelRuntimeBuildError::from)?,
+        );
         let provider = AttachmentPreparingModelCallProvider::new(
             UsageLimitedModelCallProvider::new(provider, model_configuration),
             pass_pool.clone(),

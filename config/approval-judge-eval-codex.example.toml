@@ -4,6 +4,7 @@
 version = 1
 
 [numeric_bounds]
+max_git_object_bytes = "none"
 # Seven days from authenticated webhook receipt to its durable expiry.
 repository_watch_webhook_retention = "604800s"
 # Guard reacquisition backoff and total recovery time; none keeps waiting.

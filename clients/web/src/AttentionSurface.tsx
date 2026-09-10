@@ -205,18 +205,18 @@ export function AttentionSurface({
       {attention.isError && (
         <section className="surface-empty" role="alert">
           <div>
-            <h2>Couldn't load Attention</h2>
+            <h2>Attention failed to load</h2>
             <p>
               {attention.error instanceof ProductRequestError
                 ? `${attention.error.response.error.code}: ${attention.error.message}`
-                : 'The server sent an unexpected response.'}
+                : 'Unexpected daemon response.'}
             </p>
             <button ref={errorFocus} type="button" onClick={retryAttention}>
               Retry
             </button>
             {after && (
               <button type="button" onClick={returnToLivePage}>
-                Live page
+                First page
               </button>
             )}
           </div>
@@ -263,7 +263,7 @@ export function AttentionSurface({
             <div className="attention-page-controls">
               {after && (
                 <button type="button" onClick={returnToLivePage}>
-                  Live page
+                  First page
                 </button>
               )}
               {attention.data.continuation_after_session_id && (
@@ -320,7 +320,7 @@ export function AttentionSurface({
               )}
               <section className="attention-judge" aria-label="Approval outcomes">
                 <div>
-                  <span>Actionable</span>
+                  <span>Needs decision</span>
                   <strong>{selected.judge.actionable}</strong>
                 </div>
                 <div>

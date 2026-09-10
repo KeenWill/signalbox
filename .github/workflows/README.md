@@ -137,3 +137,13 @@ and remote hits, actual executions, retries and execution seconds in its job
 summary. Cached historical test durations do not count as execution in this run.
 Missing results or an incomplete stream are labeled explicitly. Reporting is
 informational and cannot replace the suite command's exit status.
+
+Each PostgreSQL shard also samples its Docker daemon's running containers every
+five seconds and reports aggregate observed CPU and working-memory peaks. This
+captures test containers even when their cgroups are outside the runner pod. The
+report excludes the runner and Docker daemon; do not add it to pod totals
+without checking cgroup placement. Linux Docker memory statistics exclude
+inactive file cache. Short-lived containers and peaks between samples can be
+missed, and sampling failures are reported as gaps. Sampling errors do not
+change the suite command's exit status. Interrupted collection is unmeasured.
+Per-shard JSON sample artifacts are retained for seven days.

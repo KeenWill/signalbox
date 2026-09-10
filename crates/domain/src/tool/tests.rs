@@ -168,8 +168,7 @@ fn arguments_preserve_reserved_number_key_objects() {
     }
 }
 
-/// the byte bound, rather than serde's default recursion cutoff, governs syntactically valid nested
-/// JSON.
+/// Syntactically valid nested JSON is independent of serde's default recursion cutoff.
 #[test]
 fn deeply_nested_arguments_remain_json() {
     let depth = 512;
@@ -384,13 +383,13 @@ fn denial_reason_derivation_preserves_admissible_text_verbatim() {
     );
 }
 
-/// Control characters become spaces and forbidden edge spaces trim.
+/// Internal line feeds are retained while forbidden controls become spaces and edge spaces trim.
 #[test]
 fn denial_reason_derivation_maps_control_characters_and_trims_edges() {
     assert_eq!(
         ToolDenialReason::from_rationale(&admitted_rationale("  first\nsecond\tthird  "))
             .map(ToolDenialReason::into_string),
-        Some(String::from("first second third"))
+        Some(String::from("first\nsecond third"))
     );
 }
 
@@ -413,15 +412,15 @@ fn denial_reason_derivation_preserves_admitted_edge_whitespace() {
     );
 }
 
-/// Oversized text cuts to the reason bound on a character boundary.
+/// A maximum-sized rationale derives without truncation.
 #[test]
-fn denial_reason_derivation_truncates_on_a_character_boundary() {
-    let truncation_prefix = "a".repeat(1023);
-    let oversized = ToolDecisionRationale::try_new(format!("{truncation_prefix}é"))
+fn denial_reason_derivation_preserves_the_rationale_bound() {
+    let prefix = "a".repeat(ToolDecisionRationale::MAX_UTF8_BYTES - 2);
+    let at_bound = ToolDecisionRationale::try_new(format!("{prefix}é"))
         .expect("fixture rationale is admitted");
-    let truncated =
-        ToolDenialReason::from_rationale(&oversized).expect("nonempty text derives a reason");
-    assert_eq!(truncated.as_str(), truncation_prefix);
+    let derived =
+        ToolDenialReason::from_rationale(&at_bound).expect("nonempty text derives a reason");
+    assert_eq!(derived.as_str(), at_bound.as_str());
 }
 
 /// Every derived reason re-admits through the reason validator.
@@ -516,17 +515,12 @@ fn user_command_preparation_preserves_agency() {
     assert!(applied.resolution().is_approved());
 }
 
-/// one provider response admits at most the recorded 32 logical tool requests without accepting a
-/// partial prefix.
 #[test]
-fn tool_response_request_count_is_bounded() {
-    let admitted = ToolUsingAssistantResponse::try_from_parts(tool_response_parts(32))
-        .expect("the exact per-response limit is admitted");
-    let rejected = ToolUsingAssistantResponse::try_from_parts(tool_response_parts(33))
-        .expect_err("the first response above the limit is rejected whole");
-
-    assert_eq!(admitted.tool_count(), 32);
-    assert_eq!(rejected.into_parts().len(), 33);
+fn tool_response_preserves_large_tool_batches() {
+    let response = ToolUsingAssistantResponse::try_from_parts(tool_response_parts(40))
+        .expect("the response retains admitted and rejected requests together");
+    assert_eq!(response.tool_count(), 40);
+    assert_eq!(response.parts().len(), 40);
 }
 
 /// user-global command sentinels never enter the canonical

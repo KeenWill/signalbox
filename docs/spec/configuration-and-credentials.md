@@ -146,6 +146,11 @@ independently of web-egress and tool-mapping policies. Optional
 `RUSTUP_TOOLCHAIN`; automatic toolchain installation is disabled, `CARGO_HOME`
 stays private and writable, and `npm_config_cache` is `/workspace/.npm`.
 
+The optional `[tool_proposals]` table sets `max_requests` and
+`max_argument_bytes` to nonnegative integers or `"none"`, with defaults of 32
+and 1048576. Exceeding either cap produces the per-request errors in
+[tool-loop](tool-loop.md).
+
 The optional `[tool_approval_postures]` table decides, per exact composed tool
 name, whether a request is approved by policy, judged by the approval judge, or
 parked for a person; a tool whose declaration always confirms keeps that
@@ -158,7 +163,9 @@ human wait when that wait first reaches the daemon. The optional
 delegated requests, and when it is absent the judge reuses the request-producing
 call's selection. The optional `[workspace_instructions]` table is either absent
 or present at version one, and its bounded `registered_roots` array names the
-instruction directories registered outside a session's workspace.
+instruction directories registered outside a session's workspace. Its entry,
+finding, source-byte, and elapsed discovery limits accept finite values or
+`"none"` ([workspace-instructions.md](workspace-instructions.md)).
 
 A credential profile names one account. Its `CredentialReference` is the
 non-secret name that appears in configuration, errors, logs, and durable
@@ -651,10 +658,10 @@ bound session is refused. Linked worktrees sharing common references and objects
 cannot bind separate session serialization domains. Administration directories
 nested under another bound workspace or its Git administration are refused by
 comparing captured ancestry with all three bound directory identities. Ancestry
-capture needs only search permission on ancestor directories. Failure to compose
-or bind a derived root closes that tool request as a known failure whose
-sanitized detail names the closed reason, and it never falls back to another
-root.
+capture needs only search permission on ancestor directories and refuses device
+boundaries or Linux mount-ID boundaries. Failure to compose or bind a derived
+root closes that tool request as a known failure whose sanitized detail names
+the closed reason, and it never falls back to another root.
 
 The secret reaches the provider through the profile's delivery, never through a
 process environment variable of the daemon. Two families of one adapter may

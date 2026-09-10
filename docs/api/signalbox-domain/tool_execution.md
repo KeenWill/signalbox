@@ -284,6 +284,11 @@ pub struct PreparedToolResultProjection {/* private */}
 impl PreparedToolResultProjection {
     pub fn entries(&self) -> &[SemanticTranscriptEntry];
     pub const fn snapshot(&self) -> &ResolvedContextFrontierSnapshot;
+    pub fn with_context_boundary(
+        self,
+        entry: SemanticTranscriptEntry,
+        snapshot: ResolvedContextFrontierSnapshot,
+    ) -> result::Result<Self, ToolResultProjectionError>;
     pub fn with_runner_placement_boundary(
         self,
         boundary: &RunnerPlacementBoundary,
@@ -371,7 +376,6 @@ impl ToolBatchReconstitutionInput {
 ```rust
 pub enum ToolBatchReconstitutionFailure {
     EmptyRequestBatch,
-    TooManyRequests,
     RequestOwnershipMismatch,
     RequestOrderMismatch,
     YieldedSnapshotSessionMismatch,

@@ -497,7 +497,7 @@ export function SearchUsageWorkbench({
             <span>{results.length} loaded</span>
             <span>↑↓ to move · Enter to open</span>
             {revealState === 'loading' && <span>Loading context…</span>}
-            {revealState === 'failed' && <span role="alert">Couldn't open this result.</span>}
+            {revealState === 'failed' && <span role="alert">Result failed to open.</span>}
           </div>
           {searchQuery.isError ? (
             <p className="surface-error" role="alert">
@@ -574,10 +574,10 @@ export function SearchUsageWorkbench({
               </button>
             ))}
           </section>
-          {usageSummary.data?.truncated && <p className="surface-warning">Summary is truncated.</p>}
+          {usageSummary.data?.truncated && <p className="surface-warning">Summary truncated.</p>}
           {usageSummary.isError || usageCalls.isError ? (
             <p className="surface-error" role="alert">
-              Usage data failed to load.
+              Usage failed to load.
             </p>
           ) : (
             <UsageTable

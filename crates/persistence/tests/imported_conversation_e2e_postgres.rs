@@ -1055,3 +1055,120 @@ async fn process_read_preserves_long_imported_transcript() -> Result<(), Box<dyn
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn input_after_imported_seed_compaction_is_accepted() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ContextCompactionId, ContextCompactionTokenUsage};
+    use signalbox_persistence::context_compaction::{
+        ContextCompactionRepository, PrepareContextCompactionOutcome,
+        PrepareContextCompactionRequest,
+    };
+
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = ImportedConversationId::from_uuid(Uuid::now_v7());
+    let imported_entry = ImportedTranscriptEntryId::from_uuid(Uuid::now_v7());
+    let mut import = ImportConversationService::new(
+        FixedImportIds {
+            conversations: [conversation].into(),
+            entries: [imported_entry].into(),
+        },
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    assert_eq!(
+        import
+            .execute(br#"{"type":"user","message":{"content":"Keep the imported task decision."}}"#)
+            .await?,
+        ImportConversationOutcome::Inserted { conversation }
+    );
+    let (_, _, imports) = import.into_parts();
+    let stored = imports
+        .load(conversation)
+        .await?
+        .expect("the import is durable");
+    let frontier = stored.frontiers().next().expect("one imported entry");
+    let session = SessionId::from_uuid(Uuid::now_v7());
+    let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
+    let mut seed = CreateSessionFromImportedFrontierService::new(
+        FixedImportedSessionIds {
+            sessions: [session].into(),
+            semantic_entries: [SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())].into(),
+            frontiers: [ContextFrontierId::from_uuid(Uuid::now_v7())].into(),
+        },
+        ImportedSessionRepository::new(pool.clone(), test_session_credential_pin()),
+    );
+    let CreateSessionFromImportedFrontierOutcome::Applied(_) = seed
+        .execute(CreateSessionFromImportedFrontierRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            frontier,
+            ImportedSessionRelationship::Resume,
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )?)
+        .await?
+    else {
+        panic!("the import seeds a session");
+    };
+    let compactions = ContextCompactionRepository::new(pool.clone());
+    let PrepareContextCompactionOutcome::Prepared(prepared) = compactions
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::now_v7()),
+            session,
+            requested_through_position: Some(1),
+            automatic_for_turn: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection,
+            target: ResolvedProviderTarget::naming(
+                ProviderModelIdentity::from_uuid(Uuid::now_v7()),
+            ),
+            input_includes_cache_tokens: false,
+            credential_reference: String::from("compaction-fixture"),
+            call: ModelCallId::from_uuid(Uuid::now_v7()),
+            compaction: ContextCompactionId::from_uuid(Uuid::now_v7()),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::now_v7()),
+        })
+        .await?
+    else {
+        panic!("the imported seed can compact");
+    };
+    compactions.authorize(&prepared).await?;
+    compactions
+        .complete(
+            &prepared,
+            "Retain the imported task decision.",
+            ContextCompactionTokenUsage::unreported(),
+        )
+        .await?;
+
+    let turn = TurnId::from_uuid(Uuid::now_v7());
+    let mut submit = SubmitInputService::new(
+        FixedSubmitIds {
+            accepted_inputs: [AcceptedInputId::from_uuid(Uuid::now_v7())].into(),
+            turns: [turn].into(),
+            semantic_entries: [SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())].into(),
+            frontiers: [ContextFrontierId::from_uuid(Uuid::now_v7())].into(),
+        },
+        SubmitInputRepository::new(pool),
+        AcceptingEligibilityNudge,
+        InProcessToolDispatchGate::default(),
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(origin),
+    )) = submit
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            session,
+            UserContent::try_text(String::from("Continue the retained decision."))
+                .expect("nonempty follow-up input"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: input_choices(),
+            },
+        )?)
+        .await?
+    else {
+        panic!("a compacted imported session accepts its next input");
+    };
+    assert_eq!(origin.turn(), turn);
+    Ok(())
+}

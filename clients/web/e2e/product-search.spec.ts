@@ -475,7 +475,7 @@ test('reports an unreachable search transport separately from contract decoding'
   await page.goto('/search?q=release')
 
   await expect(page.getByRole('alert')).toContainText('Search failed')
-  await expect(page.getByRole('alert')).toContainText("Can't reach the Signalbox server.")
+  await expect(page.getByRole('alert')).toContainText('Signalbox daemon unreachable.')
   expect(problems.pageErrors).toEqual([])
 })
 
@@ -601,7 +601,7 @@ test('keeps artifact inspector inputs in their editing context on Search', async
   await useSearchFixture(page)
   await page.goto('/search')
   await page.getByRole('button', { name: 'Open artifact inspector' }).click()
-  for (const name of ['Digest', 'Media type (as declared)', 'Display filename optional']) {
+  for (const name of ['Digest', 'Declared media type', 'Display filename optional']) {
     const input = page.getByRole('textbox', { name, exact: true })
     await input.focus()
     await input.press('Escape')
@@ -652,6 +652,6 @@ test('releases the imports title when the next scenario fails to load', async ({
   await page.goto('/scenario/imports')
   await expect(page).toHaveTitle('Signalbox Scenario Studio — Imports')
   await page.getByRole('link', { name: /^Streaming session/ }).click()
-  await expect(page.getByText("Couldn't load Scenario studio.")).toBeVisible()
+  await expect(page.getByText('Scenario studio failed to load.')).toBeVisible()
   await expect(page).not.toHaveTitle('Signalbox Scenario Studio — Imports')
 })

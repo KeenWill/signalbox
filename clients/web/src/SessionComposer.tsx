@@ -41,7 +41,7 @@ export function SessionComposer({
   const [text, setText] = useState('')
   const [notice, setNotice] = useState('')
   useEffect(() => {
-    if (notice === 'Message sent' && activeState != null) setNotice('')
+    if (notice === 'Message accepted' && activeState != null) setNotice('')
   }, [activeState, notice])
   const mutation = useMutation({
     mutationFn: (input: WebSubmitInputRequest) => submitSessionInput(sessionId, input),
@@ -50,7 +50,7 @@ export function SessionComposer({
         actions.sessionInputSettled({ sessionId, commandId: input.command_id, confirmed: true }),
       )
       setText('')
-      setNotice('Message sent')
+      setNotice('Message accepted')
       void onAccepted()
     },
     onError: (error, input) => {
@@ -62,7 +62,7 @@ export function SessionComposer({
           actions.sessionInputSettled({ sessionId, commandId: input.command_id, confirmed: true }),
         )
         setText(input.message)
-        setNotice(`Not accepted: ${error.message}`)
+        setNotice(`Message rejected: ${error.message}`)
       } else {
         dispatch(
           actions.sessionInputSettled({ sessionId, commandId: input.command_id, confirmed: false }),

@@ -77,7 +77,7 @@ const errorMessage = (error: Error): string => {
     return `${error.response.error.code}: ${error.message}`
   }
   if (error instanceof ProductTransportError) return error.message
-  return 'The server sent an unexpected response.'
+  return 'Unexpected daemon response.'
 }
 
 export function ArtifactInspector({
@@ -163,7 +163,7 @@ export function ArtifactInspector({
       </header>
       {!available ? (
         <div className="artifact-capability" role="status">
-          Stored content lookup unavailable
+          Blob lookup unavailable
         </div>
       ) : (
         <form onSubmit={resolveDescriptor}>
@@ -181,7 +181,7 @@ export function ArtifactInspector({
             />
           </label>
           <label>
-            Media type (as declared)
+            Declared media type
             <input
               name="media-type"
               value={mediaType}

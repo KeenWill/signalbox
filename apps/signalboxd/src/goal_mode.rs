@@ -19,8 +19,7 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     goal::{
-        GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository,
-        GoalRepositoryError, GoalTransitionOutcome,
+        GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError, GoalTransitionOutcome,
     },
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
 };
@@ -69,13 +68,6 @@ const GOAL_DECLARE_REJECTED: &str =
 const GOAL_DECLARE_RESULT: &str = "{\"status\":\"applied\"}";
 const EXECUTION_FAILURE_NEED: &str =
     "Resolve the failed goal turn's execution condition, then resume the goal.";
-/// Need text an execution-failure block carries when its durable recovery cause
-/// proves no unchanged resumption can progress.
-///
-/// It is the only need text that distinguishes a block planned from that cause
-/// from one planned from block provenance alone, so it is exported for a
-/// consumer asserting which of the two a lineage recorded.
-pub const CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED: &str = "No safe context-compaction boundary fits the configured model window. Start a fresh session or reduce the imported context before resuming this goal; no automatic resumption is scheduled.";
 /// Preamble for an execution-failure block automatic resumption still owes.
 ///
 /// The repair follows it rather than replacing it with a promise of automation,
@@ -768,14 +760,6 @@ impl PostgresGoalPassDisposition {
             }
             (None, None) => None,
         };
-        if let Some(turn) = failed_turn
-            && let Some(cause) = self
-                .repository
-                .execution_failure_recovery_cause(session, turn)
-                .await?
-        {
-            return Ok(AutomaticResumption::OperatorRequired { cause });
-        }
         let Some(goal) = goal else {
             return Ok(AutomaticResumption::after_spent_attempts(
                 SpentAutomaticResumeAttempts::none(),
@@ -837,15 +821,6 @@ impl PostgresGoalPassDisposition {
                     attempt_ceiling = ?self.numeric_bounds.attempt_ceiling,
                     cause_code = "goal_automatic_resume_ceiling_reached",
                     "blocked goal reached its automatic-resumption ceiling and awaits an operator"
-                );
-                return;
-            }
-            AutomaticResumption::OperatorRequired { cause } => {
-                tracing::warn!(
-                    session = %session.into_uuid(),
-                    event_ordinal = blocked.get(),
-                    cause_code = cause.code(),
-                    "blocked goal has a durable non-resumable execution failure and awaits an operator"
                 );
                 return;
             }
@@ -1114,10 +1089,6 @@ impl PostgresGoalPassDisposition {
     /// other pass already armed is harmless, because both derive the same
     /// identity and the second attempt replays.
     ///
-    /// The block's own failed turn is named to the planner, so a block whose
-    /// durable cause requires an operator is planned from that cause rather
-    /// than from provenance alone: the trailing event's provenance says a turn
-    /// failed, never that resuming it could ever progress.
     async fn reconcile_ambiguous_block(&self, session: SessionId) {
         let mut remaining = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES;
         loop {
@@ -1332,11 +1303,6 @@ enum AutomaticResumption {
     Exhausted { attempt_budget: u32 },
     /// Every attempt the lifetime ceiling admits is spent; only an operator can resume.
     CeilingReached { attempt_ceiling: u32 },
-    /// Durable failure evidence proves unchanged automatic resumption cannot progress.
-    OperatorRequired {
-        /// Exact recorded reason the automatic path cannot make progress.
-        cause: GoalExecutionFailureRecoveryCause,
-    },
     /// The session is unmonitored: no liveness obligation, no resumption.
     Unmonitored,
 }
@@ -1383,9 +1349,6 @@ impl AutomaticResumption {
             Self::CeilingReached { attempt_ceiling } => format!(
                 "Automatic resumption reached its ceiling of {attempt_ceiling} consecutive attempts. {EXECUTION_FAILURE_NEED}"
             ),
-            Self::OperatorRequired {
-                cause: GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit,
-            } => String::from(CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED),
             Self::Unmonitored => {
                 format!("{EXECUTION_FAILURE_UNMONITORED_PREAMBLE} {EXECUTION_FAILURE_NEED}")
             }
@@ -2078,11 +2041,7 @@ context_window_tokens = 200000
         }
         .need()
         .expect("the ceiling need is admitted");
-        let operator_required = AutomaticResumption::OperatorRequired {
-            cause: GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit,
-        }
-        .need()
-        .expect("the operator-required need is admitted");
+
         let unmonitored = AutomaticResumption::Unmonitored
             .need()
             .expect("the unmonitored need is admitted");
@@ -2091,10 +2050,7 @@ context_window_tokens = 200000
         assert!(unmonitored.as_str().ends_with(EXECUTION_FAILURE_NEED));
         assert!(exhausted.as_str().ends_with(EXECUTION_FAILURE_NEED));
         assert!(ceiling_reached.as_str().ends_with(EXECUTION_FAILURE_NEED));
-        assert_eq!(
-            operator_required.as_str(),
-            CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED
-        );
+
         assert_eq!(
             scheduled.as_str(),
             "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal."

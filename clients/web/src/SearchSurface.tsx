@@ -313,7 +313,7 @@ export function SearchSurface({
                 ? `${results.error.response.error.code}: ${results.error.message}`
                 : results.error instanceof ProductTransportError
                   ? results.error.message
-                  : 'The server sent an unexpected response.'}
+                  : 'Unexpected daemon response.'}
             </p>
             <button
               type="button"

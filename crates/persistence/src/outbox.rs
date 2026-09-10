@@ -825,6 +825,28 @@ impl From<OutboxCorruption> for OutboxDispatchError {
     }
 }
 
+impl OutboxCorruption {
+    const fn quarantinable(self) -> bool {
+        matches!(
+            self,
+            Self::MissingCommittedEventHeader
+                | Self::InvalidAcceptancePosition
+                | Self::InvalidAcceptedInputContent
+                | Self::UnsupportedStorageVersion
+                | Self::UnsupportedEventKind
+                | Self::MissingTypedRecord
+                | Self::InvalidLifecycleEventCorrelation
+                | Self::InvalidTerminalEventCorrelation
+                | Self::InvalidModelCallState
+                | Self::InvalidDelegationEvent
+                | Self::InvalidModelSettingsEvent
+                | Self::InvalidRunnerEvent
+                | Self::InvalidLifecycleEvent
+                | Self::InvalidSettlementEvent
+        )
+    }
+}
+
 /// PostgreSQL-backed single-event transactional outbox dispatcher.
 ///
 /// Composition runs exactly one attempt loop. The database lock still
@@ -866,13 +888,30 @@ impl OutboxConsumerReader {
             .bind(session_id_to_uuid(session)).fetch_one(&self.pool).await?)
     }
 
-    /// Reads the next typed event without advancing the durable prefix.
+    /// Reads the next typed event without advancing its sequence. Undecodable
+    /// rows are quarantined while the consumer prefix advances past them.
     pub async fn read_next(&self) -> Result<Option<DispatchedOutboxEvent>, OutboxDispatchError> {
-        let mut transaction = self.pool.begin().await?;
-        let delivered = lock_consumer_cursor(&mut transaction, self.consumer).await?;
-        let event = load_next_event(&mut transaction, delivered).await?;
-        transaction.rollback().await?;
-        Ok(event)
+        loop {
+            let mut transaction = self.pool.begin().await?;
+            let delivered = lock_consumer_cursor(&mut transaction, self.consumer).await?;
+            match load_next_event(&mut transaction, delivered).await {
+                Ok(event) => {
+                    transaction.rollback().await?;
+                    return Ok(event);
+                }
+                Err(OutboxDispatchError::Corruption(error)) => {
+                    let Some(inserted) =
+                        quarantine_next_event(&mut transaction, self.consumer, delivered, error)
+                            .await?
+                    else {
+                        return Err(error.into());
+                    };
+                    transaction.commit().await?;
+                    log_quarantine(inserted, delivered + 1, error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Advances the durable prefix through the exact event just processed.
@@ -903,7 +942,8 @@ impl OutboxDispatcher {
     ///
     /// The consumer runs while the delivery-state row lock is held. Returning
     /// [`OutboxDeliveryDecision::Retry`] or ending before the commit request
-    /// leaves the prefix unchanged, so a later attempt offers the same event.
+    /// leaves that event pending, so a later attempt offers it again.
+    /// Undecodable preceding rows are quarantined and skipped first.
     /// A lost commit response is resolved by the next locked cursor read: a
     /// committed advance proceeds, while a rolled-back advance redelivers.
     pub async fn dispatch_next<Consumer>(
@@ -913,24 +953,87 @@ impl OutboxDispatcher {
     where
         Consumer: FnOnce(&DispatchedOutboxEvent) -> OutboxDeliveryDecision,
     {
-        let mut transaction = self.pool.begin().await?;
         let consumer = OutboxConsumer::ProcessProtocol;
-        let delivered = lock_consumer_cursor(&mut transaction, consumer).await?;
-        let event = load_next_event(&mut transaction, delivered).await?;
-        let Some(event) = event else {
-            transaction.rollback().await?;
-            return Ok(OutboxDispatchOutcome::Idle);
-        };
-        let next = event.sequence();
+        loop {
+            let mut transaction = self.pool.begin().await?;
+            let delivered = lock_consumer_cursor(&mut transaction, consumer).await?;
+            let event = match load_next_event(&mut transaction, delivered).await {
+                Ok(event) => event,
+                Err(OutboxDispatchError::Corruption(error)) => {
+                    let Some(inserted) =
+                        quarantine_next_event(&mut transaction, consumer, delivered, error).await?
+                    else {
+                        return Err(error.into());
+                    };
+                    transaction.commit().await?;
+                    log_quarantine(inserted, delivered + 1, error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let Some(event) = event else {
+                transaction.rollback().await?;
+                return Ok(OutboxDispatchOutcome::Idle);
+            };
+            let next = event.sequence();
 
-        if consume(&event) == OutboxDeliveryDecision::Retry {
-            transaction.rollback().await?;
-            return Ok(OutboxDispatchOutcome::Retry { sequence: next });
+            if consume(&event) == OutboxDeliveryDecision::Retry {
+                transaction.rollback().await?;
+                return Ok(OutboxDispatchOutcome::Retry { sequence: next });
+            }
+
+            advance_consumer_cursor(&mut transaction, consumer, delivered, next).await?;
+            transaction.commit().await?;
+            return Ok(OutboxDispatchOutcome::Delivered { sequence: next });
         }
+    }
+}
 
-        advance_consumer_cursor(&mut transaction, consumer, delivered, next).await?;
-        transaction.commit().await?;
-        Ok(OutboxDispatchOutcome::Delivered { sequence: next })
+async fn quarantine_next_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    consumer: OutboxConsumer,
+    delivered: u64,
+    error: OutboxCorruption,
+) -> Result<Option<bool>, OutboxDispatchError> {
+    if !error.quarantinable() {
+        return Ok(None);
+    }
+    let next = delivered
+        .checked_add(1)
+        .ok_or(OutboxCorruption::InvalidSequence)?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM outbox_event WHERE event_sequence = $1
+            UNION ALL
+            SELECT 1 FROM delegation_outbox_event WHERE event_sequence = $1)",
+    )
+    .bind(Decimal::from(next))
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !exists {
+        return Ok(None);
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO outbox_event_quarantine(event_sequence, decode_error)
+         VALUES ($1, $2) ON CONFLICT (event_sequence) DO NOTHING",
+    )
+    .bind(Decimal::from(next))
+    .bind(error.to_string())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected()
+        == 1;
+    advance_consumer_cursor(transaction, consumer, delivered, next).await?;
+    Ok(Some(inserted))
+}
+
+fn log_quarantine(inserted: bool, sequence: u64, error: OutboxCorruption) {
+    if inserted {
+        tracing::error!(
+            event_sequence = sequence,
+            decode_error = %error,
+            "outbox event quarantined"
+        );
     }
 }
 

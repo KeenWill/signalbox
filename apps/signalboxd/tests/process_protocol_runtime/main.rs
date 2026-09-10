@@ -119,8 +119,8 @@ use signalboxd::{
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ExpiredPassRecoveryPolicy,
     FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
     PostgresProviderModelExecution, ProcessProviderTextDeltaSink, ProcessRuntime,
-    ProcessRuntimeError, ReportedUsageCompaction, ReportedUsageCompactionError,
-    SessionTemplateConfiguration, TurnLivenessNumericBounds, TurnLivenessRuntime,
+    ProcessRuntimeError, ReportedUsageCompaction, SessionTemplateConfiguration,
+    TurnLivenessNumericBounds, TurnLivenessRuntime,
 };
 use sqlx::PgPool;
 use tempfile::TempDir;
@@ -141,12 +141,14 @@ mod compaction;
 mod continuation_compaction;
 mod credential_exclusions;
 mod credential_pool;
+mod discovery;
 mod fixtures;
 mod fleet_soak;
 mod imported_conversations;
 mod input_admission;
 mod oauth;
 mod program;
+mod proposals;
 mod reconciliation;
 mod review_orchestration;
 mod runner_recovery;

@@ -147,3 +147,16 @@ test_suite(
     name = "checker_tests",
     visibility = ["//visibility:public"],
 )
+
+py_library(
+    name = "measure_docker_resources",
+    srcs = ["measure_docker_resources.py"],
+    imports = ["."],
+)
+
+py_test(
+    name = "test_measure_docker_resources",
+    size = "small",
+    srcs = ["test_measure_docker_resources.py"],
+    deps = [":measure_docker_resources"],
+)

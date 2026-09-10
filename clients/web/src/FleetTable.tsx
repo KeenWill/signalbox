@@ -18,7 +18,7 @@ const fleetColumns = fleetColumn.columns([
       <span className={`status status-${getValue()}`}>{enumLabel(getValue())}</span>
     ),
   }),
-  fleetColumn.accessor('purpose', { header: 'Current purpose' }),
+  fleetColumn.accessor('purpose', { header: 'Purpose' }),
   fleetColumn.accessor('age', { header: 'Age' }),
 ])
 
@@ -47,7 +47,7 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
     <section className="table-panel" aria-labelledby="fleet-heading">
       <header className="section-header table-heading">
         <div>
-          <span className="eyebrow">Operator view</span>
+          <span className="eyebrow" />
           <h2 id="fleet-heading">Fleet work</h2>
         </div>
         <span className="window-count">

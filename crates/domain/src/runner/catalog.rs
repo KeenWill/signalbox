@@ -116,12 +116,16 @@ pub struct RunnerToolModelDefinition {
 }
 
 impl RunnerToolModelDefinition {
-    /// Validates a tool description and normalized JSON object input schema.
+    /// Validates a tool description and a normalized JSON object input schema within 1 MiB.
     pub fn try_new(description: String, input_schema: String) -> Result<Self, RunnerDomainError> {
+        // The stored runner_tool_schema domain bounds the canonical schema to 1 MiB.
+        const MAX_SCHEMA_BYTES: usize = 1024 * 1024;
         let description = validate_exact(description)?;
         let input_schema = NormalizedToolArguments::try_from_provider_text(input_schema)
             .map_err(|_| RunnerDomainError::InvalidToolInputSchema)?;
-        if input_schema.kind() != ToolArgumentsKind::Json || !input_schema.as_str().starts_with('{')
+        if input_schema.kind() != ToolArgumentsKind::Json
+            || !input_schema.as_str().starts_with('{')
+            || input_schema.as_str().len() > MAX_SCHEMA_BYTES
         {
             return Err(RunnerDomainError::InvalidToolInputSchema);
         }

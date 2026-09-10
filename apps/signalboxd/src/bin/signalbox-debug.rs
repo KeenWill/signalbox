@@ -413,6 +413,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         credential_families,
         automatic_tool_round_limit,
         instruction_roots,
+        instruction_limits,
         provider,
     ) = match provider {
         DebugProvider::Scripted { reply } => {
@@ -438,6 +439,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 None,
                 None,
                 Vec::new(),
+                Default::default(),
                 DebugProviderRuntime::Scripted(
                     AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
                 ),
@@ -505,6 +507,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 Some(configuration.credential_family_catalog()),
                 automatic_tool_round_limit,
                 instruction_roots,
+                configuration.workspace_instructions().limits(),
                 DebugProviderRuntime::Anthropic(provider),
             )
         }
@@ -585,7 +588,8 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         StartEligibleTurnRepository::new(pool.clone()),
     );
     let workspace_instructions =
-        WorkspaceInstructionRuntime::new(pool.clone(), None, instruction_roots);
+        WorkspaceInstructionRuntime::new(pool.clone(), None, instruction_roots)
+            .with_discovery_limits(instruction_limits);
     let transcript = match provider {
         DebugProviderRuntime::Scripted(reply) => {
             let (execution, fatal_execution) =

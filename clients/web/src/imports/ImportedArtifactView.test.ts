@@ -90,7 +90,7 @@ describe('imported artifact projection', () => {
       displayName: 'Imported entry 8',
       kind: 'blocked',
       attemptedKind: 'Imported document',
-      reason: 'No preview for this content.',
+      reason: 'No preview for this content type.',
     })
   })
 
