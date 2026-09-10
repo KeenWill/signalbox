@@ -61,6 +61,37 @@ fn worktree_diff_includes_a_staged_missing_skip_worktree_entry() {
 }
 
 #[test]
+fn worktree_diff_marks_a_changed_large_skip_worktree_object_truncated() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let mut content = vec![b'x'; MAX_DIFF_BYTES];
+    fs::write(fixture.root().join(TRACKED_PATH), &content).expect("full preview prefix");
+    commit_all(&repository, "preview-sized base");
+    content.extend_from_slice(b"hidden change\n");
+    let changed = repository
+        .blob(&content)
+        .expect("changed blob beyond preview");
+    let mut index = repository.index().expect("index");
+    let mut entry = index
+        .get_path(Path::new(TRACKED_PATH), 0)
+        .expect("tracked entry");
+    entry.id = changed;
+    entry.file_size = content.len() as u32;
+    entry.flags_extended |= crate::limits::INDEX_SKIP_WORKTREE;
+    index.add(&entry).expect("changed skip-worktree entry");
+    index.write().expect("index writes");
+    fs::remove_file(fixture.root().join(TRACKED_PATH)).expect("missing skip-worktree file");
+
+    let diff = execute(
+        &fixture.executor(),
+        LocalOperation::Diff(GitDiffArguments::Worktree),
+    );
+
+    assert_eq!(diff["truncated"], true);
+    assert!(diff["patch"].as_str().expect("patch text").len() <= MAX_DIFF_BYTES);
+}
+
+#[test]
 fn worktree_diff_includes_an_untracked_file() {
     let fixture = Fixture::new();
     fs::write(fixture.root().join(UNTRACKED_PATH), UNTRACKED_CONTENT)
