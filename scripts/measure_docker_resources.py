@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+from typing import Any
 
 SAMPLE_INTERVAL_SECONDS = 5
 DOCKER_TIMEOUT_SECONDS = 5
@@ -29,7 +30,7 @@ class DockerConnection(http.client.HTTPConnection):
         self.sock.connect(self.socket_path)
 
 
-def docker_json(path: str) -> object:
+def docker_json(path: str) -> Any:
     endpoint = os.environ.get("DOCKER_HOST", "unix:///var/run/docker.sock")
     if not endpoint.startswith("unix://"):
         raise ValueError("Resource collection requires the runner's Unix Docker socket")
@@ -45,7 +46,7 @@ def docker_json(path: str) -> object:
         connection.close()
 
 
-def container_stats(container: dict) -> dict:
+def container_stats(container: dict[str, Any]) -> dict[str, Any]:
     identifier = container["Id"]
     raw = docker_json(f"/containers/{identifier}/stats?stream=false&one-shot=true")
     memory = raw["memory_stats"]
@@ -61,12 +62,12 @@ def container_stats(container: dict) -> dict:
 
 
 class DockerSampler:
-    def __init__(self):
-        self.previous_cpu = {}
-        self.previous_time = None
+    def __init__(self) -> None:
+        self.previous_cpu: dict[str, float] = {}
+        self.previous_time: float | None = None
         self.cpu_seconds_observed = 0.0
 
-    def sample(self) -> dict:
+    def sample(self) -> dict[str, Any]:
         containers = docker_json("/containers/json")
         # One-shot reads avoid the CLI's wait for two CPU snapshots per invocation.
         # A container disappearing during collection makes this an explicit gap.
