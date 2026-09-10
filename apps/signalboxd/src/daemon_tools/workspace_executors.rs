@@ -589,13 +589,20 @@ where
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
-            name if LOCAL_GIT_TOOL_NAMES.contains(&name) => executors
-                .local_git
-                .as_mut()
-                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
-                .execute(invocation)
-                .await
-                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            name if LOCAL_GIT_TOOL_NAMES.contains(&name) => {
+                let Some(git) = executors.local_git.as_mut() else {
+                    return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                        detail: signalbox_domain::ToolExecutionErrorDetail::try_new(
+                            "local Git is unavailable for this session".to_owned(),
+                        )
+                        .ok(),
+                    }));
+                };
+                git.execute(invocation)
+                    .await
+                    .map_err(|error| DaemonToolExecutorError::from_error(&error))
+            }
+
             SANDBOXED_EXEC_NAME => executors
                 .sandboxed_exec
                 .execute(invocation)

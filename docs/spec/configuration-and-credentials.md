@@ -623,8 +623,9 @@ against the configured `ModelTargetCatalog` and fails closed as
 The configured root is opened once during tool construction and its pinned
 authority is cloned into the workspace and execution suites. Repository roots,
 including empty repositories and linked worktrees, also compose the Git suite; a
-plain directory composes without Git. A nonexistent, non-directory,
-final-symlink, or malformed repository root fails startup.
+plain directory has no Git executor but registers Git declarations for
+repository-backed derived sessions. A nonexistent, non-directory, final-symlink,
+or malformed repository root fails startup.
 
 Repository-watch pull-request dispatch provisions its derived directory; other
 derived directories are provisioned by deployment. Only a reported absence at

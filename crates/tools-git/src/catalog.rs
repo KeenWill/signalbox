@@ -66,6 +66,40 @@ pub struct PinnedRepositoryDirectories {
     pub common_administration: WorkspaceRootIdentity,
 }
 
+/// Compiles local Git declarations before a session repository is selected.
+///
+/// Revision arguments admit either supported object-ID width. The bound
+/// executor validates them against its pinned repository's actual format.
+pub fn local_git_catalog() -> Result<CompiledToolCatalog, LocalGitToolsConstructionError> {
+    compile_local_git_catalog(None)
+}
+
+fn compile_local_git_catalog(
+    object_format: Option<ObjectFormat>,
+) -> Result<CompiledToolCatalog, LocalGitToolsConstructionError> {
+    let invalid_detail = detail(INVALID_ARGUMENTS_DETAIL)?;
+    let compiled = LocalToolKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let definition = kind.definition().map_err(|error| match error {
+                ToolContractCompileError::Name => LocalGitToolsConstructionError::Name,
+                ToolContractCompileError::Schema => LocalGitToolsConstructionError::Schema,
+            })?;
+            Ok(CompiledTool::new(
+                definition,
+                GitArgumentValidator {
+                    kind,
+                    object_format,
+                    detail: invalid_detail.clone(),
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, LocalGitToolsConstructionError>>()?;
+    let catalog = CompiledToolCatalog::try_new(compiled)
+        .map_err(|_| LocalGitToolsConstructionError::Duplicate)?;
+    Ok(catalog)
+}
+
 /// Seven local Git declarations and their injected-root executor.
 #[derive(Debug)]
 pub struct LocalGitTools<FileSystem = LocalWorkspaceFileSystem> {
@@ -92,29 +126,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
         if identity_after_root_open != repository_identity {
             return Err(LocalGitToolsConstructionError::Repository);
         }
-        let invalid_detail = detail(INVALID_ARGUMENTS_DETAIL)?;
         let repository_detail = detail(REPOSITORY_REJECTED_DETAIL)?;
         let path_detail = detail(PATH_REJECTED_DETAIL)?;
         let operation_detail = detail(OPERATION_FAILED_DETAIL)?;
-        let compiled = LocalToolKind::ALL
-            .into_iter()
-            .map(|kind| {
-                let definition = kind.definition().map_err(|error| match error {
-                    ToolContractCompileError::Name => LocalGitToolsConstructionError::Name,
-                    ToolContractCompileError::Schema => LocalGitToolsConstructionError::Schema,
-                })?;
-                Ok(CompiledTool::new(
-                    definition,
-                    GitArgumentValidator {
-                        kind,
-                        object_format: repository_authority.object_format,
-                        detail: invalid_detail.clone(),
-                    },
-                ))
-            })
-            .collect::<Result<Vec<_>, LocalGitToolsConstructionError>>()?;
-        let catalog = CompiledToolCatalog::try_new(compiled)
-            .map_err(|_| LocalGitToolsConstructionError::Duplicate)?;
+        let catalog = compile_local_git_catalog(Some(repository_authority.object_format))?;
         Ok(Self {
             catalog,
             executor: LocalGitExecutor {
@@ -216,12 +231,20 @@ impl<FileSystem: WorkspaceFileSystem> ToolExecutor for LocalGitExecutor<FileSyst
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
         let kind =
             kind_for_name(invocation.request().name().as_str()).ok_or(LocalGitExecutorError)?;
-        let operation = decode_operation(
+        let operation = match decode_operation(
             kind,
             invocation.request().arguments(),
             self.repository_authority.object_format,
-        )
-        .map_err(|_| LocalGitExecutorError)?;
+        ) {
+            Ok(operation) => operation,
+            Err(_) => {
+                return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                    detail: Some(
+                        detail(INVALID_ARGUMENTS_DETAIL).map_err(|_| LocalGitExecutorError)?,
+                    ),
+                }));
+            }
+        };
         let evidence = match self.execute_operation(operation) {
             Ok(result) => ToolExecutorEvidence::CompletedText(result),
             Err(LocalGitFailure::Repository) => ToolExecutorEvidence::KnownFailed {

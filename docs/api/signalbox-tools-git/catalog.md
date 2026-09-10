@@ -23,6 +23,13 @@ pub struct PinnedRepositoryDirectories {
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
+## local_git_catalog
+
+```rust
+pub fn local_git_catalog(
+) -> result::Result<signalbox_application::CompiledToolCatalog, LocalGitToolsConstructionError>;
+```
+
 ## LocalGitTools
 
 ```rust
