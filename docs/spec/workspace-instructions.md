@@ -27,8 +27,8 @@ instruction directory that configuration registers
 ([configuration-and-credentials.md](configuration-and-credentials.md)). Under
 both kinds of root it skips version-control metadata and build or dependency
 outputs, under the workspace root it also skips nested repositories, and it
-stops at fixed safety limits. One scan produces a discovery snapshot: the roots
-it walked, the candidates it found, a typed finding for every entry it could not
+stops at configured limits. One scan produces a discovery snapshot: the roots it
+walked, the candidates it found, a typed finding for every entry it could not
 read or classify, and whether the scan was complete.
 
 Registration turns each candidate into an `InstructionBundleRegistration`
@@ -73,7 +73,11 @@ invalid-skill finding.
 
 Discovery does not follow symbolic links.
 
-The discovery safety limits are fixed by the daemon and not user-configurable.
+The `[workspace_instructions]` configuration accepts `max_classified_entries`,
+`max_findings`, `max_candidate_source_bytes`, and `max_elapsed`. Each accepts
+`"none"`; omitted values retain the defaults of 100,000 entries, 4,096 findings,
+64 MiB, and 30 seconds. A finite finding limit must leave room for the
+incomplete marker.
 
 ## Boundary contracts
 
@@ -95,10 +99,9 @@ In the workspace, a skill candidate is each directory immediately below an
 occur at any depth. In a configured root, every nested directory holding a
 regular `SKILL.md` is a candidate, including the root itself.
 
-The walk is complete only within the daemon's fixed limits on classified
-entries, findings, candidate source bytes, and elapsed time. An incomplete scan
-is never presented as a complete inventory, and no turn-start manifest names
-one.
+A turn-start manifest binds the discovered inventory even when a scan reaches a
+configured limit. Its discovery record carries `scan_complete = false` and a
+terminal limit finding; the turn proceeds with that partial inventory.
 
 Workspace roots sort before configured roots, and within each kind roots sort by
 canonical path. The first root whose kind-specific rules yield a candidate is
@@ -124,8 +127,8 @@ paths serialize on the session scheduler lock
 ([persistence-protocol.md](persistence-protocol.md)), and no present command can
 change the empty eligibility or admitted sets.
 
-A turn-start manifest names a complete discovery for its own session and turn,
-and a prepared call cannot name a turn without the exact manifest used for its
+A turn-start manifest names discovery evidence for its own session and turn, and
+a prepared call cannot name a turn without the exact manifest used for its
 instruction projection.
 
 Comparing two manifests does not require the live workspace.

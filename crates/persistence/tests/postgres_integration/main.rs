@@ -1536,7 +1536,7 @@ async fn checkpoint_restart_model_call_with_input(
     .expect("one restart fixture target forms a catalog");
     let repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
-            .with_continuation_usage_limits(limits.iter().copied());
+            .with_continuation_usage_limits(limits.iter().cloned());
     assert!(matches!(
         repository
             .prepare_initial_call(

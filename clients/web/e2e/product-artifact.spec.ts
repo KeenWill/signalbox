@@ -302,7 +302,7 @@ test('keeps focus moved during a pending bootstrap retry', async ({ page }) => {
     route.fulfill({ json: incompatibleDescriptorFixture }),
   )
   await page.goto('/sessions?workspace=true')
-  await expect(page.getByText('Unexpected server response')).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response')).toBeVisible()
 
   const response = Promise.withResolvers<void>()
   await page.route('**/api/bootstrap', async (route) => {
@@ -315,7 +315,7 @@ test('keeps focus moved during a pending bootstrap retry', async ({ page }) => {
   const navigation = page.getByRole('link', { name: /Settings/ })
   await navigation.focus()
   response.resolve()
-  await expect(page.getByText('Unexpected server response')).toHaveCount(0)
+  await expect(page.getByText('Unexpected daemon response')).toHaveCount(0)
   await expect(navigation).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -351,7 +351,7 @@ test('preserves an intentional blur during a pending bootstrap retry', async ({ 
     route.fulfill({ json: incompatibleDescriptorFixture }),
   )
   await page.goto('/sessions?workspace=true')
-  await expect(page.getByText('Unexpected server response')).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response')).toBeVisible()
 
   const response = Promise.withResolvers<void>()
   await page.route('**/api/bootstrap', async (route) => {

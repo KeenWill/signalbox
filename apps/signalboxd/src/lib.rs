@@ -141,8 +141,7 @@ pub use fenced_database::{
 #[cfg(feature = "test-support")]
 pub use goal_mode::goal_declaration_test_tools;
 pub use goal_mode::{
-    CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED, GoalModeNumericBounds, PostgresGoalPassDisposition,
-    PostgresGoalPassDispositionError,
+    GoalModeNumericBounds, PostgresGoalPassDisposition, PostgresGoalPassDispositionError,
 };
 pub use lifecycle_deadline_runtime::LifecycleDeadlineRuntime;
 pub use lifecycle_metrics_runtime::LifecycleMetricsRuntime;
@@ -3439,6 +3438,7 @@ where
                         }
                         ToolExecutionServiceOutcome::ChildWaitParked(_)
                         | ToolExecutionServiceOutcome::AwaitingRecovery(_)
+                        | ToolExecutionServiceOutcome::ContinuationContextCompactionFailed(_)
                         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_)
                         | ToolExecutionServiceOutcome::ContinuationPoolExhausted(_)
                         | ToolExecutionServiceOutcome::ContinuationContextCompactionRequired(_) => {

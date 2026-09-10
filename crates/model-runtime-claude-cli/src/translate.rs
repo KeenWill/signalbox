@@ -11,6 +11,20 @@ use signalbox_model_runtime::{
 
 use crate::bridge::{Catalog, CatalogTool, TOOL_PREFIX, valid_mcp_tool_name};
 
+/// Measures the complete adapter request, including instructions and tool declarations.
+pub fn serialized_request_bytes<C>(operation: &ModelOperation<C>) -> Option<usize> {
+    let mut translated = translate(operation).ok()?;
+    for tool in &mut translated.catalog.tools {
+        tool.name = qualified_tool_name(&tool.name);
+    }
+    Some(
+        translated
+            .prompt
+            .len()
+            .saturating_add(serde_json::to_vec(&translated.catalog).ok()?.len()),
+    )
+}
+
 pub(crate) struct TranslatedOperation {
     pub(crate) prompt: Vec<u8>,
     pub(crate) input_format: crate::image::InputFormat,

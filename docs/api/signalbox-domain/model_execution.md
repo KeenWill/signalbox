@@ -167,6 +167,12 @@ impl ModelCallExecution {
         &self,
         call: ModelCallId,
     ) -> result::Result<PreparedModelCallRequest, ModelCallPreparationError>;
+    pub fn preview_initial_call_consuming_steering(
+        &self,
+        call: ModelCallId,
+        steering_entries: vec::Vec<SemanticTranscriptEntryId>,
+        steering_frontier: option::Option<ContextFrontierId>,
+    ) -> result::Result<PreparedModelCallRequest, ModelCallPreparationError>;
     pub fn prepare_initial_call(
         self,
         call: ModelCallId,

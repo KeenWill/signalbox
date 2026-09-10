@@ -535,6 +535,31 @@ impl PreparedToolResultProjection {
         &self.snapshot
     }
 
+    /// Appends a validated summary or runner placement entry to the result frontier.
+    pub fn with_context_boundary(
+        mut self,
+        entry: SemanticTranscriptEntry,
+        snapshot: ResolvedContextFrontierSnapshot,
+    ) -> Result<Self, ToolResultProjectionError> {
+        if !matches!(
+            entry.payload(),
+            crate::SemanticTranscriptEntryPayload::ContextSummary { .. }
+                | crate::SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+        ) || !self.snapshot.is_semantic_prefix_of(&snapshot)
+            || snapshot.entry_count() != self.snapshot.entry_count() + 1
+            || snapshot.ordered_entries().last() != Some(entry.reference())
+        {
+            return Err(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::FrontierDerivationFailed,
+            });
+        }
+        let mut entries = self.entries.into_vec();
+        entries.push(entry);
+        self.entries = entries.into_boxed_slice();
+        self.snapshot = snapshot;
+        Ok(self)
+    }
+
     /// Extends the complete result frontier by its checked runner replacement boundary.
     pub fn with_runner_placement_boundary(
         mut self,
