@@ -189,3 +189,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     serve_one(&catalog).await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[test]
+fn fixture_parser_rejects_the_unsandboxed_process_environment() {
+    assert!(verify_sandbox_authority().is_err());
+}

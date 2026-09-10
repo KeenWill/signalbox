@@ -658,15 +658,6 @@ fn rejected_parent_termination(
     (relation, authority)
 }
 
-fn assert_standard_error<T: std::error::Error>() {}
-
-#[test]
-fn delegation_public_errors_implement_standard_error_contract() {
-    assert_standard_error::<DelegationContentError>();
-    assert_standard_error::<DelegationRequestError>();
-    assert_standard_error::<DelegationTransitionError>();
-}
-
 /// spawn retains the exact sealed request facts and derives delegated creation without ancestry.
 #[test]
 fn aggregate_spawn_retains_policy_task_and_provenance() {

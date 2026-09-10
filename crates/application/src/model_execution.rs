@@ -51,6 +51,7 @@ mod content;
 pub use content::{
     ModelAttachmentStub, ModelCallCredentialReference, ModelConversationMessage,
     ModelToolResultContent, ModelUserContent, ModelUserContentPart, ProviderReasoningProvenance,
+    RenderedAttachmentSelector,
 };
 use content::{SerializedAttachmentEnvelope, SerializedAttachmentStub};
 
