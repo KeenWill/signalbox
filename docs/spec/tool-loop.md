@@ -270,7 +270,9 @@ detail, or denial reason.
 The optional `[tool_proposals]` configuration sets `max_requests` (default 32)
 and `max_argument_bytes` (default 1048576); `"none"` removes the corresponding
 admission bound. The first `max_requests` proposals are eligible for approval;
-each later proposal receives an `execution_failed` result naming the cap. An
+each later proposal receives an `execution_failed` result naming the cap and
+retains its normalized arguments unless the argument-byte bound requires a
+preview. Normalization and durable-value validation precede either limit. An
 argument payload exceeding its byte bound before or after canonicalization is
 stored as a bounded UTF-8 preview with retained/dropped byte counts and receives
 an `invalid_arguments` result. These requests remain in their original response

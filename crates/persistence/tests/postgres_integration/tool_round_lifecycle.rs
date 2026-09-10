@@ -5545,6 +5545,17 @@ async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
 -> Result<(), Box<dyn Error>> {
+    assert_next_batch_reservation(Some(32)).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unbounded_proposals_reserve_headroom_for_a_subsequent_tool_response()
+-> Result<(), Box<dyn Error>> {
+    assert_next_batch_reservation(None).await
+}
+
+async fn assert_next_batch_reservation(max_requests: Option<u64>) -> Result<(), Box<dyn Error>> {
     // Only supplies distinct identities for the two model responses.
     const FIXTURE_SEED: u128 = 0x269_1000;
     const INPUT_TOKENS: u64 = 141_000;
@@ -5557,7 +5568,8 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
         FIXTURE_SEED + 6,
     )));
     let limits =
-        ToolContinuationUsageLimit::new(target, FastMode::Disabled, OUTPUT_CEILING, 200_000);
+        ToolContinuationUsageLimit::new(target, FastMode::Disabled, OUTPUT_CEILING, 200_000)
+            .with_max_tool_requests(max_requests);
     let fixture = checkpoint_restart_model_call_with_limits(
         &pool,
         FIXTURE_SEED,

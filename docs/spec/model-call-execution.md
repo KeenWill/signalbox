@@ -53,23 +53,25 @@ the required prompt and JSON escaping. Before tool results enter context, each
 result receives an equal share of the smaller of that safe-prefix budget and the
 producing call's remaining headroom, reserving the next response's output, the
 following call's output ceiling, the current result envelopes, and envelopes
-with empty-prefix markers for the maximum admitted next tool batch. Successful
-text and failure details share the same admission bound; typed failure kinds
-remain intact. Oversized text is truncated at a UTF-8 boundary with an explicit
-marker naming the retained and dropped byte counts; JSON escaping and the marker
-count against the share. The admitted text is durable and used by ordinary
-rendering, compaction, and headroom accounting; exact executor text and failure
-details remain observation evidence. When framing or an indivisible exchange
-exceeds the compaction input budget, source text is bounded with UTF-8-safe
-truncation and retained/dropped byte markers. The complete serialized request is
-measured when bounding that material. The dedicated call summarizes that bounded
-material. Its summary text is bounded by the configured output reservation in
-bytes; headroom measures the admitted text separately from billed provider
-output. Automatic compaction targets the first safe boundary at or beyond half
-the rendered bytes, falls back to the latest fitting safe boundary, and includes
-the first indivisible exchange when none fits. A prefix summary absorbs the next
-complete exchange when one remains. Before activating a queued turn, the guard
-repeats compaction until its continuation fits. When only a summary remains, its
+with empty-prefix markers for the maximum admitted next tool batch. With an
+unbounded proposal count, the next-batch reservation uses the default 32-request
+allowance. Successful text and failure details share the same admission bound;
+typed failure kinds remain intact. Oversized text is truncated at a UTF-8
+boundary with an explicit marker naming the retained and dropped byte counts;
+JSON escaping and the marker count against the share. The admitted text is
+durable and used by ordinary rendering, compaction, and headroom accounting;
+exact executor text and failure details remain observation evidence. During
+automatic compaction, when framing or an indivisible exchange exceeds the
+compaction input budget, source text is bounded with UTF-8-safe truncation and
+retained/dropped byte markers. The complete serialized request is measured when
+bounding that material. The automatic call summarizes that bounded material. Its
+summary text is bounded by the configured output reservation in bytes; headroom
+measures the admitted text separately from billed provider output. Automatic
+compaction targets the first safe boundary at or beyond half the rendered bytes,
+falls back to the latest fitting safe boundary, and includes the first
+indivisible exchange when none fits. A prefix summary absorbs the next complete
+exchange when one remains. Before activating a queued turn, the guard repeats
+compaction until its continuation fits. When only a summary remains, its
 replacement is bounded to half its bytes. If the one-byte summary still leaves
 insufficient headroom, the queued turn closes without another compaction call. A
 failed provider compaction closes the queued turn without preparing an ordinary
@@ -87,8 +89,9 @@ retires the checkpoint when it prepares a call or parks for credential
 availability. Checkpoints schedule a follow-up eligibility pass and survive
 restarts; tool results are reused without execution. Successful compaction
 preserves the same turn and goal lineage for every session kind. A failed or
-refused automatic compaction closes the active checkpoint, as does a one-byte
-summary that still lacks continuation headroom.
+refused automatic compaction, including failure before preparing its dedicated
+call, closes the active checkpoint, as does a one-byte summary that still lacks
+continuation headroom.
 
 Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen

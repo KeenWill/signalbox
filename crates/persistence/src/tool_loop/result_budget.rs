@@ -107,13 +107,13 @@ pub(super) async fn result_byte_limit(
         .saturating_sub(output)
         .saturating_sub(limit.compaction_prompt_bytes());
     // The following response can admit more tools than the producing response.
-    // Reserve every envelope and an empty-prefix marker for that bounded batch.
+    // An unbounded response reserves the default batch allowance.
     let framing_per_result = framing
         .checked_div(count)
         .ok_or(ToolLoopCorruption::Inconsistent("empty tool result batch"))?;
     let next_batch = limit
         .max_tool_requests()
-        .unwrap_or(0)
+        .unwrap_or(signalbox_application::ToolProposalLimits::DEFAULT_MAX_REQUESTS)
         .saturating_mul(framing_per_result.saturating_add(minimum_failure_content));
     let headroom = window
         .saturating_sub(output.saturating_add(output))
