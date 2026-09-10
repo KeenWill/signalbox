@@ -4629,6 +4629,7 @@ version = "0.0.0"
 dependencies = [
  "expect-test",
  "expectable",
+ "futures-util",
  "rust_decimal",
  "serde",
  "serde_json",

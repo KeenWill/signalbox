@@ -203,37 +203,38 @@ impl ImportedConversationDisplayTitle {
     /// wall clock, or import-time context, so re-deriving from the same
     /// immutable aggregate always returns the same value.
     pub fn derive(conversation: &ImportedConversation) -> Option<Self> {
+        Self::derive_candidates(conversation)
+            .into_iter()
+            .flatten()
+            .next()
+    }
+
+    /// Derives the first candidate in each format-defined priority class.
+    ///
+    /// This permits an incremental store to retain one bounded title per class
+    /// while preserving the result of [`Self::derive`] across all records.
+    pub fn derive_candidates(conversation: &ImportedConversation) -> [Option<Self>; 3] {
         match conversation.format() {
             ImportedConversationFormat::ClaudeCodeSessionJsonlV1
-            | ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
+            | ImportedConversationFormat::ClaudeCodeSessionJsonlV2
+            | ImportedConversationFormat::ClaudeCodeSessionJsonlV3 => [
                 typed_record_string_candidates(conversation, "summary", &["summary"])
-                    .filter_map(Self::shape_candidate)
-                    .next()
-                    .or_else(|| {
-                        attested_user_text_candidates(conversation)
-                            .filter_map(Self::shape_candidate)
-                            .next()
-                    })
-            }
-            ImportedConversationFormat::CodexRolloutJsonlV1 => {
+                    .find_map(Self::shape_candidate),
+                attested_user_text_candidates(conversation).find_map(Self::shape_candidate),
+                None,
+            ],
+            ImportedConversationFormat::CodexRolloutJsonlV1
+            | ImportedConversationFormat::CodexRolloutJsonlV2 => [
                 typed_record_string_candidates(conversation, "session_meta", &["payload", "title"])
-                    .filter_map(Self::shape_candidate)
-                    .next()
-                    .or_else(|| {
-                        typed_record_string_candidates(
-                            conversation,
-                            "session_meta",
-                            &["payload", "instructions"],
-                        )
-                        .filter_map(Self::shape_candidate)
-                        .next()
-                    })
-                    .or_else(|| {
-                        attested_user_text_candidates(conversation)
-                            .filter_map(Self::shape_candidate)
-                            .next()
-                    })
-            }
+                    .find_map(Self::shape_candidate),
+                typed_record_string_candidates(
+                    conversation,
+                    "session_meta",
+                    &["payload", "instructions"],
+                )
+                .find_map(Self::shape_candidate),
+                attested_user_text_candidates(conversation).find_map(Self::shape_candidate),
+            ],
         }
     }
 

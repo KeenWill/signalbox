@@ -196,8 +196,6 @@ pub enum HubModelConfigurationError {
     InvalidLimit,
     /// The compaction prompt was empty, oversized, or contained NUL.
     InvalidCompactionPrompt,
-    /// The optional conversation-import byte bound was absent, zero, or invalid.
-    InvalidConversationImportLimit,
     /// The optional blob-store registry or its routes were malformed.
     InvalidBlobStorageConfiguration,
     /// The optional web-fetch table was malformed or named an invalid origin.
@@ -426,9 +424,6 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidLimit => "model configuration contains an invalid token limit",
             Self::InvalidCompactionPrompt => {
                 "model configuration contains an invalid compaction prompt"
-            }
-            Self::InvalidConversationImportLimit => {
-                "model configuration contains an invalid conversation import byte limit"
             }
             Self::InvalidBlobStorageConfiguration => {
                 "model configuration contains invalid blob-storage settings"

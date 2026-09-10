@@ -7,7 +7,6 @@ pub(super) struct ParsedStartup {
     pub(super) global_model_settings: ModelSettingsOverlay,
     pub(super) model_settings_profiles: HashMap<Arc<str>, ModelSettingsOverlay>,
     pub(super) compaction_prompt: Arc<str>,
-    pub(super) conversation_import_max_source_bytes: usize,
     pub(super) file_media: bool,
     pub(super) blob_storage: Option<BlobStorageConfiguration>,
     pub(super) web_fetch_egress_policy: WebFetchEgressPolicy,
@@ -48,7 +47,6 @@ pub(super) fn parse_startup(
             "serving_targets",
             "aliases",
             "compaction",
-            "conversation_import",
             "web_fetch",
             "tool_mappings",
             "daemon_tools",
@@ -83,33 +81,8 @@ pub(super) fn parse_startup(
         return Err(HubModelConfigurationError::InvalidCompactionPrompt);
     }
     let compaction_prompt: Arc<str> = Arc::from(compaction_prompt);
-    let conversation_import_max_source_bytes = document
-        .get("conversation_import")
-        .map(|item| {
-            let table = item
-                .as_table()
-                .ok_or(HubModelConfigurationError::InvalidConversationImportLimit)?;
-            reject_unknown_fields(table, &["max_source_bytes"])
-                .map_err(|_| HubModelConfigurationError::InvalidConversationImportLimit)?;
-            let value = table
-                .get("max_source_bytes")
-                .and_then(|item| item.as_integer())
-                .ok_or(HubModelConfigurationError::InvalidConversationImportLimit)?;
-            let value = usize::try_from(value)
-                .map_err(|_| HubModelConfigurationError::InvalidConversationImportLimit)?;
-            if value == 0 {
-                Err(HubModelConfigurationError::InvalidConversationImportLimit)
-            } else {
-                Ok(value)
-            }
-        })
-        .transpose()?
-        .unwrap_or(DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES);
-    let minimum_blob_bytes = u64::try_from(conversation_import_max_source_bytes)
+    let blob_storage = BlobStorageConfiguration::parse(document.get("blob_storage"))
         .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
-    let blob_storage =
-        BlobStorageConfiguration::parse(document.get("blob_storage"), minimum_blob_bytes)
-            .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
     let file_media = document
         .get("file_media")
         .map(|value| {
@@ -380,7 +353,6 @@ pub(super) fn parse_startup(
         global_model_settings,
         model_settings_profiles,
         compaction_prompt,
-        conversation_import_max_source_bytes,
         blob_storage,
         file_media,
         web_fetch_egress_policy,

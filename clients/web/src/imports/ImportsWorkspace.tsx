@@ -47,8 +47,10 @@ type ModelKind = 'direct' | 'alias'
 
 const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
   { value: EMPTY_FILTER, label: 'All sources' },
+  { value: 'claude_code_session_jsonl_v3', label: 'Claude Code, converter 3' },
   { value: 'claude_code_session_jsonl_v2', label: 'Claude Code, converter 2' },
   { value: 'claude_code_session_jsonl_v1', label: 'Claude Code, converter 1' },
+  { value: 'codex_rollout_jsonl_v2', label: 'Codex rollout, converter 2' },
   { value: 'codex_rollout_jsonl_v1', label: 'Codex rollout, converter 1' },
 ]
 

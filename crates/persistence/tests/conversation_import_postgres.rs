@@ -11,17 +11,22 @@ use std::{
     env,
     error::Error,
     fs,
-    num::NonZeroU32,
+    io::{BufReader, Cursor},
+    num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use rust_decimal::Decimal;
 use signalbox_application::{
     ImportConversationError, ImportConversationOutcome, ImportConversationService,
     ImportedConversationConverter, ImportedConversationIdGenerator,
+    ImportedConversationStoreOutcome, StreamingResilientImportedConversationConverter,
 };
-use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
+use signalbox_conversation_import_claude_code::{
+    ClaudeCodeJsonlConverter, ResilientClaudeCodeJsonlConverter,
+};
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
     BlobDigest, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -36,7 +41,8 @@ use signalbox_persistence::{
     conversation_import::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
-        corrupt_integration_imported_blob,
+        StreamingImportedConversationReport, corrupt_integration_imported_blob,
+        load_normalized_entry_page,
     },
     conversation_import_discovery::{
         ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
@@ -211,9 +217,10 @@ async fn insert_imported_source_scaffolding(
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
          VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 3,
-                 NULL, 'underivable')",
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(facts.conversation)
     .bind(vec![0x22_u8; 32])
@@ -967,6 +974,32 @@ async fn exact_reingestion_resolves_the_immutable_winner() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// normalized inspection reads advance through bounded database pages.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn normalized_entry_pages_bound_and_advance_the_imported_transcript()
+-> Result<(), Box<dyn Error>> {
+    let fixture = import_round_trip_fixture().await?;
+    let limit = NonZeroUsize::new(1).expect("the fixture page limit is positive");
+
+    let first = load_normalized_entry_page(&fixture.pool, fixture.winner, 0, limit)
+        .await?
+        .expect("the imported conversation exists");
+    assert_eq!(first.entries().len(), 1);
+    assert_eq!(first.entries()[0].position().as_u64(), 1);
+    assert!(first.has_more());
+
+    let second = load_normalized_entry_page(&fixture.pool, fixture.winner, 1, limit)
+        .await?
+        .expect("the imported conversation exists");
+    assert_eq!(second.entries().len(), 1);
+    assert_eq!(second.entries()[0].position().as_u64(), 2);
+    assert!(!second.has_more());
+
+    fixture.finish().await;
+    Ok(())
+}
+
 /// imported raw bytes deduplicate by content identity while every ordered occurrence and semantic
 /// frontier reconstitutes.
 #[tokio::test(flavor = "multi_thread")]
@@ -1614,6 +1647,123 @@ async fn concurrent_reversed_raws_use_stable_blob_order() -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// concurrent streamed imports of one source resolve the durable winner.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_streamed_duplicates_return_inserted_and_already_imported()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let source = br#"{"type":"summary","value":"same"}"#.to_vec();
+    let first_repository = ImportedConversationRepository::new(pool.clone());
+    let second_repository = ImportedConversationRepository::new(pool.clone());
+    let first_source = source.clone();
+    let first = async move {
+        let candidate = ImportedConversationId::from_uuid(Uuid::from_u128(0x880));
+        let mut converter = ResilientClaudeCodeJsonlConverter;
+        let format = converter.format();
+        let records = converter.convert_resilient_from_reader(
+            candidate,
+            BufReader::new(Cursor::new(first_source)),
+            u64::MAX,
+            || ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x881)),
+        );
+        first_repository
+            .resolve_or_insert_stream(candidate, format, records)
+            .await
+    };
+    let second = async move {
+        let candidate = ImportedConversationId::from_uuid(Uuid::from_u128(0x890));
+        let mut converter = ResilientClaudeCodeJsonlConverter;
+        let format = converter.format();
+        let records = converter.convert_resilient_from_reader(
+            candidate,
+            BufReader::new(Cursor::new(source)),
+            u64::MAX,
+            || ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x891)),
+        );
+        second_repository
+            .resolve_or_insert_stream(candidate, format, records)
+            .await
+    };
+
+    let (first, second) = tokio::join!(first, second);
+    let reports = [
+        first.expect("the first streamed import resolves"),
+        second.expect("the second streamed import resolves"),
+    ];
+    let mut inserted = None;
+    let mut already_imported = None;
+    for report in &reports {
+        let StreamingImportedConversationReport::Imported { outcome, .. } = report else {
+            panic!("the valid source must produce an imported conversation")
+        };
+        match outcome {
+            ImportedConversationStoreOutcome::Inserted { conversation, .. } => {
+                inserted = Some(*conversation);
+            }
+            ImportedConversationStoreOutcome::AlreadyImported { conversation, .. } => {
+                already_imported = Some(*conversation);
+            }
+        }
+    }
+    assert_eq!(inserted, already_imported);
+    assert!(inserted.is_some());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// streamed staging needs no second connection and leaves no transaction open across publication.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn streamed_import_stages_without_a_long_lived_transaction() -> Result<(), Box<dyn Error>> {
+    let (container, migration_pool, database_url) = migrated_postgres().await?;
+    migration_pool.close().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?;
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let candidate = ImportedConversationId::from_uuid(Uuid::from_u128(0x8a0));
+    let source = concat!(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"one\"}}\n",
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"two\"}}"
+    );
+    let mut converter = ResilientClaudeCodeJsonlConverter;
+    let format = converter.format();
+    let mut next_entry = 0x8a1_u128;
+    let records = converter.convert_resilient_from_reader(
+        candidate,
+        BufReader::new(Cursor::new(source.as_bytes())),
+        u64::MAX,
+        move || {
+            let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(next_entry));
+            next_entry += 1;
+            identity
+        },
+    );
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(5),
+        repository.resolve_or_insert_stream(candidate, format, records),
+    )
+    .await
+    .expect("streamed import must not wait for another pool connection")
+    .expect("streamed import succeeds");
+    assert!(matches!(
+        report,
+        StreamingImportedConversationReport::Imported {
+            outcome: ImportedConversationStoreOutcome::Inserted { conversation, .. },
+            ..
+        } if conversation == candidate
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// overlapping imported-entry identity keys are acquired in one stable order even when transcript
 /// positions reverse them.
 #[tokio::test(flavor = "multi_thread")]
@@ -1697,9 +1847,10 @@ async fn late_entry_identity_constraint_is_typed_collision() -> Result<(), Box<d
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
          VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1,
-                 NULL, 'underivable')",
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0xa10))
     .bind(vec![0x10_u8; 32])
@@ -1765,9 +1916,10 @@ async fn incomplete_import_header_cannot_commit() -> Result<(), Box<dyn Error>> 
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
          VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1,
-                 NULL, 'underivable')",
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x400))
     .bind(vec![0_u8; 32])
@@ -1846,9 +1998,10 @@ async fn unsupported_format_version_pair_is_schema_rejected() -> Result<(), Box<
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
-         VALUES ($1, 1, 'claude_code_session_jsonl', 3, $2, 1, 1,
-                 NULL, 'underivable')",
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 4, $2, 1, 1,
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x4ff))
     .bind(vec![0_u8; 32])
@@ -1865,9 +2018,10 @@ async fn unsupported_format_version_pair_is_schema_rejected() -> Result<(), Box<
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
-         VALUES ($1, 1, 'codex_rollout_jsonl', 2, $2, 1, 1,
-                 NULL, 'underivable')",
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
+         VALUES ($1, 1, 'codex_rollout_jsonl', 3, $2, 1, 1,
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x4fe))
     .bind(vec![1_u8; 32])
