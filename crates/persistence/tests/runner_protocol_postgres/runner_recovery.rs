@@ -3941,7 +3941,8 @@ async fn same_epoch_established_event_cannot_publish_recovery() -> Result<(), Bo
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn delegated_runner_recovery_charges_its_retained_attachment() -> Result<(), Box<dyn Error>> {
+async fn delegated_runner_recovery_admits_attachments_within_the_per_blob_limit()
+-> Result<(), Box<dyn Error>> {
     use signalbox_domain::{
         AttachmentKind, BlobDigest, DeclaredMediaType, SubmitInputAppliedResult, SubmitInputResult,
         UserContentPart,
@@ -4038,13 +4039,11 @@ async fn delegated_runner_recovery_charges_its_retained_attachment() -> Result<(
             |_| panic!("safe-point steering does not cancel tools"),
         )
         .await?;
-    assert_eq!(
+    assert!(matches!(
         later_outcome,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            signalbox_domain::SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
-                maximum_bytes: 10
-            }
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
         ))
-    );
+    ));
     Ok(())
 }
