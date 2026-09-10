@@ -322,6 +322,10 @@ Dispatched pull-request sessions whose watched repository configures
 `https://github.com/<owner>/<repo>.git`; fork heads are unavailable because that
 destination is the watched repository.
 
+App push credential lookups and refreshes use the push process's 300-second
+timeout. An explicit Git authentication rejection refreshes the rejected token
+and retries the push once; concurrent callers share the replacement token.
+
 ## Boundary contracts
 
 The v2 crate depends on the session ownership crate as its only Signalbox

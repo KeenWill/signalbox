@@ -216,5 +216,6 @@ mod tests {
 
 mod app;
 pub use app::{
-    AppAuthentication, AppCredentialFailure, AppKeyReader, AppRequestFailure, response_credential,
+    AppAuthentication, AppCredentialFailure, AppKeyReader, AppRequestFailure, AppToken,
+    response_credential,
 };

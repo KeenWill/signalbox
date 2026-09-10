@@ -46,9 +46,18 @@ struct CachedToken {
     expires_at: i64,
 }
 
-struct ResolvedAuthorization {
+/// Installation credential with its cache generation for authentication-rejection feedback.
+/// This value deliberately has no diagnostic representation.
+pub struct AppToken {
     header: HeaderValue,
     generation: u64,
+}
+
+impl AppToken {
+    /// Borrows the credential bytes for a non-HTTP GitHub transport.
+    pub fn credential_bytes(&self) -> &[u8] {
+        &self.header.as_bytes()[b"Bearer ".len()..]
+    }
 }
 
 /// Shared installation-token cache; diagnostics contain no key or token material.
@@ -113,11 +122,30 @@ impl AppAuthentication {
             .map(|authorization| authorization.header)
     }
 
+    /// Resolves a credential whose generation can be retained by an external transport.
+    pub async fn token(&self, timeout: Option<Duration>) -> Result<AppToken, AppCredentialFailure> {
+        self.resolve(None, timeout.map(|timeout| Instant::now() + timeout))
+            .await
+    }
+
+    /// Refreshes a rejected credential, sharing a concurrent refresh of its generation.
+    pub async fn refresh(
+        &self,
+        rejected: &AppToken,
+        timeout: Option<Duration>,
+    ) -> Result<AppToken, AppCredentialFailure> {
+        self.resolve(
+            Some(rejected.generation),
+            timeout.map(|timeout| Instant::now() + timeout),
+        )
+        .await
+    }
+
     async fn resolve(
         &self,
         rejected: Option<u64>,
         deadline: Option<Instant>,
-    ) -> Result<ResolvedAuthorization, AppCredentialFailure> {
+    ) -> Result<AppToken, AppCredentialFailure> {
         let observed_generation = self.generation.load(std::sync::atomic::Ordering::SeqCst);
         let mut cached = within_deadline(deadline, self.cached.lock()).await?;
         if self.generation.load(std::sync::atomic::Ordering::SeqCst) != observed_generation
@@ -132,7 +160,7 @@ impl AppAuthentication {
             && token.expires_at > jiff::Timestamp::now().as_second() + 60
             && rejected != Some(self.generation.load(std::sync::atomic::Ordering::SeqCst))
         {
-            return Ok(ResolvedAuthorization {
+            return Ok(AppToken {
                 header: token.authorization.clone(),
                 generation: self.generation.load(std::sync::atomic::Ordering::SeqCst),
             });
@@ -148,7 +176,7 @@ impl AppAuthentication {
             Ok(token) => {
                 let authorization = token.authorization.clone();
                 *cached = Ok(Some(token));
-                Ok(ResolvedAuthorization {
+                Ok(AppToken {
                     header: authorization,
                     generation: self.generation.load(std::sync::atomic::Ordering::SeqCst),
                 })
@@ -709,14 +737,37 @@ mod tests {
                 })
             }),
         };
-        let rejected = auth.resolve(None, None).await.expect("initial credential");
-        let (first, second) = tokio::join!(
-            auth.resolve(Some(rejected.generation), None),
-            auth.resolve(Some(rejected.generation), None)
-        );
+        let rejected = auth.token(None).await.expect("initial credential");
+        let (first, second) =
+            tokio::join!(auth.refresh(&rejected, None), auth.refresh(&rejected, None));
         assert_eq!(first.expect("refreshed").header, rejected.header);
         assert_eq!(second.expect("shared refresh").header, rejected.header);
         assert_eq!(exchanges.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn external_authentication_rejections_share_a_refresh_generation() {
+        let (auth, exchanges) = fixture_auth();
+        let rejected = auth.token(None).await.expect("initial push token");
+        assert_eq!(rejected.credential_bytes(), b"synthetic-installation-0");
+        let (first, second) =
+            tokio::join!(auth.refresh(&rejected, None), auth.refresh(&rejected, None));
+        assert_eq!(
+            first.expect("replacement token").credential_bytes(),
+            b"synthetic-installation-1"
+        );
+        assert_eq!(
+            second.expect("shared replacement").credential_bytes(),
+            b"synthetic-installation-1"
+        );
+        assert_eq!(exchanges.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            auth.token(None)
+                .await
+                .expect("cache replaced")
+                .credential_bytes(),
+            b"synthetic-installation-1"
+        );
     }
 
     #[test]

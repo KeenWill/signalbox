@@ -45,28 +45,37 @@ impl RepositoryWatchClientLoader {
     pub(crate) async fn authenticated_push_url(
         &self,
         remote: &str,
-    ) -> Result<String, RepositoryWatchClientLoadError> {
+        timeout: std::time::Duration,
+    ) -> Result<GitPushAuthentication, RepositoryWatchClientLoadError> {
+        if let Some(app) = self.credentials.github_app() {
+            return GitPushAuthentication::from_app(&app, remote, timeout).await;
+        }
         let credential = self
             .credentials
             .resolve(&self.reference)
             .await
             .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
-        let token = std::str::from_utf8(credential.expose_bytes())
+        Ok(GitPushAuthentication {
+            url: authenticated_push_url(remote, credential.expose_bytes())?,
+            token: None,
+        })
+    }
+
+    pub(crate) async fn refreshed_push_url(
+        &self,
+        remote: &str,
+        rejected: &GitPushAuthentication,
+        timeout: std::time::Duration,
+    ) -> Result<Option<String>, RepositoryWatchClientLoadError> {
+        let (Some(app), Some(token)) = (self.credentials.github_app(), rejected.token.as_ref())
+        else {
+            return Ok(None);
+        };
+        let refreshed = app
+            .refresh(token, Some(timeout))
+            .await
             .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
-        let mut url = url::Url::parse(remote)
-            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
-        if url.scheme() != "https"
-            || url.host_str() != Some("github.com")
-            || token.is_empty()
-            || token.contains(['\r', '\n', '\0'])
-        {
-            return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
-        }
-        url.set_username("x-access-token")
-            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
-        url.set_password(Some(token))
-            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
-        Ok(url.into())
+        authenticated_push_url(remote, refreshed.credential_bytes()).map(Some)
     }
 
     /// Binds a repository's configured delivery without reading credentials.
@@ -112,6 +121,48 @@ impl RepositoryWatchClientLoader {
             .map(|client| with_app_authentication(client, self.credentials.github_app()))
             .map_err(RepositoryWatchClientLoadError::from_construction)
     }
+}
+
+pub(crate) struct GitPushAuthentication {
+    pub(crate) url: String,
+    token: Option<signalbox_github_transport::AppToken>,
+}
+
+impl GitPushAuthentication {
+    async fn from_app(
+        app: &signalbox_github_transport::AppAuthentication,
+        remote: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Self, RepositoryWatchClientLoadError> {
+        let token = app
+            .token(Some(timeout))
+            .await
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+        Ok(Self {
+            url: authenticated_push_url(remote, token.credential_bytes())?,
+            token: Some(token),
+        })
+    }
+}
+
+fn authenticated_push_url(
+    remote: &str,
+    token: &[u8],
+) -> Result<String, RepositoryWatchClientLoadError> {
+    let unavailable = RepositoryWatchClientLoadError::CredentialUnavailable;
+    let token = std::str::from_utf8(token).map_err(|_| unavailable)?;
+    let mut url = url::Url::parse(remote).map_err(|_| unavailable)?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || token.is_empty()
+        || token.contains(['\r', '\n', '\0'])
+    {
+        return Err(unavailable);
+    }
+    url.set_username("x-access-token")
+        .map_err(|_| unavailable)?;
+    url.set_password(Some(token)).map_err(|_| unavailable)?;
+    Ok(url.into())
 }
 
 pub(crate) fn with_app_authentication(
@@ -275,6 +326,32 @@ mod tests {
     };
     use signalbox_model_runtime::CredentialReference;
 
+    #[tokio::test(start_paused = true)]
+    async fn push_app_lookup_expires_at_the_supplied_push_budget() {
+        // Arbitrary App identities; the pending key reader prevents any network request.
+        let app = signalbox_github_transport::AppAuthentication::new(
+            42,
+            73,
+            std::sync::Arc::new(|| Box::pin(std::future::pending())),
+        );
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(301),
+            super::GitPushAuthentication::from_app(
+                &app,
+                "https://github.com/fixture/project.git",
+                std::time::Duration::from_secs(300),
+            ),
+        )
+        .await
+        .expect("lookup must finish within the push budget");
+        assert_eq!(
+            result.err(),
+            Some(RepositoryWatchClientLoadError::CredentialUnavailable)
+        );
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(300));
+    }
+
     #[tokio::test]
     async fn push_url_carries_x_access_token_authentication() {
         use std::os::unix::fs::PermissionsExt;
@@ -285,12 +362,26 @@ mod tests {
             .expect("private test token");
         let loader = RepositoryWatchClientLoader::for_git_push(path);
         let url = loader
-            .authenticated_push_url("https://github.com/fixture/project.git")
+            .authenticated_push_url(
+                "https://github.com/fixture/project.git",
+                std::time::Duration::from_secs(300),
+            )
             .await
             .expect("authenticated URL");
         assert_eq!(
-            url,
+            url.url,
             "https://x-access-token:synthetic-installation-token@github.com/fixture/project.git"
+        );
+        assert_eq!(
+            loader
+                .refreshed_push_url(
+                    "https://github.com/fixture/project.git",
+                    &url,
+                    std::time::Duration::from_secs(300)
+                )
+                .await
+                .expect("file delivery needs no App exchange"),
+            None
         );
     }
 

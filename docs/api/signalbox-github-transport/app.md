@@ -27,6 +27,15 @@ pub type AppKeyReader = sync::Arc<
 >;
 ```
 
+## AppToken
+
+```rust
+pub struct AppToken {/* private */}
+impl AppToken {
+    pub fn credential_bytes(&self) -> &[u8];
+}
+```
+
 ## AppAuthentication
 
 ```rust
@@ -40,6 +49,15 @@ impl AppAuthentication {
         &self,
         timeout: option::Option<time::Duration>,
     ) -> result::Result<value::HeaderValue, AppCredentialFailure>;
+    pub async fn token(
+        &self,
+        timeout: option::Option<time::Duration>,
+    ) -> result::Result<AppToken, AppCredentialFailure>;
+    pub async fn refresh(
+        &self,
+        rejected: &AppToken,
+        timeout: option::Option<time::Duration>,
+    ) -> result::Result<AppToken, AppCredentialFailure>;
     pub async fn send(
         &self,
         request: request::RequestBuilder,
