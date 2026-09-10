@@ -104,6 +104,12 @@ fn directory_ancestors(
     directory: &std::fs::File,
 ) -> Result<Vec<ComposedRootIdentity>, DaemonToolsConstructionError> {
     use rustix::fs::{Mode, OFlags, openat};
+    #[cfg(target_os = "linux")]
+    let access = OFlags::PATH;
+    #[cfg(target_os = "macos")]
+    let access = OFlags::from_bits_retain(libc::O_SEARCH as u32);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let access = OFlags::RDONLY;
     let mut directory = directory
         .try_clone()
         .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
@@ -114,7 +120,7 @@ fn directory_ancestors(
             openat(
                 &directory,
                 "..",
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                access | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
             )
             .map_err(|_| DaemonToolsConstructionError::LocalGit)?,

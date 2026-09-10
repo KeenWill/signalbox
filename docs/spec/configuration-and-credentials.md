@@ -640,10 +640,11 @@ or common administration directory with the configured root or with another
 bound session is refused. Linked worktrees sharing common references and objects
 cannot bind separate session serialization domains. Administration directories
 nested under another bound workspace or its Git administration are refused by
-comparing captured ancestry with all three bound directory identities. Failure
-to compose or bind a derived root closes that tool request as a known failure
-whose sanitized detail names the closed reason, and it never falls back to
-another root.
+comparing captured ancestry with all three bound directory identities. Ancestry
+capture needs only search permission on ancestor directories. Failure to compose
+or bind a derived root closes that tool request as a known failure whose
+sanitized detail names the closed reason, and it never falls back to another
+root.
 
 The secret reaches the provider through the profile's delivery, never through a
 process environment variable of the daemon. Two families of one adapter may
