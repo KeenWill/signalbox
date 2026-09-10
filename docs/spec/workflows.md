@@ -209,7 +209,8 @@ and truncation of journal rows.
 rule/event context and propose ordered template actions without database
 handles. [Repository watch](repo-watch.md) owns revalidation and effect
 receipts; the adapter verifies a matching durable journal request and answer
-before releasing a receipt, including delivery in a successor run. The
+before releasing a pending receipt, including delivery in a successor run.
+Completed bindings remain recoverable by other runs with the same request. The
 production runner routes these effects through the current repository-watch
 runtime and its serialized checkout-aware command sink, acknowledging receipts
 after durable delivery before the next effect or any attempt outcome. Startup
