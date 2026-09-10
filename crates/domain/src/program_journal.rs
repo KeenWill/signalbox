@@ -85,6 +85,8 @@ pub enum ProgramCapability {
     EvalRecord,
     Blob,
     Register,
+    /// Checked repository-watch module operations.
+    RepoWatch,
 }
 
 /// Structured-concurrency scope operation.

@@ -170,6 +170,25 @@ readable, nonempty directory, and startup fails otherwise. Delivery links the
 selected profile's `auth.json` into a private per-operation `CODEX_HOME` with an
 empty `config.toml`.
 
+GitHub integration profiles declare `adapter = "github"` without model billing
+or pool membership. `delivery = "file"` requires `file`;
+`delivery = "github_app"` requires positive `app_id` and `installation_id`
+integers and an absolute `private_key_file`. Validation names a missing or
+invalid App field. The `code_host` and `github` mappings use `github-primary`; a
+declared profile supplies that reference, otherwise `GITHUB_TOKEN_FILE` supplies
+it. Repository-watch entries select either `credential_file` or
+`credential_profile`.
+
+The App key is read at token minting under the credential-file admission rules,
+never at boot. The daemon signs an RS256 JWT with issuance sixty seconds in the
+past and expiry ten minutes in the future, exchanges it for an installation
+access token, and caches only that token and its expiry in memory. Requests
+refresh within sixty seconds of expiry; a 401 refreshes the rejected token and
+retries the request once. Concurrent requests share a refresh and reuse a token
+already refreshed for the same rejection. REST, GraphQL, and HTTPS Git requests
+through the profile authenticate as that installation. App key, JWT, and token
+material never enter logs or durable records.
+
 A Codex home pool declares one `codex_cli` subscription profile with
 `delivery = "codex_home"` and a distinct `codex_home` directory per
 independently metered account, then lists those profile names as pool members.
@@ -618,7 +637,9 @@ converge on one root. Isolation is checked against directory identities rather
 than pathnames: a composed root sharing its worktree, worktree administration,
 or common administration directory with the configured root or with another
 bound session is refused. Linked worktrees sharing common references and objects
-cannot bind separate session serialization domains. Failure to compose or bind a
+cannot bind separate session serialization domains. Administration directories
+nested under another bound workspace are refused by comparing their captured
+directory ancestry with workspace identities. Failure to compose or bind a
 derived root closes that tool request as a known failure whose sanitized detail
 names the closed reason, and it never falls back to another root.
 
@@ -737,26 +758,30 @@ exists only for a profile whose value the daemon reads; a code-host tool instead
 resolves its fixed reference and builds its scrubber inside execution. Every
 provider-controlled text leaving such an adapter, and every checked string in a
 successful code-host result, is scrubbed of that value and its JSON-escaped form
-before it crosses into evidence. An `ambient` or `codex_home` profile gives the
-daemon no value; its output follows the
+before it crosses into evidence. CI job-log downloads also retain the scrubber
+for the App token used by the redirect response. Truncated logs and repository
+file selections scrub trailing prefixes of either response-credential spelling
+before applying the final text bound. An `ambient` or `codex_home` profile gives
+the daemon no value; its output follows the
 [runtime substrate](runtime-substrate.md).
 
 The GitHub and code-host adapters share `github-primary`, which needs API access
 to read pull requests, publish reviews and comments, reply to and resolve review
 threads, read repository files and directories, read checks and CI job logs, and
 rerun failed jobs. Neither adapter pushes Git changes. The repository-watch
-credential needs read access for polling and checkout provisioning; it does not
-need push or workflow-write authority. Classic `repo` is broader than read-only
-access, so a fine-grained read credential limits that role to the watched
-repositories. An optional absolute `push_credential_file` on
-`[[repository_watch.repositories]]` supplies a deployment-owned token with push
-authority; each push rereads it through `FileCredentialAccess` and passes
-authorization only in the child environment. Push credential files participate
-in the repository-watch credential isolation checks, including symlink and
-hard-link aliases of polling, push, and webhook credentials. The push family is
-registered from the configuration installed by durable reload recovery at
-startup; a repository-watch reload that adds or removes `push_credential_file`
-takes effect for registration at the next boot.
+credential needs read access for polling and checkout provisioning. Classic
+`repo` is broader than read-only access, so a fine-grained read credential
+limits that role to the watched repositories. An optional absolute
+`push_credential_file` on `[[repository_watch.repositories]]` supplies a
+deployment-owned token with push authority. An App-backed repository uses its
+installation token for pushes when no separate push file is configured. Git
+receives an `https://x-access-token:<token>@github.com/` URL rewrite only
+through the child environment; command arguments retain the public destination.
+Push credential files participate in the repository-watch credential isolation
+checks, including symlink and hard-link aliases of polling, push, and webhook
+credentials. The push family is registered from the configuration installed by
+durable reload recovery at startup; a repository-watch reload that adds or
+removes `push_credential_file` takes effect for registration at the next boot.
 
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
