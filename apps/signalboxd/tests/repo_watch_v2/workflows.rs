@@ -242,24 +242,25 @@ async fn fixture(
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires disposable PostgreSQL"]
-async fn workflow_evaluation_skips_a_quarantined_event() -> Result<(), Box<dyn Error>> {
+async fn workflow_evaluation_quarantines_undecodable_event_and_advances()
+-> Result<(), Box<dyn Error>> {
     let (_database, core, module, mut effects, repository, rule) = fixture(Case::Dispatch).await?;
     let poisoned = effects
         .store
         .next_rule_context(&repository, &rule)
         .await?
         .expect("first eligible context");
-    sqlx::query(
-        "UPDATE gh_event
-            SET normalized_payload = $2,
-                decode_error = $3
-          WHERE event_id = $1",
-    )
-    .bind(poisoned.event.id().into_uuid())
-    .bind(b"not json".as_slice())
-    .bind(StoreError::InvalidRetainedEvent.to_string())
-    .execute(&module)
-    .await?;
+    sqlx::query("UPDATE gh_event SET normalized_payload = $2 WHERE event_id = $1")
+        .bind(poisoned.event.id().into_uuid())
+        .bind(b"not json".as_slice())
+        .execute(&module)
+        .await?;
+    let decode_error: Option<String> =
+        sqlx::query_scalar("SELECT decode_error FROM gh_event WHERE event_id = $1")
+            .bind(poisoned.event.id().into_uuid())
+            .fetch_one(&module)
+            .await?;
+    assert!(decode_error.is_none());
     let now = OffsetDateTime::now_utc();
     effects
         .store

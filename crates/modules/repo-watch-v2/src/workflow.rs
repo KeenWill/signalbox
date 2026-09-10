@@ -123,24 +123,50 @@ impl RepoWatchStore {
         if !eligible {
             return Ok(None);
         }
-        let next: Option<(Decimal, Uuid, Vec<u8>)> = sqlx::query_as("SELECT event.repository_event_ordinal, event.event_id, event.normalized_payload FROM rule_revision revision LEFT JOIN rule_evaluation_cursor cursor ON cursor.repository = revision.repository AND cursor.rule_id = revision.rule_id AND cursor.rule_revision = revision.revision JOIN gh_event event ON event.repository = revision.repository AND event.repository_event_ordinal > GREATEST(revision.activated_after_event_ordinal, COALESCE(cursor.event_ordinal, 0)) AND event.decode_error IS NULL WHERE revision.repository = $1 AND revision.rule_id = $2 AND revision.revision = $3 ORDER BY event.repository_event_ordinal LIMIT 1")
-            .bind(repository.as_str()).bind(rule.id().as_str()).bind(Decimal::from(rule.version().get())).fetch_optional(&mut *tx).await?;
-        let Some((ordinal, id, bytes)) = next else {
-            return Ok(None);
-        };
-        let event = crate::event_decode::event(RepoWatchEventId::from_uuid(id), &bytes)
-            .ok_or(StoreError::InvalidRetainedEvent)?;
-        let observation = baseline(&mut tx, repository).await?;
-        let key =
-            crate::dispatch::singleton_key(rule.singleton_per(), &event, observation.as_ref());
-        Ok(Some(RuleContext {
-            rule: rule.clone(),
-            event,
-            ordinal: ordinal
-                .to_u64()
-                .ok_or(StoreError::InvalidEventEvaluationPosition)?,
-            singleton_key: key,
-        }))
+        loop {
+            let next: Option<(Decimal, Uuid, Vec<u8>)> = sqlx::query_as("SELECT event.repository_event_ordinal, event.event_id, event.normalized_payload FROM rule_revision revision LEFT JOIN rule_evaluation_cursor cursor ON cursor.repository = revision.repository AND cursor.rule_id = revision.rule_id AND cursor.rule_revision = revision.revision JOIN gh_event event ON event.repository = revision.repository AND event.repository_event_ordinal > GREATEST(revision.activated_after_event_ordinal, COALESCE(cursor.event_ordinal, 0)) AND event.decode_error IS NULL WHERE revision.repository = $1 AND revision.rule_id = $2 AND revision.revision = $3 ORDER BY event.repository_event_ordinal LIMIT 1")
+                .bind(repository.as_str()).bind(rule.id().as_str()).bind(Decimal::from(rule.version().get())).fetch_optional(&mut *tx).await?;
+            let Some((ordinal, id, bytes)) = next else {
+                tx.commit().await?;
+                return Ok(None);
+            };
+            let Some(event) = crate::event_decode::event(RepoWatchEventId::from_uuid(id), &bytes)
+            else {
+                let error = StoreError::InvalidRetainedEvent.to_string();
+                let marked = sqlx::query(
+                    "UPDATE gh_event SET decode_error = $2
+                     WHERE event_id = $1 AND decode_error IS NULL",
+                )
+                .bind(id)
+                .bind(&error)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                    == 1;
+                if marked {
+                    tracing::warn!(
+                        repository = repository.as_str(),
+                        event_id = %id,
+                        %error,
+                        "repository-watch event quarantined"
+                    );
+                }
+                continue;
+            };
+            let observation = baseline(&mut tx, repository).await?;
+            let key =
+                crate::dispatch::singleton_key(rule.singleton_per(), &event, observation.as_ref());
+            let context = RuleContext {
+                rule: rule.clone(),
+                event,
+                ordinal: ordinal
+                    .to_u64()
+                    .ok_or(StoreError::InvalidEventEvaluationPosition)?,
+                singleton_key: key,
+            };
+            tx.commit().await?;
+            return Ok(Some(context));
+        }
     }
 
     /// Finds committed evaluations before consulting configuration, including nonmatches.
