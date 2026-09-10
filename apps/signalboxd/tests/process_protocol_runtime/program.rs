@@ -90,7 +90,7 @@ async fn evaluation_launch_rejects_corrupt_inputs_before_pinning() -> Result<(),
         RESPONSES,
     )
     .await?;
-    let corpus = include_bytes!("../../../../crates/approval-judge-eval/corpora/seed-v1.json");
+    let corpus = br#"{"name":"synthetic-read","category":"workspace_benign","tool":"current_time","arguments":"{}","expected":"approve"}"#;
     let corpus_digest = CanonicalBlobDigest::from_digest(BlobDigest::digest(corpus));
     commit_blob_upload(
         &mut fixture.connection,
@@ -109,7 +109,7 @@ async fn evaluation_launch_rejects_corrupt_inputs_before_pinning() -> Result<(),
         registration_id,
         input: signalbox_process_protocol::EvaluationInput {
             corpus: corpus_digest,
-            format: signalbox_process_protocol::EvaluationCorpusFormat::Offline,
+            format: signalbox_process_protocol::EvaluationCorpusFormat::Live,
             cases: vec![0],
             repeats: 1,
             recorded_responses: Some(fixture.wire_digest),
