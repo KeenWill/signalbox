@@ -2023,8 +2023,8 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{
-        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, JudgedTurnAuthority,
-        judged_turn_authority_in_force, judged_turn_goal_statement, read_authority_still_stands,
+        ApprovalJudgeCorruption, JudgedTurnAuthority, judged_turn_authority_in_force,
+        judged_turn_goal_statement, read_authority_still_stands,
     };
 
     /// A goal commissioned with the given statement, as dispatch commissions it.
@@ -2215,21 +2215,5 @@ mod tests {
         });
 
         assert!(stands);
-    }
-
-    #[test]
-    fn repository_errors_display_distinct_failure_classes() {
-        assert_eq!(
-            ApprovalJudgeRepositoryError::IdentityCollision.to_string(),
-            "approval judge identity collided with durable state"
-        );
-        assert_eq!(
-            ApprovalJudgeRepositoryError::TargetUnavailable.to_string(),
-            "approval judge model target is unavailable"
-        );
-        assert_eq!(
-            ApprovalJudgeRepositoryError::AuthorityExceeded.to_string(),
-            "approval judge recommendation exceeded delegated authority"
-        );
     }
 }

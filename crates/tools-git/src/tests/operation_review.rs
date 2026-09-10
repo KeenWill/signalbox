@@ -1511,6 +1511,7 @@ fn streamed_checkout_rejects_non_regular_entries_before_touching_selected_paths(
             &tree,
             &BTreeSet::from(["removed".into(), "unsupported".into()]),
             destination.path(),
+            None,
             |_| {
                 touched = true;
                 Ok(())

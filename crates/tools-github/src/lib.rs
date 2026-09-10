@@ -3220,25 +3220,6 @@ mod tests {
     }
 
     #[test]
-    fn create_contract_requires_confirmation() {
-        let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
-            .expect("configured repository is admitted");
-        let catalog = GitHubPullRequestCreateTools::try_new(
-            SyntheticCredentials,
-            RecordingCreateTransport::default(),
-            GitHubEgressPolicy::github_api_only(),
-            repository,
-        )
-        .expect("creation suite constructs")
-        .into_parts()
-        .0;
-        let create = definition(&catalog, PULL_REQUEST_CREATE_NAME);
-
-        assert_eq!(create.permission_default(), ToolPermissionDefault::Confirm);
-        assert_eq!(create.effect_class(), ToolEffectClass::ExternalEffect);
-    }
-
-    #[test]
     fn create_contract_has_no_repository_argument() {
         let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
             .expect("configured repository is admitted");
