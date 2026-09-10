@@ -460,14 +460,14 @@ impl CredentialPoolRuntimeAction {
 
 #[derive(signalbox_derive::Accessors)]
 /// Runtime pool member in immutable policy order.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct CredentialPoolRuntimeMember {
     /// Borrows the deployment-owned profile reference.
     #[get(str)]
     credential_reference: Arc<str>,
     priority: NonZeroU32,
     headroom_reserve_percent: Option<u8>,
-    available: bool,
+    availability_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl CredentialPoolRuntimeMember {
@@ -481,7 +481,7 @@ impl CredentialPoolRuntimeMember {
             credential_reference: credential_reference.into(),
             priority,
             headroom_reserve_percent: None,
-            available: true,
+            availability_probe: None,
         }
     }
 
@@ -491,15 +491,18 @@ impl CredentialPoolRuntimeMember {
         self
     }
 
-    /// Marks whether this member may be selected for a model call.
-    pub fn with_availability(mut self, available: bool) -> Self {
-        self.available = available;
+    /// Installs a live availability probe consulted before each selection.
+    pub fn with_availability_probe(
+        mut self,
+        probe: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.availability_probe = Some(Arc::new(probe));
         self
     }
 
     /// Returns whether this member may be selected for a model call.
-    pub const fn is_available(&self) -> bool {
-        self.available
+    pub fn is_available(&self) -> bool {
+        self.availability_probe.as_ref().is_none_or(|probe| probe())
     }
 
     /// Returns the membership priority.
@@ -507,6 +510,28 @@ impl CredentialPoolRuntimeMember {
         self.priority
     }
 }
+
+impl std::fmt::Debug for CredentialPoolRuntimeMember {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CredentialPoolRuntimeMember")
+            .field("credential_reference", &self.credential_reference)
+            .field("priority", &self.priority)
+            .field("headroom_reserve_percent", &self.headroom_reserve_percent)
+            .field("has_availability_probe", &self.availability_probe.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for CredentialPoolRuntimeMember {
+    fn eq(&self, other: &Self) -> bool {
+        self.credential_reference == other.credential_reference
+            && self.priority == other.priority
+            && self.headroom_reserve_percent == other.headroom_reserve_percent
+    }
+}
+
+impl Eq for CredentialPoolRuntimeMember {}
 
 /// Selection among admissible members with equal priority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

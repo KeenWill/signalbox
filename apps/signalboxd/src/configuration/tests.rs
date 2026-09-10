@@ -3688,6 +3688,12 @@ context_window_tokens = 200000
         !runtime_policy.members()[0].is_available(),
         "the empty home is excluded before pool selection"
     );
+    std::fs::write(empty.join("auth.json"), "synthetic login material")
+        .expect("the synthetic home is provisioned");
+    assert!(
+        runtime_policy.members()[0].is_available(),
+        "the runtime member rechecks a provisioned home"
+    );
 }
 
 #[test]

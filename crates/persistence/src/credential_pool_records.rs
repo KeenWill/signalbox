@@ -11,7 +11,6 @@ pub(super) fn definition(policy: &CredentialPoolRuntimePolicy) -> serde_json::Va
         "members": policy.members().iter().map(|member| serde_json::json!({
             "profile": member.credential_reference(), "priority": member.priority().get(),
             "headroom_reserve_percent": member.headroom_reserve_percent,
-            "available": member.available,
         })).collect::<Vec<_>>(),
     })
 }
@@ -39,8 +38,6 @@ pub(super) async fn load_policy(
         profile: String,
         priority: NonZeroU32,
         headroom_reserve_percent: Option<u8>,
-        #[serde(default = "member_available")]
-        available: bool,
     }
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -71,7 +68,7 @@ pub(super) async fn load_policy(
             credential_reference: member.profile.into(),
             priority: member.priority,
             headroom_reserve_percent: member.headroom_reserve_percent,
-            available: member.available,
+            availability_probe: None,
         })
         .collect::<Vec<_>>();
     Ok(CredentialPoolRuntimePolicy::new(
@@ -88,10 +85,6 @@ pub(super) async fn load_policy(
         stored.headroom_reserve_percent,
         CredentialPoolRuntimeAction::parse(&stored.on_headroom_low)?,
     ))
-}
-
-const fn member_available() -> bool {
-    true
 }
 
 pub(super) async fn admission_policy(

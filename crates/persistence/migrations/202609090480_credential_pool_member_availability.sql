@@ -1,9 +1,27 @@
+DO $$
+DECLARE call_id uuid;
+BEGIN
+    FOR call_id IN
+        SELECT model_call_id FROM model_call_credential_pool_policy WHERE pool_policy_id IS NULL
+    LOOP
+        PERFORM retain_call_credential_pool_policy(call_id);
+    END LOOP;
+END;
+$$;
+
+ALTER TABLE model_call_credential_pool_policy
+    ALTER COLUMN pool_policy_id SET NOT NULL;
+
+ALTER TABLE credential_pool_exhaustion_member
+    ADD COLUMN operationally_unavailable boolean NOT NULL DEFAULT false,
+    ADD COLUMN operational_availability_recheck_at timestamptz,
+    ADD CHECK (operationally_unavailable = (operational_availability_recheck_at IS NOT NULL));
+
 CREATE OR REPLACE FUNCTION credential_pool_exhaustion_reconstruct(e credential_pool_exhaustion_member)
 RETURNS TABLE (evidence jsonb, action_id bigint) LANGUAGE sql STABLE AS $$
 WITH context AS (
     SELECT attempt.session_id, attempt.turn_id, lifecycle.acceptance_position,
            policy.definition->>'name' AS pool_name,
-           COALESCE((policy.definition->'members'->e.ordinal->>'available')::boolean, true) AS available,
            COALESCE(member.headroom_reserve_percent, (policy.definition->>'headroom_reserve_percent')::integer) AS reserve
       FROM turn_attempt attempt
       JOIN turn_lifecycle lifecycle ON lifecycle.turn_id = attempt.turn_id
@@ -43,9 +61,10 @@ WITH context AS (
       FROM active_projected x
       WHERE x.kind = 'profile_quarantine' AND x.origin <> 'pool_trigger'
     UNION ALL
-    SELECT 1, 0, NULL::bigint, NULL::bigint, NULL::uuid, NULL::bigint,
+    SELECT 1, 0, NULL::bigint, NULL::bigint, NULL::uuid,
+           floor(extract(epoch FROM e.operational_availability_recheck_at) * 1000)::bigint,
            jsonb_build_object('kind', 'membership_exclusion', 'record_generation', NULL)
-      FROM context WHERE NOT context.available
+      FROM context WHERE e.operationally_unavailable
     UNION ALL
     SELECT CASE a.action_kind WHEN 'quarantine' THEN 0 WHEN 'avoid_new_sessions' THEN 1 ELSE 2 END,
            1, x.record_generation, a.action_id, NULL::uuid, NULL::bigint,

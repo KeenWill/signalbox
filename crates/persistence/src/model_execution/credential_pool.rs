@@ -15,6 +15,7 @@ use sqlx::postgres::PgRow;
 use sqlx::types::Uuid;
 use sqlx::{PgConnection, Row};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Resolves the target whose credential pool governs this call.
@@ -557,7 +558,7 @@ pub(super) async fn select_runtime_pool_credential(
             false,
         ),
     };
-    let Some(policy) = policy else {
+    let Some(mut policy) = policy else {
         return Ok(SelectedRuntimePoolCredential {
             wait: None,
             reference: Some(default_reference),
@@ -565,6 +566,25 @@ pub(super) async fn select_runtime_pool_credential(
             pending_consumed_actions: Vec::new(),
         });
     };
+    if let Some(live_policy) = policies.get(&serving_evidence.effective_target) {
+        for member in Arc::make_mut(&mut policy.members) {
+            member.availability_probe = live_policy
+                .members()
+                .iter()
+                .find(|live| live.credential_reference() == member.credential_reference())
+                .and_then(|live| live.availability_probe.clone());
+        }
+    }
+    // One admission uses one operational snapshot for selection, wait evidence,
+    // and exhaustion evidence. A later admission overlays and calls the live
+    // probes again.
+    for member in Arc::make_mut(&mut policy.members) {
+        member.availability_probe = if member.is_available() {
+            None
+        } else {
+            Some(Arc::new(|| false))
+        };
+    }
     let durable = load_durable_pool_exclusions(connection, session, turn, &policy).await?;
     let observed_at = durable.observed_at;
     let profiles = policy
@@ -703,12 +723,14 @@ pub(super) async fn persist_call_pool_policy(
     policy: &CredentialPoolRuntimePolicy,
 ) -> Result<(), ModelCallRepositoryError> {
     crate::oauth_credential::lock_pool_members(connection, policy).await?;
+    let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
     sqlx::query(
         "INSERT INTO model_call_credential_pool_policy
             (model_call_id, pool_name, on_pool_exhausted,
              on_quota_exhausted, on_rate_limited, on_overloaded,
-             on_credential_rejected, tie_break, headroom_reserve_percent, on_headroom_low)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             on_credential_rejected, tie_break, headroom_reserve_percent, on_headroom_low,
+             pool_policy_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(call.into_uuid())
     .bind(policy.name())
@@ -720,6 +742,7 @@ pub(super) async fn persist_call_pool_policy(
     .bind(policy.tie_break.as_str())
     .bind(policy.headroom_reserve_percent.map(i16::from))
     .bind(policy.headroom_low.as_str())
+    .bind(policy_id)
     .execute(&mut *connection)
     .await?;
     for (ordinal, member) in policy.members().iter().enumerate() {
@@ -739,14 +762,6 @@ pub(super) async fn persist_call_pool_policy(
         .execute(&mut *connection)
         .await?;
     }
-    let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
-    sqlx::query(
-        "UPDATE model_call_credential_pool_policy SET pool_policy_id = $2 WHERE model_call_id = $1",
-    )
-    .bind(call.into_uuid())
-    .bind(policy_id)
-    .execute(connection)
-    .await?;
     Ok(())
 }
 
@@ -794,7 +809,7 @@ pub(super) async fn load_call_pool_policy(
     connection: &mut PgConnection,
     call: Uuid,
 ) -> Result<Option<CredentialPoolRuntimePolicy>, ModelCallRepositoryError> {
-    let policy_id: Option<Option<Uuid>> = sqlx::query_scalar(
+    let policy_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT pool_policy_id
            FROM model_call_credential_pool_policy
           WHERE model_call_id = $1",
@@ -804,12 +819,9 @@ pub(super) async fn load_call_pool_policy(
     .await?;
     match policy_id {
         None => Ok(None),
-        Some(Some(policy_id)) => credential_pool_records::load_policy(connection, policy_id)
+        Some(policy_id) => credential_pool_records::load_policy(connection, policy_id)
             .await
             .map(Some),
-        Some(None) => {
-            Err(ModelCallCorruption::Missing("model call credential pool policy id").into())
-        }
     }
 }
 

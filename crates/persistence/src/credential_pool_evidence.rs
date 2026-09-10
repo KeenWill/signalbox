@@ -6,6 +6,8 @@ use crate::credential_pool_exhaustion::{
 use signalbox_domain::TurnAttemptId;
 use sqlx::types::time::OffsetDateTime;
 
+const LIVE_AVAILABILITY_RECHECK_MILLIS: i64 = 1_000;
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Candidate {
@@ -38,13 +40,18 @@ pub(super) async fn snapshot(
         let profile = member.credential_reference();
         let mut candidates = Vec::new();
         if !member.is_available() {
+            let reset = unix_ms(observed_at)?
+                .checked_add(LIVE_AVAILABILITY_RECHECK_MILLIS)
+                .ok_or(ModelCallCorruption::Inconsistent(
+                    "credential availability recheck deadline",
+                ))?;
             candidates.push(Candidate {
                 exclusion: Exclusion::MembershipExclusion {
                     record_generation: None,
                 },
                 rank: 1,
                 action: None,
-                reset: None,
+                reset: Some(reset),
             });
         }
         for row in &quarantines {
@@ -157,6 +164,17 @@ pub(super) async fn record(
     let members = snapshot(connection, session, turn, policy, observed_at, headroom).await?;
     for (ordinal, (member, candidates)) in policy.members().iter().zip(members).enumerate() {
         let profile = member.credential_reference();
+        let availability_recheck = candidates.iter().find_map(|candidate| {
+            (candidate.action.is_none()
+                && matches!(
+                    &candidate.exclusion,
+                    Exclusion::MembershipExclusion {
+                        record_generation: None
+                    }
+                ))
+            .then_some(candidate.reset)
+            .flatten()
+        });
         let reset = if candidates.iter().all(|candidate| candidate.reset.is_some()) {
             candidates
                 .iter()
@@ -177,8 +195,8 @@ pub(super) async fn record(
             exclusion: selected.exclusion,
         })
         .map_err(|_| ModelCallCorruption::Inconsistent("pool evidence encoding"))?;
-        sqlx::query("INSERT INTO credential_pool_exhaustion_member (terminal_attempt_id, pool_policy_id, ordinal, profile, evidence, observed_at, generation_ceiling, action_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
-            .bind(attempt.into_uuid()).bind(policy_id).bind(i32::try_from(ordinal).map_err(|_| ModelCallCorruption::Inconsistent("pool member ordinal"))?).bind(profile).bind(evidence).bind(observed_at).bind(ceiling).bind(selected.action).execute(&mut *connection).await?;
+        sqlx::query("INSERT INTO credential_pool_exhaustion_member (terminal_attempt_id, pool_policy_id, ordinal, profile, evidence, observed_at, generation_ceiling, action_id, operationally_unavailable, operational_availability_recheck_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
+            .bind(attempt.into_uuid()).bind(policy_id).bind(i32::try_from(ordinal).map_err(|_| ModelCallCorruption::Inconsistent("pool member ordinal"))?).bind(profile).bind(evidence).bind(observed_at).bind(ceiling).bind(selected.action).bind(availability_recheck.is_some()).bind(availability_recheck.map(|reset| OffsetDateTime::from_unix_timestamp_nanos(i128::from(reset) * 1_000_000)).transpose().map_err(|_| ModelCallCorruption::Inconsistent("credential availability recheck deadline"))?).execute(&mut *connection).await?;
     }
     Ok(())
 }

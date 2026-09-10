@@ -835,10 +835,6 @@ impl HubModelConfiguration {
 
     /// Projects admitted pool policy into the persistence-owned runtime form.
     pub fn credential_pool_runtime_catalog(&self) -> CredentialPoolRuntimeCatalog {
-        let unavailable = self
-            .empty_codex_home_profiles()
-            .into_iter()
-            .collect::<HashSet<_>>();
         self.target_credential_pools
             .iter()
             .filter_map(|(target, pool_name)| {
@@ -848,9 +844,18 @@ impl HubModelConfiguration {
                 let members = members
                     .into_iter()
                     .map(|member| {
-                        CredentialPoolRuntimeMember::new(member.profile(), member.priority())
-                            .with_headroom_reserve(member.headroom_reserve_percent())
-                            .with_availability(!unavailable.contains(member.profile()))
+                        let runtime =
+                            CredentialPoolRuntimeMember::new(member.profile(), member.priority())
+                                .with_headroom_reserve(member.headroom_reserve_percent());
+                        let Some(CredentialDelivery::CodexHome { path, .. }) = self
+                            .credential_profiles
+                            .get(member.profile())
+                            .map(CredentialProfile::delivery)
+                        else {
+                            return runtime;
+                        };
+                        let path = path.clone();
+                        runtime.with_availability_probe(move || codex_home_is_available(&path))
                     })
                     .collect::<Vec<_>>();
                 Some((
@@ -1036,8 +1041,7 @@ impl HubModelConfiguration {
                 let CredentialDelivery::CodexHome { path, .. } = profile.delivery() else {
                     return None;
                 };
-                let empty =
-                    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none());
+                let empty = !codex_home_is_available(path);
                 empty.then(|| profile.name().to_owned())
             })
             .collect()
@@ -1282,6 +1286,13 @@ impl HubModelConfiguration {
             .iter()
             .map(|(alias, definition)| (*alias, definition.selected()))
     }
+}
+
+fn codex_home_is_available(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .is_some()
 }
 
 #[cfg(test)]

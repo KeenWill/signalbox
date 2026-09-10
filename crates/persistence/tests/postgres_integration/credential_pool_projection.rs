@@ -53,7 +53,7 @@ async fn unavailable_pool_members_are_skipped_before_preparation_and_can_exhaust
         "home-selection-pool",
         vec![
             CredentialPoolRuntimeMember::new("empty-home", nonzero_priority(1))
-                .with_availability(false),
+                .with_availability_probe(|| false),
             CredentialPoolRuntimeMember::new("provisioned-home", nonzero_priority(2)),
         ],
         CredentialPoolRuntimeExhaustion::Fail,
@@ -90,9 +90,9 @@ async fn unavailable_pool_members_are_skipped_before_preparation_and_can_exhaust
         "empty-home-pool",
         vec![
             CredentialPoolRuntimeMember::new("empty-home-a", nonzero_priority(1))
-                .with_availability(false),
+                .with_availability_probe(|| false),
             CredentialPoolRuntimeMember::new("empty-home-b", nonzero_priority(2))
-                .with_availability(false),
+                .with_availability_probe(|| false),
         ],
         CredentialPoolRuntimeExhaustion::Fail,
         CredentialPoolRuntimeAction::Stay,
@@ -139,11 +139,13 @@ async fn unavailable_pool_members_are_skipped_before_preparation_and_can_exhaust
     let parked_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
         Uuid::from_u128(parked_seed + 4),
     ));
+    let parked_home_available = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let parked_home_probe = Arc::clone(&parked_home_available);
     let parked_policy = CredentialPoolRuntimePolicy::new(
         "parked-empty-home-pool",
         vec![
             CredentialPoolRuntimeMember::new("parked-empty-home", nonzero_priority(1))
-                .with_availability(false),
+                .with_availability_probe(move || parked_home_probe.load(Ordering::SeqCst)),
         ],
         CredentialPoolRuntimeExhaustion::Park,
         CredentialPoolRuntimeAction::Stay,
@@ -168,8 +170,96 @@ async fn unavailable_pool_members_are_skipped_before_preparation_and_can_exhaust
         wait.cause(),
         signalbox_domain::CredentialAvailabilityWaitCause::Exhausted
     );
+    let deadline_present: bool = sqlx::query_scalar(
+        "SELECT deadline IS NOT NULL FROM credential_availability_wait WHERE wait_attempt_id = $1",
+    )
+    .bind(wait.attempt().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        deadline_present,
+        "the live availability probe arranges a retry"
+    );
+    parked_home_available.store(true, Ordering::SeqCst);
+    sqlx::query(
+        "UPDATE credential_availability_wait SET eligible = true WHERE wait_attempt_id = $1",
+    )
+    .bind(wait.attempt().into_uuid())
+    .execute(&pool)
+    .await?;
+    let PrepareInitialModelCallOutcome::Checkpointed(released) =
+        super::credential_wait::prepare_wait_admission(
+            &parked_repository,
+            parked_session,
+            parked_seed + 110,
+        )
+        .await?
+    else {
+        panic!("a provisioned home must release the availability wait")
+    };
+    let released_reference: String =
+        sqlx::query_scalar("SELECT credential_reference FROM model_call WHERE model_call_id = $1")
+            .bind(released.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(released_reference, "parked-empty-home");
 
     drop(connection);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn member_availability_migration_backfills_existing_call_policy_id()
+-> Result<(), Box<dyn Error>> {
+    const SEED: u128 = 0x4604_3000;
+    const MIGRATION: i64 = 202609090480;
+    let (container, pool, _) = unmigrated_postgres().await?;
+    let previous = sqlx::migrate::Migrator::with_migrations(
+        signalbox_persistence::MIGRATOR
+            .iter()
+            .filter(|migration| migration.version != MIGRATION)
+            .cloned()
+            .collect(),
+    );
+    previous.run(&pool).await?;
+    let (session, _, repository) = active_credential_pool_fixture(
+        &pool,
+        SEED,
+        "backfilled-policy-pool",
+        &["backfilled-member"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .await?;
+    let (call, _) = prepare_and_authorize_pool_call(&repository, session, SEED + 100).await?;
+    let call_id = call.observation_correlation().call().into_uuid();
+    sqlx::query(
+        "UPDATE model_call_credential_pool_policy SET pool_policy_id = NULL WHERE model_call_id = $1",
+    )
+    .bind(call_id)
+    .execute(&pool)
+    .await?;
+    migrate(&pool).await?;
+    let retained: Option<Uuid> = sqlx::query_scalar(
+        "SELECT pool_policy_id FROM model_call_credential_pool_policy WHERE model_call_id = $1",
+    )
+    .bind(call_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        retained.is_some(),
+        "the earlier call receives a policy identity"
+    );
+    let nullable: String = sqlx::query_scalar(
+        "SELECT is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'model_call_credential_pool_policy' AND column_name = 'pool_policy_id'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(nullable, "NO");
+
     pool.close().await;
     drop(container);
     Ok(())

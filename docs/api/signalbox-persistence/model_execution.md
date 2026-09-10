@@ -192,7 +192,7 @@ pub enum CredentialPoolRuntimeExhaustion {
 
 ```rust
 pub struct CredentialPoolRuntimeMember {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone
 impl model_execution::CredentialPoolRuntimeMember {
     pub fn credential_reference(&self) -> &str;
 }
@@ -202,10 +202,20 @@ impl model_execution::CredentialPoolRuntimeMember {
         priority: nonzero::NonZeroU32,
     ) -> Self;
     pub fn with_headroom_reserve(self, percent: option::Option<u8>) -> Self;
-    pub fn with_availability(self, available: bool) -> Self;
-    pub const fn is_available(&self) -> bool;
+    pub fn with_availability_probe(
+        self,
+        probe: impl function::Fn() -> bool + marker::Send + marker::Sync + 'static,
+    ) -> Self;
+    pub fn is_available(&self) -> bool;
     pub const fn priority(&self) -> nonzero::NonZeroU32;
 }
+impl fmt::Debug for model_execution::CredentialPoolRuntimeMember {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl cmp::PartialEq for model_execution::CredentialPoolRuntimeMember {
+    fn eq(&self, other: &Self) -> bool;
+}
+impl cmp::Eq for model_execution::CredentialPoolRuntimeMember {}
 ```
 
 ## CredentialPoolRuntimeTieBreak
