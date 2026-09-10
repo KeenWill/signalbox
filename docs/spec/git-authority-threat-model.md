@@ -111,9 +111,9 @@ markers, and status identifies renames by exact object identity. Worktree
 streams pin one descriptor and revalidate its identity around each page; object
 publication streams each batch into one pack and index pair. Checkout retains
 the clean path identity and revalidates the opened file and path before
-truncating or removing it; removal quarantines and revalidates the inode, and
-new files are created exclusively. Merge verification retains bounded previews
-and uses file-backed comparison scratch data with linear-space
+truncating or removing it; removal quarantines and revalidates the full file
+snapshot, and new files are created exclusively. Merge verification retains
+bounded previews and uses file-backed comparison scratch data with linear-space
 divide-and-conquer line matching; disjoint replacements use a linear scan.
 Private-pack writes and merge comparison check preparation deadlines between
 fixed-size pages; rename similarity streams fixed-size signatures. Unsupported
