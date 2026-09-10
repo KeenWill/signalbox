@@ -399,8 +399,11 @@ non-acceptance proof. Failed status and error are classified before ancillary
 response fields. Claude Code CLI events stay bound to the initialized exchange:
 the first assistant event may name the provider-resolved model and every later
 assistant event must repeat that value, and a result carrying a different
-session id, or an assistant event carrying a different first message id, is a
-protocol violation.
+session id is a protocol violation. Assistant content retains its first message
+id. After every proposed tool has its bridge acknowledgement, one text-only
+message with a distinct id may acknowledge the batch; its text is discarded and
+its successful `end_turn` completes the original batch as `ToolUse`. A different
+message id outside that acknowledgement is a protocol violation.
 
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
