@@ -108,6 +108,7 @@ pub struct ConfiguredModelRuntime<A, O> {
     codex_cli: Option<Arc<CodexCliRuntime>>,
     routes: HashMap<String, ModelAdapter>,
     capabilities: ModelCapabilityCatalog,
+    media: Option<crate::media_preparation::MediaPreparation>,
 }
 
 impl<A, O> Clone for ConfiguredModelRuntime<A, O> {
@@ -119,11 +120,24 @@ impl<A, O> Clone for ConfiguredModelRuntime<A, O> {
             codex_cli: self.codex_cli.clone(),
             routes: self.routes.clone(),
             capabilities: self.capabilities.clone(),
+            media: self.media.clone(),
         }
     }
 }
 
 impl<A, O> ConfiguredModelRuntime<A, O> {
+    /// Authenticates durable image results and materializes only admitted bounded views.
+    pub fn with_media_preparation(
+        mut self,
+        pool: sqlx::PgPool,
+        stores: Option<Arc<crate::BlobStoreRegistry>>,
+    ) -> Self {
+        self.media = Some(crate::media_preparation::MediaPreparation::new(
+            pool, stores,
+        ));
+        self
+    }
+
     /// Shares daemon-owned OAuth refresh and scratch delivery across Codex preparations.
     pub fn with_oauth_delivery(
         mut self,
@@ -161,6 +175,7 @@ impl<A, O> ConfiguredModelRuntime<A, O> {
                 .map(Arc::new),
             routes: configuration.adapter_routes(),
             capabilities: configuration.runtime_model_capability_catalog(),
+            media: None,
         })
     }
 }
@@ -328,6 +343,64 @@ where
     ) -> PreparationOutcome<C, Self::Prepared> {
         let adapter = self.routes.get(operation.resolved_target.as_str()).copied();
         project_provider_history(&mut operation, &self.routes, &self.capabilities);
+        let mut cancellation = cancellation;
+        let target = self
+            .capabilities
+            .resolve(&operation.resolved_target)
+            .and_then(|capability| {
+                capability
+                    .effective_target(
+                        &operation.resolved_target,
+                        operation.settings.fast_mode,
+                        operation.retained_mapped_target.as_ref(),
+                    )
+                    .ok()
+            })
+            .and_then(|(target, _)| self.capabilities.resolve(target))
+            .and_then(|capability| capability.image_presentation())
+            .cloned();
+        operation.image_presentation = target.clone();
+        if let Some(media) = &self.media {
+            match cancellation
+                .run_until_cancelled(media.prepare(&mut operation, target.as_ref()))
+                .await
+            {
+                None => {
+                    return PreparationOutcome::Cancelled {
+                        correlation: operation.correlation,
+                    };
+                }
+                Some(Ok(())) => {}
+                Some(Err(error)) => {
+                    use crate::media_preparation::MediaPreparationFailure;
+                    use signalbox_model_runtime::PreparationFailure;
+                    let failure = match error {
+                        MediaPreparationFailure::Unsupported => {
+                            PreparationFailure::UnsupportedOperation {
+                                detail: String::from(
+                                    "image presentation exceeds target bounds or is unsupported",
+                                ),
+                            }
+                        }
+                        MediaPreparationFailure::Unavailable => {
+                            PreparationFailure::ImageUnavailable
+                        }
+                        MediaPreparationFailure::Missing => PreparationFailure::ImageMissing,
+                        MediaPreparationFailure::BlobCorrupt => PreparationFailure::ImageCorrupt,
+                        MediaPreparationFailure::Corrupt => {
+                            return PreparationOutcome::Defect {
+                                correlation: operation.correlation,
+                                defect: PreparationDefect::ImageIntegrity,
+                            };
+                        }
+                    };
+                    return PreparationOutcome::Failed {
+                        correlation: operation.correlation,
+                        failure,
+                    };
+                }
+            }
+        }
         match adapter {
             Some(ModelAdapter::Anthropic) => {
                 let runtime = match self.anthropic.as_ref() {
@@ -980,6 +1053,7 @@ service_tiers = ["priority"]
     async fn provider_input_estimate_routes_only_anthropic_targets() {
         let invocations = Arc::new(AtomicUsize::new(0));
         let runtime = ConfiguredModelRuntime {
+            media: None,
             anthropic: Some(Arc::new(RecordingInputCounter {
                 invocations: Arc::clone(&invocations),
             })),

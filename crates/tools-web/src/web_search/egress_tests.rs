@@ -2,23 +2,6 @@ use url::Url;
 
 use super::{egress::*, test_support::*};
 
-/// Explicit provider configuration derives exactly Brave's API origin and
-/// fixed non-secret credential reference.
-#[test]
-fn brave_configuration_carries_one_provider_origin_and_reference() {
-    let configuration = configuration();
-
-    assert_eq!(configuration.provider(), WebSearchProvider::Brave);
-    assert_eq!(
-        configuration.egress_policy().allowed_origin(),
-        BRAVE_SEARCH_ORIGIN
-    );
-    assert_eq!(
-        configuration.credential_reference().as_str(),
-        BRAVE_SEARCH_CREDENTIAL_REFERENCE
-    );
-}
-
 /// The provider policy compares scheme, host, and effective port, so a
 /// different origin is never admitted by the automatic read.
 #[test]

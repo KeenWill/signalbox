@@ -1222,3 +1222,72 @@ fn rendered_attachment_selectors_distinguish_entries_and_part_ordinals() {
         None
     );
 }
+
+#[test]
+fn image_reference_survives_context_text_truncation_from_durable_tool_evidence() {
+    use signalbox_domain::{
+        BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
+    };
+    let request = model_tool_request(0);
+    let source = SemanticTranscriptEntryRef::from_source(
+        request.session(),
+        identity(130, SemanticTranscriptEntryId::from_uuid),
+    );
+    let attempt_id = identity(131, signalbox_domain::ToolAttemptId::from_uuid);
+    let identity = MediaValidationIdentity::try_new(
+        BlobDigest::from_bytes([1; 32]),
+        "image/png".into(),
+        "fixture".into(),
+        "png".into(),
+        "v1".into(),
+        MediaValidationEvidence::StrongSignature,
+    )
+    .unwrap();
+    let reference =
+        ToolMediaReference::direct_image(identity, std::num::NonZeroU64::new(64).unwrap()).unwrap();
+    let signalbox_domain::ReconstitutedToolAttempt::Ended(attempt) =
+        ToolAttemptReconstitutionInput::new(
+            attempt_id,
+            request.id(),
+            request.session(),
+            request.turn(),
+            TurnAttemptId::from_uuid(uuid::Uuid::from_u128(132)),
+            ToolEffectClass::ExternalEffect,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Completed {
+                result: ToolResultContent::Media {
+                    text: ToolResultText::try_new("full image summary".into()).unwrap(),
+                    reference: reference.clone(),
+                },
+            }),
+        )
+        .reconstitute()
+        .unwrap()
+    else {
+        panic!("terminal image fixture")
+    };
+    let context = ToolResultText::try_new("bounded".into()).unwrap();
+    let evidence = ResolvedToolConversationEntry::ExecutionResult {
+        source,
+        request: request.clone(),
+        context_text: Some(context.clone()),
+        context_error_detail: None,
+        attempt,
+    };
+    let payload = SemanticTranscriptEntryPayload::ToolExecutionResult {
+        attempt: attempt_id,
+    };
+    let rendered =
+        render_frontier_messages([(source, &payload)], |_| None, |_| None, [&evidence]).unwrap();
+    assert_eq!(
+        rendered.as_ref(),
+        &[ModelConversationMessage::ToolResult {
+            source,
+            request: request.id(),
+            content: ModelToolResultContent::Success(ToolResultContent::Media {
+                text: context,
+                reference
+            })
+        }]
+    );
+}

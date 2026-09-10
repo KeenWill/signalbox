@@ -5,6 +5,7 @@
 //! work remains outside database transactions.
 
 mod file_visibility;
+mod media_reference;
 mod placement_loss;
 pub use file_visibility::VisibleToolAttachment;
 mod result_budget;
@@ -56,15 +57,17 @@ use crate::{
     mapping::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         BlobReadRejectionStorageKind, ToolApprovalDecisionSourceStorageKind,
-        ToolAttemptDispositionStorageKind, approval_judge_state_to_str,
-        approval_judge_terminal_disposition_to_str, blob_read_rejection_from_str,
-        blob_read_rejection_to_str, dangerous_tool_auto_approval_from_str,
-        durable_command_id_from_uuid, durable_command_id_to_uuid, positive_u64_from_numeric,
-        session_id_from_uuid, session_id_to_uuid, tool_approval_decision_source_from_str,
+        ToolAttemptDispositionStorageKind, ToolResultContentStorageKind,
+        approval_judge_state_to_str, approval_judge_terminal_disposition_to_str,
+        blob_read_rejection_from_str, blob_read_rejection_to_str,
+        dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
+        durable_command_id_to_uuid, positive_u64_from_numeric, session_id_from_uuid,
+        session_id_to_uuid, tool_approval_decision_source_from_str,
         tool_approval_decision_source_to_str, tool_approval_posture_from_str,
         tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
         tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
-        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        tool_request_id_to_uuid, tool_result_content_from_str, tool_result_content_to_str,
+        turn_id_from_uuid, turn_id_to_uuid,
     },
     model_execution::{
         insert_snapshot, lock_delegated_child_endpoint_sessions,
@@ -3273,16 +3276,27 @@ fn decode_attempt_end(row: &PgRow) -> Result<ToolAttemptEnd, ToolLoopRepositoryE
     let stored_disposition = required::<String>(row, "terminal_disposition_kind")?;
     match tool_attempt_disposition_from_str(&stored_disposition) {
         Some(ToolAttemptDispositionStorageKind::Completed) => {
-            match required::<String>(row, "result_content_kind")?.as_str() {
-                "text" => Ok(ToolAttemptEnd::Completed {
+            let kind = required::<String>(row, "result_content_kind")?;
+            match tool_result_content_from_str(&kind) {
+                Some(ToolResultContentStorageKind::Text) => Ok(ToolAttemptEnd::Completed {
                     result: ToolResultContent::Text(
                         ToolResultText::try_new(required(row, "result_text")?)
                             .map_err(|_| ToolLoopCorruption::Inconsistent("tool result text"))?,
                     ),
                 }),
-                value => Err(ToolLoopCorruption::Unsupported {
+                Some(ToolResultContentStorageKind::Media) => Ok(ToolAttemptEnd::Completed {
+                    result: ToolResultContent::Media {
+                        text: ToolResultText::try_new(required(row, "result_text")?)
+                            .map_err(|_| ToolLoopCorruption::Inconsistent("tool result text"))?,
+                        reference: media_reference::decode(required(
+                            row,
+                            "result_media_reference",
+                        )?)?,
+                    },
+                }),
+                None => Err(ToolLoopCorruption::Unsupported {
                     field: "result_content_kind",
-                    value: value.to_owned(),
+                    value: kind,
                 }
                 .into()),
             }
@@ -3427,6 +3441,12 @@ pub(crate) async fn persist_ended_attempt(
         wait_spawning_request,
         wait_child,
     ) = encode_attempt_end(attempt.end());
+    let media_reference = match attempt.end() {
+        ToolAttemptEnd::Completed {
+            result: ToolResultContent::Media { reference, .. },
+        } => Some(media_reference::encode(reference)?),
+        _ => None,
+    };
     let (limit, error_framing): (Option<i64>, i32) = sqlx::query_as(
         "SELECT context_result_byte_limit,
                 octet_length(jsonb_build_object('error', jsonb_build_object(
@@ -3460,6 +3480,7 @@ pub(crate) async fn persist_ended_attempt(
                 result_text = $3,
                 context_result_text = $14,
                 context_error_detail = $15,
+                result_media_reference = $16,
                 error_kind = $4,
                 error_detail = $5,
                 wait_spawning_request_id = $6,
@@ -3488,6 +3509,7 @@ pub(crate) async fn persist_ended_attempt(
     .bind(Decimal::from(attempt.generation().as_u64()))
     .bind(context_result_text)
     .bind(context_error_detail)
+    .bind(media_reference)
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -3530,10 +3552,25 @@ type EncodedToolAttemptEnd<'a> = (
 fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
     match end {
         ToolAttemptEnd::Completed {
+            result: ToolResultContent::Media { text, .. },
+        } => (
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Completed),
+            Some(tool_result_content_to_str(
+                ToolResultContentStorageKind::Media,
+            )),
+            Some(text.as_str()),
+            None,
+            None,
+            None,
+            None,
+        ),
+        ToolAttemptEnd::Completed {
             result: ToolResultContent::Text(text),
         } => (
             tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Completed),
-            Some("text"),
+            Some(tool_result_content_to_str(
+                ToolResultContentStorageKind::Text,
+            )),
             Some(text.as_str()),
             None,
             None,
