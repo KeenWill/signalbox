@@ -991,25 +991,15 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         capture_bytes: usize,
     ) -> ExecResult {
         let Some(deadline) = tokio::time::Instant::now().checked_add(requested_timeout) else {
-            return ExecResult {
-                confinement: ExecutionConfinement::SandboxSetupFailed,
-                outcome: ProcessOutcome::SpawnFailed {
-                    reason: ProcessSpawnFailure::Other,
-                },
-                stdout: OutputCapture::empty(),
-                stderr: OutputCapture::empty(),
-            };
+            return empty_sandbox_setup_failure(ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::Other,
+            });
         };
         #[cfg(target_os = "linux")]
         if !self.workspace_identity.matches(&self.workspace_root) {
-            return ExecResult {
-                confinement: ExecutionConfinement::SandboxSetupFailed,
-                outcome: ProcessOutcome::SpawnFailed {
-                    reason: ProcessSpawnFailure::SandboxSetup,
-                },
-                stdout: OutputCapture::empty(),
-                stderr: OutputCapture::empty(),
-            };
+            return empty_sandbox_setup_failure(ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxSetup,
+            });
         }
         #[cfg(target_os = "linux")]
         if self
@@ -1017,14 +1007,9 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             .as_ref()
             .is_some_and(|identity| !identity.matches())
         {
-            return ExecResult {
-                confinement: ExecutionConfinement::SandboxSetupFailed,
-                outcome: ProcessOutcome::SpawnFailed {
-                    reason: ProcessSpawnFailure::SandboxSetup,
-                },
-                stdout: OutputCapture::empty(),
-                stderr: OutputCapture::empty(),
-            };
+            return empty_sandbox_setup_failure(ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxSetup,
+            });
         }
         let probe_program = sandbox_shell(&self.workspace_root)
             .to_string_lossy()
@@ -1033,12 +1018,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             .saturating_duration_since(tokio::time::Instant::now())
             .min(Duration::from_secs(5));
         if probe_timeout.is_zero() {
-            return ExecResult {
-                confinement: ExecutionConfinement::SandboxSetupFailed,
-                outcome: ProcessOutcome::TimedOut,
-                stdout: OutputCapture::empty(),
-                stderr: OutputCapture::empty(),
-            };
+            return empty_sandbox_setup_failure(ProcessOutcome::TimedOut);
         }
         let probe = bwrap_request(
             SandboxLaunchContext {
@@ -1078,18 +1058,14 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             8 * 1024,
         );
         let availability = self.runner.bwrap_availability(probe).await;
+        let network = self.configuration.network;
         match availability {
             BwrapAvailability::Available => {
                 #[cfg(target_os = "linux")]
                 if !self.workspace_identity.matches(&self.workspace_root) {
-                    return ExecResult {
-                        confinement: ExecutionConfinement::SandboxSetupFailed,
-                        outcome: ProcessOutcome::SpawnFailed {
-                            reason: ProcessSpawnFailure::SandboxSetup,
-                        },
-                        stdout: OutputCapture::empty(),
-                        stderr: OutputCapture::empty(),
-                    };
+                    return empty_sandbox_setup_failure(ProcessOutcome::SpawnFailed {
+                        reason: ProcessSpawnFailure::SandboxSetup,
+                    });
                 }
                 #[cfg(target_os = "linux")]
                 if self
@@ -1097,14 +1073,9 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                     .as_ref()
                     .is_some_and(|identity| !identity.matches())
                 {
-                    return ExecResult {
-                        confinement: ExecutionConfinement::SandboxSetupFailed,
-                        outcome: ProcessOutcome::SpawnFailed {
-                            reason: ProcessSpawnFailure::SandboxSetup,
-                        },
-                        stdout: OutputCapture::empty(),
-                        stderr: OutputCapture::empty(),
-                    };
+                    return empty_sandbox_setup_failure(ProcessOutcome::SpawnFailed {
+                        reason: ProcessSpawnFailure::SandboxSetup,
+                    });
                 }
                 #[cfg(target_os = "linux")]
                 let working_directory_identity = if arguments.working_directory == "." {
@@ -1117,12 +1088,9 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                     {
                         Ok(directory) => Some(directory),
                         Err(reason) => {
-                            return ExecResult {
-                                confinement: ExecutionConfinement::SandboxSetupFailed,
-                                outcome: ProcessOutcome::SpawnFailed { reason },
-                                stdout: OutputCapture::empty(),
-                                stderr: OutputCapture::empty(),
-                            };
+                            return empty_sandbox_setup_failure(ProcessOutcome::SpawnFailed {
+                                reason,
+                            });
                         }
                     }
                 };
@@ -1139,12 +1107,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                     });
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
-                    return ExecResult {
-                        confinement: ExecutionConfinement::SandboxSetupFailed,
-                        outcome: ProcessOutcome::TimedOut,
-                        stdout: OutputCapture::empty(),
-                        stderr: OutputCapture::empty(),
-                    };
+                    return empty_sandbox_setup_failure(ProcessOutcome::TimedOut);
                 }
                 let request = bwrap_request(
                     SandboxLaunchContext {
@@ -1185,22 +1148,18 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                     remaining,
                     capture_bytes,
                 );
-                sandbox_process_result(self.runner.run(request).await, capture_bytes)
+                sandbox_process_result(self.runner.run(request).await, capture_bytes, network)
             }
             BwrapAvailability::Missing | BwrapAvailability::Unusable => ExecResult {
                 confinement: ExecutionConfinement::SandboxRefused { availability },
                 outcome: ProcessOutcome::SpawnFailed {
                     reason: ProcessSpawnFailure::SandboxUnavailable,
                 },
+                diagnostic: None,
                 stdout: OutputCapture::empty(),
                 stderr: OutputCapture::empty(),
             },
-            BwrapAvailability::TimedOut => ExecResult {
-                confinement: ExecutionConfinement::SandboxSetupFailed,
-                outcome: ProcessOutcome::TimedOut,
-                stdout: OutputCapture::empty(),
-                stderr: OutputCapture::empty(),
-            },
+            BwrapAvailability::TimedOut => empty_sandbox_setup_failure(ProcessOutcome::TimedOut),
         }
     }
 }
@@ -1545,6 +1504,7 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
                 return ExecResult {
                     confinement: ExecutionConfinement::Unsandboxed,
                     outcome: ProcessOutcome::SpawnFailed { reason },
+                    diagnostic: None,
                     stdout: OutputCapture::empty(),
                     stderr: OutputCapture::empty(),
                 };
@@ -2331,10 +2291,21 @@ pub struct ExecResult {
     pub confinement: ExecutionConfinement,
     /// Terminal process evidence.
     pub outcome: ProcessOutcome,
+    /// Optional categorical context for interpreting the terminal outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<ExecutionDiagnostic>,
     /// Bounded standard output capture.
     pub stdout: OutputCapture,
     /// Bounded standard error capture.
     pub stderr: OutputCapture,
+}
+
+/// Sanitized context that makes an execution outcome actionable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionDiagnostic {
+    /// The command timed out while the sandbox's isolated network was active.
+    NetworkFenceActive,
 }
 
 /// Filesystem authority actually used for one execution attempt.
@@ -2474,12 +2445,17 @@ fn process_result(confinement: ExecutionConfinement, result: ProcessRunResult) -
     ExecResult {
         confinement,
         outcome: result.outcome,
+        diagnostic: None,
         stdout: output_capture(result.stdout),
         stderr: output_capture(result.stderr),
     }
 }
 
-fn sandbox_process_result(mut result: ProcessRunResult, capture_bytes: usize) -> ExecResult {
+fn sandbox_process_result(
+    mut result: ProcessRunResult,
+    capture_bytes: usize,
+    network: SandboxNetwork,
+) -> ExecResult {
     let dispatched = result.stderr.bytes.starts_with(SANDBOX_DISPATCH_MARKER);
     if result.stderr.bytes.starts_with(SANDBOX_DISPATCH_MARKER) {
         result.stderr.bytes.drain(..SANDBOX_DISPATCH_MARKER.len());
@@ -2487,7 +2463,12 @@ fn sandbox_process_result(mut result: ProcessRunResult, capture_bytes: usize) ->
     truncate_process_output(&mut result.stdout, capture_bytes);
     truncate_process_output(&mut result.stderr, capture_bytes);
     if dispatched {
-        return process_result(ExecutionConfinement::FilesystemConfined, result);
+        let diagnostic = (network == SandboxNetwork::None
+            && matches!(result.outcome, ProcessOutcome::TimedOut))
+        .then_some(ExecutionDiagnostic::NetworkFenceActive);
+        let mut result = process_result(ExecutionConfinement::FilesystemConfined, result);
+        result.diagnostic = diagnostic;
+        return result;
     }
     let outcome = match result.outcome {
         ProcessOutcome::TimedOut => ProcessOutcome::TimedOut,
@@ -2497,11 +2478,38 @@ fn sandbox_process_result(mut result: ProcessRunResult, capture_bytes: usize) ->
             reason: ProcessSpawnFailure::SandboxSetup,
         },
     };
+    sandbox_setup_failure(
+        outcome,
+        output_capture(result.stdout),
+        output_capture(result.stderr),
+    )
+}
+
+fn empty_sandbox_setup_failure(outcome: ProcessOutcome) -> ExecResult {
+    sandbox_setup_failure(outcome, OutputCapture::empty(), OutputCapture::empty())
+}
+
+fn sandbox_setup_failure(
+    outcome: ProcessOutcome,
+    stdout: OutputCapture,
+    stderr: OutputCapture,
+) -> ExecResult {
+    let outcome_kind = match outcome {
+        ProcessOutcome::Exited { .. } => "exited",
+        ProcessOutcome::TimedOut => "timed_out",
+        ProcessOutcome::SpawnFailed { .. } => "spawn_failed",
+        ProcessOutcome::SupervisionFailed { .. } => "supervision_failed",
+    };
+    tracing::warn!(
+        outcome = outcome_kind,
+        "sandbox setup failed before command dispatch"
+    );
     ExecResult {
         confinement: ExecutionConfinement::SandboxSetupFailed,
         outcome,
-        stdout: output_capture(result.stdout),
-        stderr: output_capture(result.stderr),
+        diagnostic: None,
+        stdout,
+        stderr,
     }
 }
 
@@ -3655,6 +3663,45 @@ mod tests {
     const SANDBOX_LINKED_ADMINISTRATION_PATH: &str = "/workspace/.git/worktrees/linked";
     const ISOLATION_FIXTURE_TIMEOUT: Duration = Duration::from_secs(30);
 
+    #[derive(Clone, Default)]
+    struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedTelemetryWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedTelemetryWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedTelemetry {
+        type Writer = CapturedTelemetryWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedTelemetryWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl CapturedTelemetry {
+        fn text(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone(),
+            )
+            .expect("captured telemetry is UTF-8")
+        }
+    }
+
     #[cfg(target_os = "linux")]
     async fn assert_unsandboxed_git_environment_absent(
         workspace: &ReplacementWorkspace,
@@ -4661,6 +4708,7 @@ mod tests {
                 },
             },
             EXEC_CAPTURE_BYTES,
+            SandboxNetwork::None,
         );
 
         assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
@@ -4944,26 +4992,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sandbox_probe_timeout_remains_timeout_evidence() -> Result<(), Box<dyn Error>> {
+    async fn sandbox_probe_timeout_warns_without_dispatch_or_payloads() -> Result<(), Box<dyn Error>>
+    {
         let root = std::env::current_dir()?;
         let runner = FakeRunner::returning(
             BwrapAvailability::TimedOut,
-            successful_process(b"must remain unused"),
+            successful_process(b"private-output-content"),
         );
         let observation = runner.clone();
         let mut command_runner = SandboxedCommandRunner::try_new(runner, root)?;
         let arguments = ExecArguments {
-            program: String::from("cargo"),
-            arguments: vec![String::from("check")],
+            program: String::from("private-program-name"),
+            arguments: vec![String::from("private-argument-value")],
             working_directory: String::from("."),
             timeout_seconds: 30,
         };
-
+        let captured = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("the tools-exec test process installs one telemetry subscriber");
         let result = command_runner.execute(arguments).await;
 
         assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
         assert_eq!(result.outcome, ProcessOutcome::TimedOut);
         assert_eq!(observation.recorded_requests(), Vec::new());
+        let telemetry = captured.text();
+        assert!(telemetry.contains("sandbox setup failed before command dispatch"));
+        assert!(telemetry.contains("outcome=\"timed_out\""));
+        assert!(!telemetry.contains("private-program-name"));
+        assert!(!telemetry.contains("private-argument-value"));
+        assert!(!telemetry.contains("private-output-content"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn isolated_network_timeout_reports_the_configured_fence() -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let mut process = successful_sandbox_process(b"partial output");
+        process.outcome = ProcessOutcome::TimedOut;
+        let runner = FakeRunner::returning(BwrapAvailability::Available, process);
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, root)?;
+        let arguments = ExecArguments {
+            program: String::from("sleep"),
+            arguments: vec![String::from("30")],
+            working_directory: String::from("."),
+            timeout_seconds: 1,
+        };
+
+        let result = command_runner.execute(arguments).await;
+
+        assert_eq!(result.confinement, ExecutionConfinement::FilesystemConfined);
+        assert_eq!(result.outcome, ProcessOutcome::TimedOut);
+        assert_eq!(
+            result.diagnostic,
+            Some(ExecutionDiagnostic::NetworkFenceActive)
+        );
+        assert_eq!(
+            serde_json::to_value(&result)?
+                .get("diagnostic")
+                .and_then(serde_json::Value::as_str),
+            Some("network_fence_active")
+        );
         Ok(())
     }
 

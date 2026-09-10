@@ -56,10 +56,10 @@ pub use diagnostics::{
 };
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,
-    ExecResult, ExecToolConstructionError, ExecutionConfinement, InvalidExecArguments,
-    OutputCapture, OutputEncoding, ProcessEnvironment, ProcessOutcome, ProcessOutput,
-    ProcessRequest, ProcessRunResult, ProcessRunner, ProcessSpawnFailure, ProcessStatusProtocol,
-    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxConfiguration, SandboxNetwork,
-    SandboxProcessNamespace, SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner,
-    UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+    ExecResult, ExecToolConstructionError, ExecutionConfinement, ExecutionDiagnostic,
+    InvalidExecArguments, OutputCapture, OutputEncoding, ProcessEnvironment, ProcessOutcome,
+    ProcessOutput, ProcessRequest, ProcessRunResult, ProcessRunner, ProcessSpawnFailure,
+    ProcessStatusProtocol, ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxConfiguration,
+    SandboxNetwork, SandboxProcessNamespace, SandboxedCommandRunner, SandboxedExecTool,
+    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
