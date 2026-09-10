@@ -84,6 +84,7 @@ pub struct OperatorStatusEndMessage {
     pub lifecycle_week_count: CanonicalU64,
     pub lifecycle_deadline_violation_count: CanonicalU64,
     pub session_supervision_count: CanonicalU64,
+    pub outbox_quarantine_count: CanonicalU64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```

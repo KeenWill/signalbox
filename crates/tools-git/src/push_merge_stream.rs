@@ -27,6 +27,9 @@ pub(super) struct Hunks {
     file: BufWriter<File>,
     effects: u64,
     preview: usize,
+    // At most one descriptor per indexed line (or byte of a bounded small diff).
+    pub(super) edits: Vec<[u64; 4]>,
+    pub(super) opaque: bool,
 }
 impl Hunks {
     pub(super) fn new() -> Result<Self, GitPushFailure> {
@@ -34,6 +37,8 @@ impl Hunks {
             file: BufWriter::new(tempfile::tempfile().map_err(failed)?),
             effects: 0,
             preview: 0,
+            edits: Vec::new(),
+            opaque: false,
         })
     }
     pub(super) fn start(&mut self) -> Result<(), GitPushFailure> {
@@ -42,16 +47,32 @@ impl Hunks {
     }
     pub(super) fn bytes(&mut self, bytes: &[u8]) -> Result<(), GitPushFailure> {
         let hash: [u8; 32] = Sha256::digest(bytes).into();
-        self.effect(hash, bytes.len() as u64, bytes)
+        self.effect(
+            hash,
+            bytes.len() as u64,
+            bytes,
+            matches!(bytes.first(), Some(b'+' | b'-')),
+            matches!(bytes.first(), Some(b'<' | b'>' | b'=')),
+        )
     }
     fn effect(
         &mut self,
         hash: [u8; 32],
         length: u64,
         preview: &[u8],
+        text: bool,
+        preview_only: bool,
     ) -> Result<(), GitPushFailure> {
         let kept = preview.len().min(MAX_MERGE_DETAIL_BYTES - self.preview);
-        self.file.write_all(&[2]).map_err(failed)?;
+        self.file
+            .write_all(&[if preview_only {
+                4
+            } else if text {
+                3
+            } else {
+                2
+            }])
+            .map_err(failed)?;
         self.file.write_all(&hash).map_err(failed)?;
         self.file.write_all(&length.to_le_bytes()).map_err(failed)?;
         self.file
@@ -76,11 +97,25 @@ impl Hunks {
         Ok(BufReader::new(file))
     }
     pub(super) fn permitted(&mut self, deadline: Instant) -> Result<Effects, GitPushFailure> {
+        self.permitted_filtered(None, deadline)
+    }
+    pub(super) fn permitted_filtered(
+        &mut self,
+        text: Option<bool>,
+        deadline: Instant,
+    ) -> Result<Effects, GitPushFailure> {
         let mut effects = Effects::new(self.effects)?;
         let mut reader = self.reader()?;
         while let Some(record) = record(&mut reader)? {
             check(deadline)?;
-            if let Record::Effect { hash, .. } = record {
+            if let Record::Effect {
+                hash,
+                text: is_text,
+                preview_only: false,
+                ..
+            } = record
+                && text.is_none_or(|text| text == is_text)
+            {
                 effects.change(hash, true, deadline)?;
             }
         }
@@ -90,6 +125,15 @@ impl Hunks {
         &mut self,
         permitted: &mut Effects,
         budget: usize,
+        deadline: Instant,
+    ) -> Result<Option<(String, bool)>, GitPushFailure> {
+        self.first_dropped_filtered(permitted, budget, None, deadline)
+    }
+    pub(super) fn first_dropped_filtered(
+        &mut self,
+        permitted: &mut Effects,
+        budget: usize,
+        text: Option<bool>,
         deadline: Instant,
     ) -> Result<Option<(String, bool)>, GitPushFailure> {
         let mut reader = self.reader()?;
@@ -110,8 +154,13 @@ impl Hunks {
                     hash,
                     length,
                     bytes,
+                    text: is_text,
+                    preview_only,
                 } => {
-                    if !dropped && !permitted.change(hash, false, deadline)? {
+                    if !preview_only && text.is_some_and(|text| text != is_text) {
+                        continue;
+                    }
+                    if !preview_only && !dropped && !permitted.change(hash, false, deadline)? {
                         dropped = true;
                     }
                     let kept = bytes.len().min(budget - preview.len());
@@ -133,6 +182,8 @@ enum Record {
         hash: [u8; 32],
         length: u64,
         bytes: Vec<u8>,
+        text: bool,
+        preview_only: bool,
     },
 }
 fn record(reader: &mut impl Read) -> Result<Option<Record>, GitPushFailure> {
@@ -143,7 +194,7 @@ fn record(reader: &mut impl Read) -> Result<Option<Record>, GitPushFailure> {
     if tag[0] == 1 {
         return Ok(Some(Record::Start));
     }
-    if tag[0] != 2 {
+    if !(2..=4).contains(&tag[0]) {
         return Err(GitPushFailure::Repository);
     }
     let mut hash = [0; 32];
@@ -162,6 +213,8 @@ fn record(reader: &mut impl Read) -> Result<Option<Record>, GitPushFailure> {
         hash,
         length: u64::from_le_bytes(length),
         bytes,
+        text: tag[0] == 3,
+        preview_only: tag[0] == 4,
     }))
 }
 pub(super) struct Effects {
@@ -308,7 +361,13 @@ impl Lines {
             preview.extend_from_slice(&buffer[..kept]);
             offset += count as u64;
         }
-        hunks.effect(hash.finalize().into(), line.length + 1, &preview)?;
+        hunks.effect(
+            hash.finalize().into(),
+            line.length + 1,
+            &preview,
+            true,
+            false,
+        )?;
         let mut last = [0];
         self.content
             .read_exact_at(&mut last, line.offset + line.length - 1)
@@ -354,6 +413,7 @@ pub(super) fn text_hunks(
     let checkpoint = hunks.file.stream_position().map_err(failed)?;
     let previous_effects = hunks.effects;
     let previous_preview = hunks.preview;
+    let previous_edits = hunks.edits.len();
     let mut work = MAX_MATCH_WORK;
     let Some(old) = Lines::new(old, deadline)? else {
         return Ok(TextDiff::WholeObject);
@@ -396,6 +456,16 @@ pub(super) fn text_hunks(
                 hunks.start()?;
                 start = false;
             }
+            if !start
+                && let Some(last) = hunks.edits.last_mut()
+                && last[1] == a
+                && last[3] == c
+            {
+                last[1] = b;
+                last[3] = d;
+            } else {
+                hunks.edits.push([a, b, c, d]);
+            }
             for line in a..b {
                 old.emit(line, b'-', hunks, deadline)?;
             }
@@ -413,6 +483,7 @@ pub(super) fn text_hunks(
                 .map_err(failed)?;
             hunks.effects = previous_effects;
             hunks.preview = previous_preview;
+            hunks.edits.truncate(previous_edits);
             return Ok(TextDiff::WholeObject);
         };
         if (x == a && y == c) || (x == b && y == d) {
@@ -422,6 +493,301 @@ pub(super) fn text_hunks(
         pending.push([a, x, c, y])?;
     }
     Ok(TextDiff::Detailed)
+}
+
+// Edit descriptors are bounded by the line-index budget; bytes stay in files.
+// Fixed spans are compared literally, with wildcard gaps only at parent conflicts.
+pub(super) fn preserves_text(
+    ancestor: ObjectContent,
+    branch_content: ObjectContent,
+    base_content: ObjectContent,
+    result: ObjectContent,
+    branch: &Hunks,
+    base: &Hunks,
+    deadline: Instant,
+) -> Result<bool, GitPushFailure> {
+    if branch.edits.is_empty() && base.edits.is_empty() {
+        return if branch.opaque || base.opaque {
+            Ok(true)
+        } else {
+            equal_files(
+                &ancestor.file,
+                0,
+                ancestor.size as u64,
+                &result.file,
+                0,
+                result.size as u64,
+                deadline,
+            )
+        };
+    }
+    let Some(ancestor) = Lines::new(ancestor, deadline)? else {
+        return Ok(false);
+    };
+    let Some(branch_lines) = Lines::new(branch_content, deadline)? else {
+        return Ok(false);
+    };
+    let Some(base_lines) = Lines::new(base_content, deadline)? else {
+        return Ok(false);
+    };
+    let mut edits: Vec<_> = branch
+        .edits
+        .iter()
+        .map(|edit| (false, *edit))
+        .chain(base.edits.iter().map(|edit| (true, *edit)))
+        .collect();
+    edits.sort_by_key(|(_, edit)| (edit[0], edit[1]));
+    let mut fixed = tempfile::tempfile().map_err(failed)?;
+    let (mut cursor, mut index, mut result_cursor) = (0, 0, 0);
+    let mut conflicts = false;
+    let mut search_work = MAX_MATCH_WORK;
+    while index < edits.len() {
+        check(deadline)?;
+        let start = edits[index].1[0];
+        let mut end = edits[index].1[1];
+        let first = index;
+        index += 1;
+        while index < edits.len() && edits[index].1[0] <= end {
+            end = end.max(edits[index].1[1]);
+            index += 1;
+        }
+        append_lines(&ancestor, cursor, start, &mut fixed, deadline)?;
+        let region = &edits[first..index];
+        let replacement = |side| -> Result<File, GitPushFailure> {
+            let mut bytes = tempfile::tempfile().map_err(failed)?;
+            let mut cursor = start;
+            for (_, [a, b, c, d]) in region.iter().filter(|(source, _)| *source == side) {
+                append_lines(&ancestor, cursor, *a, &mut bytes, deadline)?;
+                append_lines(
+                    if side { &base_lines } else { &branch_lines },
+                    *c,
+                    *d,
+                    &mut bytes,
+                    deadline,
+                )?;
+                cursor = *b;
+            }
+            append_lines(&ancestor, cursor, end, &mut bytes, deadline)?;
+            Ok(bytes)
+        };
+        let branch_changed = region.iter().any(|(side, _)| !side);
+        let base_changed = region.iter().any(|(side, _)| *side);
+        let branch_text = replacement(false)?;
+        let base_text = replacement(true)?;
+        let branch_size = branch_text.metadata().map_err(failed)?.len();
+        let base_size = base_text.metadata().map_err(failed)?.len();
+        if branch_changed
+            && base_changed
+            && !equal_files(
+                &branch_text,
+                0,
+                branch_size,
+                &base_text,
+                0,
+                base_size,
+                deadline,
+            )?
+        {
+            let size = fixed.metadata().map_err(failed)?.len();
+            if conflicts {
+                let Some(next) = find_span(
+                    &fixed,
+                    size,
+                    &result.file,
+                    result_cursor,
+                    result.size as u64,
+                    &mut search_work,
+                    deadline,
+                )?
+                else {
+                    return Ok(false);
+                };
+                result_cursor = next;
+            } else {
+                if size > result.size as u64
+                    || !equal_files(&fixed, 0, size, &result.file, 0, size, deadline)?
+                {
+                    return Ok(false);
+                }
+                result_cursor = size;
+            }
+            conflicts = true;
+            fixed.set_len(0).map_err(failed)?;
+            fixed.rewind().map_err(failed)?;
+        } else {
+            let (file, size) = if branch_changed {
+                (&branch_text, branch_size)
+            } else {
+                (&base_text, base_size)
+            };
+            append_bytes(file, 0, size, &mut fixed, deadline)?;
+        }
+        cursor = end;
+    }
+    append_lines(&ancestor, cursor, ancestor.count, &mut fixed, deadline)?;
+    let size = fixed.metadata().map_err(failed)?.len();
+    if !conflicts {
+        equal_files(
+            &fixed,
+            0,
+            size,
+            &result.file,
+            0,
+            result.size as u64,
+            deadline,
+        )
+    } else if size <= result.size as u64 - result_cursor {
+        equal_files(
+            &fixed,
+            0,
+            size,
+            &result.file,
+            result.size as u64 - size,
+            size,
+            deadline,
+        )
+    } else {
+        Ok(false)
+    }
+}
+
+fn append_lines(
+    lines: &Lines,
+    start: u64,
+    end: u64,
+    output: &mut File,
+    deadline: Instant,
+) -> Result<(), GitPushFailure> {
+    if start == end {
+        return Ok(());
+    }
+    let first = lines.line(start)?;
+    let last = lines.line(end - 1)?;
+    append_bytes(
+        &lines.content,
+        first.offset,
+        last.offset + last.length - first.offset,
+        output,
+        deadline,
+    )
+}
+
+fn append_bytes(
+    input: &File,
+    offset: u64,
+    length: u64,
+    output: &mut File,
+    deadline: Instant,
+) -> Result<(), GitPushFailure> {
+    let mut buffer = [0; IO_BYTES];
+    let mut copied = 0;
+    while copied < length {
+        check(deadline)?;
+        let count = (length - copied).min(buffer.len() as u64) as usize;
+        input
+            .read_exact_at(&mut buffer[..count], offset + copied)
+            .map_err(failed)?;
+        output.write_all(&buffer[..count]).map_err(failed)?;
+        copied += count as u64;
+    }
+    Ok(())
+}
+
+fn equal_files(
+    left: &File,
+    left_offset: u64,
+    left_size: u64,
+    right: &File,
+    right_offset: u64,
+    right_size: u64,
+    deadline: Instant,
+) -> Result<bool, GitPushFailure> {
+    if left_size != right_size {
+        return Ok(false);
+    }
+    let (mut a, mut b) = ([0; IO_BYTES], [0; IO_BYTES]);
+    let mut offset = 0;
+    while offset < left_size {
+        check(deadline)?;
+        let count = (left_size - offset).min(IO_BYTES as u64) as usize;
+        left.read_exact_at(&mut a[..count], left_offset + offset)
+            .map_err(failed)?;
+        right
+            .read_exact_at(&mut b[..count], right_offset + offset)
+            .map_err(failed)?;
+        if a[..count] != b[..count] {
+            return Ok(false);
+        }
+        offset += count as u64;
+    }
+    Ok(true)
+}
+
+// KMP indexes only a fixed-size prefix. Full candidate comparisons share a page
+// budget, so repeated near-matches cannot cause quadratic I/O or unbounded scratch.
+fn find_span(
+    pattern: &File,
+    size: u64,
+    result: &File,
+    start: u64,
+    end: u64,
+    work: &mut usize,
+    deadline: Instant,
+) -> Result<Option<u64>, GitPushFailure> {
+    if size == 0 {
+        return Ok(Some(start));
+    }
+    if size > end - start {
+        return Ok(None);
+    }
+    let mut prefix = vec![0; size.min(IO_BYTES as u64) as usize];
+    pattern.read_exact_at(&mut prefix, 0).map_err(failed)?;
+    let mut fallback = vec![0; prefix.len()];
+    let mut matched = 0;
+    for i in 1..prefix.len() {
+        while matched > 0 && prefix[i] != prefix[matched] {
+            matched = fallback[matched - 1];
+        }
+        if prefix[i] == prefix[matched] {
+            matched += 1;
+        }
+        fallback[i] = matched;
+    }
+    matched = 0;
+    let mut buffer = [0; IO_BYTES];
+    let mut offset = start;
+    while offset < end {
+        check(deadline)?;
+        let count = (end - offset).min(IO_BYTES as u64) as usize;
+        result
+            .read_exact_at(&mut buffer[..count], offset)
+            .map_err(failed)?;
+        for (i, byte) in buffer[..count].iter().enumerate() {
+            while matched > 0 && *byte != prefix[matched] {
+                matched = fallback[matched - 1];
+            }
+            if *byte == prefix[matched] {
+                matched += 1;
+            }
+            if matched == prefix.len() {
+                let candidate = offset + i as u64 + 1 - prefix.len() as u64;
+                if size > end - candidate {
+                    return Ok(None);
+                }
+                let pages = size.div_ceil(IO_BYTES as u64) as usize;
+                let Some(remaining) = work.checked_sub(pages) else {
+                    return Ok(None);
+                };
+                *work = remaining;
+                if equal_files(pattern, 0, size, result, candidate, size, deadline)? {
+                    return Ok(Some(candidate + size));
+                }
+                matched = fallback[matched - 1];
+            }
+        }
+        offset += count as u64;
+    }
+    Ok(None)
 }
 
 struct Ranges {
@@ -650,6 +1016,78 @@ mod tests {
         )
         .expect("fixture content")
     }
+    #[test]
+    fn conflict_gaps_preserve_literal_spans_including_matches_inside_a_line() {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let ancestor = "left old\nfixed\nright old\n";
+        let branch = "left branch\nfixed\nright branch\n";
+        let base = "left base\nfixed\nright base\n";
+        let mut branch_hunks = Hunks::new().expect("branch hunks");
+        let mut base_hunks = Hunks::new().expect("base hunks");
+        text_hunks(
+            content(ancestor),
+            content(branch),
+            &mut branch_hunks,
+            deadline,
+        )
+        .expect("branch diff");
+        text_hunks(content(ancestor), content(base), &mut base_hunks, deadline).expect("base diff");
+        for (result, preserved) in [
+            ("left resolved without newlinefixed\nright resolved\n", true),
+            ("left resolved\nchanged\nright resolved\n", false),
+        ] {
+            assert_eq!(
+                preserves_text(
+                    content(ancestor),
+                    content(branch),
+                    content(base),
+                    content(result),
+                    &branch_hunks,
+                    &base_hunks,
+                    deadline
+                )
+                .expect("span comparison"),
+                preserved
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_long_span_candidates_stop_at_the_shared_comparison_budget() {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let pattern = content(&format!("{}b", "a".repeat(IO_BYTES)));
+        let result = content(&format!("{}b", "a".repeat(3 * IO_BYTES)));
+        let mut work = 4;
+        assert_eq!(
+            find_span(
+                &pattern.file,
+                pattern.size as u64,
+                &result.file,
+                0,
+                result.size as u64,
+                &mut work,
+                deadline
+            )
+            .expect("bounded search"),
+            None
+        );
+        assert_eq!(work, 0);
+        let mut work = 2;
+        assert_eq!(
+            find_span(
+                &pattern.file,
+                pattern.size as u64,
+                &result.file,
+                2 * IO_BYTES as u64,
+                result.size as u64,
+                &mut work,
+                deadline
+            )
+            .expect("exact candidate"),
+            Some(result.size as u64)
+        );
+    }
+
     #[test]
     fn disk_diff_preserves_separate_hunks_and_effect_multiplicity() {
         let deadline = Instant::now() + Duration::from_secs(30);

@@ -3156,14 +3156,8 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
     )
     .execute(&pool)
     .await?;
-    assert!(matches!(
-        OutboxDispatcher::new(pool.clone())
-            .dispatch_next(|_| panic!("cross-wired refused ownership must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidTerminalEventCorrelation
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
+        .await?;
     sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
