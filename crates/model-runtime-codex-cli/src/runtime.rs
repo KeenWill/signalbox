@@ -630,6 +630,7 @@ impl CodexCliRuntime {
     ) -> PreparationOutcome<C, CodexCliPreparedRequest<C>> {
         let correlation = operation.correlation;
         let mut operation = ModelOperation {
+            image_presentation: operation.image_presentation,
             correlation: (),
             credential_reference: operation.credential_reference,
             requested_target: operation.requested_target,
@@ -688,6 +689,18 @@ impl CodexCliRuntime {
                 };
             }
         };
+        let image_limit = match signalbox_model_runtime::image_request_byte_limit(
+            &operation,
+            &crate::image_presentation_capability(),
+        ) {
+            Ok(limit) => limit,
+            Err(failure) => {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure,
+                };
+            }
+        };
         let credential_home = self
             .credential_homes
             .get(&operation.credential_reference)
@@ -723,6 +736,36 @@ impl CodexCliRuntime {
                 };
             }
         };
+        if let Some(limit) = image_limit {
+            let input = crate::app_server::frame::TurnInput {
+                input: std::iter::once(crate::app_server::frame::UserInput::Text {
+                    text: String::from_utf8_lossy(&translated.prompt).into_owned(),
+                })
+                .chain(translated.images.iter().cloned())
+                .collect(),
+                output_schema: serde_json::from_str(OUTPUT_SCHEMA).unwrap_or_default(),
+                effort: controls.reasoning_effort.map(str::to_owned),
+            };
+            let encoded = serde_json::to_vec(
+                &serde_json::json!({"id":3,"method":"turn/start","params": {"threadId":"", "input":input.input,"outputSchema":input.output_schema,"effort":input.effort}}),
+            );
+            // The thread identity arrives in a bounded event; reserve worst-case JSON escaping.
+            if encoded
+                .ok()
+                .and_then(|bytes| bytes.len().checked_add(self.event_limit.checked_mul(6)?))
+                .and_then(|bytes| bytes.checked_add(1))
+                .is_none_or(|bytes| bytes > limit)
+            {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure: PreparationFailure::UnsupportedOperation {
+                        detail: String::from(
+                            "encoded Codex image request exceeds its presentation bound",
+                        ),
+                    },
+                };
+            }
+        }
         let operation_home = if self
             .oauth_profiles
             .contains(&operation.credential_reference)
@@ -927,7 +970,7 @@ enum OperationHome {
 }
 
 async fn execute_process<C: Clone + Send + Sync>(
-    prepared: CodexCliPreparedRequest<C>,
+    mut prepared: CodexCliPreparedRequest<C>,
     sink: &mut (dyn ObservationSink<C> + Send),
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
@@ -987,7 +1030,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         .current_dir(&prepared.working_directory);
     use crate::app_server::{
         client::Client,
-        frame::{TextInput, TextInputKind, ThreadOptions, TurnInput},
+        frame::{ThreadOptions, TurnInput, UserInput},
     };
     let client = Client::new(
         ThreadOptions {
@@ -996,10 +1039,11 @@ async fn execute_process<C: Clone + Send + Sync>(
             service_tier: prepared.controls.service_tier.map(str::to_owned),
         },
         TurnInput {
-            input: vec![TextInput {
-                kind: TextInputKind::Text,
+            input: std::iter::once(UserInput::Text {
                 text: String::from_utf8(prepared.prompt).unwrap_or_default(),
-            }],
+            })
+            .chain(prepared.translated.images.drain(..))
+            .collect(),
             output_schema: serde_json::from_str(OUTPUT_SCHEMA).unwrap_or_default(),
             effort: prepared.controls.reasoning_effort.map(str::to_owned),
         },

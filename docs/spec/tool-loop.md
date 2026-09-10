@@ -603,3 +603,9 @@ the hint until a full nudge buffer has capacity.
   [tool-loop design](../design/tool-loop.md).
 - Runner-locus execution rules: the lost-lease retry exception and the runner
   approval ladder; see [runner protocol design](../design/runner-protocol.md).
+
+A completed image read retains a typed media reference beside its bounded text
+summary. Its storage record carries independent presented and source validation
+identities; terminal evidence is immutable. Rendering preserves that reference
+only from the durable result, and model preparation authenticates it before send
+authorization. Text or JSON tool output cannot construct this authority.

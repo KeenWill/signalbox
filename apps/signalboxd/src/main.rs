@@ -1877,7 +1877,7 @@ async fn run_hub(
                         ));
                     }
                 };
-                Some(executor)
+                Some(executor.with_model_configuration(&model_configuration))
             }
             GuardedAwait::GuardLost => {
                 disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
@@ -2223,7 +2223,9 @@ async fn run_hub(
     let pass_blobs = blob_store_registry.clone();
     let compose_pass = move |model_configuration: &HubModelConfiguration| {
         let runtime_models = model_configuration.runtime_model_catalog();
-        let runtime = runtime_factory.build(model_configuration)?;
+        let runtime = runtime_factory
+            .build(model_configuration)?
+            .with_media_preparation(pass_pool.clone(), pass_blobs.clone());
         let compaction: Arc<dyn ContextCompactionModel> = Arc::new(
             RuntimeContextCompactionModel::new(runtime.clone(), runtime_models.clone()),
         );
