@@ -37,8 +37,27 @@ pub type OauthDeliveryFuture<'a> = Pin<
     Box<dyn Future<Output = Result<OauthDeliveryOutcome, CredentialAccessFailure>> + Send + 'a>,
 >;
 
+/// Delivery recovery after one invocation rejected its access token.
+pub type OauthRecoveryFuture<'a> =
+    Pin<Box<dyn Future<Output = signalbox_model_runtime::CredentialRejectionRecovery> + Send + 'a>>;
+
 /// Daemon-owned refresh and generation authority, independent of storage representation.
 pub trait OauthCredentialProvider: Send + Sync + std::fmt::Debug {
+    /// Clears rejection recovery after an invocation proves the token works.
+    fn invocation_succeeded<'a>(
+        &'a self,
+        reference: &'a CredentialReference,
+        access_token: &'a CredentialValue,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
+    /// Refreshes a rejected access token once before a durable successor call.
+    fn recover_rejection<'a>(
+        &'a self,
+        reference: &'a CredentialReference,
+        rejected_access_token: &'a CredentialValue,
+        cancellation: CancellationSignal,
+    ) -> OauthRecoveryFuture<'a>;
+
     /// Resolves a generation and holds its row lock through the install callback.
     fn deliver<'a>(
         &'a self,

@@ -137,6 +137,23 @@ fn version_probe_with_descendant(directory: &Path, output: &str) -> std::path::P
 struct OauthFixture;
 
 impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for OauthFixture {
+    fn invocation_succeeded<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        _: &'a signalbox_model_runtime::CredentialValue,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
+
+    fn recover_rejection<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        _: &'a signalbox_model_runtime::CredentialValue,
+        _: CancellationSignal,
+    ) -> signalbox_model_runtime_codex_cli::OauthRecoveryFuture<'a> {
+        Box::pin(async { signalbox_model_runtime::CredentialRejectionRecovery::Refreshed })
+    }
+
     fn deliver<'a>(
         &'a self,
         _: &'a CredentialReference,
@@ -163,6 +180,23 @@ impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for OauthFixture
 struct WaitingOauthFixture;
 
 impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for WaitingOauthFixture {
+    fn invocation_succeeded<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        _: &'a signalbox_model_runtime::CredentialValue,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
+
+    fn recover_rejection<'a>(
+        &'a self,
+        _: &'a CredentialReference,
+        _: &'a signalbox_model_runtime::CredentialValue,
+        _: CancellationSignal,
+    ) -> signalbox_model_runtime_codex_cli::OauthRecoveryFuture<'a> {
+        Box::pin(async { signalbox_model_runtime::CredentialRejectionRecovery::Unavailable })
+    }
+
     fn deliver<'a>(
         &'a self,
         _: &'a CredentialReference,
@@ -245,7 +279,7 @@ test -z "$OPENAI_API_KEY$CODEX_API_KEY$CODEX_ACCESS_TOKEN" || exit 91
 printf '%s\n' "$@" > oauth-argv
 umask > oauth-umask
 printf '%s' 'opaque-access-that-crosses-the-small-stderr-evidence-window opaque-identity' >&2
-printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-offline-1","turn":{"id":"turn-offline-1","status":"failed","items":[],"error":{"message":"opaque-access-that-crosses-the-small-stderr-evidence-window opaque-identity","codexErrorInfo":"other"}}}}'
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-offline-1","turn":{"id":"turn-offline-1","status":"failed","items":[],"error":{"message":"opaque-access-that-crosses-the-small-stderr-evidence-window opaque-identity","codexErrorInfo":"unauthorized"}}}}'
 exit 1
 "#,
     );
@@ -280,6 +314,14 @@ exit 1
     let report = runtime
         .execute(prepared, &mut Vec::new(), CancellationSignal::never())
         .await;
+    assert_eq!(
+        provider_error(&report.evidence).kind,
+        ProviderErrorKind::CredentialRejected
+    );
+    assert_eq!(
+        provider_error(&report.evidence).credential_recovery,
+        Some(signalbox_model_runtime::CredentialRejectionRecovery::Refreshed)
+    );
     let evidence = format!("{:?}", report.evidence);
     assert!(!evidence.contains("opaque-access"), "{evidence}");
     assert!(!evidence.contains("opaque-identity"), "{evidence}");
@@ -578,6 +620,7 @@ fn emitted_streams(observations: &[Observation<String>]) -> Vec<String> {
 fn boundary_material_reads_terminal_and_observation_text() {
     let result = ExecutionResult {
         evidence: TerminalEvidence::BoundaryLoss(signalbox_model_runtime::BoundaryLossEvidence {
+            response_content_observed: true,
             cause: LossCause::StreamProtocolViolation {
                 detail: BOUNDARY_FIXTURE_TERMINAL_TEXT.to_string(),
             },
@@ -1677,12 +1720,12 @@ async fn typed_turn_errors_classify_without_consulting_prose() {
         ("serverOverloaded", ProviderErrorKind::Overloaded, true),
         (
             r#"{"httpConnectionFailed":{"httpStatusCode":503}}"#,
-            ProviderErrorKind::Unrecognized,
+            ProviderErrorKind::Overloaded,
             true,
         ),
         (
             r#"{"responseStreamConnectionFailed":{"httpStatusCode":503}}"#,
-            ProviderErrorKind::Unrecognized,
+            ProviderErrorKind::Overloaded,
             true,
         ),
         (
@@ -1700,12 +1743,12 @@ async fn typed_turn_errors_classify_without_consulting_prose() {
         ("sandboxError", ProviderErrorKind::Unrecognized, false),
         (
             r#"{"responseStreamDisconnected":{"httpStatusCode":503}}"#,
-            ProviderErrorKind::Unrecognized,
+            ProviderErrorKind::Overloaded,
             false,
         ),
         (
             r#"{"responseTooManyFailedAttempts":{"httpStatusCode":503}}"#,
-            ProviderErrorKind::Unrecognized,
+            ProviderErrorKind::Overloaded,
             false,
         ),
         (
@@ -1732,7 +1775,20 @@ async fn typed_turn_errors_classify_without_consulting_prose() {
 }
 
 #[tokio::test]
-async fn turn_activity_excludes_availability_non_acceptance_proof() {
+async fn buffered_content_before_transport_loss_remains_observed() {
+    let result = execute_scenario(
+        "content_then_loss",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    assert!(boundary_loss(&result.evidence).response_content_observed);
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn availability_classification_survives_retry_and_assistant_activity() {
     for scenario in [
         "proof_retry",
         "proof_usage",

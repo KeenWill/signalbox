@@ -497,6 +497,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             emit_error(fixtures::STREAM_ERROR_MESSAGE);
             failed("authentication failed instead of the stream error");
         }
+        "content_then_loss" => {
+            notify(
+                "item/agentMessage/delta",
+                json!({"itemId":"assistant","delta":"partial response"}),
+            );
+        }
         "no_terminal" => {
             envelope(r#"{"outcome":"completed","text":"not terminal","tool_calls":[]}"#);
         }

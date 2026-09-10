@@ -30,10 +30,10 @@ use credential_files::{absolute_search_entries, credential_bytes};
 pub use error::{HubModelConfigurationError, UnknownSessionModel};
 pub(crate) use model_routing::ModelCallInputUsage;
 pub use model_routing::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, AvailabilityCause, BillingKind,
-    CLAUDE_CLI_CREDENTIAL_REFERENCE, CODEX_CLI_CREDENTIAL_REFERENCE, ClaudeCliConfiguration,
-    CodexCliConfiguration, DerivedModelCallCost, ModelAdapter, ModelBillingRates,
-    OPENAI_CREDENTIAL_REFERENCE, ResolvedModelRoute,
+    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, CLAUDE_CLI_CREDENTIAL_REFERENCE,
+    CODEX_CLI_CREDENTIAL_REFERENCE, ClaudeCliConfiguration, CodexCliConfiguration,
+    DerivedModelCallCost, ModelAdapter, ModelBillingRates, OPENAI_CREDENTIAL_REFERENCE,
+    ResolvedModelRoute,
 };
 use model_routing::{
     AdapterMapping, MIGRATED_ANTHROPIC_MODEL_FAMILY, runtime_pool_action, runtime_pool_exhaustion,

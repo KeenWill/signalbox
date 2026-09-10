@@ -839,7 +839,7 @@ async fn configured_quota_failure_records_pool_rotation_action_end_to_end()
                     ProviderModelCallFailureCause::QuotaExhausted,
                     ProviderReportedTokenUsage::unreported(),
                     None,
-                    true,
+                    false,
                 ),
             signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
                 failed: FailedModelCallTurnIdentities::new(
@@ -922,7 +922,7 @@ async fn configured_quota_failure_records_pool_rotation_action_end_to_end()
                     ProviderModelCallFailureCause::QuotaExhausted,
                     ProviderReportedTokenUsage::unreported(),
                     None,
-                    true,
+                    false,
                 ),
             signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
                 failed: FailedModelCallTurnIdentities::new(
@@ -961,6 +961,98 @@ async fn configured_quota_failure_records_pool_rotation_action_end_to_end()
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn oauth_rejection_retries_refreshed_profile_then_rotates_without_quarantine()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::CredentialRejectionRecovery::{Refreshed, Unavailable};
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    // Arbitrary identities isolate this recovery fixture.
+    let seed = 0x1534_6000_u128;
+    let (session, _turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "oauth-recovery-pool",
+        &["oauth-profile", "fallback-profile"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let mut repository =
+        repository.with_same_credential_attempt_bound(std::num::NonZeroUsize::new(1));
+    let mut calls = Vec::new();
+    for (offset, recovery) in [(100, Refreshed), (200, Unavailable)] {
+        let (call, profile) =
+            prepare_and_authorize_pool_call(&repository, session, seed + offset).await?;
+        assert_eq!(profile, "oauth-profile");
+        calls.push(call.observation_correlation().call());
+        let outcome = repository
+            .commit_observation(
+                session,
+                call.observation_correlation()
+                    .bind_provider_failure_observation_with_usage(
+                        ProviderModelCallFailureCause::CredentialRejected,
+                        ProviderReportedTokenUsage::unreported(),
+                    )
+                    .with_credential_recovery(Some(recovery)),
+                signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                    failed: FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + offset + 21)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + offset + 22)),
+                    ),
+                    successor_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(
+                        seed + offset + 20,
+                    )),
+                },
+                |_| TurnId::from_uuid(Uuid::from_u128(seed + offset + 23)),
+            )
+            .await?;
+        let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(successor)) = outcome
+        else {
+            panic!("OAuth recovery {recovery:?} admits a durable successor");
+        };
+        assert_eq!(successor.backoff(), Duration::ZERO);
+    }
+    let (_, profile) = prepare_and_authorize_pool_call(&repository, session, seed + 300).await?;
+    assert_eq!(profile, "fallback-profile");
+    let errors: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT model_call_id, terminal_provider_failure_cause FROM model_call
+         WHERE session_id = $1 AND terminal_disposition_kind = 'known_failed'
+         ORDER BY model_call_id",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        errors,
+        calls
+            .iter()
+            .map(|call| (call.into_uuid(), "credential_rejected".to_owned()))
+            .collect::<Vec<_>>()
+    );
+    let actions: i64 = sqlx::query_scalar("SELECT count(*) FROM credential_pool_member_action WHERE pool_name = 'oauth-recovery-pool'")
+        .fetch_one(&pool).await?;
+    assert_eq!(actions, 0);
+    let exclusions: Vec<Uuid> = sqlx::query_scalar("SELECT predecessor_model_call_id FROM credential_pool_chain_exclusion WHERE session_id = $1")
+        .bind(session.into_uuid()).fetch_all(&pool).await?;
+    assert_eq!(exclusions, vec![calls[1].into_uuid()]);
+    let snapshot = signalbox_persistence::process_read::ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("retry transcript");
+    assert_eq!(
+        snapshot
+            .model_call_usage()
+            .iter()
+            .map(|call| (call.call(), call.credential_profile()))
+            .collect::<Vec<_>>(),
+        vec![(calls[0], "oauth-profile"), (calls[1], "oauth-profile")]
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A credential rejection authorizes only configured rotation: it does not
 /// require adapter non-acceptance proof and never retries the rejected member.
 #[tokio::test(flavor = "multi_thread")]
@@ -969,7 +1061,7 @@ async fn credential_rejection_switch_now_rotates_without_same_credential_retry()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x1534_2000_u128;
-    let (session, turn, mut repository) = active_credential_pool_fixture(
+    let (session, turn, repository) = active_credential_pool_fixture(
         &pool,
         seed,
         "rejected-credential-pool",
@@ -978,6 +1070,7 @@ async fn credential_rejection_switch_now_rotates_without_same_credential_retry()
         CredentialPoolRuntimeAction::SwitchNow,
     )
     .await?;
+    let mut repository = repository.with_same_credential_attempt_bound(None);
     let (first, first_reference) =
         prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
     assert_eq!(first_reference, "rejected-member");
@@ -1028,7 +1121,259 @@ async fn credential_rejection_switch_now_rotates_without_same_credential_retry()
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable, (1, 1, 0));
+    let recorded_error: (String, String) = sqlx::query_as(
+        "SELECT terminal_disposition_kind, terminal_provider_failure_cause
+           FROM model_call WHERE model_call_id = $1",
+    )
+    .bind(failed_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        recorded_error,
+        ("known_failed".into(), "credential_rejected".into())
+    );
+    let snapshot = signalbox_persistence::process_read::ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("rotation transcript");
+    let calls: Vec<_> = snapshot
+        .model_call_usage()
+        .iter()
+        .map(|call| (call.call(), call.credential_profile()))
+        .collect();
+    assert_eq!(calls, vec![(failed_call, "rejected-member")]);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn oauth_failed_refresh_rotates_without_applying_pool_quarantine()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x1534_2000_u128;
+    let (session, turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "rejected-credential-pool",
+        &["rejected-member", "replacement-member"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let mut repository = repository.with_same_credential_attempt_bound(None);
+    let (first, first_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
+    assert_eq!(first_reference, "rejected-member");
+    let failed_call = first.observation_correlation().call();
+    let successor_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 120));
+    let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(successor)) = repository
+        .commit_observation(
+            session,
+            first
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::CredentialRejected,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    false,
+                )
+                .with_credential_recovery(Some(
+                    signalbox_domain::CredentialRejectionRecovery::Unavailable,
+                )),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                ),
+                successor_attempt,
+            },
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 123)),
+        )
+        .await?
+    else {
+        panic!("failed OAuth refresh must rotate despite the pool quarantine action")
+    };
+    assert_eq!(successor.backoff(), Duration::ZERO);
+
+    let (_second, second_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 200).await?;
+    assert_eq!(second_reference, "replacement-member");
+    let durable: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM model_call
+               WHERE session_id = $1 AND turn_id = $2
+                 AND credential_reference = 'rejected-member'),
+             (SELECT count(*) FROM credential_pool_chain_exclusion
+               WHERE predecessor_model_call_id = $3),
+             (SELECT count(*) FROM credential_pool_transient_exclusion
+               WHERE observation_model_call_id = $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(failed_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable, (1, 1, 0));
+    let recorded_error: (String, String) = sqlx::query_as(
+        "SELECT terminal_disposition_kind, terminal_provider_failure_cause
+           FROM model_call WHERE model_call_id = $1",
+    )
+    .bind(failed_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        recorded_error,
+        ("known_failed".into(), "credential_rejected".into())
+    );
+    let snapshot = signalbox_persistence::process_read::ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("rotation transcript");
+    let calls: Vec<_> = snapshot
+        .model_call_usage()
+        .iter()
+        .map(|call| (call.call(), call.credential_profile()))
+        .collect();
+    assert_eq!(calls, vec![(failed_call, "rejected-member")]);
+
+    let actions: i64 = sqlx::query_scalar("SELECT count(*) FROM credential_pool_member_action WHERE pool_name = 'rejected-credential-pool'")
+        .fetch_one(&pool).await?;
+    assert_eq!(actions, 0);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn availability_overload_without_proof_rotates_at_the_attempt_bound()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x1534_2000_u128;
+    let (session, turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "overloaded-credential-pool",
+        &["overloaded-member", "ready-member"],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+    )
+    .await?;
+    let mut repository =
+        repository.with_same_credential_attempt_bound(std::num::NonZeroUsize::new(1));
+    let (first, first_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
+    assert_eq!(first_reference, "overloaded-member");
+    let failed_call = first.observation_correlation().call();
+    let successor_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 120));
+    let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(successor)) = repository
+        .commit_observation(
+            session,
+            first
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::Overloaded,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    false,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                ),
+                successor_attempt,
+            },
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 123)),
+        )
+        .await?
+    else {
+        panic!("a classified stream overload must rotate without proof")
+    };
+    assert!(!successor.backoff().is_zero());
+    expire_availability_backoff(&pool, successor_attempt).await?;
+
+    let (_second, second_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 200).await?;
+    assert_eq!(second_reference, "ready-member");
+    let durable: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM model_call
+               WHERE session_id = $1 AND turn_id = $2
+                 AND credential_reference = 'overloaded-member'),
+             (SELECT count(*) FROM credential_pool_chain_exclusion
+               WHERE predecessor_model_call_id = $3),
+             (SELECT count(*) FROM credential_pool_transient_exclusion
+               WHERE observation_model_call_id = $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(failed_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable, (1, 1, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unbounded_availability_attempts_keep_retrying_the_same_credential()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    // Arbitrary identities isolate this fixture; three calls exceed the finite fixture bound of two.
+    let seed = 0x1534_4000_u128;
+    let (session, turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "unbounded-retry-pool",
+        &["warm-member", "fallback-member"],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+    )
+    .await?;
+    let mut repository = repository.with_same_credential_attempt_bound(None);
+    for offset in [100, 200, 300] {
+        let (call, reference) =
+            prepare_and_authorize_pool_call(&repository, session, seed + offset).await?;
+        assert_eq!(reference, "warm-member");
+        let successor_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + offset + 20));
+        let outcome = repository
+            .commit_observation(
+                session,
+                call.observation_correlation()
+                    .bind_provider_failure_observation_with_retry_after(
+                        ProviderModelCallFailureCause::RateLimited,
+                        ProviderReportedTokenUsage::unreported(),
+                        None,
+                        false,
+                    ),
+                signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                    failed: FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + offset + 21)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + offset + 22)),
+                    ),
+                    successor_attempt,
+                },
+                |_| TurnId::from_uuid(Uuid::from_u128(seed + offset + 23)),
+            )
+            .await?;
+        assert!(matches!(
+            outcome,
+            Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(_))
+        ));
+        expire_availability_backoff(&pool, successor_attempt).await?;
+    }
+    let durable: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM model_call WHERE session_id = $1 AND turn_id = $2),
+                (SELECT count(*) FROM credential_pool_chain_exclusion WHERE session_id = $1 AND turn_id = $2)",
+    ).bind(session.into_uuid()).bind(turn.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(durable, (3, 0));
     pool.close().await;
     drop(container);
     Ok(())
@@ -1060,9 +1405,8 @@ async fn transient_cooldown_excludes_credential_from_every_session_preparation()
         CredentialPoolRuntimeAction::Quarantine,
     )
     .await?;
-    let mut first_repository = first_repository.with_same_credential_attempt_bound(
-        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
-    );
+    let mut first_repository =
+        first_repository.with_same_credential_attempt_bound(std::num::NonZeroUsize::new(2));
     let (first, first_reference) =
         prepare_and_authorize_pool_call(&first_repository, first_session, seed + 100).await?;
     assert_eq!(first_reference, "cooling-member");
@@ -1220,9 +1564,7 @@ async fn transient_failure_retries_same_credential_until_bound_then_rotates()
         100,
     )])
     .with_credential_pools(HashMap::from([(old_fast_target, policy)]))
-    .with_same_credential_attempt_bound(
-        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
-    );
+    .with_same_credential_attempt_bound(std::num::NonZeroUsize::new(2));
 
     let (first, first_reference) =
         prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
@@ -1235,10 +1577,10 @@ async fn transient_failure_retries_same_credential_until_bound_then_rotates()
                 first
                     .observation_correlation()
                     .bind_provider_failure_observation_with_retry_after(
-                        ProviderModelCallFailureCause::ProviderInternal,
+                        ProviderModelCallFailureCause::RateLimited,
                         ProviderReportedTokenUsage::unreported(),
                         Some(Duration::from_millis(1)),
-                        true,
+                        false,
                     ),
                 signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
                     failed: FailedModelCallTurnIdentities::new(
@@ -1358,9 +1700,7 @@ async fn transient_failure_retries_same_credential_until_bound_then_rotates()
         10,
         100,
     )])
-    .with_same_credential_attempt_bound(
-        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
-    );
+    .with_same_credential_attempt_bound(std::num::NonZeroUsize::new(2));
 
     let (second, second_reference) =
         prepare_and_authorize_pool_call(&repository, session, seed + 200).await?;
@@ -1372,10 +1712,10 @@ async fn transient_failure_retries_same_credential_until_bound_then_rotates()
             second
                 .observation_correlation()
                 .bind_provider_failure_observation_with_retry_after(
-                    ProviderModelCallFailureCause::Overloaded,
+                    ProviderModelCallFailureCause::RateLimited,
                     ProviderReportedTokenUsage::unreported(),
                     None,
-                    true,
+                    false,
                 ),
             signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
                 failed: FailedModelCallTurnIdentities::new(
@@ -1393,7 +1733,7 @@ async fn transient_failure_retries_same_credential_until_bound_then_rotates()
     assert!(!rotation.backoff().is_zero());
     expire_availability_backoff(&pool, rotation_attempt).await?;
 
-    let (_third, third_reference) =
+    let (third, third_reference) =
         prepare_and_authorize_pool_call(&repository, session, seed + 300).await?;
     assert_eq!(third_reference, "rotation-member");
     let durable_counts: (i64, i64) = sqlx::query_as(
@@ -1410,6 +1750,61 @@ async fn transient_failure_retries_same_credential_until_bound_then_rotates()
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_counts, (2, 1));
+
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct RecordedAttempt {
+        model_call_id: Uuid,
+        credential_reference: String,
+        state_kind: String,
+        terminal_provider_failure_cause: Option<String>,
+    }
+    let records: Vec<RecordedAttempt> = sqlx::query_as(
+        "SELECT model_call_id, credential_reference, state_kind,
+                terminal_provider_failure_cause FROM model_call
+          WHERE session_id = $1 ORDER BY model_call_id",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        records,
+        vec![
+            RecordedAttempt {
+                model_call_id: first.observation_correlation().call().into_uuid(),
+                credential_reference: "warm-member".into(),
+                state_kind: "terminal".into(),
+                terminal_provider_failure_cause: Some("rate_limited".into()),
+            },
+            RecordedAttempt {
+                model_call_id: second.observation_correlation().call().into_uuid(),
+                credential_reference: "warm-member".into(),
+                state_kind: "terminal".into(),
+                terminal_provider_failure_cause: Some("rate_limited".into()),
+            },
+            RecordedAttempt {
+                model_call_id: third.observation_correlation().call().into_uuid(),
+                credential_reference: "rotation-member".into(),
+                state_kind: "in_flight".into(),
+                terminal_provider_failure_cause: None,
+            },
+        ]
+    );
+    let snapshot = signalbox_persistence::process_read::ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("active retry chain snapshot");
+    let projected: Vec<_> = snapshot
+        .model_call_usage()
+        .iter()
+        .map(|call| (call.call(), call.credential_profile()))
+        .collect();
+    assert_eq!(
+        projected,
+        vec![
+            (first.observation_correlation().call(), "warm-member"),
+            (second.observation_correlation().call(), "warm-member"),
+        ]
+    );
 
     pool.close().await;
     drop(container);
@@ -1433,9 +1828,8 @@ async fn excluded_failed_credential_with_stay_terminalizes_instead_of_retrying()
         CredentialPoolRuntimeAction::Quarantine,
     )
     .await?;
-    let mut repository = repository.with_same_credential_attempt_bound(
-        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
-    );
+    let mut repository =
+        repository.with_same_credential_attempt_bound(std::num::NonZeroUsize::new(2));
     let (first, first_reference) =
         prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
     assert_eq!(first_reference, "failed-member");
@@ -1524,9 +1918,8 @@ async fn quarantined_retry_with_an_eligible_fallback_keeps_the_generic_failure()
             &["retry-member", "unauthorized-fallback"],
         ),
     )]));
-    let mut repository = repository.with_same_credential_attempt_bound(
-        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
-    );
+    let mut repository =
+        repository.with_same_credential_attempt_bound(std::num::NonZeroUsize::new(2));
     let (first, first_reference) =
         prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
     assert_eq!(first_reference, "retry-member");

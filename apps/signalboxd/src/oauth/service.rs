@@ -21,6 +21,7 @@ const CODEX_PROACTIVE_REFRESH_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 struct CachedAccess {
     generation: i64,
+    refreshed_after_rejection: bool,
     token: CredentialValue,
     expires_at: Option<Instant>,
 }
@@ -125,6 +126,80 @@ impl OauthCredentialService {
         })
     }
 
+    async fn invocation_succeeded(&self, reference: &str, token: &CredentialValue) {
+        if let Some(profile) = self.profiles.get(reference) {
+            let mut state = profile.access.lock().await;
+            if let Some(access) = &mut state.access
+                && access.token.expose_bytes() == token.expose_bytes()
+            {
+                access.refreshed_after_rejection = false;
+            }
+        }
+    }
+
+    async fn recover_rejection(
+        &self,
+        reference: &str,
+        rejected: &CredentialValue,
+        mut cancellation: CancellationSignal,
+    ) -> signalbox_model_runtime::CredentialRejectionRecovery {
+        use signalbox_model_runtime::CredentialRejectionRecovery::{Refreshed, Unavailable};
+        let Some(profile) = self.profiles.get(reference) else {
+            return Unavailable;
+        };
+        let (mut state, joined) = match profile.access.try_lock() {
+            Ok(state) => (state, false),
+            Err(_) => {
+                let Some(state) = cancellation
+                    .run_until_cancelled(profile.access.lock())
+                    .await
+                else {
+                    return Unavailable;
+                };
+                (state, true)
+            }
+        };
+        if joined && state.failure.is_some() {
+            return Unavailable;
+        }
+        if let Some(access) = &mut state.access {
+            if access.token.expose_bytes() != rejected.expose_bytes() {
+                access.refreshed_after_rejection = true;
+                return Refreshed;
+            }
+            if access.refreshed_after_rejection {
+                return Unavailable;
+            }
+        }
+        state.access = None;
+        let Some(Ok(lease)) = cancellation
+            .run_until_cancelled(self.lease(reference))
+            .await
+        else {
+            return Unavailable;
+        };
+        let result = self
+            .prepare_locked(
+                (reference, profile),
+                lease,
+                &mut state.access,
+                false,
+                &mut CacheRefreshedAccess,
+                cancellation,
+            )
+            .await;
+        state.failure = result.as_ref().err().copied();
+        match result {
+            Ok(OauthDeliveryOutcome::Delivered) => {
+                if let Some(access) = &mut state.access {
+                    access.refreshed_after_rejection = true;
+                }
+                Refreshed
+            }
+            _ => Unavailable,
+        }
+    }
+
     async fn lease(&self, reference: &str) -> Result<OauthDispatchLease, Failure> {
         self.repository
             .lock_dispatch(reference)
@@ -202,9 +277,12 @@ impl OauthCredentialService {
         }
         if let Some(access) = cached.as_ref().filter(|access| {
             access.generation == stored.generation
-                && access.expires_at.map_or(joined, |until| {
-                    until.saturating_duration_since(Instant::now()) > CODEX_PROACTIVE_REFRESH_WINDOW
-                })
+                && access
+                    .expires_at
+                    .map_or(joined || access.refreshed_after_rejection, |until| {
+                        until.saturating_duration_since(Instant::now())
+                            > CODEX_PROACTIVE_REFRESH_WINDOW
+                    })
         }) {
             return install(lease, &stored, access.token.clone(), installer).await;
         }
@@ -283,10 +361,19 @@ impl OauthCredentialService {
         install(lease, &current, access_token.clone(), installer).await?;
         *cached = Some(CachedAccess {
             generation: current.generation,
+            refreshed_after_rejection: false,
             token: access_token,
             expires_at,
         });
         Ok(OauthDeliveryOutcome::Delivered)
+    }
+}
+
+struct CacheRefreshedAccess;
+
+impl OauthCredentialInstaller for CacheRefreshedAccess {
+    fn install(&mut self, _: OauthCredentialMaterial) -> Result<(), Failure> {
+        Ok(())
     }
 }
 
@@ -334,6 +421,23 @@ fn failure(cause: Cause) -> Failure {
 }
 
 impl OauthCredentialProvider for OauthCredentialService {
+    fn invocation_succeeded<'a>(
+        &'a self,
+        reference: &'a CredentialReference,
+        access_token: &'a CredentialValue,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.invocation_succeeded(reference.as_str(), access_token))
+    }
+
+    fn recover_rejection<'a>(
+        &'a self,
+        reference: &'a CredentialReference,
+        rejected_access_token: &'a CredentialValue,
+        cancellation: CancellationSignal,
+    ) -> signalbox_model_runtime_codex_cli::OauthRecoveryFuture<'a> {
+        Box::pin(self.recover_rejection(reference.as_str(), rejected_access_token, cancellation))
+    }
+
     fn deliver<'a>(
         &'a self,
         reference: &'a CredentialReference,
@@ -364,6 +468,167 @@ mod tests {
         fn install(&mut self, _: OauthCredentialMaterial) -> Result<(), Failure> {
             Err(Failure::Unavailable)
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL and local HTTPS"]
+    async fn oauth_rejection_refreshes_once_and_reuses_the_token_before_rotation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalbox_model_runtime::CredentialRejectionRecovery::{Refreshed, Unavailable};
+        let (_container, pool, _url) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let (client, registration, server) = super::super::tests::https_server(vec![
+            (
+                200,
+                serde_json::json!({"access_token":"refreshed-access", "refresh_token":"rotated-refresh"}),
+            ),
+            (
+                200,
+                serde_json::json!({"access_token":"later-refreshed-access", "refresh_token":"later-refresh"}),
+            ),
+        ])?;
+        let repository = OauthCredentialRepository::new(pool.clone());
+        repository
+            .replace_registrations(&[("profile".into(), registration.clone())])
+            .await?;
+        let command = OauthCredentialCommand {
+            command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            operation: OauthCredentialOperation::Provision,
+            profile: "profile".into(),
+        };
+        let OauthStartOutcome::Started(exchange) = repository
+            .begin_exchange(&command, Ok(&registration))
+            .await?
+        else {
+            panic!("provisioning exchange");
+        };
+        repository
+            .complete_exchange(
+                &exchange,
+                Ok(&OauthAuthorization {
+                    refresh_token: "initial-refresh".into(),
+                    identity_token: "retained-identity".into(),
+                    account_identity: serde_json::json!({"subject":"subject"}),
+                }),
+            )
+            .await?;
+        let mut service = OauthCredentialService::new(pool, vec![("profile".into(), registration)])
+            .map_err(|_| "service construction")?;
+        service.client = client;
+        let expired = CredentialValue::new(b"expired-access".to_vec());
+        assert_eq!(
+            service
+                .recover_rejection("profile", &expired, CancellationSignal::never())
+                .await,
+            Refreshed
+        );
+        let mut installer = Installer::default();
+        assert_eq!(
+            service
+                .prepare("profile", &mut installer, CancellationSignal::never())
+                .await,
+            Ok(OauthDeliveryOutcome::Delivered)
+        );
+        let refreshed = installer.0.expect("refreshed material").access_token;
+        assert_eq!(refreshed.expose_bytes(), b"refreshed-access");
+        assert_eq!(
+            service
+                .recover_rejection("profile", &expired, CancellationSignal::never())
+                .await,
+            Refreshed
+        );
+        assert_eq!(
+            service
+                .recover_rejection("profile", &refreshed, CancellationSignal::never())
+                .await,
+            Unavailable
+        );
+        assert_eq!(
+            service
+                .recover_rejection("profile", &refreshed, CancellationSignal::never())
+                .await,
+            Unavailable
+        );
+        service.invocation_succeeded("profile", &refreshed).await;
+        assert_eq!(
+            service
+                .recover_rejection("profile", &refreshed, CancellationSignal::never())
+                .await,
+            Refreshed
+        );
+        let lease = repository.lock_dispatch("profile").await?.expect("profile");
+        let stored = lease.authorization().expect("authorization");
+        assert!(
+            stored.quarantine.is_none(),
+            "access-token rejection does not quarantine"
+        );
+        assert!(!stored.refresh_in_progress);
+        lease.commit().await?;
+        assert_eq!(server.join().map_err(|_| "TLS server panicked")??.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL and local HTTPS"]
+    async fn oauth_failed_rejection_refresh_admits_rotation_without_access_token_quarantine()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_container, pool, _url) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let (client, registration, server) = super::super::tests::https_server(vec![(
+            400,
+            serde_json::json!({"error":"invalid_client"}),
+        )])?;
+        let repository = OauthCredentialRepository::new(pool.clone());
+        repository
+            .replace_registrations(&[("profile".into(), registration.clone())])
+            .await?;
+        let command = OauthCredentialCommand {
+            command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            operation: OauthCredentialOperation::Provision,
+            profile: "profile".into(),
+        };
+        let OauthStartOutcome::Started(exchange) = repository
+            .begin_exchange(&command, Ok(&registration))
+            .await?
+        else {
+            panic!("provisioning exchange");
+        };
+        repository
+            .complete_exchange(
+                &exchange,
+                Ok(&OauthAuthorization {
+                    refresh_token: "initial-refresh".into(),
+                    identity_token: "retained-identity".into(),
+                    account_identity: serde_json::json!({"subject":"subject"}),
+                }),
+            )
+            .await?;
+        let mut service = OauthCredentialService::new(pool, vec![("profile".into(), registration)])
+            .map_err(|_| "service construction")?;
+        service.client = client;
+        let expired = CredentialValue::new(b"expired-access".to_vec());
+        let (first, joined) = tokio::join!(
+            service.recover_rejection("profile", &expired, CancellationSignal::never()),
+            service.recover_rejection("profile", &expired, CancellationSignal::never()),
+        );
+        assert_eq!(
+            first,
+            signalbox_model_runtime::CredentialRejectionRecovery::Unavailable
+        );
+        assert_eq!(
+            joined,
+            signalbox_model_runtime::CredentialRejectionRecovery::Unavailable
+        );
+        let lease = repository.lock_dispatch("profile").await?.expect("profile");
+        let stored = lease.authorization().expect("authorization");
+        assert!(
+            stored.quarantine.is_none(),
+            "access-token rejection does not quarantine"
+        );
+        assert!(!stored.refresh_in_progress);
+        lease.commit().await?;
+        assert_eq!(server.join().map_err(|_| "TLS server panicked")??.len(), 1);
+        Ok(())
     }
 
     #[tokio::test]
@@ -566,6 +831,7 @@ mod tests {
             // A token at Codex's five-minute boundary must be refreshed before installation.
             state.access = Some(CachedAccess {
                 generation,
+                refreshed_after_rejection: false,
                 token: CredentialValue::new(b"near-expiry-access".to_vec()),
                 expires_at: Some(Instant::now() + Duration::from_secs(5 * 60)),
             });

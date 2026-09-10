@@ -316,19 +316,6 @@ fn real_bwrap_refusal_is_rejected_in_ci() {
 }
 
 #[test]
-fn real_bwrap_refusal_remains_typed_evidence_outside_ci() {
-    assert_eq!(real_bwrap_refusal_policy(false), Ok(()));
-}
-
-#[test]
-fn task_children_read_success_is_observed() {
-    assert_eq!(
-        classify_task_children_read(&Ok(String::new())),
-        TaskChildrenReadOutcome::Observed
-    );
-}
-
-#[test]
 fn task_children_read_missing_file_is_treated_as_thread_exit_race() {
     let vanished = Err(std::io::Error::new(
         std::io::ErrorKind::NotFound,

@@ -1404,13 +1404,15 @@ async fn run_hub(
     let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
     let automatic_tool_round_limit = configured_usize("max_automatic_tool_rounds_per_turn")?;
     let same_credential_attempt_bound = configured_usize("max_same_credential_attempts_per_turn")?
-        .and_then(NonZeroUsize::new)
-        .ok_or_else(|| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("invalid_same_credential_attempt_bound"),
-            )
-        })?;
+        .map(|bound| {
+            NonZeroUsize::new(bound).ok_or_else(|| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("invalid_same_credential_attempt_bound"),
+                )
+            })
+        })
+        .transpose()?;
     let post_kill_reap_bound = configured_duration("post_kill_reap_bound");
     let native_message_limit = configured_usize("max_native_message_bytes")?;
     let code_host_numeric_bounds = CodeHostNumericBounds::new(

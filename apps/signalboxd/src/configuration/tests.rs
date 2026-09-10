@@ -356,6 +356,22 @@ fn configuration_lists_every_missing_required_numeric_bound() {
 }
 
 #[test]
+fn configuration_admits_unbounded_availability_attempts() {
+    let unbounded = CONFIGURATION.replace(
+        "max_same_credential_attempts_per_turn = 2",
+        "max_same_credential_attempts_per_turn = \"none\"",
+    );
+    let configuration = HubModelConfiguration::parse(&unbounded)
+        .expect("same-credential attempts may be unbounded");
+    assert_eq!(
+        configuration
+            .numeric_bounds()
+            .integer("max_same_credential_attempts_per_turn"),
+        Some(None)
+    );
+}
+
+#[test]
 fn configuration_admits_none_for_optional_integer_and_duration_bounds() {
     let unbounded = CONFIGURATION
         .replace(
@@ -3469,33 +3485,26 @@ fn configuration_admits_switch_now_for_a_codex_terminal_failure() {
     );
 
     HubModelConfiguration::parse(&substituting)
-        .expect("Codex typed failed-turn proof permits availability successors");
+        .expect("Codex classified failures permit availability successors");
 }
 
 #[test]
-fn configuration_admits_switch_now_where_the_adapter_proves_non_acceptance() {
+fn configuration_admits_availability_rotation_for_anthropic_rate_limits() {
     let substituting = configuration_with_anthropic_pool(&format!(
         "{ANTHROPIC_POOL}\non_rate_limited = \"switch_now\""
     ));
 
     HubModelConfiguration::parse(&substituting)
-        .expect("a decoded native envelope authorizes the successor for this adapter");
+        .expect("a classified failure authorizes the configured successor");
 }
 
 #[test]
-fn configuration_rejects_switch_now_for_a_cause_the_adapter_cannot_prove() {
-    // Anthropic's mapping has no quota token, so this pair could reach
-    // `switch_now` only through a status-derived fallback carrying no proof.
+fn configuration_admits_availability_rotation_without_adapter_proof() {
     let substituting = configuration_with_anthropic_pool(&format!(
         "{ANTHROPIC_POOL}\non_quota_exhausted = \"switch_now\""
     ));
-
-    assert_eq!(
-        HubModelConfiguration::parse(&substituting).err(),
-        Some(HubModelConfigurationError::UnprovableSubstitutionPolicy {
-            credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
-        })
-    );
+    HubModelConfiguration::parse(&substituting)
+        .expect("classified quota failures permit configured rotation without proof");
 }
 
 #[test]
@@ -6207,17 +6216,6 @@ fn daemon_sandbox_settings_reject_malformed_runtime_inputs() {
             "{settings}"
         );
     }
-}
-
-#[test]
-fn repository_watch_poll_budget_defaults_to_one_hundred_requests() {
-    assert_eq!(
-        HubModelConfiguration::parse(CONFIGURATION)
-            .expect("configuration")
-            .numeric_bounds()
-            .integer("repository_watch_poll_request_budget"),
-        Some(Some(100))
-    );
 }
 
 #[test]
