@@ -166,6 +166,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;
         }
+        "tool_acknowledgement_tail_is_empty" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            emit_json(&serde_json::json!({
+                "type": "assistant", "parent_tool_use_id": null,
+                "message": {
+                    "id": fixtures::OTHER_MESSAGE_ID, "model": fixtures::MODEL,
+                    "role": "assistant", "content": [],
+                },
+            }))?;
+            success("end_turn", None)?;
+        }
         "tool_acknowledgement_tail_without_result" => {
             assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
             assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
