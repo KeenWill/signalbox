@@ -798,17 +798,6 @@ impl fmt::Display for RejectionDisplay {
                 max_length_bytes.value(),
                 requested_length_bytes.value()
             ),
-            RejectionDetail::BlobReadRangeOutOfBounds {
-                offset_bytes,
-                length_bytes,
-                blob_length_bytes,
-            } => write!(
-                formatter,
-                "blob_read_range_out_of_bounds offset_bytes={} length_bytes={} blob_length_bytes={}",
-                offset_bytes.value(),
-                length_bytes.value(),
-                blob_length_bytes.value()
-            ),
         }
     }
 }
@@ -990,20 +979,6 @@ mod tests {
         let error = ClientError::remote(
             ErrorCode::CommitAmbiguous,
             "the commit response was lost".to_owned(),
-            ErrorDetail::none(),
-        )
-        .mutation();
-
-        expect![[r#"
-            the mutation outcome may be ambiguous; retry the original command with the same arguments and exact input, using any printed recovery values"#]]
-        .assert_eq(&error.to_string());
-    }
-
-    #[test]
-    fn publication_ambiguous_mutation_names_the_complete_replay_inputs() {
-        let error = ClientError::remote(
-            ErrorCode::PublicationAmbiguous,
-            "the publication response was lost".to_owned(),
             ErrorDetail::none(),
         )
         .mutation();

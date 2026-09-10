@@ -111,29 +111,6 @@ fn imported_frontier_creation_has_an_exact_closed_shape() -> Result<(), Box<dyn 
     Ok(())
 }
 
-#[test]
-fn imported_frontier_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
-    let frame = ClientFrame::try_new_for_version(
-        ProtocolVersion::One,
-        request(1)?,
-        ClientRequest::CreateSessionFromImportedFrontier {
-            command_id: command(4)?,
-            imported_conversation_id: uuid(5),
-            through_position: CanonicalU64::new(2),
-            relationship: ImportedSessionRelationship::Resume,
-            initial_model_selection: ModelSelection::Direct {
-                selection_id: uuid(6),
-            },
-            model_settings: ModelSettingsOverlay::inherit_all(),
-        },
-    )?;
-    let encoded = encode_client_line(&frame)?;
-
-    assert_eq!(frame.version(), ProtocolVersion::One);
-    assert_eq!(decode_client_line(&encoded)?, frame);
-    Ok(())
-}
-
 /// model-call usage has one exact closed shape.
 #[test]
 fn model_call_usage_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {

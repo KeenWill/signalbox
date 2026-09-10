@@ -418,7 +418,7 @@ impl RunningRuntime {
                         fixture.model_configuration_with_maximum(match blob_storage {
                             BlobStorageFixtureMode::EnabledWithMaximum(maximum) => maximum,
                             BlobStorageFixtureMode::Disabled | BlobStorageFixtureMode::Enabled => {
-                                268_435_456
+                                21_474_836_480
                             }
                         })
                     },
@@ -661,7 +661,7 @@ impl BlobStorageFixture {
     }
 
     pub(crate) fn model_configuration(&self) -> String {
-        self.model_configuration_with_maximum(268_435_456)
+        self.model_configuration_with_maximum(21_474_836_480)
     }
 
     pub(crate) fn model_configuration_with_maximum(&self, maximum_blob_bytes: u64) -> String {

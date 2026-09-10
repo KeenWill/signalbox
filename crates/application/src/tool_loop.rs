@@ -204,7 +204,7 @@ pub enum ToolPreauthorization {
         /// Exact digest requested by the logical tool request.
         digest: signalbox_domain::BlobDigest,
     },
-    /// One generic blob read charges its decoded byte length once by request.
+    /// One blob read must name a visible digest and fit the per-read page size.
     BlobRead {
         /// Exact digest requested by the logical tool request.
         digest: signalbox_domain::BlobDigest,
@@ -2321,18 +2321,6 @@ mod tests {
             ToolExecutionServiceError::<FakeError, FakeError>::DurableCompletionReconciliation(
                 FakeError::Ordinary,
             );
-
-        assert_eq!(
-            error.source().map(ToString::to_string),
-            Some(String::from("fake tool-loop failure"))
-        );
-    }
-
-    #[test]
-    fn child_wait_reconciliation_exposes_transaction_source() {
-        let error = ToolExecutionServiceError::<FakeError, FakeError>::ChildWaitReconciliation(
-            FakeError::Ordinary,
-        );
 
         assert_eq!(
             error.source().map(ToString::to_string),

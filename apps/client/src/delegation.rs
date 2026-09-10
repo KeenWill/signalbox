@@ -193,8 +193,7 @@ pub(crate) fn delegation_rejection_matches(
         | RejectionDetail::BlobReadLengthOutOfRange { .. }
         | RejectionDetail::StaleGeneration {}
         | RejectionDetail::UnknownPoolPolicy { .. }
-        | RejectionDetail::UnknownCredentialExclusion {}
-        | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
+        | RejectionDetail::UnknownCredentialExclusion {} => false,
     }
 }
 

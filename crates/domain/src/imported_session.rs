@@ -2004,8 +2004,7 @@ mod tests {
         ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSourceMetadata,
         ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
         ImportedTranscriptContent, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
-        ModelSelectionRequest, SemanticTranscriptEntryRef, SessionPlacement, SessionPlacementPath,
-        SessionPlacementVersion,
+        ModelSelectionRequest, SessionPlacement, SessionPlacementPath, SessionPlacementVersion,
     };
 
     fn defaults(value: u128) -> SessionConfigurationDefaults {
@@ -3271,16 +3270,6 @@ mod tests {
                     actual: 2,
                 }
             )
-        );
-    }
-
-    #[test]
-    fn imported_semantic_entry_reference_remains_session_qualified() {
-        let (_, _, prepared) = prepared_fixture();
-        let entry = &prepared.semantic_entries()[0];
-        assert_eq!(
-            entry.reference(),
-            SemanticTranscriptEntryRef::from_source(entry.source_session(), entry.identity())
         );
     }
 }

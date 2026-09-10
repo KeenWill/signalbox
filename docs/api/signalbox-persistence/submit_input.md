@@ -49,6 +49,7 @@ impl error::Error for submit_input::SubmitInputCorruption {
 
 ```rust
 pub enum SubmitInputRepositoryError {
+    BlobStorageUnavailable,
     CheckoutProvisioningPending,
     Database(error::Error),
     CommitAmbiguous(error::Error),

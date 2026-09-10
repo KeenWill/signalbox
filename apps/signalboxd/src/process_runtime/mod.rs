@@ -250,9 +250,7 @@ use crate::telemetry::{ModelMetricDisposition, TelemetryMetrics, TurnMetricOutco
 use crate::{
     BlobStoreRegistry, FatalRecoveryReporter, HubModelConfiguration, LocalProcessListener,
     LocalSocketError, SessionTemplateConfiguration,
-    blob_read_runtime::{
-        BLOB_READ_TIMEOUT, BlobReadError, read_blob_chunk, read_blob_entry, read_blob_metadata,
-    },
+    blob_read_runtime::{BLOB_READ_TIMEOUT, BlobReadError, read_blob_entry, read_blob_metadata},
     blob_upload_runtime::{
         BeginBlobUploadOutcome, BlobUploadError, PendingBlobUpload, begin_blob_upload,
     },

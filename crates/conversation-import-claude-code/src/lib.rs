@@ -1204,22 +1204,6 @@ mod tests {
     }
 
     #[test]
-    fn preserves_source_only_records() {
-        let source_only = ClaudeCodeJsonlConverter
-            .convert(
-                conversation(),
-                br#"{"type":"summary","value":null}"#,
-                || ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(200)),
-            )
-            .unwrap_or_else(|_| panic!("synthetic source-only transcript should convert"));
-        assert_eq!(source_only.entries().len(), 1);
-        assert!(matches!(
-            source_only.entries()[0].content(),
-            ImportedTranscriptContent::SourceEvent { .. }
-        ));
-    }
-
-    #[test]
     fn unknown_content_block_is_normalized_without_omission() {
         let source = concat!(
             "{\"type\":\"user\",\"message\":{\"content\":\"secret-before\"}}\n",

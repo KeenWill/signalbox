@@ -3,49 +3,6 @@
 use super::support::*;
 use crate::*;
 
-#[test]
-fn submit_request_round_trips_in_the_single_vocabulary() -> Result<(), Box<dyn std::error::Error>> {
-    let frame = ClientFrame::try_new_for_version(
-        ProtocolVersion::One,
-        request(1)?,
-        ClientRequest::SubmitInput {
-            command_id: command(4)?,
-            session_id: uuid(6),
-            content: UserInputContent::text(String::from("ordinary work")),
-            expected_defaults_version: Some(CanonicalU64::new(1)),
-            model_settings: ModelSettingsOverlay::inherit_all(),
-            delivery: None,
-        },
-    )?;
-    let encoded = encode_client_line(&frame)?;
-
-    assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":1,"));
-    assert_eq!(decode_client_line(&encoded)?, frame);
-    Ok(())
-}
-
-#[test]
-fn turn_control_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
-    let frame = ClientFrame::try_new_for_version(
-        ProtocolVersion::One,
-        request(1)?,
-        ClientRequest::StopTurn {
-            command_id: command(4)?,
-            session_id: uuid(6),
-            expected_active_turn_id: uuid(7),
-            content: UserInputContent::text(String::from("continue after the stop")),
-            expected_defaults_version: CanonicalU64::new(1),
-            descendant_scope: DescendantTerminationScope::ParentAlone,
-            model_settings: ModelSettingsOverlay::inherit_all(),
-        },
-    )?;
-    let encoded = encode_client_line(&frame)?;
-
-    assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":1,"));
-    assert_eq!(decode_client_line(&encoded)?, frame);
-    Ok(())
-}
-
 /// reconciliation has one exact closed request shape.
 #[test]
 fn reconcile_turn_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {

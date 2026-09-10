@@ -4,7 +4,7 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
-| approval_judge | 10 | 0 | 0 | [approval_judge](approval_judge.md) |
+| approval_judge | 10 | 0 | 1 | [approval_judge](approval_judge.md) |
 | approval_judge_eval | 5 | 0 | 2 | [approval_judge_eval](approval_judge_eval.md) |
 | attention | 5 | 0 | 0 | [attention](attention.md) |
 | automatic_reconciliation | 2 | 0 | 1 | [automatic_reconciliation](automatic_reconciliation.md) |
