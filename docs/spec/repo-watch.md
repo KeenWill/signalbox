@@ -340,6 +340,24 @@ the replacement token.
 
 ## Boundary contracts
 
+The daemon's checked workflow adapters expose rule-event reads, evaluation
+commit and pending submission over the module store. The module revalidates the
+revision, next event, matcher plan and singleton context, then atomically
+commits commands, cursor and a nonmatch, suppression or dispatch receipt.
+Pending evaluation receipts live on the cursor; pending submission bindings and
+results live on the dispatch ledger. Acknowledgement atomically moves the
+completed binding to `workflow_effect_result` and releases the pending slot.
+Both bind stable effect identities to exact method/input bytes independently of
+runs; equal recovery adopts before configuration lookup and changed input
+conflicts, including after acknowledgement and later cursor advancement. Pending
+receipts remain discoverable for successor runs until durable journal adoption;
+an unadopted evaluation prevents selecting the next event for that revision
+through either the workflow reader or the existing evaluator. Submission uses
+the retained commands and existing sink, including checkout and pending
+follow-ups, before recording completion. Recovery adopts a completed submission
+or resumes its binding; an unanswered submission without a binding is ambiguous.
+The existing runtime remains the production orchestrator.
+
 The v2 crate depends on the session ownership crate as its only Signalbox
 dependency. It consumes the seam's lifecycle events and emits only the seam's
 checked session commands. It cannot import core persistence, qualify `public`

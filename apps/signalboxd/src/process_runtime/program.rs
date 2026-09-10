@@ -339,6 +339,7 @@ fn domain_grant(grant: ProgramGrant) -> ProgramCapability {
         ProgramGrant::EvalRecord => ProgramCapability::EvalRecord,
         ProgramGrant::Blob => ProgramCapability::Blob,
         ProgramGrant::Register => ProgramCapability::Register,
+        ProgramGrant::RepoWatch => ProgramCapability::RepoWatch,
     }
 }
 

@@ -446,6 +446,12 @@ pub use signalbox_domain::RepoWatchEventTarget;
 pub use signalbox_domain::RepoWatchLabelMatcher;
 ```
 
+## RepoWatchLabelMatcherInput
+
+```rust
+pub use signalbox_domain::RepoWatchLabelMatcherInput;
+```
+
 ## RepoWatchMatcherV1
 
 ```rust
@@ -456,6 +462,12 @@ pub use signalbox_domain::RepoWatchMatcherV1;
 
 ```rust
 pub use signalbox_domain::RepoWatchMatcherV1Input;
+```
+
+## RepoWatchPattern
+
+```rust
+pub use signalbox_domain::RepoWatchPattern;
 ```
 
 ## RepoWatchRule
