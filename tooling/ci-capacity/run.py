@@ -89,8 +89,38 @@ def trial(mode, workers, repetition):
             )
         return outcomes
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        outcomes = [row for group in pool.map(worker, range(workers)) for row in group]
+    if mode == "libtest":
+        env = os.environ.copy()
+        env.pop("NEXTEST_RUN_ID", None)
+        with (directory / "libtest.log").open("w") as log:
+            try:
+                result = subprocess.run(
+                    command
+                    + ["--ignored", "--exact", f"--test-threads={workers}"]
+                    + names,
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    timeout=180,
+                )
+                code = result.returncode
+            except subprocess.TimeoutExpired:
+                code = 124
+        output = (directory / "libtest.log").read_text()
+        outcomes = [
+            {
+                "test": name,
+                "returncode": 0
+                if code == 0 and f"test {name} ... ok" in output
+                else code or 95,
+            }
+            for name in names
+        ]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            outcomes = [
+                row for group in pool.map(worker, range(workers)) for row in group
+            ]
     # This daemon belongs exclusively to this benchmark. Remove remaining fixture
     # containers before charging the completed trial, including shared-server teardown.
     ids = subprocess.check_output(["docker", "ps", "-aq"], text=True).split()
@@ -133,6 +163,10 @@ order = [
     ("dedicated", 4),
     ("dedicated", 8),
     ("shared", 8),
+    ("shared", 16),
+    ("dedicated", 16),
+    ("libtest", 8),
+    ("libtest", 16),
 ]
 for repetition in range(int(os.environ.get("BENCH_REPETITIONS", "3"))):
     for mode, workers in order if repetition % 2 == 0 else list(reversed(order)):
