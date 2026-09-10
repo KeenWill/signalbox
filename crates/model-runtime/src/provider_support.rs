@@ -101,6 +101,7 @@ pub fn pre_exchange_loss_evidence(cause: LossCause) -> TerminalEvidence {
 /// instead.
 pub fn boundary_loss_evidence(cause: LossCause, exchange: ExchangeFacts) -> TerminalEvidence {
     TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+        response_content_observed: false,
         cause,
         exchange,
         reported_model: None,

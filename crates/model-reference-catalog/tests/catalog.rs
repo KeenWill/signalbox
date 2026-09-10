@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, process::Command};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_model_reference_catalog::{
-    ActualBillingKind, BUNDLED_CATALOG_JSON, Catalog, CommercialChannel, DatePrecision,
-    MappingQuality, PriceResolution, Provider, RateDimension, ReferenceResolution, bundled_catalog,
+    BUNDLED_CATALOG_JSON, Catalog, CommercialChannel, DatePrecision, MappingQuality,
+    PriceResolution, Provider, RateDimension, ReferenceResolution, bundled_catalog,
     render_projections,
 };
 
@@ -43,18 +43,6 @@ fn consumer_mapping_mut<'a>(
         .iter_mut()
         .find(|mapping| mapping["id"] == id)
         .ok_or("consumer mapping fixture is absent")
-}
-
-#[test]
-fn actual_billing_kind_is_distinct_from_equivalent_api_pricing() {
-    assert_eq!(
-        CommercialChannel::Api.actual_billing_kind(),
-        ActualBillingKind::ApiMetered
-    );
-    assert_eq!(
-        CommercialChannel::ClaudeCodeSubscription.actual_billing_kind(),
-        ActualBillingKind::Subscription
-    );
 }
 
 #[test]

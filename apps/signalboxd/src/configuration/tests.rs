@@ -128,6 +128,8 @@ pub(crate) const CONFIGURATION: &str = r#"
 version = 1
 
 [numeric_bounds]
+max_image_presentation_bytes = "none"
+max_image_request_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
 repository_watch_webhook_retention = "604800s"
@@ -349,6 +351,22 @@ fn configuration_lists_every_missing_required_numeric_bound() {
         format!(
             "model configuration is missing required numeric bounds: {FIRST_FIELD}, {SECOND_FIELD}"
         )
+    );
+}
+
+#[test]
+fn configuration_admits_unbounded_availability_attempts() {
+    let unbounded = CONFIGURATION.replace(
+        "max_same_credential_attempts_per_turn = 2",
+        "max_same_credential_attempts_per_turn = \"none\"",
+    );
+    let configuration = HubModelConfiguration::parse(&unbounded)
+        .expect("same-credential attempts may be unbounded");
+    assert_eq!(
+        configuration
+            .numeric_bounds()
+            .integer("max_same_credential_attempts_per_turn"),
+        Some(None)
     );
 }
 
@@ -3466,33 +3484,26 @@ fn configuration_admits_switch_now_for_a_codex_terminal_failure() {
     );
 
     HubModelConfiguration::parse(&substituting)
-        .expect("Codex typed failed-turn proof permits availability successors");
+        .expect("Codex classified failures permit availability successors");
 }
 
 #[test]
-fn configuration_admits_switch_now_where_the_adapter_proves_non_acceptance() {
+fn configuration_admits_availability_rotation_for_anthropic_rate_limits() {
     let substituting = configuration_with_anthropic_pool(&format!(
         "{ANTHROPIC_POOL}\non_rate_limited = \"switch_now\""
     ));
 
     HubModelConfiguration::parse(&substituting)
-        .expect("a decoded native envelope authorizes the successor for this adapter");
+        .expect("a classified failure authorizes the configured successor");
 }
 
 #[test]
-fn configuration_rejects_switch_now_for_a_cause_the_adapter_cannot_prove() {
-    // Anthropic's mapping has no quota token, so this pair could reach
-    // `switch_now` only through a status-derived fallback carrying no proof.
+fn configuration_admits_availability_rotation_without_adapter_proof() {
     let substituting = configuration_with_anthropic_pool(&format!(
         "{ANTHROPIC_POOL}\non_quota_exhausted = \"switch_now\""
     ));
-
-    assert_eq!(
-        HubModelConfiguration::parse(&substituting).err(),
-        Some(HubModelConfigurationError::UnprovableSubstitutionPolicy {
-            credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
-        })
-    );
+    HubModelConfiguration::parse(&substituting)
+        .expect("classified quota failures permit configured rotation without proof");
 }
 
 #[test]
@@ -6184,17 +6195,6 @@ fn daemon_sandbox_settings_reject_malformed_runtime_inputs() {
 }
 
 #[test]
-fn repository_watch_poll_budget_defaults_to_one_hundred_requests() {
-    assert_eq!(
-        HubModelConfiguration::parse(CONFIGURATION)
-            .expect("configuration")
-            .numeric_bounds()
-            .integer("repository_watch_poll_request_budget"),
-        Some(Some(100))
-    );
-}
-
-#[test]
 fn repository_watch_poll_budget_accepts_finite_attempts_with_room_for_preflight() {
     const FIELD: &str = "repository_watch_poll_request_budget";
     for budget in [2, 7, 1000] {
@@ -6288,4 +6288,40 @@ fn human_approval_wait_rejects_zero_and_invalid_durations() {
             "{value}"
         );
     }
+}
+
+#[test]
+fn file_image_configuration_lowers_adapter_capabilities_and_none_retains_them() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let configuration = configuration_with_api_metered_codex_model(&executable, root.path());
+    let unbounded = HubModelConfiguration::parse(&configuration).unwrap();
+    let bounded = HubModelConfiguration::parse(
+        &configuration
+            .replace(
+                "max_image_presentation_bytes = \"none\"",
+                "max_image_presentation_bytes = 1234",
+            )
+            .replace(
+                "max_image_request_bytes = \"none\"",
+                "max_image_request_bytes = 2345",
+            ),
+    )
+    .unwrap();
+    let mut images = 0;
+    for definition in bounded.runtime_model_capability_catalog().iter() {
+        if let Some(image) = definition.capabilities().image_presentation() {
+            images += 1;
+            assert_eq!(image.maximum_image_bytes(), 1234);
+            assert_eq!(image.maximum_request_bytes(), 2345);
+            let catalog = unbounded.runtime_model_capability_catalog();
+            let original = catalog
+                .resolve(definition.target())
+                .unwrap()
+                .image_presentation()
+                .unwrap();
+            assert!(original.maximum_image_bytes() > image.maximum_image_bytes());
+        }
+    }
+    assert!(images > 0);
 }

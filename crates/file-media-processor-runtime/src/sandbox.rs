@@ -332,7 +332,35 @@ impl SandboxedFileMediaProcessor {
             .stderr
             .take()
             .ok_or(ProcessorFailure::Unavailable)?;
-        let stderr_limit = self.ceilings.stderr_bytes();
+        let binary_limit = if let Invocation::Read {
+            reader, request, ..
+        } = &invocation
+        {
+            let identity =
+                ReaderIdentity::try_from(reader.clone()).map_err(|_| ProcessorFailure::Protocol)?;
+            self.readers
+                .get(&identity)
+                .and_then(|reader| {
+                    reader
+                        .views()
+                        .iter()
+                        .find(|view| view.name().as_str() == request.view)
+                })
+                .and_then(|view| match view.bounds() {
+                    signalbox_file_media_runtime::ReadViewBounds::Image {
+                        output_bytes, ..
+                    } => usize::try_from(
+                        output_bytes.min(signalbox_file_media_runtime::MAX_PRESENTED_IMAGE_BYTES),
+                    )
+                    .ok(),
+                    _ => None,
+                })
+        } else {
+            None
+        };
+        let stderr_limit = binary_limit.map_or(self.ceilings.stderr_bytes(), |limit| {
+            limit.saturating_add(1)
+        });
         let mut stderr_task = tokio::spawn(read_and_discard_diagnostics(stderr, stderr_limit));
         let outcome = {
             let session = run_session(
@@ -374,7 +402,33 @@ impl SandboxedFileMediaProcessor {
         let diagnostics = finish_diagnostics(&mut stderr_task).await;
         let outcome = admit_completed(outcome, cancellation);
         match (outcome, diagnostics) {
-            (Ok(output), Ok(())) => Ok(output),
+            (
+                Ok(CompletedOutput::Read(ProcessorReadOutput::GeneratedImage {
+                    media_type,
+                    provider,
+                    reader,
+                    revision,
+                    byte_length,
+                    ..
+                })),
+                Ok(bytes),
+            ) => {
+                if binary_limit.is_none_or(|limit| bytes.len() > limit)
+                    || bytes.len() as u64 != byte_length
+                    || bytes.is_empty()
+                {
+                    return Err(ProcessorFailure::Protocol.into());
+                }
+                Ok(CompletedOutput::Read(ProcessorReadOutput::GeneratedImage {
+                    media_type,
+                    provider,
+                    reader,
+                    revision,
+                    byte_length,
+                    bytes,
+                }))
+            }
+            (Ok(output), Ok(_)) => Ok(output),
             (Err(error), _) => Err(error),
             (Ok(_), Err(())) => Err(ProcessorFailure::Protocol.into()),
         }
@@ -1000,7 +1054,9 @@ async fn read_and_discard_diagnostics(
     mut stderr: tokio::process::ChildStderr,
     retained_limit: usize,
 ) -> Result<Vec<u8>, std::io::Error> {
-    let mut retained = Vec::with_capacity(retained_limit);
+    let mut retained = Vec::with_capacity(
+        retained_limit.min(signalbox_file_media_runtime::MAX_WORKER_STDERR_BYTES),
+    );
     let mut buffer = [0_u8; 4096];
     loop {
         let read = stderr.read(&mut buffer).await?;
@@ -1014,9 +1070,9 @@ async fn read_and_discard_diagnostics(
 
 async fn finish_diagnostics(
     task: &mut JoinHandle<Result<Vec<u8>, std::io::Error>>,
-) -> Result<(), ()> {
+) -> Result<Vec<u8>, ()> {
     match tokio::time::timeout(CLEANUP_TIMEOUT, &mut *task).await {
-        Ok(Ok(Ok(_))) => Ok(()),
+        Ok(Ok(Ok(bytes))) => Ok(bytes),
         Ok(Ok(Err(_))) | Ok(Err(_)) => Err(()),
         Err(_) => {
             task.abort();

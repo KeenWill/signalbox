@@ -58,8 +58,8 @@ pub struct TerminalReport<C> {
 /// - [`ProvenUnsent`](Self::ProvenUnsent): `KnownFailed`, or `Cancelled` when the cause is
 ///   [`UnsentCause::CancelledBeforeSend`] and the caller holds the applied-interrupt proof required
 ///   by docs/spec/model-call-execution.md.
-/// - [`BoundaryLoss`](Self::BoundaryLoss): `Ambiguous` — the request crossed or may have crossed
-///   the acceptance-capable boundary and no definitive response classifies it.
+/// - [`BoundaryLoss`](Self::BoundaryLoss): transient transport loss before response content
+///   is `KnownFailed`; loss after content and unclassified protocol failures are `Ambiguous`.
 ///
 /// A provider-reported model identity is carried as a separate fact where
 /// observed; comparing it with the resolved target (the mismatch rule in
@@ -286,9 +286,20 @@ pub struct RefusalEvidence {
     pub retained_output_tokens: Option<u64>,
 }
 
+/// Result of recovering an invocation-time credential rejection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialRejectionRecovery {
+    /// A refreshed access token is available for a new call on the same profile.
+    Refreshed,
+    /// Refresh failed or an invocation rejected the refreshed token.
+    Unavailable,
+}
+
 /// Evidence for a complete, correlated definitive provider error response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderErrorEvidence {
+    /// Delivery-layer recovery after an invocation rejected an access token.
+    pub credential_recovery: Option<CredentialRejectionRecovery>,
     pub exchange: ExchangeFacts,
     /// The model identity the provider reported before or with the error,
     /// when observed — retained here so the mismatch precedence in
@@ -300,7 +311,8 @@ pub struct ProviderErrorEvidence {
     /// exhaustive, mutually exclusive native mapping).
     pub kind: ProviderErrorKind,
     /// Typed protocol proof that this error ended before any successful
-    /// response stream could have been accepted.
+    /// response stream could have been accepted. Classified availability
+    /// failures do not require this proof to admit a successor attempt.
     pub non_acceptance_proven: bool,
     /// The provider's native error material, retained verbatim as evidence.
     /// Classification never reads it.
@@ -396,12 +408,13 @@ pub enum UnsentCause {
 /// after the request crossed or may have crossed the acceptance-capable
 /// boundary.
 ///
-/// The intended classification for every cause, per
-/// docs/spec/model-call-execution.md, is `Ambiguous`; the causes exist so
-/// the caller and an operator can see *which* ambiguity occurred without
-/// string inspection.
+/// Transport loss before response content follows transient retry policy;
+/// loss after content and unclassified protocol failures are ambiguous.
+/// The caller classifies the typed cause and content progress without string inspection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryLossEvidence {
+    /// For transport loss, whether the adapter observed response content, in either delivery mode.
+    pub response_content_observed: bool,
     pub cause: LossCause,
     /// Exchange facts observed before the loss, when any were.
     pub exchange: ExchangeFacts,
@@ -563,7 +576,7 @@ pub enum StreamInterruption {
     TransportFailure(TransportFacts),
     /// A caller-configured local deadline elapsed mid-stream, keeping the
     /// typed timeout cause visible inside the incomplete-stream fact
-    /// (docs/spec/model-call-execution.md: a timeout after full send is
+    /// (docs/spec/model-call-execution.md: a timeout after response content is
     /// ambiguous).
     TimedOut(TransportFacts),
 }

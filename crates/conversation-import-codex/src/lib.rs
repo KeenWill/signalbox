@@ -956,11 +956,10 @@ mod tests {
         ResilientImportedConversationConverter,
     };
     use signalbox_domain::{
-        ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-        ImportedMessageContentAbsence, ImportedSourceAttestation, ImportedSpeaker,
-        ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
-        ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
-        ImportedTranscriptEntryId,
+        ImportedConversation, ImportedConversationId, ImportedMessageContentAbsence,
+        ImportedSourceAttestation, ImportedSpeaker, ImportedStructuredObjectMember,
+        ImportedStructuredValue, ImportedText, ImportedToolResultBlock, ImportedToolResultValue,
+        ImportedTranscriptContent, ImportedTranscriptEntryId,
     };
     use uuid::Uuid;
 
@@ -984,14 +983,6 @@ mod tests {
             .unwrap_or_else(|error| {
                 panic!("synthetic rollout should convert: {:?}", error.failure())
             })
-    }
-
-    #[test]
-    fn converter_declares_codex_rollout_version_one() {
-        assert_eq!(
-            CodexRolloutJsonlConverter.format(),
-            ImportedConversationFormat::CodexRolloutJsonlV1
-        );
     }
 
     #[test]

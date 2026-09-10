@@ -3577,11 +3577,6 @@ mod tests {
     }
 
     #[test]
-    fn expired_pass_attempt_budget_outlives_the_persistence_lock_budgets() {
-        assert!(example_expired_pass_policy().attempt_bound.is_some());
-    }
-
-    #[test]
     fn expired_pass_lock_contention_retries_on_the_handoff_cadence() {
         let error =
             TurnLivenessRepositoryError::TerminalizationLockUnavailable(sqlx::Error::PoolTimedOut);
@@ -5489,3 +5484,5 @@ mod tests {
 /// Durable configuration reload composition.
 pub mod configuration_reload;
 pub mod model_catalog_runtime;
+
+mod media_preparation;

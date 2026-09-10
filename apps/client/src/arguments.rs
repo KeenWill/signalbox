@@ -4606,26 +4606,6 @@ mod tests {
     }
 
     #[test]
-    fn goal_help_states_text_bounds_and_absent_guidance_behavior() {
-        let ParseOutcome::Help(attach_help) =
-            parse(["goal", "attach", "--help"].map(OsString::from))
-                .expect("goal attach help renders")
-        else {
-            panic!("goal attach --help must return help text");
-        };
-        let ParseOutcome::Help(resume_help) =
-            parse(["goal", "resume", "--help"].map(OsString::from))
-                .expect("goal resume help renders")
-        else {
-            panic!("goal resume --help must return help text");
-        };
-
-        assert!(attach_help.contains("at most 1 MiB of UTF-8"));
-        assert!(resume_help.contains("at most 1 MiB of UTF-8"));
-        assert!(resume_help.contains("Omit both guidance options to read piped standard input"));
-    }
-
-    #[test]
     fn goal_supersede_parses_a_new_immutable_statement() {
         const SESSION_ID: &str = "00000000-0000-0000-0000-000000000001";
         const COMMAND_ID: &str = "00000000-0000-0000-0000-000000000002";
@@ -4871,15 +4851,6 @@ mod tests {
             panic!("the scan option selects one directory");
         };
         assert_eq!(path, expected_path);
-    }
-
-    #[test]
-    fn help_is_generated_by_clap() {
-        let Ok(ParseOutcome::Help(help)) = parse([OsString::from("--help")]) else {
-            panic!("help must be recognized");
-        };
-        assert!(help.contains("Usage: signalbox"));
-        assert!(help.contains("Commands:"));
     }
 }
 

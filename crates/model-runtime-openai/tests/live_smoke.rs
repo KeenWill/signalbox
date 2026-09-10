@@ -156,6 +156,7 @@ mod tests {
     fn native_error_is_not_mistaken_for_a_decoded_refusal() {
         let fixture = completion();
         let evidence = TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            credential_recovery: None,
             exchange: fixture.exchange,
             reported_model: fixture.reported_model,
             usage: fixture.usage,

@@ -417,3 +417,228 @@ mod tests {
         assert!(matches!(mapped, BlobUploadError::PublicationAmbiguous));
     }
 }
+
+/// Publishes and verifies one bounded derived view, then registers its immutable replica.
+pub(crate) async fn publish_generated_artifact(
+    registry: &BlobStoreRegistry,
+    repository: &BlobCatalogRepository,
+    artifact: &signalbox_file_media_runtime::ValidatedMediaArtifact,
+) -> Result<(), signalbox_tools_file_media::FileMediaServiceFailure> {
+    let reference = artifact.reference();
+    let expected = ExpectedBlob::new(
+        BlobDigest::from_bytes(*reference.presented().digest().as_bytes()),
+        reference.byte_length(),
+    );
+    if expected.byte_length() > registry.max_blob_bytes() {
+        return Err(signalbox_file_media_runtime::FileMediaFailure::OutputUnitTooLarge.into());
+    }
+    let (store_name, store) = registry.routed_store(BlobStorageClass::GeneratedArtifact);
+    publish_generated_bytes(
+        registry.staging(),
+        store.as_ref(),
+        repository,
+        BlobStoreBindingRecord::new(store_name.clone(), registry.namespace_id(store_name)),
+        expected,
+        artifact.bytes(),
+    )
+    .await
+}
+
+async fn publish_generated_bytes(
+    staging: &signalbox_blob_store_filesystem::FilesystemBlobStaging,
+    store: &dyn BlobStore,
+    repository: &BlobCatalogRepository,
+    binding: BlobStoreBindingRecord,
+    expected: ExpectedBlob,
+    bytes: &[u8],
+) -> Result<(), signalbox_tools_file_media::FileMediaServiceFailure> {
+    use signalbox_application::OperatorFailureClass;
+    use signalbox_tools_file_media::{FileMediaExecutorError, FileMediaServiceFailure};
+    let operator =
+        |class| FileMediaServiceFailure::Operator(FileMediaExecutorError::from_class(class));
+    let spool = staging.create_upload().await.map_err(|_| {
+        operator(OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        })
+    })?;
+    let mut spool = spool;
+    spool.append(bytes).await.map_err(|_| {
+        operator(OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        })
+    })?;
+    let reader = spool.into_reader().await.map_err(|_| {
+        operator(OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        })
+    })?;
+    let publication = store
+        .put(expected, reader)
+        .await
+        .map_err(|error| match error.kind() {
+            BlobStoreFailureKind::VerificationFailed => {
+                operator(OperatorFailureClass::FailClosedCorruption)
+            }
+            _ => operator(OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }),
+        })?;
+    verify_replica(store, expected, publication.key())
+        .await
+        .map_err(|error| match error {
+            BlobUploadError::Integrity => operator(OperatorFailureClass::FailClosedCorruption),
+            _ => operator(OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }),
+        })?;
+    repository
+        .register_verified_replica(
+            expected,
+            binding.clone(),
+            BlobReplicaRecord::new(binding.store().clone(), publication.key().clone()),
+        )
+        .await
+        .map_err(|error| match error {
+            BlobCatalogRepositoryError::Database(_) => {
+                operator(OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                })
+            }
+            BlobCatalogRepositoryError::CommitAmbiguous(_) => {
+                operator(OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                })
+            }
+            BlobCatalogRepositoryError::Corruption(_) => {
+                operator(OperatorFailureClass::FailClosedCorruption)
+            }
+        })?;
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod generated_tests {
+    use super::*;
+    use signalbox_application::{ClassifyOperatorFailure as _, OperatorFailureClass};
+    use signalbox_blob_store::{
+        BlobObjectKey, BlobReader, BlobStoreError, BlobStoreFuture, OpenedBlob,
+    };
+    use std::{
+        num::NonZeroU64,
+        os::unix::fs::PermissionsExt as _,
+        sync::atomic::{AtomicUsize, Ordering::Relaxed},
+    };
+
+    #[derive(Debug)]
+    struct Store {
+        publication_fails: bool,
+        corrupt: bool,
+        calls: AtomicUsize,
+    }
+    impl BlobStore for Store {
+        fn put<'a>(
+            &'a self,
+            expected: ExpectedBlob,
+            mut source: BlobReader,
+        ) -> BlobStoreFuture<'a, BlobPutOutcome> {
+            Box::pin(async move {
+                assert_eq!(self.calls.fetch_add(1, Relaxed), 0);
+                let mut bytes = Vec::new();
+                source
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|error| BlobStoreError::io("fixture read", error))?;
+                assert_eq!(BlobDigest::digest(&bytes), expected.digest());
+                if self.publication_fails {
+                    return Err(BlobStoreError::unavailable("injected publication failure"));
+                }
+                Ok(BlobPutOutcome::Published {
+                    key: BlobObjectKey::for_digest(expected.digest()),
+                })
+            })
+        }
+        fn open<'a>(&'a self, _: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob> {
+            Box::pin(async move {
+                assert_eq!(self.calls.fetch_add(1, Relaxed), 1);
+                let bytes = if self.corrupt { b"bad" } else { b"art" };
+                Ok(OpenedBlob::new(
+                    3,
+                    Box::new(std::io::Cursor::new(bytes.to_vec())),
+                ))
+            })
+        }
+        fn open_verified<'a>(
+            &'a self,
+            _: ExpectedBlob,
+            _: &'a BlobObjectKey,
+        ) -> BlobStoreFuture<'a, OpenedBlob> {
+            Box::pin(async {
+                Err(BlobStoreError::unavailable(
+                    "unexpected fixture verified open",
+                ))
+            })
+        }
+        fn open_range<'a>(
+            &'a self,
+            _: ExpectedBlob,
+            _: &'a BlobObjectKey,
+            _: u64,
+            _: NonZeroU64,
+        ) -> BlobStoreFuture<'a, OpenedBlob> {
+            Box::pin(async { Err(BlobStoreError::unavailable("unexpected fixture range")) })
+        }
+    }
+    #[tokio::test]
+    async fn file_generated_publication_verification_and_registration_fail_without_a_reference() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://invalid/fixture")
+            .unwrap();
+        pool.close().await;
+        let repository = BlobCatalogRepository::new(pool);
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let staging = signalbox_blob_store_filesystem::FilesystemBlobStaging::try_new(
+            root.path().to_path_buf(),
+        )
+        .unwrap();
+        let expected = ExpectedBlob::new(BlobDigest::digest(b"art"), NonZeroU64::new(3).unwrap());
+        for (publication_fails, corrupt, calls, class) in [
+            (
+                true,
+                false,
+                1,
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+            ),
+            (false, true, 2, OperatorFailureClass::FailClosedCorruption),
+            (
+                false,
+                false,
+                2,
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+            ),
+        ] {
+            let store = Store {
+                publication_fails,
+                corrupt,
+                calls: AtomicUsize::new(0),
+            };
+            let binding = BlobStoreBindingRecord::new(
+                BlobStoreName::try_new("fixture").unwrap(),
+                Uuid::from_u128(1),
+            );
+            let error =
+                publish_generated_bytes(&staging, &store, &repository, binding, expected, b"art")
+                    .await
+                    .unwrap_err();
+            let signalbox_tools_file_media::FileMediaServiceFailure::Operator(error) = error else {
+                panic!("operator failure must retain its class")
+            };
+            assert_eq!(error.operator_failure_class(), class);
+            assert_eq!(store.calls.load(Relaxed), calls);
+        }
+    }
+}

@@ -5570,6 +5570,7 @@ where
 #[track_caller]
 fn completed_text(evidence: ToolExecutorEvidence) -> String {
     match evidence {
+        ToolExecutorEvidence::CompletedMedia { .. } => panic!("expected a text result"),
         ToolExecutorEvidence::CompletedText(text) => text,
         ToolExecutorEvidence::KnownFailed { detail } => {
             panic!("the workspace tool failed: {detail:?}")
@@ -5581,6 +5582,7 @@ fn completed_text(evidence: ToolExecutorEvidence) -> String {
 #[track_caller]
 fn known_failure_detail(evidence: ToolExecutorEvidence) -> String {
     match evidence {
+        ToolExecutorEvidence::CompletedMedia { .. } => panic!("expected a text result"),
         ToolExecutorEvidence::KnownFailed { detail } => detail
             .expect("a session workspace failure carries sanitized detail")
             .as_str()

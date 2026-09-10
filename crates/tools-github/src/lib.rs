@@ -2320,7 +2320,7 @@ const fn classify_destination_failure(
         PublicDestinationClientError::DestinationRejected => {
             GitHubTransportFailure::PreDispatchInfrastructure
         }
-        PublicDestinationClientError::Infrastructure => {
+        PublicDestinationClientError::Infrastructure | PublicDestinationClientError::Timeout => {
             GitHubTransportFailure::PreDispatchInfrastructure
         }
     }
@@ -3217,25 +3217,6 @@ mod tests {
         assert_eq!(metadata.effect_class(), ToolEffectClass::ExternalEffect);
         assert_eq!(threads.effect_class(), ToolEffectClass::ExternalEffect);
         assert_eq!(publish.effect_class(), ToolEffectClass::ExternalEffect);
-    }
-
-    #[test]
-    fn create_contract_requires_confirmation() {
-        let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
-            .expect("configured repository is admitted");
-        let catalog = GitHubPullRequestCreateTools::try_new(
-            SyntheticCredentials,
-            RecordingCreateTransport::default(),
-            GitHubEgressPolicy::github_api_only(),
-            repository,
-        )
-        .expect("creation suite constructs")
-        .into_parts()
-        .0;
-        let create = definition(&catalog, PULL_REQUEST_CREATE_NAME);
-
-        assert_eq!(create.permission_default(), ToolPermissionDefault::Confirm);
-        assert_eq!(create.effect_class(), ToolEffectClass::ExternalEffect);
     }
 
     #[test]

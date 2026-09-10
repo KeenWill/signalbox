@@ -41,8 +41,9 @@
 
 #[cfg(test)]
 use signalbox_model_runtime::{
-    CompletionEvidence, CompletionFinish, PreparationDefect, PreparationFailure,
-    ProviderErrorEvidence, RefusalEvidence,
+    BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
+    LossCause, PreparationDefect, PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence,
+    RefusalEvidence, UnsentCause,
 };
 use std::time::Duration;
 
@@ -51,7 +52,7 @@ use signalbox_model_runtime::{
     CredentialAccessFailure, CredentialReference, CredentialValue, DeliveryMode, ExchangeFacts,
     FinishReason, ModelOperation, ModelRuntime, ModelSettings, NativeErrorFacts, Observation,
     ObservationFact, PreparationOutcome, ProviderErrorKind, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage,
+    TerminalEvidence, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 
@@ -203,6 +204,18 @@ fn require_decoded_response(
     }
 }
 
+/// The exact native facts `without_unproven_refusal` fabricates for the
+/// downgrade: a stable discriminator token and nothing the provider actually
+/// sent.
+#[cfg(test)]
+fn downgraded_refusal_facts() -> NativeErrorFacts {
+    NativeErrorFacts {
+        error_token: Some("refusal".to_string()),
+        error_code: None,
+        message: None,
+    }
+}
+
 /// Asserts a decoded response is well-formed under the compatibility-smoke
 /// contract in `docs/spec/runtime-substrate.md`: a definitive success status
 /// and provider-reported input/output usage *present*. Input tokens must
@@ -231,9 +244,10 @@ fn assert_well_formed_response(decoded: &DecodedResponse) {
     );
 }
 
-/// Credential-free coverage for `require_decoded_response`: the two accepted
-/// evidence variants preserve exchange and usage, while a provider error
-/// exercises the rejected path used by the paid ignored test.
+/// Credential-free, straight-line coverage for `require_decoded_response`'s
+/// branching: one case per accept path and one per rejected variant, so the
+/// classifier the paid ignored test relies on is also exercised by the
+/// ordinary suite.
 #[cfg(test)]
 mod require_decoded_response_tests {
     use super::*;
@@ -284,6 +298,36 @@ mod require_decoded_response_tests {
     }
 
     #[test]
+    fn completed_with_zero_output_tokens_is_accepted() {
+        // The adapter's own streamed fixtures already prove an `end_turn`
+        // response with `output_tokens: Some(0)` decodes as `Completed`
+        // (`stream.rs`), so this classifier must not reject it either —
+        // only `assert_well_formed_response` requires usage merely present,
+        // not positive, for exactly this reason.
+        let expected_exchange = exchange(200);
+        let expected_usage = TokenUsage {
+            input_tokens: Some(3),
+            output_tokens: Some(0),
+            ..TokenUsage::default()
+        };
+
+        let decoded = require_decoded_response(
+            TerminalEvidence::Completed(CompletionEvidence {
+                exchange: expected_exchange.clone(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: Vec::new(),
+                usage: expected_usage,
+            }),
+            &[],
+        );
+
+        assert_eq!(decoded.exchange, expected_exchange);
+        assert_eq!(decoded.usage, expected_usage);
+    }
+
+    #[test]
     fn refusal_is_accepted() {
         let expected_exchange = exchange(200);
         let expected_usage = usage();
@@ -307,22 +351,171 @@ mod require_decoded_response_tests {
     }
 
     #[test]
+    fn refusal_with_zero_output_tokens_is_accepted() {
+        let expected_exchange = exchange(200);
+        let expected_usage = TokenUsage {
+            input_tokens: Some(3),
+            output_tokens: Some(0),
+            ..TokenUsage::default()
+        };
+
+        let decoded = require_decoded_response(
+            TerminalEvidence::Refused(RefusalEvidence {
+                reason: signalbox_model_runtime::RefusalReason::Unspecified,
+                exchange: expected_exchange.clone(),
+                message_id: None,
+                content: Vec::new(),
+                retained_input_tokens: None,
+                retained_output_tokens: None,
+                reported_model: None,
+                usage: expected_usage,
+            }),
+            &refusal_observed(),
+        );
+
+        assert_eq!(decoded.exchange, expected_exchange);
+        assert_eq!(decoded.usage, expected_usage);
+    }
+
+    #[test]
     #[should_panic(expected = "returned no decoded response")]
-    fn native_error_event_inside_a_200_body_panics() {
+    fn downgraded_refusal_shape_without_an_observed_refusal_panics() {
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: exchange(200),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,
                 non_acceptance_proven: false,
-                native: NativeErrorFacts {
-                    error_token: Some("refusal".to_string()),
-                    error_code: None,
-                    message: Some("synthetic upstream failure".to_string()),
-                },
+                native: downgraded_refusal_facts(),
+                usage: usage(),
+            }),
+            &[],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn an_ordinary_observation_is_not_mistaken_for_a_refusal() {
+        let observations = vec![
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::UsageReported(usage()),
+            },
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::FinishReported(FinishReason::EndTurn),
+            },
+        ];
+
+        let _ = require_decoded_response(
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
+                exchange: exchange(200),
+                reported_model: None,
+                kind: ProviderErrorKind::Unrecognized,
+                non_acceptance_proven: false,
+                native: downgraded_refusal_facts(),
+                usage: usage(),
+            }),
+            &observations,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn unrecognized_provider_error_from_a_non_200_status_panics() {
+        let _ = require_decoded_response(
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
+                exchange: exchange(500),
+                reported_model: None,
+                kind: ProviderErrorKind::Unrecognized,
+                non_acceptance_proven: false,
+                native: downgraded_refusal_facts(),
+                usage: TokenUsage::unreported(),
+            }),
+            &refusal_observed(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn unrecognized_200_provider_error_without_the_refusal_token_panics() {
+        // Same `kind` and the same HTTP 200 status as the accepted
+        // downgraded-refusal shape, but missing `without_unproven_refusal`'s
+        // stable discriminator: a hypothetical future HTTP-200 Unrecognized
+        // provider error reached some other way must not be waved through as
+        // a refusal it never was.
+        let _ = require_decoded_response(
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
+                exchange: exchange(200),
+                reported_model: None,
+                kind: ProviderErrorKind::Unrecognized,
+                non_acceptance_proven: false,
+                native: NativeErrorFacts::default(),
                 usage: usage(),
             }),
             &refusal_observed(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn recognized_provider_error_panics() {
+        let _ = require_decoded_response(
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                credential_recovery: None,
+                exchange: exchange(401),
+                reported_model: None,
+                kind: ProviderErrorKind::CredentialRejected,
+                non_acceptance_proven: false,
+                native: NativeErrorFacts::default(),
+                usage: TokenUsage::unreported(),
+            }),
+            &refusal_observed(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn cancellation_confirmed_panics() {
+        let _ = require_decoded_response(
+            TerminalEvidence::CancellationConfirmed(CancellationConfirmedEvidence {
+                exchange: exchange(200),
+                reported_model: None,
+                native: NativeErrorFacts::default(),
+            }),
+            &[],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn proven_unsent_panics() {
+        let _ = require_decoded_response(
+            TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                cause: UnsentCause::CancelledBeforeSend,
+            }),
+            &[],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn boundary_loss_panics() {
+        let _ = require_decoded_response(
+            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: true,
+                cause: LossCause::UnexpectedHttpStatus,
+                exchange: exchange(200),
+                reported_model: None,
+                finish_reported: None,
+                tool_calls: ToolCallsAtLoss::Unobserved,
+                usage: TokenUsage::unreported(),
+            }),
+            &[],
         );
     }
 }
@@ -357,6 +550,15 @@ mod assert_well_formed_response_tests {
     }
 
     #[test]
+    fn present_zero_output_tokens_passes() {
+        // The exact edge both accept paths can legitimately report: a
+        // present-but-zero output count is not a positivity requirement.
+        let mut decoded = well_formed();
+        decoded.usage.output_tokens = Some(0);
+        assert_well_formed_response(&decoded);
+    }
+
+    #[test]
     #[should_panic(expected = "documented success status")]
     fn non_200_status_panics() {
         let mut decoded = well_formed();
@@ -369,6 +571,16 @@ mod assert_well_formed_response_tests {
     fn missing_input_tokens_panics() {
         let mut decoded = well_formed();
         decoded.usage.input_tokens = None;
+        assert_well_formed_response(&decoded);
+    }
+
+    #[test]
+    #[should_panic(expected = "input usage")]
+    fn zero_input_tokens_panics() {
+        // Unlike output, input tokens must be positive: a request that
+        // reached the model always billed at least one.
+        let mut decoded = well_formed();
+        decoded.usage.input_tokens = Some(0);
         assert_well_formed_response(&decoded);
     }
 
