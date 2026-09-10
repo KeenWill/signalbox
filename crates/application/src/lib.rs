@@ -102,11 +102,11 @@ pub use model_execution::{
     ModelConversationMessage, ModelFrontierRenderingError, ModelToolResultContent,
     ModelUserContent, ModelUserContentPart, PrepareModelCallOutcome, PrepareModelCallTransaction,
     PreparedModelCallFailureCause, PreparedModelOperation, ProviderReasoningProvenance,
-    RetainedModelCallExecutionState, RetainedModelCallObservationStatus,
-    RetainedPreparedFailureStatus, ScriptedModelCallCapability, ScriptedModelCallError,
-    ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
-    projected_frontier_container_bytes, projected_frontier_content_bytes,
-    render_model_user_content,
+    RenderedAttachmentSelector, RetainedModelCallExecutionState,
+    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallCapability,
+    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
+    UuidV7ModelCallExecutionIdGenerator, projected_frontier_container_bytes,
+    projected_frontier_content_bytes, render_model_user_content,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{

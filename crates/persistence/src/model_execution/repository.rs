@@ -448,6 +448,7 @@ impl PostgresModelCallRepository {
                                     WHEN 'tool_execution_result' THEN
                                         CASE WHEN attempt.error_kind IS NULL THEN
                                         COALESCE(octet_length(attempt.context_result_text), 0)
+                                        + COALESCE(octet_length(attempt.result_media_reference::text), 0)
                                    ELSE octet_length(jsonb_build_object('error',
                                         jsonb_build_object('kind', attempt.error_kind,
                                                           'detail', attempt.context_error_detail))::text)

@@ -775,7 +775,7 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
 #[cfg(test)]
 mod passthrough_tests {
     use super::*;
-    use crate::app_server::frame::{TextInput, TextInputKind, ThreadOptions, TurnInput};
+    use crate::app_server::frame::{ThreadOptions, TurnInput, UserInput};
     use serde_json::json;
 
     #[test]
@@ -806,6 +806,7 @@ Finish with one short summary of the commit and the thread ids.
         ];
         for delivery in [DeliveryMode::Buffered, DeliveryMode::Streamed] {
             let translated = TranslatedOperation {
+                images: Vec::new(),
                 prompt: prior_user_content.as_bytes().to_vec(),
                 declared_tools: calls
                     .iter()
@@ -821,8 +822,7 @@ Finish with one short summary of the commit and the thread ids.
                     service_tier: None,
                 },
                 TurnInput {
-                    input: vec![TextInput {
-                        kind: TextInputKind::Text,
+                    input: vec![UserInput::Text {
                         text: prior_user_content.into(),
                     }],
                     output_schema: json!({"type":"object"}),

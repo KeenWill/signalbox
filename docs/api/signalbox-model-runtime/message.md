@@ -30,6 +30,8 @@ impl ConversationMessage {
 
 ```rust
 pub enum MessagePart {
+    ImageReference(ImageReference),
+    Image(ImageInput),
     Text(string::String),
     ToolCall(ToolCallProposal),
     ToolResult(ToolResultRecord),

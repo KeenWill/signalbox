@@ -6087,3 +6087,197 @@ async fn assert_bounded_269_kib_batch(arguments: &str) -> Result<Vec<i64>, Box<d
     drop(container);
     Ok(result_limits)
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn file_use_resolution_requires_the_selector_for_repeated_visible_attachments()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::RenderedAttachmentSelector;
+    let (container, pool, _) = migrated_postgres().await?;
+    let seed = 0x133010;
+    let digest = BlobDigest::digest(b"same bytes, different uses");
+    let hidden = BlobDigest::digest(b"catalogued but absent from the frontier");
+    register_fixture_blob(&pool, seed, digest).await?;
+    register_fixture_blob(&pool, seed + 0x100, hidden).await?;
+    let parts = UserContent::try_parts(vec![
+        UserContentPart::Attachment {
+            digest,
+            kind: AttachmentKind::File,
+            media_type: DeclaredMediaType::try_new("text/plain".into())
+                .expect("fixture media type"),
+            display_filename: Some(
+                AttachmentDisplayFilename::try_new("first.txt".into()).expect("fixture filename"),
+            ),
+        },
+        UserContentPart::try_text("between".into()).expect("fixture text"),
+        UserContentPart::Attachment {
+            digest,
+            kind: AttachmentKind::Document,
+            media_type: DeclaredMediaType::try_new("text/csv".into()).expect("fixture media type"),
+            display_filename: Some(
+                AttachmentDisplayFilename::try_new("second.csv".into()).expect("fixture filename"),
+            ),
+        },
+    ])
+    .expect("fixture parts");
+    let input = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(seed + 8)),
+        SessionId::from_uuid(Uuid::from_u128(seed + 1)),
+        parts,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let fixture = checkpoint_restart_model_call_with_input(&pool, seed, false, input, &[]).await?;
+    let authorized = authorize_checkpointed_fixture(&pool, seed, fixture).await?;
+    let (fixture, _, _, _) = commit_authorized_tool_batch(
+        seed,
+        authorized,
+        &[("file_inspect", "{}")],
+        InitialToolApproval::PolicyAuto,
+        ProviderReportedTokenUsage::unreported(),
+        None,
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let batch = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("fixture tool batch");
+    let request = &batch.requests()[0];
+    assert!(
+        repository
+            .resolve_visible_attachment(request, hidden, None)
+            .await?
+            .is_none()
+    );
+    assert!(
+        repository
+            .resolve_visible_attachment(request, digest, None)
+            .await?
+            .is_none()
+    );
+    let entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 10));
+    let selected = repository
+        .resolve_visible_attachment(
+            request,
+            digest,
+            Some(RenderedAttachmentSelector::new(entry, 2)),
+        )
+        .await?
+        .expect("the selected second occurrence is visible");
+    assert_eq!(selected.selector.part_ordinal(), 2);
+    assert_eq!(
+        selected.part,
+        UserContentPart::Attachment {
+            digest,
+            kind: AttachmentKind::Document,
+            media_type: DeclaredMediaType::try_new("text/csv".into()).expect("fixture media type"),
+            display_filename: Some(
+                AttachmentDisplayFilename::try_new("second.csv".into()).expect("fixture filename")
+            )
+        }
+    );
+    assert!(
+        repository
+            .resolve_visible_attachment(
+                request,
+                digest,
+                Some(RenderedAttachmentSelector::new(entry, 1))
+            )
+            .await?
+            .is_none()
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn image_result_commit_is_atomic_and_terminal_reference_is_immutable()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
+    };
+    let (_container, pool, _) = migrated_postgres().await?;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, 0x133_430, "file_read", "{}").await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    let authorized = repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    let identity = |seed| {
+        MediaValidationIdentity::try_new(
+            BlobDigest::from_bytes([seed; 32]),
+            "image/png".into(),
+            "fixture".into(),
+            "png".into(),
+            "v1".into(),
+            MediaValidationEvidence::StrongSignature,
+        )
+        .unwrap()
+    };
+    let reference = ToolMediaReference::image(
+        identity(1),
+        identity(2),
+        std::num::NonZeroU64::new(64).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        sqlx::query(
+            "UPDATE tool_attempt SET result_media_reference = '{}'::jsonb WHERE attempt_id = $1"
+        )
+        .bind(attempt.into_uuid())
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    let observation = authorized
+        .executor_fence()
+        .bind(ToolAttemptObservation::Completed {
+            result: ToolResultContent::Media {
+                text: ToolResultText::try_new("image".into()).unwrap(),
+                reference: reference.clone(),
+            },
+        });
+    sqlx::raw_sql("CREATE FUNCTION reject_fixture_media_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.result_content_kind = 'media' THEN RAISE EXCEPTION 'injected result commit failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_fixture_media_commit BEFORE UPDATE ON tool_attempt FOR EACH ROW EXECUTE FUNCTION reject_fixture_media_commit();").execute(&pool).await?;
+    assert!(
+        repository
+            .commit_observation(observation.clone())
+            .await
+            .is_err()
+    );
+    assert!(repository.load_media_reference(request).await?.is_none());
+    sqlx::raw_sql("DROP TRIGGER reject_fixture_media_commit ON tool_attempt; DROP FUNCTION reject_fixture_media_commit();").execute(&pool).await?;
+    repository.commit_observation(observation.clone()).await?;
+    assert_eq!(
+        repository.load_media_reference(request).await?,
+        Some(reference)
+    );
+    assert_eq!(
+        repository.reread_observation(&observation).await?,
+        signalbox_application::RetainedToolAttemptObservationStatus::AlreadyCommitted
+    );
+    assert!(sqlx::query("UPDATE tool_attempt SET result_media_reference = jsonb_set(result_media_reference, '{byte_length}', '65') WHERE attempt_id = $1").bind(attempt.into_uuid()).execute(&pool).await.is_err());
+    Ok(())
+}

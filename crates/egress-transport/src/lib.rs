@@ -18,6 +18,8 @@ const MAX_RESOLVED_ADDRESSES: usize = 32;
 pub enum WebFetchTransportFailure {
     /// Destination resolution or client setup failed before dispatch.
     RequestFailed,
+    /// The exchange deadline elapsed before a complete bounded response.
+    Timeout,
     /// Dispatch began but no complete bounded response was established.
     DispatchUnknown,
 }
@@ -37,15 +39,13 @@ impl Error for ReqwestWebFetchConstructionError {}
 /// Whether a body stream still holds content after an exact-cap read. Empty
 /// trailing frames are legal and are not evidence that bytes were discarded.
 #[doc(hidden)]
-pub async fn has_more_response_bytes<S, B, E>(
-    stream: &mut S,
-) -> Result<bool, WebFetchTransportFailure>
+pub async fn has_more_response_bytes<S, B, E>(stream: &mut S) -> Result<bool, E>
 where
     S: futures_util::Stream<Item = Result<B, E>> + Unpin,
     B: AsRef<[u8]>,
 {
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| WebFetchTransportFailure::DispatchUnknown)?;
+        let chunk = chunk?;
         if !chunk.as_ref().is_empty() {
             return Ok(true);
         }
@@ -74,7 +74,7 @@ pub async fn public_destination_client(
             timeout
                 .checked_sub(started.elapsed())
                 .filter(|remaining| !remaining.is_zero())
-                .ok_or(PublicDestinationClientError::Infrastructure)
+                .ok_or(PublicDestinationClientError::Timeout)
         })
         .transpose()?;
     build_web_fetch_client(remaining, Some(&destination))
@@ -88,6 +88,8 @@ pub async fn public_destination_client(
 pub enum PublicDestinationClientError {
     /// The destination shape or resolved address set was not public-only.
     DestinationRejected,
+    /// The shared resolution and exchange deadline elapsed before dispatch.
+    Timeout,
     /// DNS resolution or client construction failed before dispatch.
     Infrastructure,
 }
@@ -106,13 +108,7 @@ async fn resolve_public_destination(
         vec![SocketAddr::new(address, port)]
     } else {
         let lookup = tokio::net::lookup_host((host, port));
-        let resolved = match exchange_timeout {
-            Some(timeout) => tokio::time::timeout(timeout, lookup)
-                .await
-                .map_err(|_| PublicDestinationClientError::Infrastructure)?,
-            None => lookup.await,
-        }
-        .map_err(|_| PublicDestinationClientError::Infrastructure)?;
+        let resolved = await_resolution(lookup, exchange_timeout).await?;
         resolved
             .take(MAX_RESOLVED_ADDRESSES + 1)
             .collect::<Vec<_>>()
@@ -129,6 +125,19 @@ async fn resolve_public_destination(
         host: host.to_owned(),
         addresses,
     })
+}
+
+async fn await_resolution<T>(
+    lookup: impl std::future::Future<Output = std::io::Result<T>>,
+    timeout: Option<Duration>,
+) -> Result<T, PublicDestinationClientError> {
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, lookup)
+            .await
+            .map_err(|_| PublicDestinationClientError::Timeout)?,
+        None => lookup.await,
+    }
+    .map_err(|_| PublicDestinationClientError::Infrastructure)
 }
 
 #[doc(hidden)]
@@ -216,6 +225,23 @@ pub fn parse_url_host_ip(host: &str) -> Option<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dns_deadline_expiry_is_distinct_from_lookup_failure() {
+        let expired = await_resolution(
+            std::future::pending::<std::io::Result<()>>(),
+            Some(Duration::ZERO),
+        )
+        .await;
+        assert_eq!(expired, Err(PublicDestinationClientError::Timeout));
+
+        let failed = await_resolution(
+            std::future::ready(Err::<(), _>(std::io::Error::other("DNS unavailable"))),
+            None,
+        )
+        .await;
+        assert_eq!(failed, Err(PublicDestinationClientError::Infrastructure));
+    }
 
     /// Public address classification admits ordinary global-unicast
     /// destinations.

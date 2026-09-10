@@ -126,11 +126,11 @@ pub use credential_pools::{
     CredentialProfile, OauthDelivery,
 };
 pub use daemon_tools::{
-    BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonToolCatalog,
-    DaemonToolComposition, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
-    DaemonToolsConstructionError, MappedDaemonCredentialInputs, PinnedWorkspaceFileSystem,
-    PostgresSessionStatusWriter, PostgresSessionStatusWriterError, SessionWorkspaceRoots,
-    WorkspaceInstructionRootResolver,
+    BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonFileMediaExecutor,
+    DaemonToolCatalog, DaemonToolComposition, DaemonToolExecutor, DaemonToolExecutorError,
+    DaemonTools, DaemonToolsConstructionError, MappedDaemonCredentialInputs,
+    PinnedWorkspaceFileSystem, PostgresSessionStatusWriter, PostgresSessionStatusWriterError,
+    SessionWorkspaceRoots, WorkspaceInstructionRootResolver,
 };
 pub use fenced_database::{
     FencedHubDatabase, FencedHubDatabaseError, FencedPoolFloorReconciliation,
@@ -5489,3 +5489,5 @@ mod tests {
 /// Durable configuration reload composition.
 pub mod configuration_reload;
 pub mod model_catalog_runtime;
+
+mod media_preparation;

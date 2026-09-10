@@ -372,4 +372,40 @@ impl signalbox_application::ToolExecutionTransaction for tool_loop::PostgresTool
                 signalbox_domain::TurnId,
             ) + marker::Send;
 }
+impl tool_loop::PostgresToolLoopRepository {
+    pub async fn resolve_visible_attachment(
+        &self,
+        request: &signalbox_domain::ToolRequest,
+        digest: signalbox_domain::BlobDigest,
+        selector: option::Option<signalbox_application::RenderedAttachmentSelector>,
+    ) -> result::Result<
+        option::Option<tool_loop::VisibleToolAttachment>,
+        tool_loop::ToolLoopRepositoryError,
+    >;
+}
+impl tool_loop::PostgresToolLoopRepository {
+    pub async fn load_media_reference(
+        &self,
+        request: signalbox_domain::ToolRequestId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::ToolMediaReference>,
+        tool_loop::ToolLoopRepositoryError,
+    >;
+}
+impl tool_loop::PostgresToolLoopRepository {
+    pub async fn file_use_target(
+        &self,
+        request: &signalbox_domain::ToolRequest,
+    ) -> result::Result<signalbox_domain::ResolvedProviderTarget, tool_loop::ToolLoopRepositoryError>;
+}
+```
+
+## VisibleToolAttachment
+
+```rust
+pub struct VisibleToolAttachment {
+    pub selector: signalbox_application::RenderedAttachmentSelector,
+    pub part: signalbox_domain::UserContentPart,
+}
+// derives: clone::Clone, fmt::Debug
 ```

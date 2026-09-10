@@ -13,6 +13,7 @@ use crate::bridge::{Catalog, CatalogTool, TOOL_PREFIX, valid_mcp_tool_name};
 
 pub(crate) struct TranslatedOperation {
     pub(crate) prompt: Vec<u8>,
+    pub(crate) input_format: crate::image::InputFormat,
     pub(crate) catalog: Catalog,
     pub(crate) tool_requirement: ToolRequirement,
 }
@@ -51,6 +52,9 @@ struct PromptMessage<'a> {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PromptPart<'a> {
+    Image {
+        media_type: &'a str,
+    },
     Text {
         text: &'a str,
     },
@@ -190,7 +194,10 @@ pub(crate) fn translate<C>(
     )
     .into_bytes();
 
+    let (prompt, input_format) =
+        crate::image::encode_input(operation, prompt).map_err(TranslationError::Failure)?;
     Ok(TranslatedOperation {
+        input_format,
         prompt,
         catalog: Catalog {
             tools: catalog_tools,
@@ -225,13 +232,15 @@ fn render_message(message: &ConversationMessage) -> Result<PromptMessage<'_>, Tr
         let valid = matches!(part, MessagePart::Text(_))
             || matches!(
                 (message.role, part),
-                (ConversationRole::User, MessagePart::ToolResult(_))
-                    | (
-                        ConversationRole::Assistant,
-                        MessagePart::ToolCall(_)
-                            | MessagePart::Thinking { .. }
-                            | MessagePart::RedactedThinking { .. }
-                    )
+                (
+                    ConversationRole::User,
+                    MessagePart::ToolResult(_) | MessagePart::Image(_)
+                ) | (
+                    ConversationRole::Assistant,
+                    MessagePart::ToolCall(_)
+                        | MessagePart::Thinking { .. }
+                        | MessagePart::RedactedThinking { .. }
+                )
             );
         if !valid {
             return Err(TranslationError::Failure(
@@ -254,6 +263,14 @@ fn render_message(message: &ConversationMessage) -> Result<PromptMessage<'_>, Tr
 
 fn render_part(part: &MessagePart) -> Result<PromptPart<'_>, TranslationError> {
     match part {
+        MessagePart::Image(image) => Ok(PromptPart::Image {
+            media_type: &image.media_type,
+        }),
+        MessagePart::ImageReference(_) => Err(TranslationError::Failure(
+            PreparationFailure::UnsupportedOperation {
+                detail: String::from("image reference was not authenticated"),
+            },
+        )),
         MessagePart::Text(text) => Ok(PromptPart::Text { text }),
         MessagePart::ToolCall(call) => Ok(PromptPart::ToolCall {
             id: call.id.as_str(),
@@ -362,10 +379,31 @@ pub(crate) enum TranslationError {
 /// Measures one array-framed history message through the adapter's request serializer.
 /// Returns `None` for a message the adapter cannot render.
 pub fn serialized_message_bytes(message: &ConversationMessage) -> Option<usize> {
-    let rendered = render_message(message).ok()?;
+    let mut projected = message.clone();
+    let mut image_bytes = 0_usize;
+    for part in &mut projected.parts {
+        let (media_type, length) = match part {
+            MessagePart::ImageReference(reference) => (
+                reference.media_type.clone(),
+                usize::try_from(reference.byte_length.get()).ok()?,
+            ),
+            MessagePart::Image(image) => (image.media_type.clone(), image.bytes.len()),
+            _ => continue,
+        };
+        // Reserve base64, its wire envelope, and the image's prompt location label.
+        image_bytes = image_bytes
+            .checked_add(length.checked_add(2)?.checked_div(3)?.checked_mul(4)?)?
+            .checked_add(1024)?;
+        *part = MessagePart::Image(signalbox_model_runtime::ImageInput {
+            media_type,
+            bytes: std::sync::Arc::from([]),
+        });
+    }
+    let rendered = render_message(&projected).ok()?;
     serde_json::to_vec(&[rendered])
-        .ok()
-        .map(|bytes| bytes.len())
+        .ok()?
+        .len()
+        .checked_add(image_bytes)
 }
 
 #[cfg(test)]

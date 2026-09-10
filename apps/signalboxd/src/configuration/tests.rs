@@ -128,6 +128,8 @@ pub(crate) const CONFIGURATION: &str = r#"
 version = 1
 
 [numeric_bounds]
+max_image_presentation_bytes = "none"
+max_image_request_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
 repository_watch_webhook_retention = "604800s"
@@ -6260,6 +6262,21 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
 }
 
 #[test]
+fn file_media_requires_blob_storage_before_worker_startup() {
+    let enabled = format!("file_media = true\n{CONFIGURATION}");
+    assert_eq!(
+        HubModelConfiguration::parse(&enabled).err(),
+        Some(HubModelConfigurationError::InvalidBlobStorageConfiguration)
+    );
+    let disabled = format!("file_media = false\n{CONFIGURATION}");
+    assert!(
+        !HubModelConfiguration::parse(&disabled)
+            .expect("disabled file tools require no store")
+            .file_media()
+    );
+}
+
+#[test]
 fn checked_in_example_admits_unlisted_web_origins() {
     use signalbox_application::ToolCatalog;
     let configuration = super::checked_in_example_configuration().expect("example parses");
@@ -6305,4 +6322,40 @@ fn human_approval_wait_rejects_zero_and_invalid_durations() {
             "{value}"
         );
     }
+}
+
+#[test]
+fn file_image_configuration_lowers_adapter_capabilities_and_none_retains_them() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let configuration = configuration_with_api_metered_codex_model(&executable, root.path());
+    let unbounded = HubModelConfiguration::parse(&configuration).unwrap();
+    let bounded = HubModelConfiguration::parse(
+        &configuration
+            .replace(
+                "max_image_presentation_bytes = \"none\"",
+                "max_image_presentation_bytes = 1234",
+            )
+            .replace(
+                "max_image_request_bytes = \"none\"",
+                "max_image_request_bytes = 2345",
+            ),
+    )
+    .unwrap();
+    let mut images = 0;
+    for definition in bounded.runtime_model_capability_catalog().iter() {
+        if let Some(image) = definition.capabilities().image_presentation() {
+            images += 1;
+            assert_eq!(image.maximum_image_bytes(), 1234);
+            assert_eq!(image.maximum_request_bytes(), 2345);
+            let catalog = unbounded.runtime_model_capability_catalog();
+            let original = catalog
+                .resolve(definition.target())
+                .unwrap()
+                .image_presentation()
+                .unwrap();
+            assert!(original.maximum_image_bytes() > image.maximum_image_bytes());
+        }
+    }
+    assert!(images > 0);
 }
