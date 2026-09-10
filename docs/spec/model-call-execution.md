@@ -78,11 +78,12 @@ compaction checkpoint while retaining the active turn. The daemon summarizes the
 checkpoint through its last safe boundary, then prepares the continuation from
 the results and appended summary after rechecking headroom including the frozen
 system prompt, tool definitions, summary preface, message framing, pending
-steering, and output reservation. Checkpoints schedule a follow-up eligibility
-pass and survive restarts; tool results are reused without execution. Successful
-compaction preserves the same turn and goal lineage for every session kind. A
-failed or refused automatic compaction closes the active checkpoint, as does a
-one-byte summary that still lacks continuation headroom.
+steering, and output reservation. Admission retires the checkpoint when it
+prepares a call or parks for credential availability. Checkpoints schedule a
+follow-up eligibility pass and survive restarts; tool results are reused without
+execution. Successful compaction preserves the same turn and goal lineage for
+every session kind. A failed or refused automatic compaction closes the active
+checkpoint, as does a one-byte summary that still lacks continuation headroom.
 
 Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen
