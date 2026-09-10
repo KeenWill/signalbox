@@ -3659,6 +3659,17 @@ function assertTimelineDetailPage(value) {{
               "ambiguous for the recovery target attempt",
             );
           }}
+          if (
+            physical !== null &&
+            item.body.state.type === "child_wait_resumed" &&
+            physical.attempt_id === item.body.state.tool_attempt_id &&
+            physical.state !== "awaiting_child"
+          ) {{
+            fail(
+              `${{path}}.body.tools[0].evidence.state`,
+              "awaiting_child for the resumed target attempt",
+            );
+          }}
           if (physical !== null) {{
             const terminalFailure = physical.state === "known_failed";
             if (physical.result_present && physical.state !== "completed") {{

@@ -39,5 +39,16 @@ ALTER TABLE tool_batch_transition_outbox_event
         )
     ),
     ADD CONSTRAINT tool_batch_transition_outbox_version_supported CHECK (
-        storage_version IN (1, 2)
+        (
+            transition_kind IN (
+                'proposed',
+                'results_projected',
+                'recovery_required'
+            )
+            AND storage_version IN (1, 2)
+        )
+        OR (
+            transition_kind = 'child_wait_resumed'
+            AND storage_version = 2
+        )
     );

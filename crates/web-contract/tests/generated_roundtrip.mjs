@@ -3237,6 +3237,45 @@ test("tool batches accept only tool-produced goal events", () => {
   }
 });
 
+test("child wait resumptions require the matching attempt to await its child", () => {
+  const page = userInputDetailPage();
+  const attemptId = "00000000-0000-0000-0000-000000000994";
+  page.items[0].kind = "tool_batch_transition";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  page.items[0].body = {
+    type: "tool_batch",
+    turn_id: "00000000-0000-0000-0000-000000000992",
+    producing_model_call_id: "00000000-0000-0000-0000-000000000993",
+    state: { type: "child_wait_resumed", tool_attempt_id: attemptId },
+    projected_member_index: 0,
+    tools: [{
+      request_id: "00000000-0000-0000-0000-000000000995",
+      tool_name: "spawn_agent",
+      arguments: { text: "", offset_bytes: "0", total_bytes: "0", continuation: null },
+      approval_posture: "auto",
+      approval_judge_escalated: false,
+      evidence: {
+        type: "physical_attempt",
+        attempt_id: attemptId,
+        result_present: false,
+        failure_present: false,
+        effect_posture: "external_effect",
+        state: "awaiting_child",
+      },
+    }],
+    goal_events: [],
+  };
+
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  for (const state of ["prepared", "in_flight", "completed", "known_failed", "ambiguous"]) {
+    page.items[0].body.tools[0].evidence.state = state;
+    assert.throws(
+      () => decodeWebSessionTimelineDetailPage(page),
+      /awaiting_child for the resumed target attempt/,
+    );
+  }
+});
+
 test("goal evidence belongs to the enclosing detail session", () => {
   const page = userInputDetailPage();
   page.items[0].kind = "goal_changed";

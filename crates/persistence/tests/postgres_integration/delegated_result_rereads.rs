@@ -2324,6 +2324,33 @@ async fn successive_foreground_results_resume_the_same_tool_batch_and_emit_trans
     .fetch_one(&pool)
     .await?;
     assert_eq!(resumed_storage_version, 2);
+    let unsupported_version = sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event (event_kind, storage_version, session_id)
+            VALUES ('tool_batch_transition', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO tool_batch_transition_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, producing_model_call_id, transition_kind, frontier_id,
+             tool_attempt_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $2, $3, 'child_wait_resumed', NULL, $4
+           FROM header",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.call.into_uuid())
+    .bind(await_attempt.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a child-wait resumption requires tool-batch storage version 2");
+    assert_eq!(
+        unsupported_version
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("tool_batch_transition_outbox_version_supported")
+    );
     assert!(matches!(
         OutboxDispatcher::new(pool.clone())
             .dispatch_next(|event| {
