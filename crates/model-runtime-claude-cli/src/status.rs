@@ -63,6 +63,7 @@ pub(crate) fn classify_error(
                 "insufficient_quota",
                 "usage limit reached",
                 "hit your usage limit",
+                "hit your session limit",
                 "error_max_budget_usd",
             ],
         ) =>

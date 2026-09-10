@@ -73,6 +73,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     system_init(&arguments)?;
     match scenario.as_str() {
+        "session_limit" => {
+            emit_json(&serde_json::json!({
+                "type": "result", "subtype": "success", "is_error": true,
+                "session_id": fixtures::SESSION_ID, "stop_reason": "stop_sequence",
+                "result": "You've hit your session limit",
+                "usage": {"input_tokens": 0, "output_tokens": 0,
+                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+            }))?;
+        }
         "native_prompt_too_large" => {
             emit_json(&serde_json::json!({
                 "type": "result", "subtype": "success", "is_error": true,
