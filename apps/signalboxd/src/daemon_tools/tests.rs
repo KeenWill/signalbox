@@ -6886,6 +6886,33 @@ fn mapped_composition_registers_git_push_with_a_push_credential() {
 }
 
 #[test]
+fn repository_identity_traverses_a_search_only_ancestor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = tempfile::tempdir().expect("identity fixture");
+    let ancestor = fixture.path().join("search-only");
+    let root = ancestor.join("repository");
+    git2::Repository::init(&root).expect("repository");
+    let expected = ComposedWorkspaceIdentity::capture(&root).expect("readable ancestry");
+    // The owner gets only search permission, as a different user would under 0711.
+    fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o111))
+        .expect("search-only ancestor");
+    let listing = fs::read_dir(&ancestor);
+    let captured = ComposedWorkspaceIdentity::capture(&root);
+    fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o700))
+        .expect("restore fixture for cleanup");
+
+    assert_eq!(
+        listing.expect_err("ancestor cannot be listed").kind(),
+        ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        captured.expect("search permission permits identity capture"),
+        expected
+    );
+}
+
+#[test]
 fn linked_worktrees_sharing_common_administration_cannot_bind_separate_sessions() {
     let fixture = tempfile::tempdir().expect("linked identity fixture");
     let main = fixture.path().join("main");

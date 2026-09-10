@@ -181,6 +181,66 @@ fn worktree_diff_renders_a_tracked_directory_replaced_by_a_file() {
 }
 
 #[test]
+fn worktree_diff_keeps_later_changes_after_a_large_mode_only_change() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    repository
+        .config()
+        .expect("config")
+        .set_bool("core.filemode", true)
+        .expect("file modes enabled");
+    let mode_path = fixture.root().join("a-mode.txt");
+    fs::write(&mode_path, vec![b'x'; MAX_DIFF_BYTES + 1]).expect("blob beyond the preview prefix");
+    fs::set_permissions(&mode_path, fs::Permissions::from_mode(0o644)).expect("base mode");
+    commit_all(&repository, "base modes");
+    fs::set_permissions(&mode_path, fs::Permissions::from_mode(0o755)).expect("executable mode");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("later content change");
+
+    let diff = execute(
+        &fixture.executor(),
+        LocalOperation::Diff(GitDiffArguments::Worktree),
+    );
+    let patch = diff["patch"].as_str().expect("patch text");
+    assert!(patch.contains("old mode 100644\nnew mode 100755"));
+    assert!(patch.contains(&format!("+{}", CHANGED_CONTENT.trim_end())));
+    assert_eq!(diff["truncated"], false);
+}
+
+#[test]
+fn worktree_diff_keeps_later_changes_after_a_large_index_backed_mode_only_change() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    repository
+        .config()
+        .expect("config")
+        .set_bool("core.filemode", true)
+        .expect("file modes enabled");
+    let mode_path = fixture.root().join("a-mode.txt");
+    fs::write(&mode_path, vec![b'x'; MAX_DIFF_BYTES + 1]).expect("blob beyond the preview prefix");
+    fs::set_permissions(&mode_path, fs::Permissions::from_mode(0o644)).expect("base mode");
+    commit_all(&repository, "base modes");
+    let mut index = repository.index().expect("index");
+    let mut entry = index
+        .get_path(Path::new("a-mode.txt"), 0)
+        .expect("mode entry");
+    entry.mode = 0o100755;
+    entry.flags_extended |= crate::limits::INDEX_SKIP_WORKTREE;
+    index.add(&entry).expect("skip-worktree mode stages");
+    index.write().expect("index writes");
+    fs::remove_file(&mode_path).expect("skip-worktree file removes");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("later content change");
+
+    let diff = execute(
+        &fixture.executor(),
+        LocalOperation::Diff(GitDiffArguments::Worktree),
+    );
+    let patch = diff["patch"].as_str().expect("patch text");
+    assert!(patch.contains("old mode 100644\nnew mode 100755"));
+    assert!(patch.contains(&format!("+{}", CHANGED_CONTENT.trim_end())));
+    assert_eq!(diff["truncated"], false);
+}
+
+#[test]
 fn worktree_diff_reports_an_executable_mode_only_change() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");

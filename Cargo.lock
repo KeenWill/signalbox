@@ -4996,6 +4996,7 @@ dependencies = [
  "http-body-util",
  "image",
  "jiff",
+ "libc",
  "mime",
  "opentelemetry",
  "opentelemetry-otlp",
