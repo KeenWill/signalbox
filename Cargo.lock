@@ -5019,6 +5019,7 @@ dependencies = [
  "signalbox-conversation-import-codex",
  "signalbox-derive",
  "signalbox-domain",
+ "signalbox-file-media-adapter-pdf",
  "signalbox-file-media-adapters-image",
  "signalbox-file-media-adapters-text",
  "signalbox-file-media-processor-runtime",
