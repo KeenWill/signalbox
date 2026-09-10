@@ -25,3 +25,6 @@ tokio = { version = "1.53.0", default-features = false, features = [
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+signalbox-test-bin = { path = "../test-bin" }

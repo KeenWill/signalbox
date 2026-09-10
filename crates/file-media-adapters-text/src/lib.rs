@@ -22,7 +22,7 @@ const PROVIDER_NAME: &str = "signalbox_text";
 const TEXT_READER_NAME: &str = "utf8_text";
 const JSON_READER_NAME: &str = "json";
 const CSV_READER_NAME: &str = "csv";
-const READER_REVISION: &str = "v1";
+const READER_REVISION: &str = "v2";
 const TEXT_MEDIA_TYPE: &str = "text/plain";
 const JSON_MEDIA_TYPE: &str = "application/json";
 const CSV_MEDIA_TYPE: &str = "text/csv";
@@ -34,7 +34,7 @@ const PROBE_PREFIX_BYTES: u64 = 4_096;
 /// Hard safety ceiling; bounds whole-source parsing and result allocation.
 pub const MAX_TEXT_FAMILY_BYTES: u64 = 131_072;
 
-/// Compiled provider for the three version-one text-family readers.
+/// Compiled provider for the three text-family readers.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TextFamilyProvider;
 
@@ -185,7 +185,7 @@ fn reader(input: ReaderInput<'_>) -> Result<ReaderDeclaration, Box<dyn Error + S
 fn text_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> {
     Ok(ReadViewDeclaration::try_new(
         ReadViewName::try_new(TEXT_VIEW_NAME)?,
-        String::from("Reads the complete file as exact UTF-8 text."),
+        String::from("Reads one bounded UTF-8 section, with a continuation when more remain."),
         empty_options_schema()?,
         ReadAccessPattern::Streaming { maximum_ranges: 1 },
         ReadViewBounds::Text {
