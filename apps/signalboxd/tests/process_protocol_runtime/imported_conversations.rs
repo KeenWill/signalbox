@@ -140,6 +140,8 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
         concat!(
             "{\"sessionId\":\"operational-claude\",\"type\":\"user\",",
             "\"message\":{\"role\":\"user\",\"content\":\"question\"}}\n",
+            "{\"sessionId\":\"operational-claude\",\"type\":\"user\",",
+            "\"message\":{\"role\":\"user\",\"content\":7}}\n",
             "{\"sessionId\":\"operational-claude\",\"type\":\"assistant\",",
             "\"message\":{\"role\":\"assistant\",\"content\":\"answer\"}}"
         )
@@ -152,7 +154,7 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
             ProtocolVersion::One,
             1,
             ClientRequest::ImportConversation {
-                format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
+                format: ConversationImportFormat::ClaudeCodeSessionJsonlV3,
                 source: source.clone(),
             },
         )
@@ -166,16 +168,22 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
         inserted.message(),
         &ServerMessage::ConversationImportInserted {
             imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+            dropped_record_count: CanonicalU64::new(1),
+            first_dropped_record_position: Some(CanonicalU64::new(2)),
         }
     );
 
-    let declared_size_bytes = CanonicalU64::new(u64::try_from(source.as_bytes().len())?);
+    let mut chunked_bytes = Vec::with_capacity(source.as_bytes().len() + 1);
+    chunked_bytes.push(b'\n');
+    chunked_bytes.extend_from_slice(source.as_bytes());
+    let chunked_source = ConversationImportSource::new(chunked_bytes);
+    let declared_size_bytes = CanonicalU64::new(u64::try_from(chunked_source.as_bytes().len())?);
     connection
         .request_version(
             ProtocolVersion::One,
             2,
             ClientRequest::BeginConversationImport {
-                format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
+                format: ConversationImportFormat::ClaudeCodeSessionJsonlV3,
                 declared_size_bytes,
             },
         )
@@ -191,7 +199,9 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
         .request_version(
             ProtocolVersion::One,
             3,
-            ClientRequest::AppendConversationImport { chunk: source },
+            ClientRequest::AppendConversationImport {
+                chunk: chunked_source,
+            },
         )
         .await?;
     let appended = response_within(&mut connection).await?;
@@ -213,6 +223,138 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
         already_imported.message(),
         &ServerMessage::ConversationImportAlreadyImported {
             imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+            dropped_record_count: CanonicalU64::new(2),
+            first_dropped_record_position: Some(CanonicalU64::new(1)),
+        }
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            5,
+            ClientRequest::ReadImportedConversation {
+                imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+            },
+        )
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::ImportedConversationStart {
+            imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+            dropped_record_count: CanonicalU64::new(1),
+            first_dropped_record_position: Some(CanonicalU64::new(2)),
+        }
+    );
+    for _ in 0..2 {
+        assert!(matches!(
+            response_within(&mut connection).await?.message(),
+            ServerMessage::ImportedConversationEntry { .. }
+        ));
+    }
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::ImportedConversationEnd { .. }
+    ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// an inline import applies the configured raw-record ceiling before blob storage and reports the
+/// same content-silent converter rejection as the chunked path.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inline_record_above_blob_maximum_is_a_raw_record_rejection() -> Result<(), Box<dyn Error>>
+{
+    let runtime = RunningRuntime::start_with_blob_storage_maximum(96).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let source = ConversationImportSource::new(
+        format!(
+            "{{\"sessionId\":\"inline-limit\",\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{}\"}}}}",
+            "x".repeat(128)
+        )
+        .into_bytes(),
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            1,
+            ClientRequest::ImportConversation {
+                format: ConversationImportFormat::ClaudeCodeSessionJsonlV3,
+                source,
+            },
+        )
+        .await?;
+    let rejected = response_within(&mut connection).await?;
+    assert_eq!(
+        protocol_error_code(rejected.message()),
+        ErrorCode::InvalidRequest
+    );
+    assert_eq!(
+        protocol_error_detail(rejected.message()),
+        Some(RejectionDetail::ConversationImportConversionFailed {
+            class: ConversationImportRejectionClass::RawRecordTooLarge,
+            record_ordinal: Some(CanonicalU64::new(1)),
+        })
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// terminal inspection advances through more than one bounded PostgreSQL entry page.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inspection_streams_across_database_pages() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let source = (1..=129)
+        .map(|position| {
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"entry-{position}\"}}}}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes();
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            1,
+            ClientRequest::ImportConversation {
+                format: ConversationImportFormat::ClaudeCodeSessionJsonlV3,
+                source: ConversationImportSource::new(source),
+            },
+        )
+        .await?;
+    let conversation = require_inserted_import_receipt(&mut connection).await?;
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            2,
+            ClientRequest::ReadImportedConversation {
+                imported_conversation_id: conversation,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::ImportedConversationStart { .. }
+    ));
+    for position in 1..=129 {
+        assert!(matches!(
+            response_within(&mut connection).await?.message(),
+            ServerMessage::ImportedConversationEntry { position: observed, .. }
+                if *observed == CanonicalU64::new(position)
+        ));
+    }
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::ImportedConversationEnd {
+            imported_conversation_id: conversation,
+            entry_count: CanonicalU64::new(129),
         }
     );
 
@@ -233,7 +375,7 @@ async fn disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dyn Er
             ProtocolVersion::One,
             1,
             ClientRequest::BeginConversationImport {
-                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                format: ConversationImportFormat::CodexRolloutJsonlV2,
                 declared_size_bytes,
             },
         )
@@ -269,7 +411,7 @@ async fn disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dyn Er
             ProtocolVersion::One,
             3,
             ClientRequest::BeginConversationImport {
-                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                format: ConversationImportFormat::CodexRolloutJsonlV2,
                 declared_size_bytes,
             },
         )
@@ -373,6 +515,8 @@ async fn reads_every_selectable_imported_position() -> Result<(), Box<dyn Error>
         start.message(),
         &ServerMessage::ImportedConversationStart {
             imported_conversation_id: fixture.conversation,
+            dropped_record_count: CanonicalU64::new(0),
+            first_dropped_record_position: None,
         }
     );
     let first = response_within(&mut connection).await?;
@@ -620,7 +764,7 @@ async fn selects_the_codex_rollout_converter() -> Result<(), Box<dyn Error>> {
             ProtocolVersion::One,
             1,
             ClientRequest::ImportConversation {
-                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                format: ConversationImportFormat::CodexRolloutJsonlV2,
                 source,
             },
         )
@@ -634,6 +778,8 @@ async fn selects_the_codex_rollout_converter() -> Result<(), Box<dyn Error>> {
         inserted.message(),
         &ServerMessage::ConversationImportInserted {
             imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+            dropped_record_count: CanonicalU64::new(0),
+            first_dropped_record_position: None,
         }
     );
     let stored = ImportedConversationRepository::new(runtime.pool.clone())
@@ -642,7 +788,7 @@ async fn selects_the_codex_rollout_converter() -> Result<(), Box<dyn Error>> {
         .expect("the successful operation inserted its imported conversation");
     assert_eq!(
         stored.format(),
-        ImportedConversationFormat::CodexRolloutJsonlV1
+        ImportedConversationFormat::CodexRolloutJsonlV2
     );
 
     drop(connection);
@@ -657,6 +803,7 @@ pub(crate) async fn require_inserted_import_receipt(
     match response_within(connection).await?.message() {
         ServerMessage::ConversationImportInserted {
             imported_conversation_id,
+            ..
         } => Ok(*imported_conversation_id),
         message => Err(io::Error::other(format!("unexpected import receipt: {message:?}")).into()),
     }
@@ -714,7 +861,7 @@ async fn lists_native_and_imported_conversations() -> Result<(), Box<dyn Error>>
             ProtocolVersion::One,
             30,
             ClientRequest::ImportConversation {
-                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                format: ConversationImportFormat::CodexRolloutJsonlV2,
                 source,
             },
         )
@@ -773,7 +920,7 @@ async fn lists_native_and_imported_conversations() -> Result<(), Box<dyn Error>>
         imported_conversation_id,
         title: Some(title),
         entry_count,
-        source_format: ImportedConversationSourceFormat::CodexRolloutJsonlV1,
+        source_format: ImportedConversationSourceFormat::CodexRolloutJsonlV2,
     } = imported
     else {
         panic!("fixture expected imported conversation summary");

@@ -133,11 +133,7 @@ rust_binary(
 
 rust_binary(
     name = "signalbox-approval-judge-eval",
-    compile_data = CRATE_COMPILE_DATA + [
-        "//crates/approval-judge-eval:corpora/seed-responses-v1.json",
-        "//crates/approval-judge-eval:corpora/seed-scorecard-v1.json",
-        "//crates/approval-judge-eval:corpora/seed-v1.json",
-    ],
+    compile_data = CRATE_COMPILE_DATA,
     crate_features = CRATE_FEATURES,
     crate_root = "src/bin/signalbox-approval-judge-eval.rs",
     proc_macro_deps = CRATE_PROC_MACRO_DEPS,
@@ -395,6 +391,9 @@ rust_integration_test(
     srcs = glob(["tests/**/*.rs"]),
     args = ["--test-threads=4"],
     compile_data = [
+        "//crates/approval-judge-eval:corpora/seed-v1.json",
+        "//crates/approval-judge-eval:corpora/seed-responses-v1.json",
+        "//crates/approval-judge-eval:corpora/seed-scorecard-v1.json",
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
     ],
@@ -406,12 +405,14 @@ rust_integration_test(
         exclude = ["tests/**/*.rs"],
     ) + [
         ":approval-judge-eval",
+        ":signalbox-approval-judge-eval",
         ":signalbox-debug",
         ":signalboxd",
         "//:config/session-templates.example.toml",
     ],
     env = {
         "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_signalbox_approval_judge_eval": "$(rootpath :signalbox-approval-judge-eval)",
         "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
         "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
         "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
@@ -419,6 +420,7 @@ rust_integration_test(
     proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     rustc_env = {
         "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_signalbox-approval-judge-eval": "$(rootpath :signalbox-approval-judge-eval)",
         "CARGO_BIN_EXE_approval-judge-eval": "$(rootpath :approval-judge-eval)",
         "CARGO_BIN_EXE_signalbox-debug": "$(rootpath :signalbox-debug)",
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",

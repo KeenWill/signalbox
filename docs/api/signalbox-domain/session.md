@@ -151,6 +151,18 @@ impl CreateSessionFromImportedFrontier {
     >
     where
         NextSemanticEntryId: function::FnMut() -> SemanticTranscriptEntryId;
+    pub fn prepare_normalized<NextSemanticEntryId>(
+        self,
+        imported_entries: &[ImportedTranscriptEntryInput],
+        session: SessionId,
+        seed_frontier: ContextFrontierId,
+        next_semantic_entry_id: NextSemanticEntryId,
+    ) -> result::Result<
+        PreparedCreateSessionFromImportedFrontier,
+        CreateSessionFromImportedFrontierPreparationError,
+    >
+    where
+        NextSemanticEntryId: function::FnMut() -> SemanticTranscriptEntryId;
 }
 impl CreateSessionFromImportedFrontier {
     pub fn with_runner_placement(

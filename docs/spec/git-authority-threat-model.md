@@ -23,7 +23,8 @@ configuration, references, lock state, and object data into private snapshots;
 the typed Git library, `git2`, works only on those snapshots. Status, diff, and
 log capture objects on demand into a private database and revalidate their
 source bindings before returning; unrelated historical object contents are not
-copied.
+copied. Packed-object decoding packs are discarded after the selected object is
+copied into the private database.
 
 Pushing is a separate surface with its own authority. A push names a branch; its
 destination is a remote the deployment configured, never one the caller chose. A
@@ -44,6 +45,9 @@ never discovers a repository or opens the live administration tree by an ambient
 or caller-selected path. The suite never searches the current directory,
 ancestors, environment, home directory, or process-global Git state for a
 repository.
+
+Commit trees are rebuilt from the validated staged index entries; optional index
+tree caches do not supply objects to the commit.
 
 Live administration reads are implemented in the authority layer rather than
 through a path-based repository API, because such an API cannot express the

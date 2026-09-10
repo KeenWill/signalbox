@@ -683,6 +683,19 @@ impl ObjectSource {
                 None => break,
             }
         }
+        if let [(kind, content)] = entries.as_slice() {
+            let kind = match kind {
+                1 => ObjectType::Commit,
+                2 => ObjectType::Tree,
+                3 => ObjectType::Blob,
+                4 => ObjectType::Tag,
+                _ => return Err(LocalGitFailure::Repository),
+            };
+            if database.write(kind, content).map_err(rejected)? != oid {
+                return Err(LocalGitFailure::Repository);
+            }
+            return Ok(());
+        }
         // Emit the selected dependency chain base-first with new OFS_DELTA offsets.
         let mut pack = b"PACK\0\0\0\x02".to_vec();
         pack.extend_from_slice(&(entries.len() as u32).to_be_bytes());
@@ -718,10 +731,27 @@ impl ObjectSource {
             ObjectFormat::Sha256 => Sha256::digest(&pack).to_vec(),
         };
         pack.extend_from_slice(&checksum);
-        let mut writer = database.packwriter().map_err(rejected)?;
+        // Decode the selected chain in a disposable database. Retaining one pack
+        // per captured object makes later object lookups scan an expanding pack set.
+        let directory = tempfile::tempdir().map_err(rejected)?;
+        let mut options = git2::RepositoryInitOptions::new();
+        options
+            .bare(true)
+            .no_reinit(true)
+            .external_template(false)
+            .object_format(self.format);
+        let repository =
+            git2::Repository::init_opts(directory.path(), &options).map_err(rejected)?;
+        let decoded = repository.odb().map_err(rejected)?;
+        let mut writer = decoded.packwriter().map_err(rejected)?;
         writer.write_all(&pack).map_err(rejected)?;
         writer.commit().map_err(rejected)?;
-        if !database.exists(oid) {
+        let object = decoded.read(oid).map_err(rejected)?;
+        if database
+            .write(object.kind(), object.data())
+            .map_err(rejected)?
+            != oid
+        {
             return Err(LocalGitFailure::Repository);
         }
         Ok(())

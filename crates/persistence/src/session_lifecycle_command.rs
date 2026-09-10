@@ -293,6 +293,9 @@ async fn apply(
             .execute(&mut *connection)
             .await?;
     }
+    if matches!(command.operation(), SessionLifecycleOperation::Resume) {
+        session_lifecycle::lock_supervision_frontier(connection, session).await?;
+    }
     let held = match load_locked(connection, session).await {
         Ok(held) => held,
         Err(SessionLifecycleRepositoryError::UnknownSession(_)) => {

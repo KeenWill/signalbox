@@ -286,6 +286,8 @@ private actor MockProcessProtocolState {
           [
             "type": "imported_conversation_start",
             "imported_conversation_id": MockProcessProtocolFixtures.importedConversationID,
+            "dropped_record_count": "1",
+            "first_dropped_record_position": "2",
           ],
           [
             "type": "imported_conversation_entry",

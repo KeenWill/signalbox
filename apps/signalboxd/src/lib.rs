@@ -47,6 +47,7 @@ use tokio::{
 use tracing::Instrument;
 pub mod approval_judge_eval;
 mod approval_wait_wakeups;
+pub mod eval_client;
 pub use approval_wait_wakeups::ApprovalWaitWakeups;
 mod attachment_preparation_runtime;
 mod blob_read_runtime;
@@ -63,6 +64,7 @@ mod credential_pools;
 mod daemon_tools;
 mod fenced_database;
 mod goal_mode;
+pub mod guard_recovery;
 mod imported_source_blobs;
 mod lifecycle_deadline_runtime;
 mod lifecycle_metrics_runtime;
@@ -307,7 +309,17 @@ pub trait ActivatedTurnExecution {
     }
 
     /// Reports that durable activation may require startup recovery.
-    fn report_post_activation_failure(&self) {}
+    fn report_post_activation_failure(
+        &self,
+        _session: SessionId,
+        _failure: SessionExecutionFailure,
+    ) {
+    }
+
+    /// Whether local supervision has suspended this session pending its durable park.
+    fn session_is_suspended(&self, _session: SessionId) -> bool {
+        false
+    }
 
     /// Captures a synchronous marker applied before bounded cancellation.
     fn occupancy_expiry_handler(&self) -> Option<std::sync::Arc<dyn SchedulerPassExpiryHandler>> {
@@ -484,40 +496,209 @@ where
         }
     }
 
-    fn report_post_activation_failure(&self) {
-        self.execution.report_post_activation_failure();
+    fn report_post_activation_failure(&self, session: SessionId, failure: SessionExecutionFailure) {
+        self.execution
+            .report_post_activation_failure(session, failure);
+    }
+
+    fn session_is_suspended(&self, session: SessionId) -> bool {
+        self.execution.session_is_suspended(session)
     }
 }
 
-/// Cheap-clone handle that raises the daemon's fatal recovery signal.
-///
-/// The scheduler pass reaches the signal through its execution role, but the
-/// connection runtime has no execution role and still observes durable
-/// outcomes the running process cannot decide. Both raise the same signal
-/// through this one handle rather than growing a second recovery mechanism.
+/// One session-scoped execution failure, excluding adapter-authored detail.
+#[derive(Clone, Copy, Debug)]
+pub struct SessionExecutionFailure {
+    class: OperatorFailureClass,
+    cause_code: &'static str,
+}
+
+impl SessionExecutionFailure {
+    fn classified(error: &impl ClassifyOperatorFailure) -> Self {
+        Self {
+            class: error.operator_failure_class(),
+            cause_code: error.operator_failure_cause_code(),
+        }
+    }
+}
+
+impl ClassifyOperatorFailure for SessionExecutionFailure {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        self.class
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        self.cause_code
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct FatalRecoveryRequests {
+    process_recovery: bool,
+    pending: std::collections::HashMap<SessionId, SessionExecutionFailure>,
+    suspended: std::collections::HashSet<SessionId>,
+}
+
+impl FatalRecoveryRequests {
+    fn is_triggered(&self) -> bool {
+        self.process_recovery || !self.pending.is_empty()
+    }
+}
+
+/// Cheap-clone reporter for process-wide or session-scoped recovery evidence.
 #[derive(Clone, Debug)]
 pub struct FatalRecoveryReporter {
-    fatal_signal: watch::Sender<bool>,
+    fatal_signal: watch::Sender<FatalRecoveryRequests>,
 }
 
 impl FatalRecoveryReporter {
-    /// Reports that durable state may require startup recovery.
+    /// Reports recovery for infrastructure that has no session scope.
     pub fn report_recovery_required(&self) {
-        self.fatal_signal.send_replace(true);
+        self.fatal_signal
+            .send_modify(|state| state.process_recovery = true);
+    }
+
+    /// Suspends exactly one session until its cause has been parked durably.
+    pub fn report_session_recovery_required(&self, session: SessionId) {
+        self.report_session_failure(
+            session,
+            SessionExecutionFailure {
+                class: OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                },
+                cause_code: "session_commit_ambiguous",
+            },
+        );
+    }
+
+    fn report_session_failure(&self, session: SessionId, failure: SessionExecutionFailure) {
+        self.fatal_signal.send_modify(|state| {
+            state.suspended.insert(session);
+            state.pending.entry(session).or_insert(failure);
+        });
+    }
+
+    async fn record_session_failure<Write, Outcome>(
+        &self,
+        session: SessionId,
+        nudge: &signalbox_application::InProcessEligibilityNudge,
+        write: Write,
+    ) -> Result<(), signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError>
+    where
+        Write: FnOnce() -> Outcome,
+        Outcome: std::future::Future<
+                Output = Result<
+                    (),
+                    signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError,
+                >,
+            >,
+    {
+        let result = write().await;
+        if result.is_ok() {
+            self.fatal_signal.send_modify(|state| {
+                state.pending.remove(&session);
+                state.suspended.remove(&session);
+            });
+            nudge.nudge_waiting_for_capacity(session).await;
+        }
+        result
+    }
+
+    /// Records session failures in the operator queue while other sessions execute.
+    pub async fn park_failed_sessions(
+        &self,
+        pool: sqlx::PgPool,
+        nudge: signalbox_application::InProcessEligibilityNudge,
+    ) {
+        let retry_delay = pool.options().get_acquire_timeout();
+        let repository =
+            signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(pool);
+        self.park_failed_sessions_with(retry_delay, nudge, |session, failure, mut state| {
+            let repository = repository.clone();
+            async move {
+                let result = repository
+                    .record_supervision_failure_with_state(session, &failure, &mut state)
+                    .await;
+                (state, result)
+            }
+        })
+        .await;
+    }
+
+    async fn park_failed_sessions_with<Write, Outcome>(
+        &self,
+        retry_delay: std::time::Duration,
+        nudge: signalbox_application::InProcessEligibilityNudge,
+        mut write: Write,
+    ) where
+        Write: FnMut(
+            SessionId,
+            SessionExecutionFailure,
+            signalbox_persistence::session_lifecycle::SessionSupervisionWrite,
+        ) -> Outcome,
+        Outcome: std::future::Future<
+                Output = (
+                    signalbox_persistence::session_lifecycle::SessionSupervisionWrite,
+                    Result<
+                        (),
+                        signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError,
+                    >,
+                ),
+            >,
+    {
+        let mut writes = std::collections::HashMap::new();
+        let mut changed = self.fatal_signal.subscribe();
+        loop {
+            let pending = changed.borrow_and_update().pending.clone();
+            for (session, failure) in pending {
+                let state = writes.remove(&session).unwrap_or_default();
+                let (state, result) = write(session, failure, state).await;
+                let result = self
+                    .record_session_failure(session, &nudge, || std::future::ready(result))
+                    .await;
+                if result.is_err() {
+                    writes.insert(session, state);
+                }
+                tracing::error!(
+                    session = %session.as_uuid(),
+                    failure_class = ?failure.class,
+                    cause = failure.cause_code,
+                    persisted = result.is_ok(),
+                    "session execution suspended for operator recovery"
+                );
+            }
+            let retry_pending = !changed.borrow().pending.is_empty();
+            tokio::select! {
+                result = changed.changed() => {
+                    if result.is_err() { return; }
+                }
+                () = tokio::time::sleep(retry_delay), if retry_pending => {}
+            }
+        }
     }
 }
 
 /// Cloneable signal raised when an activated turn may require recovery.
 #[derive(Clone, Debug)]
 pub struct FatalExecutionSignal {
-    triggered: watch::Receiver<bool>,
+    triggered: watch::Receiver<FatalRecoveryRequests>,
 }
 
 impl FatalExecutionSignal {
     /// Waits until an activated-turn execution reports failure.
     pub async fn wait(&self) {
         let mut triggered = self.triggered.clone();
-        while !*triggered.borrow_and_update() {
+        while !triggered.borrow_and_update().is_triggered() {
+            if triggered.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    /// Waits for recovery of infrastructure that has no session scope.
+    pub async fn wait_for_process_recovery(&self) {
+        let mut triggered = self.triggered.clone();
+        while !triggered.borrow_and_update().process_recovery {
             if triggered.changed().await.is_err() {
                 std::future::pending::<()>().await;
             }
@@ -526,18 +707,15 @@ impl FatalExecutionSignal {
 
     /// Reports whether activated-turn execution has failed.
     pub fn is_triggered(&self) -> bool {
-        *self.triggered.borrow()
+        self.triggered.borrow().is_triggered()
     }
 }
 
-/// Raises a fatal runtime signal when durable activation may require recovery.
-///
-/// The hub composition root uses the signal to stop scheduling and exit, so
-/// startup recovery can regain authority over the active durable turn.
+/// Suspends failed session execution until its durable operator park is recorded.
 #[derive(Clone, Debug)]
 pub struct FatalExecutionSupervisor<Execution> {
     execution: Execution,
-    fatal_signal: watch::Sender<bool>,
+    fatal_signal: watch::Sender<FatalRecoveryRequests>,
     bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
 }
 
@@ -560,7 +738,7 @@ impl<Execution> FatalExecutionSupervisor<Execution> {
 
     /// Wraps one execution role and returns its independently awaitable signal.
     pub fn new(execution: Execution) -> (Self, FatalExecutionSignal) {
-        let (fatal_signal, triggered) = watch::channel(false);
+        let (fatal_signal, triggered) = watch::channel(FatalRecoveryRequests::default());
         (
             Self {
                 execution,
@@ -655,8 +833,13 @@ where
         Execution::active_resume_failure_turn(error)
     }
 
-    fn report_post_activation_failure(&self) {
-        self.recovery_reporter().report_recovery_required();
+    fn report_post_activation_failure(&self, session: SessionId, failure: SessionExecutionFailure) {
+        self.recovery_reporter()
+            .report_session_failure(session, failure);
+    }
+
+    fn session_is_suspended(&self, session: SessionId) -> bool {
+        self.fatal_signal.borrow().suspended.contains(&session)
     }
 
     fn occupancy_expiry_handler(&self) -> Option<std::sync::Arc<dyn SchedulerPassExpiryHandler>> {
@@ -667,7 +850,7 @@ where
 }
 
 async fn supervise_execution_for_session<Execution, ExecutionError>(
-    fatal_signal: watch::Sender<bool>,
+    fatal_signal: watch::Sender<FatalRecoveryRequests>,
     bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
     session: SessionId,
     execution: Execution,
@@ -675,14 +858,20 @@ async fn supervise_execution_for_session<Execution, ExecutionError>(
 ) -> Result<(), ExecutionError>
 where
     Execution: Future<Output = Result<(), ExecutionError>>,
+    ExecutionError: ClassifyOperatorFailure,
 {
-    let fatal_on_drop = FatalOnIncompleteExecution::new(fatal_signal, bounded_expirations, session);
+    let mut fatal_on_drop =
+        FatalOnIncompleteExecution::new(fatal_signal, bounded_expirations, session);
     let result = execution.await;
     let requires_recovery = match &result {
         Ok(()) => false,
         Err(error) => failure_requires_recovery(error),
     };
-    if !requires_recovery {
+    if requires_recovery {
+        if let Err(error) = &result {
+            fatal_on_drop.failure = Some(SessionExecutionFailure::classified(error));
+        }
+    } else {
         fatal_on_drop.disarm();
     }
     result
@@ -690,11 +879,12 @@ where
 
 #[cfg(test)]
 async fn supervise_execution<Execution, ExecutionError>(
-    fatal_signal: watch::Sender<bool>,
+    fatal_signal: watch::Sender<FatalRecoveryRequests>,
     execution: Execution,
 ) -> Result<(), ExecutionError>
 where
     Execution: Future<Output = Result<(), ExecutionError>>,
+    ExecutionError: ClassifyOperatorFailure,
 {
     supervise_execution_for_session(
         fatal_signal,
@@ -707,7 +897,7 @@ where
 }
 
 async fn supervise_active_resume<Execution, Resume>(
-    fatal_signal: watch::Sender<bool>,
+    fatal_signal: watch::Sender<FatalRecoveryRequests>,
     bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
     session: SessionId,
     resume: Resume,
@@ -716,13 +906,18 @@ where
     Execution: ActivatedTurnExecution,
     Resume: Future<Output = Result<(), Execution::Error>>,
 {
-    let fatal_on_drop = FatalOnIncompleteExecution::new(fatal_signal, bounded_expirations, session);
+    let mut fatal_on_drop =
+        FatalOnIncompleteExecution::new(fatal_signal, bounded_expirations, session);
     let result = resume.await;
     let requires_recovery = match &result {
         Ok(()) => false,
         Err(error) => Execution::active_resume_failure_requires_recovery(error),
     };
-    if !requires_recovery {
+    if requires_recovery {
+        if let Err(error) = &result {
+            fatal_on_drop.failure = Some(SessionExecutionFailure::classified(error));
+        }
+    } else {
         fatal_on_drop.disarm();
     }
     result
@@ -879,14 +1074,15 @@ struct FatalExecutionGuardState {
 }
 
 struct FatalOnIncompleteExecution {
-    fatal_signal: Option<watch::Sender<bool>>,
+    failure: Option<SessionExecutionFailure>,
+    fatal_signal: Option<watch::Sender<FatalRecoveryRequests>>,
     bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
     session: SessionId,
 }
 
 impl FatalOnIncompleteExecution {
     fn new(
-        fatal_signal: watch::Sender<bool>,
+        fatal_signal: watch::Sender<FatalRecoveryRequests>,
         bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
         session: SessionId,
     ) -> Self {
@@ -896,6 +1092,7 @@ impl FatalOnIncompleteExecution {
             .active_sessions
             .insert(session);
         Self {
+            failure: None,
             fatal_signal: Some(fatal_signal),
             bounded_expirations,
             session,
@@ -916,7 +1113,15 @@ impl Drop for FatalOnIncompleteExecution {
         state.active_sessions.remove(&self.session);
         let bounded = state.bounded_expirations.remove(&self.session);
         if !bounded && let Some(fatal_signal) = self.fatal_signal.take() {
-            fatal_signal.send_replace(true);
+            let failure = self.failure.unwrap_or(SessionExecutionFailure {
+                class: OperatorFailureClass::CallerOrHubBug,
+                cause_code: if std::thread::panicking() {
+                    "execution_unwind"
+                } else {
+                    "execution_cancelled"
+                },
+            });
+            FatalRecoveryReporter { fatal_signal }.report_session_failure(self.session, failure);
         }
     }
 }
@@ -1390,6 +1595,9 @@ where
                 std::sync::Arc::clone(&observe_turn),
             );
         async move {
+            if execution.session_is_suspended(session) {
+                return Ok(());
+            }
             if let Err(source) = execution
                 .resume_active_with_observer(session, std::sync::Arc::clone(&observe_turn))
                 .await
@@ -1416,13 +1624,15 @@ where
                     .await;
                 drop(compaction_window);
                 if let Err(error) = compacted {
-                    return Err(reported_usage_compaction_failure(&execution, error));
+                    return Err(reported_usage_compaction_failure(
+                        &execution, session, error,
+                    ));
                 }
             }
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    report_ambiguous_commit(&execution, &error);
+                    report_ambiguous_commit(&execution, session, &error);
                     return Err(ActivatedTurnPassError::Activation(error));
                 }
             };
@@ -2109,24 +2319,29 @@ fn turn_work_span(session: SessionId, turn: TurnId) -> tracing::Span {
 /// declared class for exactly that state. Every eligibility pass able to
 /// observe it owes the same reported outcome, so the reaction is defined once
 /// here instead of being restated — and diverging — per pass.
-pub(crate) fn report_ambiguous_commit<Execution, Failure>(execution: &Execution, error: &Failure)
-where
+pub(crate) fn report_ambiguous_commit<Execution, Failure>(
+    execution: &Execution,
+    session: SessionId,
+    error: &Failure,
+) where
     Execution: ActivatedTurnExecution,
     Failure: ClassifyOperatorFailure,
 {
     if commit_outcome_is_unknown(error) {
-        execution.report_post_activation_failure();
+        execution
+            .report_post_activation_failure(session, SessionExecutionFailure::classified(error));
     }
 }
 
 fn reported_usage_compaction_failure<Execution, ActivationError>(
     execution: &Execution,
+    session: SessionId,
     error: ReportedUsageCompactionError,
 ) -> ActivatedTurnPassError<ActivationError, Execution::Error>
 where
     Execution: ActivatedTurnExecution,
 {
-    report_ambiguous_commit(execution, &error);
+    report_ambiguous_commit(execution, session, &error);
     ActivatedTurnPassError::ReportedUsageCompaction(error)
 }
 
@@ -2156,7 +2371,13 @@ where
     if actual == expected {
         true
     } else {
-        execution.report_post_activation_failure();
+        execution.report_post_activation_failure(
+            expected,
+            SessionExecutionFailure {
+                class: OperatorFailureClass::CallerOrHubBug,
+                cause_code: "activation_session_mismatch",
+            },
+        );
         false
     }
 }
@@ -2681,7 +2902,8 @@ async fn execute_approval_judge(
     Ok(match outcome {
         CompleteApprovalJudgeOutcome::Decided
         | CompleteApprovalJudgeOutcome::ClosedInadmissible => ApprovalJudgeLoopOutcome::Continue,
-        CompleteApprovalJudgeOutcome::EscalatedToHuman
+        CompleteApprovalJudgeOutcome::Cancelled
+        | CompleteApprovalJudgeOutcome::EscalatedToHuman
         | CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized => {
             ApprovalJudgeLoopOutcome::Parked
         }
@@ -3535,7 +3757,7 @@ mod tests {
         ExpiredPassObservationSource, ExpiredPassRecoveryPolicy, ExpiredPassRecoverySource,
         ExpiredPassSubject, FailedApprovalJudgeDisposition, FatalExecutionGuardState,
         FatalExecutionOccupancyExpiry, FatalExecutionSignal, FatalExecutionSupervisor,
-        FreshPassAdmission, JudgeRequestFields, MAX_QUOTED_CONTEXT_BYTES,
+        FatalRecoveryRequests, FreshPassAdmission, JudgeRequestFields, MAX_QUOTED_CONTEXT_BYTES,
         ReportedUsageCompactionError, SchedulerPassOccupancyRecovery, SessionAuthorityContext,
         TokenUsage, TurnLivenessRepositoryError, TurnPassExecutionStage,
         WorkspaceInstructionPreparedExecution, WorkspaceInstructionRuntime,
@@ -4492,6 +4714,7 @@ mod tests {
 
     #[test]
     fn ambiguous_reported_usage_failure_closure_raises_the_fatal_recovery_signal() {
+        let session = SessionId::from_uuid(Uuid::from_u128(9));
         let (execution, signal) = FatalExecutionSupervisor::new(NoopExecution);
         let source =
             CommitActivationPreviewError::Activation(StartEligibleTurnRepositoryError::Database {
@@ -4504,7 +4727,7 @@ mod tests {
         };
 
         let reported: ActivatedTurnPassError<ExecutionFailure, ExecutionFailure> =
-            reported_usage_compaction_failure(&execution, error);
+            reported_usage_compaction_failure(&execution, session, error);
 
         assert_reported_usage_compaction_error(reported);
         assert!(signal.is_triggered());
@@ -4535,9 +4758,172 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn supervision_retains_failed_requests_until_the_write_succeeds() {
+        let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
+        let reporter = execution.recovery_reporter();
+        let session = SessionId::from_uuid(Uuid::from_u128(144));
+        reporter.report_session_recovery_required(session);
+        let (nudge, _source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://fixture:fixture@localhost/fixture")
+            .unwrap();
+        pool.close().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            reporter.park_failed_sessions(pool, nudge.clone()),
+        )
+        .await
+        .expect_err("the supervisor waits for further work after a failed write");
+        assert!(
+            reporter
+                .fatal_signal
+                .borrow()
+                .pending
+                .contains_key(&session)
+        );
+        assert!(execution.session_is_suspended(session));
+        reporter
+            .record_session_failure(session, &nudge, || ready(Ok(())))
+            .await
+            .unwrap();
+        assert!(
+            !reporter
+                .fatal_signal
+                .borrow()
+                .pending
+                .contains_key(&session)
+        );
+        assert!(!execution.session_is_suspended(session));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supervision_retries_a_retained_request_without_another_notification() {
+        let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
+        let reporter = execution.recovery_reporter();
+        let session = SessionId::from_uuid(Uuid::from_u128(144));
+        reporter.report_session_recovery_required(session);
+        let (nudge, _source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
+        let mut outcomes = std::collections::VecDeque::from([
+            Err(
+                signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError::Database(
+                    sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+                ),
+            ),
+            Ok(()),
+        ]);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reporter.park_failed_sessions_with(
+                std::time::Duration::from_secs(1),
+                nudge,
+                |reported, _, state| {
+                    assert_eq!(reported, session);
+                    ready((
+                        state,
+                        outcomes
+                            .pop_front()
+                            .expect("acknowledgement removes the retry request"),
+                    ))
+                },
+            ),
+        )
+        .await
+        .expect_err("the supervisor remains available after acknowledgement");
+        assert!(outcomes.is_empty());
+        assert!(
+            !reporter
+                .fatal_signal
+                .borrow()
+                .pending
+                .contains_key(&session)
+        );
+        assert!(!execution.session_is_suspended(session));
+    }
+
+    #[tokio::test]
+    async fn unacknowledged_supervision_keeps_local_suspension() {
+        use signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError;
+        let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
+        let reporter = execution.recovery_reporter();
+        let session = SessionId::from_uuid(Uuid::from_u128(144));
+        reporter.report_session_recovery_required(session);
+        let (nudge, _source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
+        let mut writes = 0;
+        assert!(
+            reporter
+                .record_session_failure(session, &nudge, || {
+                    writes += 1;
+                    ready(Err(SessionLifecycleRepositoryError::CommitAmbiguous(
+                        sqlx::Error::PoolClosed,
+                    )))
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(writes, 1);
+        assert!(execution.session_is_suspended(session));
+    }
+
+    #[tokio::test]
+    async fn releasing_supervision_requeues_a_resume_consumed_during_local_suspension() {
+        use signalbox_application::{EligibilityNudge, EligibilityNudgeOutcome};
+        let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
+        let reporter = execution.recovery_reporter();
+        let session = SessionId::from_uuid(Uuid::from_u128(146));
+        let (nudge, mut source) =
+            InProcessEligibilityWorkSource::with_options(EmptyEligibilitySweep, None, None);
+        reporter.report_session_recovery_required(session);
+        let mut acknowledgement = Some(async {
+            assert_eq!(nudge.nudge(session), EligibilityNudgeOutcome::Enqueued);
+            assert_eq!(source.next().await, Ok(session));
+            assert!(execution.session_is_suspended(session));
+            Ok(())
+        });
+        reporter
+            .record_session_failure(session, &nudge, || {
+                acknowledgement
+                    .take()
+                    .expect("the durable park acknowledges once")
+            })
+            .await
+            .expect("the park commit is acknowledged after the resume hint is consumed");
+        drop(acknowledgement);
+        assert!(!execution.session_is_suspended(session));
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), source.next()).await,
+            Ok(Ok(session)),
+            "resume remains eligible with periodic sweeps disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervision_keeps_local_suspension_when_the_park_cannot_be_recorded() {
+        use signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError;
+        let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
+        let reporter = execution.recovery_reporter();
+        let session = SessionId::from_uuid(Uuid::from_u128(145));
+        reporter.report_session_recovery_required(session);
+        let (nudge, _work_source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
+        let mut writes = 0;
+        assert!(
+            reporter
+                .record_session_failure(session, &nudge, || {
+                    writes += 1;
+                    ready(Err(SessionLifecycleRepositoryError::Database(
+                        sqlx::Error::PoolClosed,
+                    )))
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(writes, 1);
+        assert!(execution.session_is_suspended(session));
+    }
+
     #[tokio::test]
     async fn post_activation_failure_raises_the_fatal_signal() {
-        let (fatal_signal, triggered) = watch::channel(false);
+        let (fatal_signal, triggered) = watch::channel(FatalRecoveryRequests::default());
         let signal = FatalExecutionSignal { triggered };
         assert_eq!(
             supervise_execution(fatal_signal, ready(Err(ExecutionFailure))).await,
@@ -4549,7 +4935,7 @@ mod tests {
 
     #[tokio::test]
     async fn nonambiguous_initial_failure_remains_an_ordinary_pass_error() {
-        let (fatal_signal, triggered) = watch::channel(false);
+        let (fatal_signal, triggered) = watch::channel(FatalRecoveryRequests::default());
         let signal = FatalExecutionSignal { triggered };
 
         assert!(matches!(
@@ -4631,7 +5017,7 @@ mod tests {
         reason = "the test deliberately exercises unwind supervision"
     )]
     async fn activated_execution_unwind_raises_the_fatal_signal() {
-        let (fatal_signal, triggered) = watch::channel(false);
+        let (fatal_signal, triggered) = watch::channel(FatalRecoveryRequests::default());
         let signal = FatalExecutionSignal { triggered };
         let execution = tokio::spawn(supervise_execution(fatal_signal, async {
             panic!("simulated activated-turn execution unwind");
@@ -4709,7 +5095,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_activated_execution_raises_the_fatal_signal() {
-        let (fatal_signal, triggered) = watch::channel(false);
+        let (fatal_signal, triggered) = watch::channel(FatalRecoveryRequests::default());
         let signal = FatalExecutionSignal { triggered };
         let entered = Arc::new(tokio::sync::Notify::new());
         let execution_entered = Arc::clone(&entered);
@@ -4732,7 +5118,7 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_scheduler_expiry_does_not_raise_the_fatal_signal() {
-        let (fatal_signal, triggered) = watch::channel(false);
+        let (fatal_signal, triggered) = watch::channel(FatalRecoveryRequests::default());
         let signal = FatalExecutionSignal { triggered };
         let bounded_expirations =
             Arc::new(std::sync::Mutex::new(FatalExecutionGuardState::default()));
@@ -4767,7 +5153,7 @@ mod tests {
 
     #[tokio::test]
     async fn expiry_outside_guarded_execution_does_not_suppress_later_failure() {
-        let (fatal_signal, triggered) = watch::channel(false);
+        let (fatal_signal, triggered) = watch::channel(FatalRecoveryRequests::default());
         let signal = FatalExecutionSignal { triggered };
         let bounded_expirations =
             Arc::new(std::sync::Mutex::new(FatalExecutionGuardState::default()));

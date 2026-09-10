@@ -534,7 +534,7 @@ test('gates catalog reads on a successful bootstrap', async ({ page }) => {
   })
 
   await page.goto('/sessions')
-  await expect(page.getByText('Unexpected server response')).toBeVisible()
+  await expect(page.getByText('Unexpected daemon response')).toBeVisible()
   await expect(page.getByText('Sessions unavailable')).toBeVisible()
   expect(sessionReads).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -758,7 +758,7 @@ test('classifies a catalog connection failure as transport unavailability', asyn
   await page.goto('/sessions')
   await expect(page.getByRole('heading', { name: "Couldn't load sessions" })).toBeVisible()
   await expect(page.getByRole('alert')).not.toContainText('generated web contract')
-  await expect(page.getByRole('alert')).toContainText("Can't reach the Signalbox server.")
+  await expect(page.getByRole('alert')).toContainText('Signalbox daemon unreachable.')
 })
 
 test('opens a session link directly on a phone without an inspector', async ({ page }) => {

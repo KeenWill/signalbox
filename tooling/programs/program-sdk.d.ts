@@ -93,6 +93,7 @@ declare module "@signalbox/program-sdk/v1" {
   export interface EvalManifest {
     corpus: string; format: "offline" | "live"; cases: number[]; repeats: number;
     binding: JudgeBinding; postures: Record<string, string>; speculative_tools: string[];
+    recorded_responses: { disposition: ApprovalDisposition; rationale: string }[] | null;
   }
   export interface JudgeUsage {
     input_tokens: string | null; output_tokens: string | null;

@@ -776,6 +776,111 @@ impl EligibilitySweep for NoCompactionSweep {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn compaction_rereads_the_checkpoint_after_nudging_eligibility() -> Result<(), Box<dyn Error>>
+{
+    let runtime = RunningRuntime::start().await?;
+    let (session, turn) =
+        exhausted_continuation(&runtime, ContinuationSession::Interactive).await?;
+    let (producing, frontier): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT active_tool_round_call_id, compaction_frontier_id
+           FROM turn_lifecycle WHERE turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let calls = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("continuation-fixture"),
+    )
+    .with_session_credentials(configuration.credential_family_catalog());
+    let (nudge, work) = InProcessEligibilityWorkSource::new(NoCompactionSweep);
+    let work = Arc::new(Mutex::new(work));
+    let nudged = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    // Pause the admission read after the nudge, while another eligibility pass
+    // closes the checkpoint through the ordinary persistence boundary.
+    let compaction_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .before_acquire({
+            let nudged = nudged.clone();
+            let resume = resume.clone();
+            move |_, _| {
+                let eligible = work.lock().expect("work source lock").next().now_or_never();
+                let nudged = nudged.clone();
+                let resume = resume.clone();
+                Box::pin(async move {
+                    if let Some(eligible) = eligible {
+                        assert_eq!(eligible.expect("eligibility nudge"), session);
+                        nudged.notify_one();
+                        resume.notified().await;
+                    }
+                    Ok(true)
+                })
+            }
+        })
+        .connect_with(runtime.pool.connect_options().as_ref().clone())
+        .await?;
+    let summary = ScriptedModel::following([]);
+    let probe = summary.clone();
+    let runtime_models = configuration.runtime_model_catalog();
+    let compaction = ReportedUsageCompaction::new(
+        StartEligibleTurnRepository::new(compaction_pool.clone()),
+        PostgresModelCallRepository::new(
+            compaction_pool.clone(),
+            configuration.target_catalog(),
+            ModelCallCredentialReference::new("continuation-fixture"),
+        )
+        .with_session_credentials(configuration.credential_family_catalog()),
+        NoToolCatalog,
+        runtime_models.clone(),
+        configuration,
+        Arc::new(RuntimeContextCompactionModel::new(summary, runtime_models)),
+    )
+    .with_repository_watch_continuation(nudge, InProcessToolDispatchGate::default());
+    let guard = tokio::spawn(async move { compaction.compact_if_needed(session, None).await });
+    tokio::time::timeout(Duration::from_secs(10), nudged.notified()).await?;
+    let closed = calls
+        .tool_loop_repository()
+        .fail_compaction_checkpoint(
+            session,
+            turn,
+            ModelCallId::from_uuid(producing),
+            ContextFrontierId::from_uuid(frontier),
+            signalbox_application::ToolContinuationIdentities::new(
+                Vec::new(),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ModelCallId::from_uuid(Uuid::now_v7()),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+    assert!(matches!(
+        closed,
+        signalbox_application::PrepareToolContinuationOutcome::ContextCompactionFailed(_)
+    ));
+    resume.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), guard).await???;
+    assert!(probe.received_operations().is_empty());
+    let commands: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM compact_session_command WHERE automatic_for_turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(commands, 0);
+    compaction_pool.close().await;
+    runtime.stop().await
+}
+
 async fn resume_compaction_checkpoint(
     runtime: &RunningRuntime,
     session: SessionId,

@@ -17,15 +17,21 @@ pub(crate) struct ScannedImportPath {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConversationImportOutcome {
-    Inserted(CanonicalUuid),
-    AlreadyImported(CanonicalUuid),
+    Inserted(CanonicalUuid, ConversationImportDropFacts),
+    AlreadyImported(CanonicalUuid, ConversationImportDropFacts),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ConversationImportDropFacts {
+    pub(crate) dropped_record_count: CanonicalU64,
+    pub(crate) first_dropped_record_position: Option<CanonicalU64>,
 }
 
 enum ConversationImportResponse {
     Begun(CanonicalU64),
     Appended(CanonicalU64),
-    Inserted(CanonicalUuid),
-    AlreadyImported(CanonicalUuid),
+    Inserted(CanonicalUuid, ConversationImportDropFacts),
+    AlreadyImported(CanonicalUuid, ConversationImportDropFacts),
     Error {
         code: ErrorCode,
         message: String,
@@ -44,10 +50,26 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         } => ConversationImportResponse::Appended(assembled_size_bytes),
         ServerMessage::ConversationImportInserted {
             imported_conversation_id,
-        } => ConversationImportResponse::Inserted(imported_conversation_id),
+            dropped_record_count,
+            first_dropped_record_position,
+        } => ConversationImportResponse::Inserted(
+            imported_conversation_id,
+            ConversationImportDropFacts {
+                dropped_record_count,
+                first_dropped_record_position,
+            },
+        ),
         ServerMessage::ConversationImportAlreadyImported {
             imported_conversation_id,
-        } => ConversationImportResponse::AlreadyImported(imported_conversation_id),
+            dropped_record_count,
+            first_dropped_record_position,
+        } => ConversationImportResponse::AlreadyImported(
+            imported_conversation_id,
+            ConversationImportDropFacts {
+                dropped_record_count,
+                first_dropped_record_position,
+            },
+        ),
         ServerMessage::Error {
             code,
             message,
@@ -152,6 +174,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ProgramRegistered { .. }
         | ServerMessage::ProgramRunStarted { .. }
         | ServerMessage::ProgramRunRead { .. }
+        | ServerMessage::EvaluationScorecardRead { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }
@@ -403,8 +426,8 @@ where
         } => return Err(ClientError::remote(code, message, detail)),
         ConversationImportResponse::Begun(_)
         | ConversationImportResponse::Appended(_)
-        | ConversationImportResponse::Inserted(_)
-        | ConversationImportResponse::AlreadyImported(_)
+        | ConversationImportResponse::Inserted(_, _)
+        | ConversationImportResponse::AlreadyImported(_, _)
         | ConversationImportResponse::Unexpected => {
             return Err(ClientError::Protocol(
                 "conversation import begin returned an unexpected response",
@@ -454,8 +477,8 @@ where
             } => return Err(ClientError::remote(code, message, detail)),
             ConversationImportResponse::Begun(_)
             | ConversationImportResponse::Appended(_)
-            | ConversationImportResponse::Inserted(_)
-            | ConversationImportResponse::AlreadyImported(_)
+            | ConversationImportResponse::Inserted(_, _)
+            | ConversationImportResponse::AlreadyImported(_, _)
             | ConversationImportResponse::Unexpected => {
                 return Err(ClientError::Protocol(
                     "conversation import append returned an unexpected response",
@@ -470,11 +493,11 @@ where
     match classify_conversation_import_response(
         connection.message().await.map_err(ClientError::mutation)?,
     ) {
-        ConversationImportResponse::Inserted(imported_conversation_id) => Ok(
-            ConversationImportOutcome::Inserted(imported_conversation_id),
+        ConversationImportResponse::Inserted(imported_conversation_id, dropped) => Ok(
+            ConversationImportOutcome::Inserted(imported_conversation_id, dropped),
         ),
-        ConversationImportResponse::AlreadyImported(imported_conversation_id) => Ok(
-            ConversationImportOutcome::AlreadyImported(imported_conversation_id),
+        ConversationImportResponse::AlreadyImported(imported_conversation_id, dropped) => Ok(
+            ConversationImportOutcome::AlreadyImported(imported_conversation_id, dropped),
         ),
         ConversationImportResponse::Error {
             code,
@@ -515,13 +538,25 @@ async fn import_conversation(
     match connection.message().await.map_err(ClientError::mutation)? {
         ServerMessage::ConversationImportInserted {
             imported_conversation_id,
+            dropped_record_count,
+            first_dropped_record_position,
         } => Ok(ConversationImportOutcome::Inserted(
             imported_conversation_id,
+            ConversationImportDropFacts {
+                dropped_record_count,
+                first_dropped_record_position,
+            },
         )),
         ServerMessage::ConversationImportAlreadyImported {
             imported_conversation_id,
+            dropped_record_count,
+            first_dropped_record_position,
         } => Ok(ConversationImportOutcome::AlreadyImported(
             imported_conversation_id,
+            ConversationImportDropFacts {
+                dropped_record_count,
+                first_dropped_record_position,
+            },
         )),
         ServerMessage::Error {
             code,
@@ -537,11 +572,11 @@ pub(crate) fn write_single_import_outcome(
     outcome: ConversationImportOutcome,
 ) -> Result<(), ClientError> {
     match outcome {
-        ConversationImportOutcome::Inserted(imported_conversation_id) => {
-            output.conversation_import_inserted(imported_conversation_id)?;
+        ConversationImportOutcome::Inserted(imported_conversation_id, dropped) => {
+            output.conversation_import_inserted(imported_conversation_id, dropped)?;
         }
-        ConversationImportOutcome::AlreadyImported(imported_conversation_id) => {
-            output.conversation_import_already_imported(imported_conversation_id)?;
+        ConversationImportOutcome::AlreadyImported(imported_conversation_id, dropped) => {
+            output.conversation_import_already_imported(imported_conversation_id, dropped)?;
         }
     }
     Ok(())
@@ -560,16 +595,20 @@ pub(crate) async fn scan_conversations(
             Err(error) => Err(error),
         };
         match outcome {
-            Ok(ConversationImportOutcome::Inserted(imported_conversation_id)) => {
+            Ok(ConversationImportOutcome::Inserted(imported_conversation_id, dropped)) => {
                 summary.imported += 1;
-                output
-                    .conversation_import_scan_inserted(&path.display, imported_conversation_id)?;
+                output.conversation_import_scan_inserted(
+                    &path.display,
+                    imported_conversation_id,
+                    dropped,
+                )?;
             }
-            Ok(ConversationImportOutcome::AlreadyImported(imported_conversation_id)) => {
+            Ok(ConversationImportOutcome::AlreadyImported(imported_conversation_id, dropped)) => {
                 summary.already_imported += 1;
                 output.conversation_import_scan_already_imported(
                     &path.display,
                     imported_conversation_id,
+                    dropped,
                 )?;
             }
             Err(error) => {
@@ -599,11 +638,12 @@ pub(crate) async fn imported(
     imported_conversation_id: CanonicalUuid,
 ) -> Result<(), ClientError> {
     let mut spool = tempfile::tempfile()?;
-    let entry_count = read_imported_conversation(client, imported_conversation_id, |frame| {
-        spool.write_all(&encode_server_line(frame)?)?;
-        Ok(())
-    })
-    .await?;
+    let (entry_count, dropped) =
+        read_imported_conversation(client, imported_conversation_id, |frame| {
+            spool.write_all(&encode_server_line(frame)?)?;
+            Ok(())
+        })
+        .await?;
     spool.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(spool);
     let mut line = Vec::new();
@@ -630,7 +670,7 @@ pub(crate) async fn imported(
         }
         line.clear();
     }
-    output.imported_conversation_entry_count(entry_count)?;
+    output.imported_conversation_entry_count(entry_count, dropped)?;
     Ok(())
 }
 
@@ -640,16 +680,21 @@ pub(crate) async fn read_imported_conversation(
     client: &mut ProcessClient,
     imported_conversation_id: CanonicalUuid,
     mut consume: impl FnMut(&ServerFrame) -> Result<(), ClientError>,
-) -> Result<u64, ClientError> {
+) -> Result<(u64, ConversationImportDropFacts), ClientError> {
     let mut connection = client
         .request(ClientRequest::ReadImportedConversation {
             imported_conversation_id,
         })
         .await?;
-    match connection.message().await? {
+    let dropped = match connection.message().await? {
         ServerMessage::ImportedConversationStart {
             imported_conversation_id: started,
-        } if started == imported_conversation_id => {}
+            dropped_record_count,
+            first_dropped_record_position,
+        } if started == imported_conversation_id => ConversationImportDropFacts {
+            dropped_record_count,
+            first_dropped_record_position,
+        },
         ServerMessage::Error {
             code,
             message,
@@ -660,7 +705,7 @@ pub(crate) async fn read_imported_conversation(
                 "imported conversation did not begin with its start frame",
             ));
         }
-    }
+    };
     let mut entry_count = 0_u64;
     loop {
         let frame = connection.frame().await?;
@@ -688,7 +733,7 @@ pub(crate) async fn read_imported_conversation(
                         "imported conversation reported no entries",
                     ));
                 }
-                return Ok(entry_count);
+                return Ok((entry_count, dropped));
             }
             ServerMessage::Error {
                 code,

@@ -97,6 +97,46 @@ fn first_native_frontier_appends_to_imported_seed() {
     );
 }
 
+/// a bounded imported seed header authenticates scheduling without retaining
+/// any imported semantic member in the scheduling projection.
+#[test]
+fn bounded_imported_seed_schedules_with_no_materialized_prefix_members() {
+    let imported = imported_session();
+    let session = imported.session().clone();
+    let source_frontier = match session.creation_provenance().ancestry() {
+        TranscriptAncestry::ImportedConversation {
+            source_frontier, ..
+        } => source_frontier,
+        _ => panic!("the fixture has imported ancestry"),
+    };
+    let seed = ImportedSessionSeedHeaderReconstitutionInput::new(
+        session.id(),
+        imported.seed_snapshot().frontier().snapshot(),
+        source_frontier.through_position().as_u64(),
+    );
+    let queued = accepted_origin(1);
+    let activation = activation(1);
+
+    let candidate = queued_input(&session, queued)
+        .with_bounded_imported_seed(seed)
+        .reconstitute()
+        .expect("the bounded imported seed admits queued native work")
+        .prepare_earliest_queued_activation(activation.identities())
+        .expect("the native turn does not materialize the imported prefix");
+
+    assert_eq!(
+        candidate
+            .starting_snapshot()
+            .ordered_entries()
+            .collect::<Vec<_>>(),
+        vec![activation.origin_entry().reference(&session)]
+    );
+    assert_eq!(
+        candidate.start().lineage(),
+        AcceptedInputStartingLineage::FirstInSession
+    );
+}
+
 /// restart returns a queued scheduling projection with no
 /// manufactured start, and a cross-wired OriginOf fact fails closed.
 #[test]
