@@ -73,14 +73,31 @@ class DockerResourcesTests(unittest.TestCase):
     def test_command_failure_survives_missing_docker(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "usage.json"
+            sampled = Path(directory) / "sampled"
+
+            def unavailable_docker():
+                sampled.touch()
+                raise FileNotFoundError("docker")
+
+            command = (
+                "import pathlib, sys, time\n"
+                "sampled = pathlib.Path(sys.argv[1])\n"
+                "deadline = time.monotonic() + 10\n"
+                "while not sampled.exists() and time.monotonic() < deadline:\n"
+                "    time.sleep(0.01)\n"
+                "sys.exit(7 if sampled.exists() else 99)\n"
+            )
             with patch.object(
-                resources, "sample_docker", side_effect=FileNotFoundError("docker")
-            ):
+                resources, "sample_docker", side_effect=unavailable_docker
+            ) as sample:
                 result = resources.run_command(
-                    [sys.executable, "-c", "import sys; sys.exit(7)"], output
+                    [sys.executable, "-c", command, str(sampled)], output
                 )
+            sample.assert_called()
             self.assertEqual(result, 7)
-            self.assertEqual(json.loads(output.read_text())["command_returncode"], 7)
+            recorded = json.loads(output.read_text())
+            self.assertEqual(recorded["command_returncode"], 7)
+            self.assertEqual(set(recorded["errors"]), {"docker"})
             self.assertIn("unmeasured", resources.report(output))
 
     def test_missing_output_is_unmeasured(self):
