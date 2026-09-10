@@ -58,14 +58,6 @@ rust_postgres_test(
 )
 
 rust_postgres_test(
-    name = "approval_judge_eval_postgres",
-    crate_features = CRATE_FEATURES,
-    crate_root = "tests/approval_judge_eval_postgres.rs",
-    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
-    deps = TEST_DEPS,
-)
-
-rust_postgres_test(
     name = "blob_postgres",
     crate_features = CRATE_FEATURES,
     crate_root = "tests/blob_postgres.rs",
@@ -259,12 +251,6 @@ rust_selection_test(
     name = "evaluation_postgres_ordinary",
     args = ["--test-threads=4"],
     test = ":evaluation_postgres",
-)
-
-rust_selection_test(
-    name = "approval_judge_eval_postgres_ordinary",
-    args = ["--test-threads=4"],
-    test = ":approval_judge_eval_postgres",
 )
 
 rust_selection_test(

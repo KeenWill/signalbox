@@ -22,6 +22,30 @@ struct Fixture {
     snapshot: EvaluationSnapshot,
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn empty_schema_migrations_leave_only_general_evaluation_recording()
+-> Result<(), Box<dyn Error>> {
+    let (_database, pool, _) = migrated_postgres(4).await?;
+    let remaining: Vec<String> = sqlx::query_scalar("SELECT relname FROM pg_class WHERE relname IN ('approval_judge_eval_run', 'approval_judge_eval_call')").fetch_all(&pool).await?;
+    assert!(
+        remaining.is_empty(),
+        "temporary tables remain: {remaining:?}"
+    );
+    let functions: Vec<String> = sqlx::query_scalar("SELECT proname FROM pg_proc WHERE proname IN ('reject_eval_call_outside_run_recording', 'stamp_eval_run_recording_transaction')").fetch_all(&pool).await?;
+    assert!(
+        functions.is_empty(),
+        "temporary functions remain: {functions:?}"
+    );
+    sqlx::query("SELECT run_id FROM evaluation_run LIMIT 0")
+        .execute(&pool)
+        .await?;
+    sqlx::query("SELECT run_id FROM evaluation_trial LIMIT 0")
+        .execute(&pool)
+        .await?;
+    Ok(())
+}
+
 impl Fixture {
     async fn new() -> Result<Self, Box<dyn Error>> {
         let (database, pool, _) = migrated_postgres(4).await?;

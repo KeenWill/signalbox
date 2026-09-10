@@ -373,6 +373,7 @@ mod reload;
 mod request;
 use request::handle_request;
 mod credential_exclusions;
+mod evaluation;
 mod program;
 use credential_exclusions::*;
 use program::*;

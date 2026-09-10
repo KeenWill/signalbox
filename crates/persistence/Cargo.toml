@@ -65,11 +65,6 @@ path = "tests/evaluation_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
-name = "approval_judge_eval_postgres"
-path = "tests/approval_judge_eval_postgres.rs"
-required-features = ["postgres-integration"]
-
-[[test]]
 name = "blob_postgres"
 path = "tests/blob_postgres.rs"
 required-features = ["postgres-integration"]

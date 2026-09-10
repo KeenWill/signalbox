@@ -2226,6 +2226,7 @@ async fn run_hub(
     let pass_nudge = eligibility_nudge.clone();
     let pass_invocation_processes = invocation_processes.clone();
     let pass_blobs = blob_store_registry.clone();
+    let eval_runtime_factory = runtime_factory.clone();
     let compose_pass = move |model_configuration: &HubModelConfiguration| {
         let runtime_models = model_configuration.runtime_model_catalog();
         let runtime = runtime_factory
@@ -2387,11 +2388,33 @@ async fn run_hub(
     }
     let (workflow_shutdown, workflow_shutdown_receiver) = oneshot::channel();
     let workflows =
-        signalboxd::workflows::WorkflowRuntime::new(pool.clone()).map(|(service, runtime)| {
-            (
+        signalboxd::workflows::WorkflowRuntime::new(pool.clone()).and_then(|(service, runtime)| {
+            let runtime = if let Some(stores) = &blob_store_registry {
+                let model = eval_runtime_factory
+                    .build(&model_configuration)
+                    .map_err(|error| {
+                        signalboxd::workflows::WorkflowRuntimeError::Runtime(std::io::Error::other(
+                            error,
+                        ))
+                    })?;
+                runtime.with_eval(signalboxd::workflows::eval::EvalServices::new(
+                    pool.clone(),
+                    stores.clone(),
+                    Arc::new(RuntimeApprovalJudgeModel::new(
+                        model,
+                        model_configuration.runtime_model_catalog(),
+                    )),
+                    signalboxd::workflows::eval::configured_binding(&model_configuration)
+                        .unwrap_or_else(|_| signalboxd::workflows::eval::recorded_binding()),
+                    Arc::new(model_configuration.clone()),
+                ))
+            } else {
+                runtime
+            };
+            Ok((
                 service,
                 runtime.with_repository_watch(workflow_repository_watch),
-            )
+            ))
         });
     let process_runtime = match &workflows {
         Ok((service, _)) => process_runtime.with_workflows(service.clone()),
