@@ -1086,6 +1086,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
         let database = Odb::new_ext(self.repository_authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
+        pinned_objects.add_to(&database)?;
         repository
             .set_odb(&database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;

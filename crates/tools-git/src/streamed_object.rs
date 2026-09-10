@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
+    time::Instant,
 };
 
 pub(super) const IO_BYTES: usize = 64 * 1024;
@@ -23,10 +24,24 @@ impl ObjectContent {
         reader: &mut impl Read,
         size: usize,
         kind: ObjectType,
+        deadline: Option<Instant>,
     ) -> Result<Self, LocalGitFailure> {
         let mut file = tempfile::tempfile().map_err(failed)?;
-        let copied = std::io::copy(&mut reader.take((size as u64).saturating_add(1)), &mut file)
-            .map_err(failed)?;
+        let mut reader = reader.take((size as u64).saturating_add(1));
+        let mut buffer = [0; IO_BYTES];
+        let mut copied = 0u64;
+        loop {
+            check_deadline(deadline)?;
+            let count = reader.read(&mut buffer).map_err(failed)?;
+            if count == 0 {
+                break;
+            }
+            copied += count as u64;
+            if copied > size as u64 {
+                return Err(LocalGitFailure::Repository);
+            }
+            file.write_all(&buffer[..count]).map_err(failed)?;
+        }
         if copied != size as u64 {
             return Err(LocalGitFailure::Repository);
         }
@@ -38,6 +53,7 @@ impl ObjectContent {
         mut self,
         mut delta: File,
         limit: Option<usize>,
+        deadline: Option<Instant>,
     ) -> Result<Self, LocalGitFailure> {
         delta.rewind().map_err(failed)?;
         let mut delta = std::io::BufReader::new(delta);
@@ -51,6 +67,7 @@ impl ObjectContent {
         let mut buffer = [0u8; IO_BYTES];
         let mut opcode = [0u8; 1];
         while delta.read(&mut opcode).map_err(failed)? != 0 {
+            check_deadline(deadline)?;
             let opcode = opcode[0];
             let (offset, length) = if opcode & 128 != 0 {
                 let mut offset = 0usize;
@@ -92,6 +109,7 @@ impl ObjectContent {
             };
             let mut remaining = length;
             while remaining != 0 {
+                check_deadline(deadline)?;
                 let length = remaining.min(buffer.len());
                 reader.read_exact(&mut buffer[..length]).map_err(failed)?;
                 file.write_all(&buffer[..length]).map_err(failed)?;
@@ -113,6 +131,7 @@ impl ObjectContent {
         &mut self,
         directory: &std::path::Path,
         format: ObjectFormat,
+        deadline: Option<Instant>,
     ) -> Result<Oid, LocalGitFailure> {
         let header = format!("{} {}\0", self.kind.str(), self.size);
         self.file.rewind().map_err(failed)?;
@@ -123,6 +142,7 @@ impl ObjectContent {
         hash.update(header.as_bytes());
         let mut buffer = [0u8; IO_BYTES];
         loop {
+            check_deadline(deadline)?;
             let count = self.file.read(&mut buffer).map_err(failed)?;
             if count == 0 {
                 break;
@@ -237,7 +257,14 @@ pub(super) fn write_pack(
         let offset = writer.file.stream_position().map_err(failed)?;
         let mut content = content_for(oid)?;
         let mut size = content.size;
-        let mut first = (content.kind as u8) << 4 | (size & 15) as u8;
+        let kind = match content.kind {
+            ObjectType::Commit => 1u8,
+            ObjectType::Tree => 2,
+            ObjectType::Blob => 3,
+            ObjectType::Tag => 4,
+            ObjectType::Any => return Err(LocalGitFailure::Repository),
+        };
+        let mut first = kind << 4 | (size & 15) as u8;
         size >>= 4;
         if size != 0 {
             first |= 128;
@@ -391,6 +418,15 @@ pub(super) fn checkout_paths(
     };
     let root = File::open(destination).map_err(failed)?;
     let files = crate::bounded::tree_files(repository, tree)?;
+    for (path, (_, mode)) in &files {
+        if paths
+            .iter()
+            .any(|selected| path == selected || path.starts_with(selected))
+            && !matches!(mode, 0o100644 | 0o100755)
+        {
+            return Err(LocalGitFailure::Operation);
+        }
+    }
     for path in paths {
         if !files.contains_key(path) {
             match crate::rollback::open_worktree_parent(&root, path) {
@@ -447,4 +483,12 @@ pub(super) fn checkout_paths(
         updated(&path)?;
     }
     Ok(())
+}
+
+fn check_deadline(deadline: Option<Instant>) -> Result<(), LocalGitFailure> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        Err(LocalGitFailure::Repository)
+    } else {
+        Ok(())
+    }
 }

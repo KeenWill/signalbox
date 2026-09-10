@@ -150,6 +150,7 @@ impl RepositoryShell {
             &mut object.data(),
             object.len(),
             object.kind(),
+            None,
         )
     }
 
