@@ -109,7 +109,11 @@ pub(super) fn status<FileSystem: WorkspaceFileSystem>(
                     WorkspacePathRejection::Symlink
                 ))
         ) {
-            let bytes = read_worktree_symlink(authority, path, repository.object_byte_limit())?;
+            let bytes = read_worktree_symlink(
+                authority,
+                path,
+                repository.object_byte_limit(git2::ObjectType::Blob),
+            )?;
             if *mode != 0o120000 {
                 set_worktree_status(&mut raw, path, "type_changed");
             } else if blob_oid(&bytes, authority.object_format)? != *oid {
