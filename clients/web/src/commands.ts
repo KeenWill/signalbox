@@ -82,7 +82,7 @@ export const commandRegistry = [
   {
     id: 'artifact.attachment.remove',
     title: 'Remove composer attachment',
-    description: '',
+    description: 'Remove this attachment.',
     category: 'Artifact',
     bindings: [],
     available: (context) => context.removeAttachment !== undefined,
@@ -91,7 +91,7 @@ export const commandRegistry = [
   {
     id: 'artifact.select',
     title: 'Select artifact',
-    description: '',
+    description: 'Select this artifact.',
     category: 'Artifact',
     bindings: [],
     available: (context) => context.artifactSelectionTarget !== undefined,
@@ -378,7 +378,7 @@ export const commandRegistry = [
   {
     id: 'imports.entry.select',
     title: 'Select entry',
-    description: '',
+    description: 'Select this entry.',
     category: 'Imports',
     bindings: [],
     available: (context) =>
@@ -588,7 +588,7 @@ export const commandRegistry = [
   {
     id: 'theme.dark',
     title: 'Use dark theme',
-    description: '',
+    description: 'Use the dark theme.',
     category: 'Settings',
     bindings: [],
     available: always,
@@ -597,7 +597,7 @@ export const commandRegistry = [
   {
     id: 'theme.light',
     title: 'Use light theme',
-    description: '',
+    description: 'Use the light theme.',
     category: 'Settings',
     bindings: [],
     available: always,
