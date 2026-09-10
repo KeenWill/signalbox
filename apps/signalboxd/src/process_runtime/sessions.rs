@@ -1404,6 +1404,7 @@ pub(super) async fn spool_operator_status(
         request_id,
         ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
             OperatorStatusEndMessage {
+                session_supervision_count: CanonicalU64::new(counts.session_supervision()),
                 repository_ingestion_count: CanonicalU64::new(ingestion_count),
                 lifecycle_week_count: CanonicalU64::new(counts.lifecycle_weeks()),
                 lifecycle_deadline_violation_count: CanonicalU64::new(
@@ -1441,6 +1442,39 @@ pub(super) const fn wire_lifecycle_state(
 
 pub(super) fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
     match item {
+        ProcessOperatorStatusItem::SessionSupervision {
+            session,
+            terminal,
+            failure,
+        } => {
+            use signalbox_process_protocol::{
+                OperatorStatusSessionSupervisionMessage,
+                OperatorStatusSupervisionFailureClass as WireClass,
+            };
+            let failure_class = match failure.class {
+                signalbox_application::OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                } => WireClass::Infrastructure,
+                signalbox_application::OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                } => WireClass::CommitAmbiguous,
+                signalbox_application::OperatorFailureClass::FailClosedCorruption => {
+                    WireClass::Corruption
+                }
+                signalbox_application::OperatorFailureClass::IdentityCollision => {
+                    WireClass::IdentityCollision
+                }
+                signalbox_application::OperatorFailureClass::CallerOrHubBug => WireClass::Bug,
+            };
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::SessionSupervision(
+                Box::new(OperatorStatusSessionSupervisionMessage {
+                    session_id: wire_uuid(session.into_uuid()),
+                    terminal,
+                    failure_class,
+                    cause_code: failure.cause_code,
+                }),
+            )))
+        }
         ProcessOperatorStatusItem::LifecycleWeek(item) => ServerMessage::OperatorStatus(Box::new(
             OperatorStatusMessage::LifecycleWeek(Box::new(OperatorStatusLifecycleWeekMessage {
                 week_start_date: item.week_start_date(),

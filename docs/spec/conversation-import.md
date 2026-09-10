@@ -156,6 +156,10 @@ session.
 
 Later session creation checks and inserts the selected normalized prefix one
 entry at a time without loading the complete prefix or raw audit records.
+Subsequent submission scheduling reads authenticate the constant-size imported
+seed link and frontier header without loading the normalized prefix again.
+Activation and model-call construction resolve the complete semantic context
+they require.
 
 Every accepted nonempty physical JSONL record is preserved verbatim before
 normalization. An accepted non-message record produces a typed source event
@@ -220,9 +224,11 @@ ceiling. Conversion rejects an oversized physical record before buffering or
 parsing beyond that per-record ceiling. One admitted import awaits at most one
 raw blob publication or verification at a time while holding the process-wide
 bulk-ingest permit; it never fans out concurrently. Conversion and storage run
-inside the connection task, so runtime cancellation stops them and releases the
-permit. Writers acquire shared raw hashes and globally unique entry identities
-in their respective sorted key order and store physical positions explicitly.
+in a connection-owned worker that checks cancellation between source chunks and
+around asynchronous storage, so deadline or runtime cancellation stops it before
+releasing the permit. Writers acquire shared raw hashes and globally unique
+entry identities in their respective sorted key order and store physical
+positions explicitly.
 
 Once a header exists, any hash mismatch, missing member, gap, duplicate entry
 identity, unknown version, invalid value, or lineage mismatch is typed

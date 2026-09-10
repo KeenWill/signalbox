@@ -472,3 +472,59 @@ fn commit_publishes_reflogs_while_the_target_reference_lock_is_held() {
         format!("{new}\n")
     );
 }
+
+#[test]
+fn commit_rebuilds_missing_cached_trees_from_staged_entries() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository opens");
+    let nested_path = Path::new("nested/staged.txt");
+    fs::create_dir(fixture.root().join("nested")).expect("nested directory writes");
+    fs::write(fixture.root().join(nested_path), CHANGED_CONTENT).expect("staged content writes");
+    let mut index = repository.index().expect("index opens");
+    index.add_path(nested_path).expect("nested file stages");
+    let staged_blob = index.get_path(nested_path, 0).expect("staged entry").id;
+    let cached_root = index.write_tree().expect("index tree caches");
+    let cached_nested = repository
+        .find_tree(cached_root)
+        .expect("cached root")
+        .get_name("nested")
+        .expect("cached nested tree")
+        .id();
+    index.write().expect("cached index writes");
+    drop(index);
+    for oid in [cached_root, cached_nested] {
+        let hex = oid.to_string();
+        fs::remove_file(
+            repository
+                .path()
+                .join("objects")
+                .join(&hex[..2])
+                .join(&hex[2..]),
+        )
+        .expect("unreferenced cached tree removes");
+    }
+    drop(repository);
+
+    let result = execute(
+        &fixture.executor(),
+        LocalOperation::Commit(GitCommitArguments {
+            message: MODEL_MESSAGE.to_owned(),
+        }),
+    );
+    let repository = Repository::open(fixture.root()).expect("committed repository opens");
+    let commit = repository
+        .find_commit(
+            Oid::from_str(result["commit"].as_str().expect("commit id")).expect("commit oid"),
+        )
+        .expect("commit exists");
+    assert_eq!(commit.parent_id(0).expect("parent"), fixture.initial);
+    assert_eq!(
+        commit
+            .tree()
+            .expect("tree")
+            .get_path(nested_path)
+            .expect("nested entry")
+            .id(),
+        staged_blob
+    );
+}

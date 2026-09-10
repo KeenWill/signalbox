@@ -1,5 +1,11 @@
 use super::*;
 
+use std::{
+    io::Read,
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
+};
+
 #[cfg(test)]
 use signalbox_application::ImportConversationError;
 
@@ -1170,19 +1176,110 @@ where
     Converter::Error: ClassifyConversationImportError,
     Converter::RecordFailure: ClassifyConversationImportRecordFailure + Copy,
 {
-    let _import_permit = import_permit;
-    match source {
-        ConversationImportSource::Inline(source) => {
-            execute_streamed_import(
-                &mut converter,
-                BufReader::new(Cursor::new(source)),
-                &repository,
-            )
-            .await
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (cancel_sender, mut cancel_receiver) = watch::channel(false);
+    let cancellation_guard = CancelImportWorkerOnDrop {
+        cancelled: Arc::clone(&cancelled),
+        signal: cancel_sender,
+    };
+    let runtime = tokio::runtime::Handle::current();
+    let worker = tokio::task::spawn_blocking(move || {
+        let _import_permit = import_permit;
+        runtime.block_on(async move {
+            let import = async move {
+                match source {
+                    ConversationImportSource::Inline(source) => {
+                        execute_streamed_import(
+                            &mut converter,
+                            CooperativeImportReader::new(
+                                BufReader::new(Cursor::new(source)),
+                                cancelled,
+                            ),
+                            &repository,
+                        )
+                        .await
+                    }
+                    ConversationImportSource::Spooled(source) => {
+                        execute_streamed_import(
+                            &mut converter,
+                            CooperativeImportReader::new(BufReader::new(source), cancelled),
+                            &repository,
+                        )
+                        .await
+                    }
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = cancel_receiver.changed() => Err(OperationalImportError::Unavailable),
+                result = import => result,
+            }
+        })
+    });
+    let result = worker.await.map_err(|_| {
+        OperationalImportError::Internal(InternalDiagnostic::ConversationImportContractDefect)
+    })?;
+    drop(cancellation_guard);
+    result
+}
+
+struct CancelImportWorkerOnDrop {
+    cancelled: Arc<AtomicBool>,
+    signal: watch::Sender<bool>,
+}
+
+impl Drop for CancelImportWorkerOnDrop {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        let _ = self.signal.send(true);
+    }
+}
+
+struct CooperativeImportReader<Reader> {
+    inner: Reader,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl<Reader> CooperativeImportReader<Reader> {
+    fn new(inner: Reader, cancelled: Arc<AtomicBool>) -> Self {
+        Self { inner, cancelled }
+    }
+
+    fn check_cancelled(&self) -> io::Result<()> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "conversation import cancelled",
+            ))
+        } else {
+            Ok(())
         }
-        ConversationImportSource::Spooled(source) => {
-            execute_streamed_import(&mut converter, BufReader::new(source), &repository).await
-        }
+    }
+}
+
+impl<Reader> Read for CooperativeImportReader<Reader>
+where
+    Reader: Read,
+{
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.check_cancelled()?;
+        thread::yield_now();
+        self.inner.read(buffer)
+    }
+}
+
+impl<Reader> std::io::BufRead for CooperativeImportReader<Reader>
+where
+    Reader: std::io::BufRead,
+{
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.check_cancelled()?;
+        thread::yield_now();
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.inner.consume(amount);
     }
 }
 

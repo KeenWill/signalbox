@@ -133,6 +133,9 @@ max_image_request_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
 repository_watch_webhook_retention = "604800s"
+guard_recovery_initial_delay = "1s"
+guard_recovery_maximum_delay = "10s"
+guard_recovery_elapsed_bound = "none"
 fenced_pool_min_connections = 48
 fenced_pool_floor_reconciliation_interval = "5s"
 fenced_pool_floor_reconciliation_attempt_bound = "30s"
@@ -907,6 +910,50 @@ fn repository_watch_is_enabled_by_default() {
             .expect("configured watch")
             .enabled()
     );
+}
+
+#[test]
+fn repository_observation_workflows_are_disabled_by_default() {
+    let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+        .expect("repository-watch configuration");
+    assert!(
+        !configured
+            .repository_watch()
+            .expect("configured watch")
+            .workflows_enabled()
+    );
+}
+
+#[test]
+fn repository_observation_workflows_can_be_selected_explicitly() {
+    let configured = HubModelConfiguration::parse(&configuration_with_repository_watch().replace(
+        "[repository_watch]\nversion = 1",
+        "[repository_watch]\nversion = 1\nworkflows_enabled = true",
+    ))
+    .expect("workflow repository-watch configuration");
+    assert!(
+        configured
+            .repository_watch()
+            .expect("configured watch")
+            .workflows_enabled()
+    );
+}
+
+#[test]
+fn repository_observation_workflows_reject_non_boolean_values() {
+    for value in ["1", "\"true\"", "[]"] {
+        let source = configuration_with_repository_watch().replace(
+            "[repository_watch]\nversion = 1",
+            &format!("[repository_watch]\nversion = 1\nworkflows_enabled = {value}"),
+        );
+        assert!(
+            matches!(
+                HubModelConfiguration::parse(&source),
+                Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            ),
+            "workflows_enabled must reject {value}"
+        );
+    }
 }
 
 #[test]

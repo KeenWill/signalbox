@@ -112,6 +112,13 @@ and the `RuntimeModelCatalog` for the provider bridge. The optional
 `repository_watch_poll_request_budget` defaults to 100 and accepts integers from
 2 through 1,000, including the quota preflight request in each attempt.
 
+`guard_recovery_initial_delay` and `guard_recovery_maximum_delay` are positive
+durations, with the maximum no smaller than the initial delay.
+`guard_recovery_elapsed_bound` limits one guard-loss recovery episode, including
+pool shutdown and runtime reconstruction; `none` leaves it unbounded.
+[Turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md) owns
+reacquisition before admission resumes.
+
 The `[[tool_mappings]]` array composes the deployment-mapped tool families and
 binds one configured workspace root. Each session's workspace root is derived
 from that root by a fixed formula: `<name>.sessions/<session uuid>` beside the
@@ -783,9 +790,11 @@ removes `push_credential_file` takes effect for registration at the next boot.
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
 true; false disables module polling, webhook listening, and command dispatch,
-including convergence-sweep target enrollment and session commissioning.
-Repository-watch duration fields accept integer seconds or Jiff's friendly
-unsigned-duration strings; rule cooldowns retain whole-second precision.
+including convergence-sweep target enrollment and session commissioning. The
+`workflows_enabled` boolean defaults to false and selects workflow-driven
+observations when true. Repository-watch duration fields accept integer seconds
+or Jiff's friendly unsigned-duration strings; rule cooldowns retain whole-second
+precision.
 
 The optional `[convergence]` table deserializes the
 [shared convergence policy](../../crates/convergence/README.md), including its
@@ -879,8 +888,6 @@ credential pool admission as [contention](credential-availability.md).
 
 ## Planned
 
-- Guard recovery initial and maximum backoff delays and an elapsed bound
-  admitting `none`; see [daemon survival design](../design/daemon-survival.md).
 - Input-modality declarations on model and serving-target records, and the blob
   catalog they feed: [design](../design/configuration-and-credentials.md).
 - Dated rate windows on a model entry; the present grammar admits one flat rate,

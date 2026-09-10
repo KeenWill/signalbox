@@ -131,6 +131,7 @@ async fn pull_request_metadata_matches_the_merged_fixture() -> SmokeResult {
             "body": FIXTURE_BODY,
             "state": "closed",
             "draft": false,
+            "mergeable": null,
             "author": "KeenWill",
             "base_ref": "main",
             "base_revision": FIXTURE_BASE_REVISION,

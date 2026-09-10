@@ -2365,6 +2365,40 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_import_interrupts_a_synchronous_record_read_loop()
+    -> Result<(), Box<dyn Error>> {
+        let budget = Arc::new(Semaphore::new(1));
+        let import_permit = Arc::clone(&budget).acquire_owned().await?;
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+        let repository = ImportedConversationRepository::new(pool);
+        let started = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let import = tokio::spawn(execute_import(
+            BusyRecordReaderConverter {
+                started: Arc::clone(&started),
+                stopped: Arc::clone(&stopped),
+            },
+            ConversationImportSource::Inline(Vec::new()),
+            repository,
+            import_permit,
+        ));
+        timeout(Duration::from_secs(1), async {
+            while !started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+
+        import.abort();
+        assert!(import.await.is_err());
+        let permit = timeout(Duration::from_secs(1), Arc::clone(&budget).acquire_owned()).await??;
+        drop(permit);
+        assert!(stopped.load(Ordering::SeqCst));
+        Ok(())
+    }
+
     #[test]
     fn import_converter_contract_defect_has_exact_operator_diagnostic() {
         let error = ImportConversationError::<io::Error, ImportedConversationRepositoryError>::
@@ -2586,6 +2620,87 @@ pub(crate) mod tests {
                     SyntheticRecordFailure,
                     ),
                 ))
+            })
+        }
+    }
+
+    struct BusyRecordReaderConverter {
+        started: Arc<AtomicBool>,
+        stopped: Arc<AtomicBool>,
+    }
+
+    impl ImportedConversationConverter for BusyRecordReaderConverter {
+        type Error = io::Error;
+
+        fn format(&self) -> ImportedConversationFormat {
+            ImportedConversationFormat::CodexRolloutJsonlV1
+        }
+
+        fn convert<NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            _source: &[u8],
+            _next_entry_id: NextEntryId,
+        ) -> Result<ImportedConversation, Self::Error>
+        where
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            panic!("the fixture uses only streamed conversion")
+        }
+    }
+
+    impl ResilientImportedConversationConverter for BusyRecordReaderConverter {
+        type RecordFailure = SyntheticRecordFailure;
+
+        fn convert_resilient<NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            _source: &[u8],
+            _next_entry_id: NextEntryId,
+        ) -> Result<ImportedConversationConversionReport<Self::RecordFailure>, Self::Error>
+        where
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            panic!("the fixture uses only streamed conversion")
+        }
+    }
+
+    impl StreamingResilientImportedConversationConverter for BusyRecordReaderConverter {
+        fn convert_resilient_from_reader<Reader, NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            mut source: Reader,
+            _maximum_record_bytes: u64,
+            _next_entry_id: NextEntryId,
+        ) -> impl Iterator<
+            Item = Result<
+                ImportedConversationStreamItem<Self::RecordFailure>,
+                StreamConversionError<Self::Error>,
+            >,
+        > + Send
+        where
+            Reader: std::io::BufRead + Send,
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
+        {
+            let started = Arc::clone(&self.started);
+            let stopped = Arc::clone(&self.stopped);
+            std::iter::once_with(move || {
+                struct StopGuard(Arc<AtomicBool>);
+
+                impl Drop for StopGuard {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+
+                let _guard = StopGuard(stopped);
+                started.store(true, Ordering::SeqCst);
+                loop {
+                    if source.fill_buf().is_err() {
+                        return Err(StreamConversionError::SourceRead);
+                    }
+                    std::thread::yield_now();
+                }
             })
         }
     }

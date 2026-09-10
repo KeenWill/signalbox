@@ -120,6 +120,11 @@ strictly increasing, unique action-ordinal order. The module submitter recovers
 exact retained payloads and invokes core session handlers through the daemon's
 command adapter.
 
+`repository_watch.workflows_enabled` defaults to false. When true, the existing
+serialized poll/webhook worker admits finite `ObserveRepository` runs to the
+daemon workflow runner; rule evaluation, command submission and lifecycle
+reactions use the existing workers.
+
 ## Design decisions
 
 Each repository frontier commit includes the complete current repository and
@@ -254,7 +259,13 @@ component; repository scope keys the repository; rule scope spans repositories.
 Each key belongs to one rule revision. A live dispatch suppresses later matching
 facts. Nonsticky session termination releases its action; cooldown begins when
 the last action releases. A sticky stop keeps redispatch suppressed for that
-key.
+key. After the latest dispatch ends nonsticky without a durably completed
+configured push, repository watch retries that rule and pull request after its
+cooldown while the latest observed matching condition remains: a conflicting
+merge, unresolved review threads, or failing checks. Retries use the current
+pull-request context, retain their preceding dispatch and evaluated event
+context, and pass through the existing singleton and dispatch admission limits;
+they do not create GitHub change events.
 
 Goal commissioning or resumption releases the dispatched session's held start
 gate. A user-stopped goal issues a parent-only sticky stop. An achieved session
@@ -263,14 +274,15 @@ event commissions a fresh session and goal under the rule's cooldown. A close or
 merge fact with a repository event ordinal after the dispatch event issues a
 parent-only sticky stop for its live dispatched session, with
 `pull_request_closed` or `pull_request_merged` retained as the ledger reason; an
-already terminal session is left alone. Reactions check durable core terminal
-facts before recording retirement or submitting its stop, including facts still
-pending at the module cursor. Retirement scans retain discovered terminal times
-on the dispatch ledger. A queued retirement whose session has ended is rejected
-locally as `session_already_terminal`. Reactions retain their original rule and
-action even after configuration removes the rule. The module commits lifecycle
-effects before advancing its application cursor; the daemon acknowledges the
-corresponding seam event afterward.
+already terminal session is left alone. For retries, the close or merge fact
+must also be recorded no earlier than dispatch issuance. Reactions check durable
+core terminal facts before recording retirement or submitting its stop,
+including facts still pending at the module cursor. Retirement scans retain
+discovered terminal times on the dispatch ledger. A queued retirement whose
+session has ended is rejected locally as `session_already_terminal`. Reactions
+retain their original rule and action even after configuration removes the rule.
+The module commits lifecycle effects before advancing its application cursor;
+the daemon acknowledges the corresponding seam event afterward.
 
 Pull-request dispatch atomically creates the session with a provisioning hold
 that public start and ownership releases cannot clear. Input accepted during
@@ -356,7 +368,21 @@ through either the workflow reader or the existing evaluator. Submission uses
 the retained commands and existing sink, including checkout and pending
 follow-ups, before recording completion. Recovery adopts a completed submission
 or resumes its binding; an unanswered submission without a binding is ambiguous.
-The existing runtime remains the production orchestrator.
+
+`repo.observe` uses the same provider paging, conditional caches, reviewer
+invalidation and request ceilings. Each completed frontier stage atomically
+retains its stable effect identity, exact request and accepted event range on
+`repository_state`, including unchanged observations. The receipt accumulates
+completed stages and records the attempt's success, partial or failure outcome;
+interruption between stages retains a partial result. Observation execution and
+adoption serialize per repository. A successor adopts the receipt before
+provider configuration or another fetch, and exact durable journal delivery
+moves its binding to `workflow_effect_result` before releasing the pending slot
+for the next observation in either mode. Completed observation bindings remain
+recoverable after later observations; changed input conflicts. A finalized
+attempt with no committed frontier stage retains its result there directly. An
+unanswered effect without a receipt is ambiguous. Shutdown cancels admitted
+observation runs and drains their provider work.
 
 The v2 crate depends on the session ownership crate as its only Signalbox
 dependency. It consumes the seam's lifecycle events and emits only the seam's

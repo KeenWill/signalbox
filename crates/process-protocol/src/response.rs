@@ -207,6 +207,13 @@ pub enum ServerMessage {
         run_id: CanonicalUuid,
         run: crate::ProgramRun,
     },
+    /// Exact JSON bytes from the immutable sealed evaluation scorecard.
+    EvaluationScorecardRead {
+        run_id: CanonicalUuid,
+        offset: u64,
+        bytes: Vec<u8>,
+        total_bytes: u64,
+    },
     /// The stored result of one program cancellation command.
     ProgramRunCancellationReceipt {
         command_id: crate::CommandId,

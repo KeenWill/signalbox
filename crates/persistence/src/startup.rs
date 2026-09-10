@@ -1,4 +1,4 @@
-//! Atomic PostgreSQL recovery of prior-process active attempts.
+//! Atomic PostgreSQL recovery of abandoned active attempts.
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -178,24 +178,12 @@ impl PostgresStartupScanRepository {
         Self { pool }
     }
 
-    /// Reads the finite active-session inventory in deterministic order.
-    pub async fn active_sessions(&self) -> Result<Box<[SessionId]>, StartupScanRepositoryError> {
-        let rows = sqlx::query_scalar::<_, Uuid>(
-            "SELECT session_id
-               FROM (
-                    SELECT session_id
-                      FROM turn_lifecycle
-                     WHERE state_kind = 'active'
-                       AND NOT delegation_runtime_terminal
-                    UNION
-                    SELECT session_id
-                      FROM context_compaction_model_call
-                     WHERE state_kind <> 'terminal'
-               ) AS recovery_inventory
-              ORDER BY session_id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    /// Reads the finite session inventory in deterministic order.
+    pub async fn sessions(&self) -> Result<Box<[SessionId]>, StartupScanRepositoryError> {
+        let rows =
+            sqlx::query_scalar::<_, Uuid>("SELECT session_id FROM session ORDER BY session_id")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows
             .into_iter()
             .map(session_id_from_uuid)
@@ -203,7 +191,7 @@ impl PostgresStartupScanRepository {
             .into_boxed_slice())
     }
 
-    /// Locks one session and atomically terminalizes its prior-process attempt.
+    /// Locks one session and atomically terminalizes its abandoned attempt.
     pub async fn recover<Generator>(
         &self,
         session: SessionId,
@@ -241,8 +229,28 @@ impl PostgresStartupScanRepository {
 impl StartupScanRepository for PostgresStartupScanRepository {
     type Error = StartupScanRepositoryError;
 
-    async fn active_sessions(&mut self) -> Result<Box<[SessionId]>, Self::Error> {
-        PostgresStartupScanRepository::active_sessions(self).await
+    async fn sessions(&mut self) -> Result<Box<[SessionId]>, Self::Error> {
+        PostgresStartupScanRepository::sessions(self).await
+    }
+
+    async fn record_corrupt_session(
+        &mut self,
+        session: SessionId,
+        error: &Self::Error,
+    ) -> Result<(), Self::Error> {
+        crate::session_lifecycle::SessionLifecycleRepository::new(self.pool.clone())
+            .record_supervision_failure(session, error)
+            .await
+            .map_err(|failure| match failure {
+                crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source) => {
+                    StartupScanRepositoryError::from_database(source, false)
+                }
+                crate::session_lifecycle::SessionLifecycleRepositoryError::CommitAmbiguous(
+                    source,
+                ) => StartupScanRepositoryError::from_database(source, true),
+                _ => StartupScanCorruption::Inconsistent("startup operator item").into(),
+            })?;
+        Ok(())
     }
 
     async fn recover<Generator>(
@@ -258,7 +266,7 @@ impl StartupScanRepository for PostgresStartupScanRepository {
     }
 }
 
-async fn recover_in_transaction<Generator>(
+pub(crate) async fn recover_in_transaction<Generator>(
     connection: &mut PgConnection,
     requested_session: SessionId,
     identities: AcceptedInputTurnFailureIdentities,
@@ -488,6 +496,19 @@ where
         ));
     }
 
+    let lifecycle = match crate::session_lifecycle::load_optional(connection, requested_session)
+        .await
+    {
+        Ok(Some(lifecycle)) => lifecycle,
+        Ok(None) => return Err(StartupScanCorruption::Missing("session lifecycle row").into()),
+        Err(crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source)) => {
+            return Err(source.into());
+        }
+        Err(_) => {
+            return Err(StartupScanCorruption::Inconsistent("session lifecycle projection").into());
+        }
+    };
+
     if let Some(recovered) =
         recover_context_compaction(connection, requested_session, None, active_turn).await?
     {
@@ -568,6 +589,23 @@ where
         .map(signalbox_domain::ActivatedAcceptedInputTurn::turn)
         .or(delegated_active_turn);
     let Some(active_turn_id) = active_turn_id else {
+        if matches!(
+            lifecycle.state(),
+            signalbox_domain::SessionLifecycleState::Terminal { .. }
+        ) && lifecycle
+            .supervision_failure()
+            .is_some_and(|failure| failure.pending)
+        {
+            sqlx::query(
+                "UPDATE session_supervision SET supervision_pending = false WHERE session_id = $1",
+            )
+            .bind(session_id_to_uuid(requested_session))
+            .execute(&mut *connection)
+            .await?;
+            return Ok(TransactionDecision::Commit(
+                StartupScanSessionOutcome::NoActiveTurn,
+            ));
+        }
         return Ok(TransactionDecision::Rollback(
             StartupScanSessionOutcome::NoActiveTurn,
         ));

@@ -15,6 +15,7 @@ mod context_compaction;
 mod context_frontier;
 mod credential_availability;
 mod delivery_request;
+pub mod evaluation;
 mod fatal_mismatch;
 mod git_remote;
 mod goal;

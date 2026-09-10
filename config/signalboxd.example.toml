@@ -31,6 +31,10 @@ client_write_progress_deadline = "30s"
 # Seven days from authenticated webhook receipt to its durable expiry.
 repository_watch_webhook_retention = "604800s"
 repository_watch_poll_request_budget = 100
+# Guard reacquisition backoff and total recovery time; none keeps waiting.
+guard_recovery_initial_delay = "1s"
+guard_recovery_maximum_delay = "10s"
+guard_recovery_elapsed_bound = "none"
 # Physical database sessions established before daemon work begins.
 fenced_pool_min_connections = 48
 # Delay between checks that restore retired fenced pool sessions.
@@ -1051,3 +1055,13 @@ selection_id = "2669e033-22f8-4ea9-b046-cbf21fe8b2d7"
 [[aliases]]
 alias_id = "540ce009-c2ec-4a04-b823-c411ea189778"
 selection_id = "a5fec003-0edd-4118-96d1-18af31157bd3"
+
+# Optional repository observations; workflow mode defaults to false.
+# [repository_watch]
+# version = 1
+# workflows_enabled = false
+# signal_reviewers = ["example-reviewer"]
+# [[repository_watch.repositories]]
+# repository = "example/project"
+# poll_interval_seconds = 60
+# credential_file = "/etc/signalbox/repository-token"

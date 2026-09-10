@@ -655,11 +655,12 @@ impl<'a> Output<'a> {
         let OperatorStatusPresentationCounts {
             lifecycle_weeks,
             lifecycle_deadline_violations,
+            session_supervision,
         } = counts;
         writeln!(
             self.stdout,
             "status lifecycle_weeks={lifecycle_weeks} \
-             nonterminal_past_deadline={lifecycle_deadline_violations}"
+             nonterminal_past_deadline={lifecycle_deadline_violations} session_supervision={session_supervision}"
         )
     }
 
@@ -673,6 +674,14 @@ impl<'a> Output<'a> {
             ));
         };
         match message.as_ref() {
+            OperatorStatusMessage::SessionSupervision(item) => {
+                writeln!(
+                    self.stdout,
+                    "session_supervision {}",
+                    serde_json::to_string(item).map_err(std::io::Error::other)?
+                )?;
+                Ok(())
+            }
             OperatorStatusMessage::RepositoryIngestion(item) => {
                 writeln!(
                     self.stdout,
