@@ -117,6 +117,24 @@ async fn normal_completion_requires_typed_terminal_result() {
 }
 
 #[tokio::test]
+async fn native_compaction_boundary_preserves_the_completion() {
+    let result = execute_scenario("native_compaction", OperationShape::Text).await;
+
+    assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn native_compaction_boundary_rejects_a_different_session() {
+    let result = execute_scenario("native_compaction_wrong_session", OperationShape::Text).await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
 async fn nonterminal_system_events_do_not_mask_the_initialized_exchange() {
     let result = execute_scenario("nonterminal_system_events", OperationShape::Text).await;
 

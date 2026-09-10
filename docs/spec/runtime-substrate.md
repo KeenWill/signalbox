@@ -406,6 +406,10 @@ acknowledge the batch. Its content is discarded; the reported finish must be
 `end_turn`, while the effective completion of the original batch is `ToolUse`. A
 different message id outside that acknowledgement is a protocol violation.
 
+Claude CLI native compaction boundaries must name the initialized session. The
+adapter logs the reported trigger and pre-compaction token count; the boundary
+does not replace the daemon's canonical transcript.
+
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
 zero, a total-only report records nothing because no adapter distributes a
