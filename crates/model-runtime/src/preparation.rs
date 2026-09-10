@@ -41,6 +41,12 @@ pub enum PreparationFailure {
         /// What the adapter does not support.
         detail: String,
     },
+    /// Validated image bytes could not be delivered before send authorization.
+    ImageUnavailable,
+    /// The authenticated image has no available replica.
+    ImageMissing,
+    /// Available replicas contradict the authenticated image bytes.
+    ImageCorrupt,
     /// The provider credential could not be read during request preparation.
     /// The reference-only access error is safe to return across the adapter
     /// boundary; it never contains credential material.
@@ -58,6 +64,8 @@ pub enum PreparationFailure {
 /// A local adapter defect discovered before send authorization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreparationDefect {
+    /// Durable image authority or store evidence is internally inconsistent.
+    ImageIntegrity,
     /// A provider wire value could not be serialized.
     SerializationFailed {
         /// The serializer's rendered description.

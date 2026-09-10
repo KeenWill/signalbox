@@ -20,6 +20,7 @@ pub struct ModelCapabilities {
     fast_mode: Option<FastModeTarget>,
     service_tiers: BTreeSet<ServiceTier>,
     reasoning_replay_family: Option<String>,
+    image_presentation: Option<crate::ImagePresentationCapability>,
 }
 
 impl ModelCapabilities {
@@ -34,7 +35,22 @@ impl ModelCapabilities {
             fast_mode,
             service_tiers,
             reasoning_replay_family: None,
+            image_presentation: None,
         }
+    }
+
+    /// Declares bounded image presentation for this exact model target.
+    pub fn with_image_presentation(
+        mut self,
+        capability: Option<crate::ImagePresentationCapability>,
+    ) -> Self {
+        self.image_presentation = capability;
+        self
+    }
+
+    /// Borrows this target's admitted image presentation capability.
+    pub const fn image_presentation(&self) -> Option<&crate::ImagePresentationCapability> {
+        self.image_presentation.as_ref()
     }
 
     /// Declares the operator-configured family for opaque reasoning replay.

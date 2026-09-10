@@ -18,15 +18,16 @@ use signalbox_tool_contract::{
 };
 
 use signalbox_egress_transport::{
-    ReqwestWebFetchConstructionError, WebFetchTransportFailure, build_web_fetch_client,
-    has_more_response_bytes, is_public_destination_address, parse_url_host_ip,
-    public_destination_client,
+    PublicDestinationClientError, ReqwestWebFetchConstructionError, WebFetchTransportFailure,
+    build_web_fetch_client, has_more_response_bytes, is_public_destination_address,
+    parse_url_host_ip, public_destination_client,
 };
 
 pub const WEB_FETCH_NAME: &str = "web_fetch";
 const INVALID_ARGUMENTS_DETAIL: &str =
     "expected one absolute HTTP(S) URL without user information or a fragment";
 const REQUEST_FAILED_DETAIL: &str = "web fetch request failed";
+const TIMEOUT_DETAIL: &str = "web fetch request timed out";
 const DEFAULT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_URL_BYTES: usize = 8 * 1024;
 const MAX_CONTENT_TYPE_BYTES: usize = 1024;
@@ -255,6 +256,8 @@ impl<Transport> WebFetchTool<Transport> {
         let request_failed_detail =
             ToolExecutionErrorDetail::try_new(String::from(REQUEST_FAILED_DETAIL))
                 .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
+        let timeout_detail = ToolExecutionErrorDetail::try_new(String::from(TIMEOUT_DETAIL))
+            .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
         let definition = compile_contract_definition::<Self>(
             ToolPermissionDefault::Confirm,
             ToolEffectClass::ExternalEffect,
@@ -278,6 +281,7 @@ impl<Transport> WebFetchTool<Transport> {
             executor: WebFetchExecutor {
                 transport,
                 request_failed_detail,
+                timeout_detail,
                 egress_policy,
             },
         })
@@ -391,7 +395,13 @@ impl WebFetchTransport for ReqwestWebFetchTransport {
     ) -> Result<WebFetchResponse, WebFetchTransportFailure> {
         let client = public_destination_client(request.url(), Some(self.exchange_timeout))
             .await
-            .map_err(|_| WebFetchTransportFailure::RequestFailed)?;
+            .map_err(|error| match error {
+                PublicDestinationClientError::Timeout => WebFetchTransportFailure::Timeout,
+                PublicDestinationClientError::DestinationRejected
+                | PublicDestinationClientError::Infrastructure => {
+                    WebFetchTransportFailure::RequestFailed
+                }
+            })?;
         fetch_with_client(client, request).await
     }
 }
@@ -416,7 +426,7 @@ async fn fetch_with_client(
     let mut truncated = false;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| WebFetchTransportFailure::DispatchUnknown)?;
+        let chunk = chunk.map_err(classify_send_failure)?;
         let remaining = MAX_WEB_FETCH_BODY_BYTES.saturating_sub(body.len());
         if chunk.len() > remaining {
             body.extend_from_slice(&chunk[..remaining]);
@@ -425,7 +435,9 @@ async fn fetch_with_client(
         }
         body.extend_from_slice(&chunk);
         if body.len() == MAX_WEB_FETCH_BODY_BYTES {
-            truncated = has_more_response_bytes(&mut stream).await?;
+            truncated = has_more_response_bytes(&mut stream)
+                .await
+                .map_err(classify_send_failure)?;
             break;
         }
     }
@@ -439,7 +451,9 @@ async fn fetch_with_client(
 }
 
 fn classify_send_failure(error: reqwest::Error) -> WebFetchTransportFailure {
-    if error.is_connect() {
+    if error.is_timeout() {
+        WebFetchTransportFailure::Timeout
+    } else if error.is_connect() {
         WebFetchTransportFailure::RequestFailed
     } else {
         WebFetchTransportFailure::DispatchUnknown
@@ -455,6 +469,7 @@ fn classify_send_failure(error: reqwest::Error) -> WebFetchTransportFailure {
 pub struct WebFetchExecutor<Transport> {
     transport: Transport,
     request_failed_detail: ToolExecutionErrorDetail,
+    timeout_detail: ToolExecutionErrorDetail,
     egress_policy: WebFetchEgressPolicy,
 }
 
@@ -507,6 +522,9 @@ where
             Err(WebFetchTransportFailure::DispatchUnknown) => {
                 return Err(WebFetchExecutorError::DispatchUnknown);
             }
+            Err(WebFetchTransportFailure::Timeout) => ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.timeout_detail.clone()),
+            },
         };
         Ok(invocation.bind(evidence))
     }
@@ -564,7 +582,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use signalbox_egress_transport::{PublicDestinationClientError, ResolvedPublicDestination};
+    use signalbox_egress_transport::ResolvedPublicDestination;
 
     const FIXTURE_ORIGIN: &str = "https://example.com";
     const REDIRECT_STATUS: u16 = 302;
@@ -779,6 +797,73 @@ mod tests {
             ),
             Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
         ));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_exhausted_resolution_budget_returns_timeout_before_dispatch() {
+        let mut transport = ReqwestWebFetchTransport {
+            exchange_timeout: Duration::ZERO,
+        };
+        let request = WebFetchRequest {
+            url: Url::parse("https://93.184.216.34/").unwrap(),
+        };
+        assert_eq!(
+            transport.fetch(request).await,
+            Err(WebFetchTransportFailure::Timeout)
+        );
+    }
+
+    #[tokio::test]
+    async fn web_fetch_timeouts_preserve_the_typed_deadline_at_every_read_stage() {
+        // Cover waiting for headers, a partial body, and EOF after the exact cap.
+        for body_bytes in [None, Some(1), Some(MAX_WEB_FETCH_BODY_BYTES)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let destination = ResolvedPublicDestination {
+                host: "example.test".to_owned(),
+                addresses: vec![address],
+            };
+            let client =
+                build_web_fetch_client(Some(Duration::from_millis(250)), Some(&destination))
+                    .unwrap();
+            let request = WebFetchRequest {
+                url: Url::parse(&format!("http://example.test:{}/", address.port())).unwrap(),
+            };
+            let (stage_sent, stage_received) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut input = [0; 1024];
+                let received = socket.read(&mut input).await.unwrap();
+                assert!(received > 0, "the client started its request");
+                if let Some(bytes) = body_bytes {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                        .await
+                        .unwrap();
+                    socket.write_all(&vec![b'x'; bytes]).await.unwrap();
+                }
+                stage_sent.send(body_bytes).unwrap();
+                std::future::pending::<()>().await;
+            });
+            let result = fetch_with_client(client, request).await;
+            server.abort();
+            let server_end = server.await.expect_err("the fixture waits until cancelled");
+            assert!(
+                server_end.is_cancelled(),
+                "fixture server failed: {server_end}"
+            );
+            assert_eq!(
+                stage_received
+                    .await
+                    .expect("server reached the requested stage"),
+                body_bytes
+            );
+            assert_eq!(
+                result,
+                Err(WebFetchTransportFailure::Timeout),
+                "stage {body_bytes:?}"
+            );
+        }
     }
 
     /// Loss after physical dispatch is classified as commit-ambiguous
