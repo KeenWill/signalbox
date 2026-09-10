@@ -46,7 +46,11 @@ impl Hunks {
         self.file.write_all(&[1]).map_err(failed)
     }
     pub(super) fn bytes(&mut self, bytes: &[u8]) -> Result<(), GitPushFailure> {
-        let hash: [u8; 32] = Sha256::digest(bytes).into();
+        let hash: [u8; 32] = if matches!(bytes.first(), Some(b'+' | b'-')) {
+            text_effect_hash(bytes[0], Sha256::digest(&bytes[1..]).into())
+        } else {
+            Sha256::digest(bytes).into()
+        };
         self.effect(
             hash,
             bytes.len() as u64,
@@ -275,7 +279,7 @@ impl Effects {
 // At 48 bytes per record, each line index is at most 6 MiB; blobs remain unbounded.
 const MAX_INDEXED_LINES: u64 = 131_072;
 
-struct Lines {
+pub(super) struct Lines {
     content: File,
     index: File,
     count: u64,
@@ -287,7 +291,10 @@ struct Line {
     hash: [u8; 32],
 }
 impl Lines {
-    fn new(content: ObjectContent, deadline: Instant) -> Result<Option<Self>, GitPushFailure> {
+    pub(super) fn new(
+        content: ObjectContent,
+        deadline: Instant,
+    ) -> Result<Option<Self>, GitPushFailure> {
         let mut reader = BufReader::with_capacity(IO_BYTES, content.file);
         reader.rewind().map_err(failed)?;
         let mut index = BufWriter::new(tempfile::tempfile().map_err(failed)?);
@@ -323,6 +330,13 @@ impl Lines {
             count,
         }))
     }
+    pub(super) fn duplicate(&self) -> Result<Self, GitPushFailure> {
+        Ok(Self {
+            content: self.content.try_clone().map_err(failed)?,
+            index: self.index.try_clone().map_err(failed)?,
+            count: self.count,
+        })
+    }
     fn line(&self, number: u64) -> Result<Line, GitPushFailure> {
         let mut record = [0; 48];
         self.index
@@ -345,24 +359,14 @@ impl Lines {
         deadline: Instant,
     ) -> Result<(), GitPushFailure> {
         let line = self.line(number)?;
-        let mut hash = Sha256::new();
-        hash.update([origin]);
-        let mut buffer = [0; IO_BYTES];
-        let mut offset = 0;
-        let mut preview = vec![origin];
-        while offset < line.length {
-            check(deadline)?;
-            let count = (line.length - offset).min(buffer.len() as u64) as usize;
-            self.content
-                .read_exact_at(&mut buffer[..count], line.offset + offset)
-                .map_err(failed)?;
-            hash.update(&buffer[..count]);
-            let kept = count.min(MAX_MERGE_DETAIL_BYTES - preview.len());
-            preview.extend_from_slice(&buffer[..kept]);
-            offset += count as u64;
-        }
+        check(deadline)?;
+        let kept = line.length.min((MAX_MERGE_DETAIL_BYTES - 1) as u64) as usize;
+        let mut preview = vec![origin; kept + 1];
+        self.content
+            .read_exact_at(&mut preview[1..], line.offset)
+            .map_err(failed)?;
         hunks.effect(
-            hash.finalize().into(),
+            text_effect_hash(origin, line.hash),
             line.length + 1,
             &preview,
             true,
@@ -383,6 +387,15 @@ impl Lines {
         Ok(())
     }
 }
+// Domain-separate additions and removals using the complete indexed line hash.
+// This reuses the streamed digest without rereading a large line for each delta.
+fn text_effect_hash(origin: u8, line: [u8; 32]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update([origin]);
+    hash.update(line);
+    hash.finalize().into()
+}
+
 fn write_line(
     writer: &mut impl Write,
     offset: u64,
@@ -404,9 +417,25 @@ pub(super) enum TextDiff {
     WholeObject,
 }
 
+#[cfg(test)]
 pub(super) fn text_hunks(
     old: ObjectContent,
     new: ObjectContent,
+    hunks: &mut Hunks,
+    deadline: Instant,
+) -> Result<TextDiff, GitPushFailure> {
+    let Some(old) = Lines::new(old, deadline)? else {
+        return Ok(TextDiff::WholeObject);
+    };
+    let Some(new) = Lines::new(new, deadline)? else {
+        return Ok(TextDiff::WholeObject);
+    };
+    indexed_text_hunks(&old, &new, hunks, deadline)
+}
+
+pub(super) fn indexed_text_hunks(
+    old: &Lines,
+    new: &Lines,
     hunks: &mut Hunks,
     deadline: Instant,
 ) -> Result<TextDiff, GitPushFailure> {
@@ -415,12 +444,6 @@ pub(super) fn text_hunks(
     let previous_preview = hunks.preview;
     let previous_edits = hunks.edits.len();
     let mut work = MAX_MATCH_WORK;
-    let Some(old) = Lines::new(old, deadline)? else {
-        return Ok(TextDiff::WholeObject);
-    };
-    let Some(new) = Lines::new(new, deadline)? else {
-        return Ok(TextDiff::WholeObject);
-    };
     // Pending ranges and both search frontiers live on disk, including for
     // highly unbalanced splits. Only the current range occupies resident memory.
     let mut pending = Ranges::new()?;
@@ -451,7 +474,7 @@ pub(super) fn text_hunks(
         if a == b && c == d {
             continue;
         }
-        if a == b || c == d || !have_common_line(&old, &new, [a, b, c, d], deadline)? {
+        if a == b || c == d || !have_common_line(old, new, [a, b, c, d], deadline)? {
             if start {
                 hunks.start()?;
                 start = false;
@@ -474,7 +497,7 @@ pub(super) fn text_hunks(
             }
             continue;
         }
-        let Some((x, y)) = bisect(&old, &new, [a, b, c, d], &mut work, deadline)? else {
+        let Some((x, y)) = bisect(old, new, [a, b, c, d], &mut work, deadline)? else {
             hunks.file.flush().map_err(failed)?;
             hunks.file.get_ref().set_len(checkpoint).map_err(failed)?;
             hunks
@@ -530,6 +553,26 @@ pub(super) fn preserves_text(
     let Some(base_lines) = Lines::new(base_content, deadline)? else {
         return Ok(false);
     };
+    preserves_indexed_text(
+        &ancestor,
+        &branch_lines,
+        &base_lines,
+        &result,
+        branch,
+        base,
+        deadline,
+    )
+}
+
+pub(super) fn preserves_indexed_text(
+    ancestor: &Lines,
+    branch_lines: &Lines,
+    base_lines: &Lines,
+    result: &ObjectContent,
+    branch: &Hunks,
+    base: &Hunks,
+    deadline: Instant,
+) -> Result<bool, GitPushFailure> {
     let mut edits: Vec<_> = branch
         .edits
         .iter()
@@ -551,15 +594,15 @@ pub(super) fn preserves_text(
             end = end.max(edits[index].1[1]);
             index += 1;
         }
-        append_lines(&ancestor, cursor, start, &mut fixed, deadline)?;
+        append_lines(ancestor, cursor, start, &mut fixed, deadline)?;
         let region = &edits[first..index];
         let replacement = |side| -> Result<File, GitPushFailure> {
             let mut bytes = tempfile::tempfile().map_err(failed)?;
             let mut cursor = start;
             for (_, [a, b, c, d]) in region.iter().filter(|(source, _)| *source == side) {
-                append_lines(&ancestor, cursor, *a, &mut bytes, deadline)?;
+                append_lines(ancestor, cursor, *a, &mut bytes, deadline)?;
                 append_lines(
-                    if side { &base_lines } else { &branch_lines },
+                    if side { base_lines } else { branch_lines },
                     *c,
                     *d,
                     &mut bytes,
@@ -567,7 +610,7 @@ pub(super) fn preserves_text(
                 )?;
                 cursor = *b;
             }
-            append_lines(&ancestor, cursor, end, &mut bytes, deadline)?;
+            append_lines(ancestor, cursor, end, &mut bytes, deadline)?;
             Ok(bytes)
         };
         let branch_changed = region.iter().any(|(side, _)| !side);
@@ -624,7 +667,7 @@ pub(super) fn preserves_text(
         }
         cursor = end;
     }
-    append_lines(&ancestor, cursor, ancestor.count, &mut fixed, deadline)?;
+    append_lines(ancestor, cursor, ancestor.count, &mut fixed, deadline)?;
     let size = fixed.metadata().map_err(failed)?.len();
     if !conflicts {
         equal_files(

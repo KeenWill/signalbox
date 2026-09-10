@@ -225,15 +225,16 @@ pub(super) fn verify_merge(
         for change in std::iter::once(delta).chain(branch_delta).chain(base_delta) {
             capture_change(change, &mut source, &database)?;
         }
+        let mut contents = Contents::new(&source, deadline);
         let mut branch_hunks = branch_delta
-            .map(|delta| change_hunks(delta, None, &source, deadline))
+            .map(|delta| change_hunks(delta, None, &mut contents, deadline))
             .transpose()?
             .map_or_else(Hunks::new, Ok)?;
         let mut base_hunks = base_delta
-            .map(|delta| change_hunks(delta, None, &source, deadline))
+            .map(|delta| change_hunks(delta, None, &mut contents, deadline))
             .transpose()?
             .map_or_else(Hunks::new, Ok)?;
-        let mut carried_hunks = change_hunks(delta, Some(source_path), &source, deadline)?;
+        let mut carried_hunks = change_hunks(delta, Some(source_path), &mut contents, deadline)?;
         let ancestor = base_delta
             .or(branch_delta)
             .map_or(delta.old, |delta| delta.old);
@@ -242,7 +243,7 @@ pub(super) fn verify_merge(
             old: ancestor,
             new: delta.new,
         };
-        let mut result_hunks = change_hunks(result, None, &source, deadline)?;
+        let mut result_hunks = change_hunks(result, None, &mut contents, deadline)?;
         let mut retained = result_hunks.permitted_filtered(Some(true), deadline)?;
         let mut permitted = branch_hunks.permitted_filtered(Some(false), deadline)?;
         let mut missing = base_hunks.first_dropped_filtered(
@@ -260,22 +261,15 @@ pub(super) fn verify_merge(
             )?;
         }
         if missing.is_none()
-            && !streamed::preserves_text(
-                content(ancestor, &source, deadline)?,
-                content(
+            && !contents.preserves(
+                [
+                    ancestor,
                     branch_delta.map_or(ancestor, |delta| delta.new),
-                    &source,
-                    deadline,
-                )?,
-                content(
                     base_delta.map_or(ancestor, |delta| delta.new),
-                    &source,
-                    deadline,
-                )?,
-                content(delta.new, &source, deadline)?,
+                    delta.new,
+                ],
                 &branch_hunks,
                 &base_hunks,
-                deadline,
             )?
         {
             missing = carried_hunks.first_dropped(
@@ -334,23 +328,21 @@ pub(super) fn verify_merge(
         {
             capture_change(change, &mut source, &database)?;
         }
-        let mut branch_hunks = change_hunks(delta, None, &source, deadline)?;
+        let mut contents = Contents::new(&source, deadline);
+        let mut branch_hunks = change_hunks(delta, None, &mut contents, deadline)?;
         let base_hunks = base_delta
-            .map(|delta| change_hunks(delta, None, &source, deadline))
+            .map(|delta| change_hunks(delta, None, &mut contents, deadline))
             .transpose()?
             .map_or_else(Hunks::new, Ok)?;
-        if !streamed::preserves_text(
-            content(delta.old, &source, deadline)?,
-            content(delta.new, &source, deadline)?,
-            content(
+        if !contents.preserves(
+            [
+                delta.old,
+                delta.new,
                 base_delta.map_or(delta.old, |delta| delta.new),
-                &source,
-                deadline,
-            )?,
-            content(result, &source, deadline)?,
+                result,
+            ],
             &branch_hunks,
             &base_hunks,
-            deadline,
         )? && let Some((preview, truncated)) = branch_hunks.first_dropped(
             &mut Hunks::new()?.permitted(deadline)?,
             preview_bytes,
@@ -405,31 +397,109 @@ fn capture_change(
     Ok(())
 }
 
-fn content(
-    file: Side<'_>,
-    source: &ObjectSource,
+// Retain decoded versions only for one path comparison; subsequent diffs clone
+// descriptors, never blob bytes. No cached files accumulate across paths.
+struct Contents<'a> {
+    source: &'a ObjectSource,
+    files: BTreeMap<Oid, crate::streamed_object::ObjectContent>,
+    indexes: BTreeMap<Oid, Option<streamed::Lines>>,
     deadline: Instant,
-) -> Result<crate::streamed_object::ObjectContent, GitPushFailure> {
-    if file.id().is_zero() || file.mode() == git2::FileMode::Commit {
-        crate::streamed_object::ObjectContent::decode(
-            &mut std::io::empty(),
-            0,
-            ObjectType::Blob,
-            Some(deadline),
+}
+impl<'a> Contents<'a> {
+    fn new(source: &'a ObjectSource, deadline: Instant) -> Self {
+        Self {
+            source,
+            files: BTreeMap::new(),
+            indexes: BTreeMap::new(),
+            deadline,
+        }
+    }
+    fn lines(&mut self, side: Side<'_>) -> Result<Option<streamed::Lines>, GitPushFailure> {
+        if !self.indexes.contains_key(&side.id()) {
+            let content = self.get(side)?;
+            self.indexes
+                .insert(side.id(), streamed::Lines::new(content, self.deadline)?);
+        }
+        self.indexes
+            .get(&side.id())
+            .and_then(Option::as_ref)
+            .map(streamed::Lines::duplicate)
+            .transpose()
+    }
+    fn preserves(
+        &mut self,
+        versions: [Side<'_>; 4],
+        branch: &Hunks,
+        base: &Hunks,
+    ) -> Result<bool, GitPushFailure> {
+        let [ancestor, branch_side, base_side, result] = versions;
+        let result = self.get(result)?;
+        if branch.edits.is_empty() && base.edits.is_empty() {
+            return streamed::preserves_text(
+                self.get(ancestor)?,
+                self.get(branch_side)?,
+                self.get(base_side)?,
+                result,
+                branch,
+                base,
+                self.deadline,
+            );
+        }
+        let Some(ancestor) = self.lines(ancestor)? else {
+            return Ok(false);
+        };
+        let Some(branch_lines) = self.lines(branch_side)? else {
+            return Ok(false);
+        };
+        let Some(base_lines) = self.lines(base_side)? else {
+            return Ok(false);
+        };
+        streamed::preserves_indexed_text(
+            &ancestor,
+            &branch_lines,
+            &base_lines,
+            &result,
+            branch,
+            base,
+            self.deadline,
         )
-        .map_err(repository_failure)
-    } else {
-        source
-            .content(file.id())
-            .map_err(repository_failure)?
-            .ok_or(GitPushFailure::Repository)
+    }
+    fn get(
+        &mut self,
+        side: Side<'_>,
+    ) -> Result<crate::streamed_object::ObjectContent, GitPushFailure> {
+        let content = match self.files.entry(side.id()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let content = if side.id().is_zero() || side.mode() == git2::FileMode::Commit {
+                    crate::streamed_object::ObjectContent::decode(
+                        &mut std::io::empty(),
+                        0,
+                        ObjectType::Blob,
+                        Some(self.deadline),
+                    )
+                    .map_err(repository_failure)?
+                } else {
+                    self.source
+                        .content(side.id())
+                        .map_err(repository_failure)?
+                        .ok_or(GitPushFailure::Repository)?
+                };
+                entry.insert(content)
+            }
+        };
+        Ok(crate::streamed_object::ObjectContent {
+            file: content.file.try_clone().map_err(repository_failure)?,
+            size: content.size,
+            kind: content.kind,
+        })
     }
 }
 
 fn change_hunks(
     delta: Change<'_>,
     rename_source: Option<&Path>,
-    source: &ObjectSource,
+    contents: &mut Contents<'_>,
     deadline: Instant,
 ) -> Result<Hunks, GitPushFailure> {
     streamed::check(deadline)?;
@@ -468,8 +538,8 @@ fn change_hunks(
         object_hunk(delta, &mut hunks)?;
         return Ok(hunks);
     }
-    let mut old = content(delta.old_file(), source, deadline)?;
-    let mut new = content(delta.new_file(), source, deadline)?;
+    let mut old = contents.get(delta.old_file())?;
+    let mut new = contents.get(delta.new_file())?;
     let old_prefix = old
         .prefix(crate::limits::MAX_DIFF_BYTES)
         .map_err(repository_failure)?;
@@ -512,11 +582,18 @@ fn change_hunks(
             object_hunk(delta, &mut hunks)?;
         }
     } else {
-        if streamed::text_hunks(old, new, &mut hunks, deadline)? == streamed::TextDiff::WholeObject
-        {
+        let detailed = match (contents.lines(delta.old)?, contents.lines(delta.new)?) {
+            (Some(old), Some(new)) => {
+                streamed::indexed_text_hunks(&old, &new, &mut hunks, deadline)?
+                    == streamed::TextDiff::Detailed
+            }
+            _ => false,
+        };
+        if !detailed {
             object_hunk(delta, &mut hunks)?;
         }
     }
+
     Ok(hunks)
 }
 fn object_hunk(delta: Change<'_>, hunks: &mut Hunks) -> Result<(), GitPushFailure> {
