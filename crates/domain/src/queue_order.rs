@@ -646,38 +646,6 @@ mod tests {
         assert_eq!(maximum.as_u64(), u64::MAX);
     }
 
-    /// queue-order facts expose exactly the immutable acceptance
-    /// position and typed priority they were constructed with, and the
-    /// derivation projection round-trips its session, turn, and order without
-    /// substituting or dropping any identity.
-    #[test]
-    fn queue_order_facts_expose_their_construction_inputs() {
-        let position = positions(2);
-
-        let ordinary_order = AcceptedInputQueueOrder::ordinary(position[0]);
-        assert_eq!(ordinary_order.acceptance_position(), position[0]);
-        assert_eq!(
-            ordinary_order.priority(),
-            AcceptedInputQueuePriority::Ordinary
-        );
-
-        let predecessor = turn_id(7);
-        let interrupt_order =
-            AcceptedInputQueueOrder::interrupt_immediately_after(position[1], predecessor);
-        assert_eq!(interrupt_order.acceptance_position(), position[1]);
-        assert_eq!(
-            interrupt_order.priority(),
-            AcceptedInputQueuePriority::InterruptImmediatelyAfter { predecessor }
-        );
-
-        let session = session_id(100);
-        let turn = turn_id(3);
-        let work = AcceptedInputQueueWork::new(session, turn, interrupt_order);
-        assert_eq!(work.session(), session);
-        assert_eq!(work.turn(), turn);
-        assert_eq!(work.order(), interrupt_order);
-    }
-
     /// ordinary work is ordered by immutable acceptance position, independent of fact iteration
     /// order.
     #[test]

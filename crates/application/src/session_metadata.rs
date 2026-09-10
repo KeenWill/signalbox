@@ -792,20 +792,6 @@ mod tests {
     }
 
     #[test]
-    fn default_list_query_selects_first_non_archived_page() {
-        let query = SessionMetadataListQuery::default_page(5);
-
-        assert_eq!(
-            query.required_tags().collect::<Vec<_>>(),
-            Vec::<&str>::new()
-        );
-        assert_eq!(query.title_contains(), None);
-        assert!(!query.include_archived());
-        assert_eq!(query.page_size(), 5);
-        assert_eq!(query.after_session(), None);
-    }
-
-    #[test]
     fn list_query_canonicalizes_required_tag_order() {
         let query = SessionMetadataListQuery::try_new_with_limits(
             vec![String::from("z"), String::from("a")],

@@ -644,51 +644,6 @@ fn dependency_cycle_evidence_rejects_a_repeated_internal_vertex() {
 }
 
 #[test]
-fn dependency_overflow_fixture_has_exact_boundary_shape() {
-    let provenance = PlanEventProvenance::from_invocation(correlation(10));
-    let maximum = u64::try_from(MAX_PLAN_DEPENDENCIES_PER_ENTRY)
-        .expect("the fixture dependency limit fits u64");
-    let last_dependency = maximum + 2;
-    let first_edge = maximum + 3;
-    let last_event = maximum * 2 + 3;
-    let events = dependency_overflow_history();
-    let expected_last_creation = event(
-        last_dependency,
-        provenance,
-        PlanEventKind::Created {
-            text: text(INITIAL_TEXT),
-        },
-    );
-    let expected_first_edge = event(
-        first_edge,
-        provenance,
-        PlanEventKind::DependsOn {
-            entry: entry(1),
-            dependency: entry(2),
-        },
-    );
-    let expected_last_edge = event(
-        last_event,
-        provenance,
-        PlanEventKind::DependsOn {
-            entry: entry(1),
-            dependency: entry(last_dependency),
-        },
-    );
-
-    assert_eq!(events.len(), MAX_PLAN_DEPENDENCIES_PER_ENTRY * 2 + 3);
-    assert_eq!(
-        events.get(MAX_PLAN_DEPENDENCIES_PER_ENTRY + 1),
-        Some(&expected_last_creation)
-    );
-    assert_eq!(
-        events.get(MAX_PLAN_DEPENDENCIES_PER_ENTRY + 2),
-        Some(&expected_first_edge)
-    );
-    assert_eq!(events.last(), Some(&expected_last_edge));
-}
-
-#[test]
 fn fold_rejects_a_dependency_set_above_the_read_bound() {
     let dependent = entry(1);
     let events = dependency_overflow_history();

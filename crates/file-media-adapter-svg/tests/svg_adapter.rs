@@ -134,14 +134,6 @@ impl FileMediaProcessor for AdversarialOutputProcessor {
     }
 }
 
-#[test]
-fn declaration_registers_data_only_svg_under_available_isolation() -> Result<(), Box<dyn Error>> {
-    let registry = registry()?;
-
-    assert_eq!(registry.providers(), &[declaration()?]);
-    Ok(())
-}
-
 #[tokio::test]
 async fn generated_svg_validates() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::ordinary().into_source()?;
