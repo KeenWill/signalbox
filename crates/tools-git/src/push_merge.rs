@@ -360,7 +360,10 @@ fn hunks(
             object_hunk(delta, &mut hunks)?;
         }
     } else {
-        streamed::text_hunks(old, new, &mut hunks, deadline)?;
+        if streamed::text_hunks(old, new, &mut hunks, deadline)? == streamed::TextDiff::WholeObject
+        {
+            object_hunk(delta, &mut hunks)?;
+        }
     }
     Ok(hunks)
 }

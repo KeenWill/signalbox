@@ -329,12 +329,26 @@ fn write_line(
     writer.write_all(&hash).map_err(failed)
 }
 
+// Bounds random frontier operations and line comparisons across every split of
+// one file diff. Exhaustion uses an atomic object effect, never inferred edits.
+const MAX_MATCH_WORK: usize = 65_536;
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum TextDiff {
+    Detailed,
+    WholeObject,
+}
+
 pub(super) fn text_hunks(
     old: ObjectContent,
     new: ObjectContent,
     hunks: &mut Hunks,
     deadline: Instant,
-) -> Result<(), GitPushFailure> {
+) -> Result<TextDiff, GitPushFailure> {
+    let checkpoint = hunks.file.stream_position().map_err(failed)?;
+    let previous_effects = hunks.effects;
+    let previous_preview = hunks.preview;
+    let mut work = MAX_MATCH_WORK;
     let old = Lines::new(old, deadline)?;
     let new = Lines::new(new, deadline)?;
     // Pending ranges and both search frontiers live on disk, including for
@@ -380,14 +394,24 @@ pub(super) fn text_hunks(
             }
             continue;
         }
-        let (x, y) = bisect(&old, &new, [a, b, c, d], deadline)?;
+        let Some((x, y)) = bisect(&old, &new, [a, b, c, d], &mut work, deadline)? else {
+            hunks.file.flush().map_err(failed)?;
+            hunks.file.get_ref().set_len(checkpoint).map_err(failed)?;
+            hunks
+                .file
+                .seek(std::io::SeekFrom::Start(checkpoint))
+                .map_err(failed)?;
+            hunks.effects = previous_effects;
+            hunks.preview = previous_preview;
+            return Ok(TextDiff::WholeObject);
+        };
         if (x == a && y == c) || (x == b && y == d) {
             return Err(GitPushFailure::Repository);
         }
         pending.push([x, b, y, d])?;
         pending.push([a, x, c, y])?;
     }
-    Ok(())
+    Ok(TextDiff::Detailed)
 }
 
 struct Ranges {
@@ -501,8 +525,9 @@ fn bisect(
     old: &Lines,
     new: &Lines,
     [a, b, c, e]: [u64; 4],
+    work: &mut usize,
     deadline: Instant,
-) -> Result<(u64, u64), GitPushFailure> {
+) -> Result<Option<(u64, u64)>, GitPushFailure> {
     let n = i64::try_from(b - a).map_err(failed)?;
     let m = i64::try_from(e - c).map_err(failed)?;
     let max = n
@@ -510,14 +535,18 @@ fn bisect(
         .and_then(|n| n.checked_add(1))
         .ok_or(GitPushFailure::Repository)?
         / 2;
-    let forward = Frontier::new(max)?;
-    let reverse = Frontier::new(max)?;
+    let forward = Frontier::new(max.min(MAX_MATCH_WORK as i64))?;
+    let reverse = Frontier::new(max.min(MAX_MATCH_WORK as i64))?;
     let delta = n - m;
     let odd = delta % 2 != 0;
     let (mut forward_start, mut forward_end, mut reverse_start, mut reverse_end) = (0, 0, 0, 0);
     for distance in 0..=max {
         for k in (-distance + forward_start..=distance - forward_end).step_by(2) {
             check(deadline)?;
+            let Some(remaining) = work.checked_sub(1) else {
+                return Ok(None);
+            };
+            *work = remaining;
             let mut x =
                 if k == -distance || (k != distance && forward.get(k - 1)? < forward.get(k + 1)?) {
                     forward.get(k + 1)?
@@ -532,6 +561,10 @@ fn bisect(
                 && old.line(a + x as u64)?.hash == new.line(c + y as u64)?.hash
             {
                 check(deadline)?;
+                let Some(remaining) = work.checked_sub(1) else {
+                    return Ok(None);
+                };
+                *work = remaining;
                 x += 1;
                 y += 1;
             }
@@ -543,12 +576,16 @@ fn bisect(
             } else if odd && (delta - k).abs() < distance {
                 let backwards = reverse.get(delta - k)?;
                 if backwards >= 0 && x >= n - backwards {
-                    return Ok((a + x as u64, c + y as u64));
+                    return Ok(Some((a + x as u64, c + y as u64)));
                 }
             }
         }
         for k in (-distance + reverse_start..=distance - reverse_end).step_by(2) {
             check(deadline)?;
+            let Some(remaining) = work.checked_sub(1) else {
+                return Ok(None);
+            };
+            *work = remaining;
             let mut x =
                 if k == -distance || (k != distance && reverse.get(k - 1)? < reverse.get(k + 1)?) {
                     reverse.get(k + 1)?
@@ -563,6 +600,10 @@ fn bisect(
                 && old.line(b - x as u64 - 1)?.hash == new.line(e - y as u64 - 1)?.hash
             {
                 check(deadline)?;
+                let Some(remaining) = work.checked_sub(1) else {
+                    return Ok(None);
+                };
+                *work = remaining;
                 x += 1;
                 y += 1;
             }
@@ -574,7 +615,10 @@ fn bisect(
             } else if !odd && (delta - k).abs() <= distance {
                 let forwards = forward.get(delta - k)?;
                 if forwards >= 0 && forwards >= n - x {
-                    return Ok((a + forwards as u64, c + (forwards - (delta - k)) as u64));
+                    return Ok(Some((
+                        a + forwards as u64,
+                        c + (forwards - (delta - k)) as u64,
+                    )));
                 }
             }
         }
@@ -743,6 +787,46 @@ mod tests {
         assert!(preview.len() <= MAX_MERGE_DETAIL_BYTES);
         assert!(truncated);
     }
+    #[test]
+    fn nearly_disjoint_large_files_fall_back_without_partial_line_effects() {
+        let make = |prefix: &str| {
+            let mut file = BufWriter::new(tempfile::tempfile().expect("generated text"));
+            for line in 0..100_000 {
+                if line == 50_000 {
+                    writeln!(file, "shared middle line").expect("shared line");
+                } else {
+                    writeln!(file, "{prefix}-{line:08}").expect("distinct line");
+                }
+            }
+            let mut file = file.into_inner().expect("flush");
+            let size = file.metadata().expect("metadata").len() as usize;
+            assert!(size > crate::limits::MAX_DIFF_BYTES);
+            file.rewind().expect("rewind");
+            ObjectContent {
+                file,
+                size,
+                kind: git2::ObjectType::Blob,
+            }
+        };
+        let mut hunks = Hunks::new().expect("hunks");
+        hunks.single(b"mode change").expect("existing effect");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        assert_eq!(
+            text_hunks(make("old"), make("new"), &mut hunks, deadline).expect("bounded diff"),
+            TextDiff::WholeObject
+        );
+        assert_eq!(hunks.effects, 1, "partial line effects are discarded");
+        let mut allowed = Hunks::new().expect("allowed");
+        allowed.single(b"mode change").expect("mode effect");
+        let mut allowed = allowed.permitted(deadline).expect("allowed counts");
+        assert_eq!(
+            hunks
+                .first_dropped(&mut allowed, MAX_MERGE_DETAIL_BYTES, deadline)
+                .expect("comparison"),
+            None
+        );
+    }
+
     #[test]
     fn streamed_merge_work_stops_at_its_deadline() {
         let expired = Instant::now() - Duration::from_secs(1);
