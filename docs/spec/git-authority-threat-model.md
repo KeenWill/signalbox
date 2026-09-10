@@ -103,6 +103,11 @@ the final validation or after an operation returns. Descriptor pinning does not
 sandbox a hostile same-UID process, stop writes through pre-existing hard links
 or open descriptors, or survive a compromised kernel or library.
 
+Blob preparation and range reads trust ingest-verified catalog evidence and
+filesystem length and inode checks. A same-UID writer changing blob bytes in
+place after ingest is an accepted residual; explicit operator reads verify the
+complete blob's SHA-256.
+
 Scans and result text remain bounded; worktree, staging, and object-database
 content have no aggregate byte ceiling. Patches preview bounded content prefixes
 with truncation markers, and status identifies renames by exact object identity.

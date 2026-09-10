@@ -60,7 +60,8 @@ inspection. Text inspection validates a bounded prefix, and text reads return
 bounded UTF-8 sections without splitting scalars. JSON and CSV views retain
 bounded structured results and reject sources outside their whole-decode
 envelopes. Sources are range capabilities; their total length never sizes a
-materialization.
+materialization. Source range reads reject ranges extending beyond the
+catalogued length, including offset-plus-length overflow, before store access.
 
 PDF preflight charges recursive length-carrier decoding against the aggregate
 object-stream budget. Text reads charge page content and font CMaps against one

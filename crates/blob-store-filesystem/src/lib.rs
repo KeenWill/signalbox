@@ -128,6 +128,8 @@ impl Drop for TemporaryBlobFile {
 /// Filesystem store rooted at one deployment-owned storage namespace.
 #[derive(Clone)]
 pub struct FilesystemBlobStore {
+    #[cfg(feature = "test-support")]
+    read_bytes: Arc<std::sync::atomic::AtomicU64>,
     root: Arc<fs::File>,
     publication_directory: Arc<fs::File>,
 }
@@ -309,6 +311,20 @@ impl std::fmt::Debug for FilesystemBlobStore {
 }
 
 impl FilesystemBlobStore {
+    /// Returns body bytes read through this store's preparation and range paths.
+    #[cfg(feature = "test-support")]
+    pub fn read_bytes_for_test(&self) -> u64 {
+        self.read_bytes.load(Ordering::Relaxed)
+    }
+
+    fn measured_reader<Reader>(&self, reader: Reader) -> MeasuredReader<Reader> {
+        MeasuredReader {
+            reader,
+            #[cfg(feature = "test-support")]
+            count: self.read_bytes.clone(),
+        }
+    }
+
     /// Constructs a store at an absolute existing directory.
     pub fn try_new(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
         let (root_descriptor, _) = open_validated_root(&root)?;
@@ -324,6 +340,8 @@ impl FilesystemBlobStore {
         Ok(Self {
             root: root_descriptor,
             publication_directory,
+            #[cfg(feature = "test-support")]
+            read_bytes: Arc::default(),
         })
     }
 
@@ -373,6 +391,8 @@ impl FilesystemBlobStore {
             Self {
                 root: root_descriptor,
                 publication_directory,
+                #[cfg(feature = "test-support")]
+                read_bytes: Arc::default(),
             },
             opened.identity,
         ))
@@ -569,7 +589,10 @@ impl FilesystemBlobStore {
         }
         let (file, byte_length) =
             open_private_regular_file(self.root.clone(), key.clone(), "open object").await?;
-        Ok(OpenedBlob::new(byte_length, Box::new(file)))
+        Ok(OpenedBlob::new(
+            byte_length,
+            Box::new(self.measured_reader(file)),
+        ))
     }
 
     async fn open_verified_inner(
@@ -629,6 +652,7 @@ impl FilesystemBlobStore {
             return Err(BlobStoreError::unavailable("reject reserved object key"));
         }
         verify_and_retain_range(
+            self,
             self.root.clone(),
             key.clone(),
             expected,
@@ -819,6 +843,7 @@ async fn verify_opened_file_with_destination(
 }
 
 async fn verify_and_retain_range(
+    store: &FilesystemBlobStore,
     root: Arc<fs::File>,
     key: BlobObjectKey,
     expected: ExpectedBlob,
@@ -828,63 +853,30 @@ async fn verify_and_retain_range(
     if byte_length.get() > MAX_BLOB_RANGE_BYTES {
         return Err(BlobStoreError::unavailable("validate object range"));
     }
-    let end = offset
-        .checked_add(byte_length.get())
-        .filter(|end| *end <= expected.byte_length())
-        .ok_or_else(|| BlobStoreError::unavailable("validate object range"))?;
-    let (mut file, _) = open_private_regular_file(root, key, "open object range").await?;
-    let retained_capacity = usize::try_from(byte_length.get())
-        .map_err(|_| BlobStoreError::unavailable("allocate object range"))?;
-    let mut retained = Vec::with_capacity(retained_capacity);
-    let mut digest = Sha256::new();
-    let mut observed_length = 0_u64;
-    let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .await
-            .map_err(|source| BlobStoreError::io("read object range verification", source))?;
-        if read == 0 {
-            break;
-        }
-        let chunk_start = observed_length;
-        observed_length = observed_length
-            .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
-            .ok_or_else(|| {
-                BlobStoreError::verification(
-                    "count range-verified object bytes",
-                    BlobVerificationFailure::new(expected, None, u64::MAX),
-                )
-            })?;
-        if observed_length > expected.byte_length() {
-            return Err(BlobStoreError::verification(
-                "verify object for range",
-                BlobVerificationFailure::new(expected, None, observed_length),
-            ));
-        }
-        let retain_start = offset.max(chunk_start);
-        let retain_end = end.min(observed_length);
-        if retain_start < retain_end {
-            let buffer_start = usize::try_from(retain_start - chunk_start)
-                .map_err(|_| BlobStoreError::unavailable("retain object range"))?;
-            let buffer_end = usize::try_from(retain_end - chunk_start)
-                .map_err(|_| BlobStoreError::unavailable("retain object range"))?;
-            retained.extend_from_slice(&buffer[buffer_start..buffer_end]);
-        }
-        digest.update(&buffer[..read]);
-    }
-    let observed_digest = BlobDigest::from_bytes(digest.finalize().into());
-    if observed_length != expected.byte_length() || observed_digest != expected.digest() {
+    let (file, observed_length) = open_private_regular_file(root, key, "open object range").await?;
+    let mut file = store.measured_reader(file);
+    if observed_length != expected.byte_length() {
         return Err(BlobStoreError::verification(
-            "verify object for range",
-            BlobVerificationFailure::new(expected, Some(observed_digest), observed_length),
+            "check object range length",
+            BlobVerificationFailure::new(expected, None, observed_length),
         ));
     }
-    if retained.len() != retained_capacity {
-        return Err(BlobStoreError::unavailable("retain complete object range"));
+    let length = byte_length
+        .get()
+        .min(observed_length.saturating_sub(offset));
+    let retained_capacity = usize::try_from(length)
+        .map_err(|_| BlobStoreError::unavailable("allocate object range"))?;
+    let mut retained = vec![0; retained_capacity];
+    if length != 0 {
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|source| BlobStoreError::io("seek object range", source))?;
+        file.read_exact(&mut retained)
+            .await
+            .map_err(|source| BlobStoreError::io("read object range", source))?;
     }
     Ok(OpenedBlob::new(
-        byte_length.get(),
+        length,
         Box::new(std::io::Cursor::new(retained)),
     ))
 }
@@ -926,6 +918,10 @@ async fn open_private_regular_file(
     tokio::task::spawn_blocking(move || {
         let file = open_relative_regular_candidate(&root, &key)?;
         let metadata = file.metadata()?;
+        let current = open_relative_regular_candidate(&root, &key)?.metadata()?;
+        if metadata_device_inode(&metadata) != metadata_device_inode(&current) {
+            return Err(io::Error::other("blob object changed during open"));
+        }
         if !private_regular_file_metadata(&metadata) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -2195,5 +2191,43 @@ mod tests {
         replacement
             .join()
             .expect("the replacement construction thread completes");
+    }
+}
+
+struct MeasuredReader<Reader> {
+    reader: Reader,
+    #[cfg(feature = "test-support")]
+    count: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl<Reader: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for MeasuredReader<Reader> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        #[cfg(feature = "test-support")]
+        let before = buffer.filled().len();
+        let outcome = std::pin::Pin::new(&mut self.reader).poll_read(context, buffer);
+        #[cfg(feature = "test-support")]
+        self.count
+            .fetch_add((buffer.filled().len() - before) as u64, Ordering::Relaxed);
+        outcome
+    }
+}
+
+impl<Reader: tokio::io::AsyncSeek + Unpin> tokio::io::AsyncSeek for MeasuredReader<Reader> {
+    fn start_seek(
+        mut self: std::pin::Pin<&mut Self>,
+        position: std::io::SeekFrom,
+    ) -> io::Result<()> {
+        std::pin::Pin::new(&mut self.reader).start_seek(position)
+    }
+
+    fn poll_complete(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<u64>> {
+        std::pin::Pin::new(&mut self.reader).poll_complete(context)
     }
 }
