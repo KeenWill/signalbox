@@ -479,12 +479,6 @@ impl ToolArgumentValidator for WorkspaceMutationArgumentValidator {
 #[derive(Debug)]
 enum InvalidMutationArguments {
     Shape,
-    TooLarge {
-        field: &'static str,
-        actual_bytes: usize,
-        maximum_bytes: usize,
-        bound: &'static str,
-    },
     Path(WorkspacePathRejection),
     Patch(PatchParseError),
 }
@@ -493,15 +487,6 @@ impl InvalidMutationArguments {
     fn tool_detail(&self) -> Option<ToolExecutionErrorDetail> {
         let detail = match self {
             Self::Shape => return None,
-            Self::TooLarge {
-                field,
-                actual_bytes,
-                maximum_bytes,
-                bound,
-            } => format!(
-                "workspace mutation argument {field:?} has {actual_bytes} UTF-8 bytes; \
-                 {bound} is {maximum_bytes} bytes"
-            ),
             Self::Path(reason) => format!("workspace mutation path rejected: {reason}"),
             Self::Patch(error) => patch_parse_detail(error),
         };
@@ -544,23 +529,6 @@ enum MutationOperation {
     ApplyPatch(WorkspacePatch),
 }
 
-fn validate_argument_byte_length(
-    field: &'static str,
-    actual_bytes: usize,
-    maximum_bytes: usize,
-    bound: &'static str,
-) -> Result<(), InvalidMutationArguments> {
-    if actual_bytes > maximum_bytes {
-        return Err(InvalidMutationArguments::TooLarge {
-            field,
-            actual_bytes,
-            maximum_bytes,
-            bound,
-        });
-    }
-    Ok(())
-}
-
 fn decode_operation(
     kind: MutationToolKind,
     arguments: &NormalizedToolArguments,
@@ -569,12 +537,9 @@ fn decode_operation(
         MutationToolKind::WriteFile => {
             let decoded: WriteFileArguments = serde_json::from_str(arguments.as_str())
                 .map_err(|_| InvalidMutationArguments::Shape)?;
-            validate_argument_byte_length(
-                "content",
-                decoded.content.len(),
-                MAX_WORKSPACE_MUTATION_FILE_BYTES,
-                "MAX_WORKSPACE_MUTATION_FILE_BYTES",
-            )?;
+            if decoded.content.len() > MAX_WORKSPACE_MUTATION_FILE_BYTES {
+                return Err(InvalidMutationArguments::Shape);
+            }
             let path = WorkspaceMutationPath::try_new(decoded.path)
                 .map_err(InvalidMutationArguments::Path)?;
             Ok(MutationOperation::Write {
@@ -585,21 +550,12 @@ fn decode_operation(
         MutationToolKind::EditFile => {
             let decoded: EditFileArguments = serde_json::from_str(arguments.as_str())
                 .map_err(|_| InvalidMutationArguments::Shape)?;
-            if decoded.old_string.is_empty() {
+            if decoded.old_string.is_empty()
+                || decoded.old_string.len() > MAX_WORKSPACE_MUTATION_FILE_BYTES
+                || decoded.new_string.len() > MAX_WORKSPACE_MUTATION_FILE_BYTES
+            {
                 return Err(InvalidMutationArguments::Shape);
             }
-            validate_argument_byte_length(
-                "old_string",
-                decoded.old_string.len(),
-                MAX_WORKSPACE_MUTATION_FILE_BYTES,
-                "MAX_WORKSPACE_MUTATION_FILE_BYTES",
-            )?;
-            validate_argument_byte_length(
-                "new_string",
-                decoded.new_string.len(),
-                MAX_WORKSPACE_MUTATION_FILE_BYTES,
-                "MAX_WORKSPACE_MUTATION_FILE_BYTES",
-            )?;
             let path = WorkspaceMutationPath::try_new(decoded.path)
                 .map_err(InvalidMutationArguments::Path)?;
             Ok(MutationOperation::Edit {
@@ -612,12 +568,6 @@ fn decode_operation(
         MutationToolKind::ApplyPatch => {
             let decoded: ApplyPatchArguments = serde_json::from_str(arguments.as_str())
                 .map_err(|_| InvalidMutationArguments::Shape)?;
-            validate_argument_byte_length(
-                "patch",
-                decoded.patch.len(),
-                crate::MAX_PATCH_BYTES,
-                "MAX_PATCH_BYTES",
-            )?;
             parse_patch(&decoded.patch)
                 .map(MutationOperation::ApplyPatch)
                 .map_err(InvalidMutationArguments::Patch)

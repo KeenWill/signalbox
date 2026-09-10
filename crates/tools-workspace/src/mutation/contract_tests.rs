@@ -125,47 +125,6 @@ fn catalog_preserves_truncated_patch_location_and_reason() {
 }
 
 #[test]
-fn oversized_mutation_argument_detail_names_field_size_and_bound() {
-    let old_string = validate_argument_byte_length(
-        "old_string",
-        MAX_WORKSPACE_MUTATION_FILE_BYTES + 17,
-        MAX_WORKSPACE_MUTATION_FILE_BYTES,
-        "MAX_WORKSPACE_MUTATION_FILE_BYTES",
-    )
-    .expect_err("oversized edit source is rejected")
-    .tool_detail()
-    .expect("oversized edit source has typed detail");
-    let patch = validate_argument_byte_length(
-        "patch",
-        crate::MAX_PATCH_BYTES + 31,
-        crate::MAX_PATCH_BYTES,
-        "MAX_PATCH_BYTES",
-    )
-    .expect_err("oversized patch is rejected")
-    .tool_detail()
-    .expect("oversized patch has typed detail");
-
-    assert_eq!(
-        old_string.as_str(),
-        format!(
-            "workspace mutation argument \"old_string\" has {} UTF-8 bytes; \
-             MAX_WORKSPACE_MUTATION_FILE_BYTES is {} bytes",
-            MAX_WORKSPACE_MUTATION_FILE_BYTES + 17,
-            MAX_WORKSPACE_MUTATION_FILE_BYTES
-        )
-    );
-    assert_eq!(
-        patch.as_str(),
-        format!(
-            "workspace mutation argument \"patch\" has {} UTF-8 bytes; \
-             MAX_PATCH_BYTES is {} bytes",
-            crate::MAX_PATCH_BYTES + 31,
-            crate::MAX_PATCH_BYTES
-        )
-    );
-}
-
-#[test]
 fn unicode_mutation_path_bound_matches_schema_and_runtime_validation() {
     const CHARACTER: &str = "é";
     const CHARACTER_COUNT: usize = 3_000;
