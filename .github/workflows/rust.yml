@@ -50,6 +50,7 @@ jobs:
       web_only: ${{ steps.paths.outputs.web_only }}
       skip_rust: ${{ steps.paths.outputs.skip_rust }}
       postgres: ${{ steps.paths.outputs.postgres }}
+      changed_paths: ${{ steps.paths.outputs.changed_paths }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -111,13 +112,12 @@ jobs:
           rust=0
           while IFS= read -r -d '' path; do
             case "$path" in
-              crates/persistence/* | crates/domain/* | crates/application/* \
-                | apps/signalboxd/* | apps/client/* | crates/modules/* \
-                | crates/workflow-runtime/* | crates/tools-*/* \
-                | crates/process-protocol/* | config/* \
-                | tooling/postgres_test_image.rs \
-                | scripts/postgres_integration_suites.py | .github/workflows/* \
-                | MODULE.bazel* | Cargo.lock | BUILD.bazel | */BUILD.bazel)
+              apps/* | crates/* | config/* | clients/web/src/generated/*)
+                postgres=true
+                ;;
+              docs/* | *.md | clients/web/* | clients/native/*)
+                ;;
+              *)
                 postgres=true
                 ;;
             esac
@@ -156,8 +156,22 @@ jobs:
           echo "web_only=$web_only" >> "$GITHUB_OUTPUT"
           echo "skip_rust=$skip_rust" >> "$GITHUB_OUTPUT"
           echo "postgres=$postgres" >> "$GITHUB_OUTPUT"
+          python3 - "$changed_paths" <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          paths = Path(sys.argv[1]).read_bytes().split(b"\0")
+          value = json.dumps([os.fsdecode(path) for path in paths if path], ensure_ascii=True)
+          # Missing or oversized detail keeps every suite; the coarse gate is separate.
+          if len(value) > 200_000:
+              value = "[]"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"changed_paths={value}\n")
+          PYTHON
 
   contract-checks:
+    needs: rust-change-scope
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-builds' }}
     timeout-minutes: 30
     steps:
@@ -177,6 +191,7 @@ jobs:
         with:
           remote-cache: ${{ vars.BAZEL_REMOTE_CACHE }}
       - name: Check generated domain API declarations
+        if: needs.rust-change-scope.outputs.skip_rust != 'true'
         run: |
           bazel test --config=api --jobs=4 --local_test_jobs=1 //:api_documentation_current
       - name: Check documentation consistency
@@ -189,6 +204,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: python3 scripts/check_session_ownership.py
   domain-api-digest:
+    needs: rust-change-scope
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-reports' }}
     env:
       CARGO_BUILD_JOBS: "2"
@@ -448,3 +465,4 @@ jobs:
     uses: ./.github/workflows/bazel.yml
     with:
       postgres: ${{ needs.rust-change-scope.outputs.postgres == 'true' }}
+      changed-paths: ${{ needs.rust-change-scope.outputs.changed_paths }}

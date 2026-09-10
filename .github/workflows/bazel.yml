@@ -7,6 +7,10 @@ on:
         description: Run PostgreSQL integration shards for affected paths.
         type: boolean
         default: true
+      changed-paths:
+        description: JSON changed paths for conservative source dependency selection.
+        type: string
+        default: '[]'
   workflow_dispatch:
 
 permissions:
@@ -77,16 +81,23 @@ jobs:
 
   postgres-matrix:
     if: github.event_name == 'workflow_dispatch' || inputs.postgres
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-orchestration' }}
-    timeout-minutes: 2
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-builds' }}
+    timeout-minutes: 10
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/setup-bazel
+        with:
+          remote-cache: ${{ vars.BAZEL_REMOTE_CACHE }}
       - id: matrix
-        run: echo "matrix=$(python3 scripts/postgres_integration_suites.py --matrix)" >> "$GITHUB_OUTPUT"
+        env:
+          CHANGED_PATHS: ${{ inputs.changed-paths || '[]' }}
+        run: |
+          matrix=$(python3 scripts/ci_bazel_scope.py --changed-paths "$CHANGED_PATHS")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   bazel-postgres:
     if: github.event_name == 'workflow_dispatch' || inputs.postgres
