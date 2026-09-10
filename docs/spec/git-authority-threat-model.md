@@ -85,14 +85,14 @@ withdrawal is recorded.
 
 Push destinations accept HTTPS, `ssh://`, and `git@host:` forms. The durable
 mint and the configured remote use the same destination type. SSH uses a
-configured private key file or the host SSH agent exposed to the sandbox. Push
-approval, branch and commit fences, captured object authority, non-forced
-updates, and remote confirmation apply to both transports. SSH runs in batch
-mode with user SSH configuration disabled. Credential preparation, account
-lookup, sandbox setup, push and confirmation share one 300-second deadline.
-Agent-backed pushes run through the execution sandbox with the private captured
-repository as its workspace, host networking, and read-only binds for the agent
-socket and host trust stores. User trust files are `known_hosts` and
+configured private key file or, on Linux, the host SSH agent exposed to the
+sandbox. Push approval, branch and commit fences, captured object authority,
+non-forced updates, and remote confirmation apply to both transports. SSH runs
+in batch mode with user SSH configuration disabled. Credential preparation,
+account lookup, sandbox setup, push and confirmation share one 300-second
+deadline. Agent-backed pushes run through the execution sandbox with the private
+captured repository as its workspace, host networking, and read-only binds for
+the agent socket and host trust stores. User trust files are `known_hosts` and
 `known_hosts2` under the account home returned by the host account database; the
 `HOME` environment variable does not select them. These files are mounted at
 fixed paths outside the private workspace and selected explicitly for OpenSSH.

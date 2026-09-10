@@ -6298,9 +6298,18 @@ fn repository_ssh_push_requires_a_key_or_available_agent_and_redacts_the_destina
             let parsed =
                 HubModelConfiguration::parse(&document.to_string()).expect("SSH configuration");
             let repository = &parsed.repository_watch().expect("watch").repositories()[0];
-            assert!(repository.git_push_enabled_with_agent(Some(&socket)));
-            assert!(repository.git_push_enabled_with_agent(Some(&relative_socket)));
-            assert!(repository.git_push_enabled_with_agent(Some(&non_utf8)));
+            assert_eq!(
+                repository.git_push_enabled_with_agent(Some(&socket)),
+                key.is_some() || cfg!(target_os = "linux")
+            );
+            assert_eq!(
+                repository.git_push_enabled_with_agent(Some(&relative_socket)),
+                key.is_some() || cfg!(target_os = "linux")
+            );
+            assert_eq!(
+                repository.git_push_enabled_with_agent(Some(&non_utf8)),
+                key.is_some() || cfg!(target_os = "linux")
+            );
             for absent in [None, Some(unavailable.as_path()), Some(regular.as_path())] {
                 assert_eq!(
                     repository.git_push_enabled_with_agent(absent),

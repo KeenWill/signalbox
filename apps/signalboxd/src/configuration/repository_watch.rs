@@ -146,7 +146,7 @@ impl WatchedRepositoryConfiguration {
         self.push_remote_url.as_ref()
     }
 
-    /// Whether the destination has a configured credential or an available SSH agent.
+    /// Whether the destination has a configured credential or an available Linux SSH agent.
     pub fn admits_push(&self) -> bool {
         let socket = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
         self.git_push_enabled_with_agent(socket.as_deref())
@@ -164,10 +164,11 @@ impl WatchedRepositoryConfiguration {
                         url.scheme() == "https" && url.host_str() == Some("github.com")
                     })
                 }))
-            || (self
-                .push_remote_url
-                .as_ref()
-                .is_some_and(|remote| !remote.as_str().starts_with("https://"))
+            || (cfg!(target_os = "linux")
+                && self
+                    .push_remote_url
+                    .as_ref()
+                    .is_some_and(|remote| !remote.as_str().starts_with("https://"))
                 && socket
                     .and_then(Self::absolute_ssh_agent_socket)
                     .as_deref()

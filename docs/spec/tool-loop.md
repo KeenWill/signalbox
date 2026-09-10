@@ -156,9 +156,9 @@ not a per-tool cost.
 The daemon registers `git_push_configured` when mapped workspace tools are
 composed and a watched repository configures `push_credential_file`, a GitHub
 HTTPS destination with a `github_app` credential profile, or an SSH
-`push_remote_url` with an available host agent; execution resolves the session's
-retained commissioned or repository-dispatched branch and head fences and
-current repository configuration on every call; the judge or CLI approval
+`push_remote_url` with an available host agent on Linux; execution resolves the
+session's retained commissioned or repository-dispatched branch and head fences
+and current repository configuration on every call; the judge or CLI approval
 authorizes execution. The transport pushes without force to the configured
 repository URL and confirms the remote branch equals the resolved commit before
 acknowledging success. For a two-parent merge, exactly one parent must equal or
