@@ -87,20 +87,27 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
                FROM queued_input_origin
               WHERE session_id = $1
                 AND (goal_turn_is_scheduling_relevant(session_id, turn_id)
-                     OR EXISTS (
-                        SELECT 1 FROM turn_lifecycle AS retired
-                         WHERE retired.session_id = queued_input_origin.session_id
-                           AND retired.turn_id = queued_input_origin.turn_id
-                           AND retired.state_kind = 'terminal'
-                           AND retired.terminal_disposition_kind = 'retired'
-                     ))) AS queue_count,
+                     OR (priority_kind = 'interrupt_immediately_after'
+                         AND EXISTS (
+                            SELECT 1 FROM turn_lifecycle AS retired
+                             WHERE retired.session_id = queued_input_origin.session_id
+                               AND retired.turn_id = queued_input_origin.turn_id
+                               AND retired.state_kind = 'terminal'
+                               AND retired.terminal_disposition_kind = 'retired'
+                         )))) AS queue_count,
             (SELECT count(*)
                FROM turn_lifecycle
               WHERE session_id = $1
                 AND origin_kind = 'accepted_input'
                 AND (goal_turn_is_scheduling_relevant(session_id, turn_id)
                      OR (state_kind = 'terminal'
-                         AND terminal_disposition_kind = 'retired'))) AS lifecycle_count",
+                         AND terminal_disposition_kind = 'retired'
+                         AND EXISTS (
+                            SELECT 1 FROM queued_input_origin AS interrupt
+                             WHERE interrupt.session_id = turn_lifecycle.session_id
+                               AND interrupt.turn_id = turn_lifecycle.turn_id
+                               AND interrupt.priority_kind = 'interrupt_immediately_after'
+                         )))) AS lifecycle_count",
     )
     .bind(session_id_to_uuid(session_id))
     .fetch_one(&mut *connection)
@@ -238,7 +245,8 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
         WHERE queued.session_id = $1
           AND (goal_turn_is_scheduling_relevant(queued.session_id, queued.turn_id)
                OR (turn.state_kind = 'terminal'
-                   AND turn.terminal_disposition_kind = 'retired'))
+                   AND turn.terminal_disposition_kind = 'retired'
+                   AND queued.priority_kind = 'interrupt_immediately_after'))
         ORDER BY queued.acceptance_position",
     )
     .bind(session_id_to_uuid(session_id))
