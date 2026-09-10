@@ -1602,13 +1602,15 @@ mod tests {
             Ok::<_, std::io::Error>(String::from_utf8_lossy(&request[..read]).into_owned())
         });
         let mut guard = MultipartAbortGuard::new(
-            reqwest::Client::new(),
+            reqwest::Client::builder().no_proxy().build()?,
             Url::parse(&format!("http://{address}/blob?uploadId=fixture"))?,
         );
 
-        guard.abort().await;
-
-        let request = server.await??;
+        let request = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            guard.abort().await;
+            server.await
+        })
+        .await???;
         assert!(request.starts_with("DELETE /blob?uploadId=fixture HTTP/1.1\r\n"));
         Ok(())
     }

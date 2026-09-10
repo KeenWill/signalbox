@@ -1,6 +1,8 @@
 //! Frozen pool exhaustion records and their authenticated projections.
 use super::*;
+use signalbox_persistence::credential_invocations;
 use signalbox_persistence::credential_pool_exhaustion as evidence;
+use std::num::NonZeroU32;
 
 async fn fail_before_call(
     repository: &PostgresModelCallRepository,
@@ -73,6 +75,29 @@ async fn unavailable_pool_members_are_skipped_before_preparation_and_can_exhaust
     .expect("the provisioned co-member prepares and authorizes");
     assert_eq!(selected, "provisioned-home");
 
+    let reserved_seed = 0x4604_0800;
+    credential_invocations::replace_registrations(
+        &pool,
+        &[("empty-home-a".to_owned(), NonZeroU32::new(1))],
+    )
+    .await?;
+    let (reserved_session, _, reserved_repository) = active_credential_pool_fixture(
+        &pool,
+        reserved_seed,
+        "reservation-owner-pool",
+        &["empty-home-a"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .await?;
+    let _reserved = prepare_and_authorize_pool_call(
+        &reserved_repository,
+        reserved_session,
+        reserved_seed + 100,
+    )
+    .await
+    .expect("the available owner holds the invocation reservation");
+
     let exhausted_seed = 0x4604_1000;
     let (exhausted_session, exhausted_turn, exhausted_repository) = active_credential_pool_fixture(
         &pool,
@@ -108,7 +133,7 @@ async fn unavailable_pool_members_are_skipped_before_preparation_and_can_exhaust
         exhausted_seed + 100,
     )
     .await
-    .expect("the all-unavailable pool applies its fail policy");
+    .expect("the all-unavailable pool applies its fail policy despite an active reservation");
     let mut connection = pool.acquire().await?;
     let captured = evidence::load(
         &mut connection,

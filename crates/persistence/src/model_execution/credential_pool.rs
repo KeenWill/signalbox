@@ -592,17 +592,19 @@ pub(super) async fn select_runtime_pool_credential(
         .iter()
         .map(CredentialPoolRuntimeMember::credential_reference)
         .collect::<Vec<_>>();
+    let unavailable = policy
+        .members()
+        .iter()
+        .filter(|member| !member.is_available())
+        .map(|member| member.credential_reference().to_owned())
+        .collect::<HashSet<_>>();
     let mut bounded = crate::credential_invocations::bounded_members(connection, &profiles).await?;
-    bounded.retain(|member| !durable.excluded.contains(&member.profile));
+    bounded.retain(|member| {
+        !durable.excluded.contains(&member.profile) && !unavailable.contains(&member.profile)
+    });
     let mut excluded = durable.excluded.clone();
     excluded.extend(bounded.iter().map(|member| member.profile.clone()));
-    excluded.extend(
-        policy
-            .members()
-            .iter()
-            .filter(|member| !member.is_available())
-            .map(|member| member.credential_reference().to_owned()),
-    );
+    excluded.extend(unavailable);
     let headroom = &durable.headroom;
     let sticky_reference = match predecessor_reference {
         // An availability successor continues its predecessor's chain, so the
