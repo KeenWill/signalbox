@@ -21,7 +21,6 @@ use crate::mapping::{
 pub enum RecordTurnInstructionSnapshotOutcome {
     Recorded(TurnInstructionManifestId),
     AlreadyRecorded(TurnInstructionManifestId),
-    DiscoveryIncomplete,
     TurnUnavailable,
 }
 
@@ -56,7 +55,7 @@ impl WorkspaceInstructionPlacementObservation {
     }
 }
 
-/// One complete queued-turn snapshot prepared for the activation transaction.
+/// One queued-turn snapshot prepared for the activation transaction.
 #[derive(Debug, Clone, Copy)]
 pub struct CountedActivationInstructionEvidence<'a> {
     discovery: InstructionDiscoveryId,
@@ -182,7 +181,7 @@ impl WorkspaceInstructionRepository {
         self.preflight_for_state(session, turn, "queued").await
     }
 
-    /// Records one complete scan and empty turn-start manifest atomically.
+    /// Records scan evidence and an empty turn-start manifest atomically.
     pub async fn record_turn_start<NextBundleId>(
         &self,
         discovery: InstructionDiscoveryId,
@@ -310,7 +309,7 @@ impl WorkspaceInstructionRepository {
             .runner_owned())
     }
 
-    /// Inserts one complete instruction snapshot inside the transaction that
+    /// Inserts one instruction snapshot inside the transaction that
     /// has already revalidated and activated its counted preview.
     pub(crate) async fn record_counted_activation_in_transaction(
         connection: &mut sqlx::PgConnection,
@@ -323,11 +322,6 @@ impl WorkspaceInstructionRepository {
             bundle_ids,
             placement,
         } = evidence;
-        if !snapshot.is_complete() {
-            return Err(WorkspaceInstructionRepositoryError::Corruption(
-                "counted activation discovery incomplete",
-            ));
-        }
         if bundle_ids.len() != snapshot.bundles().len() {
             return Err(WorkspaceInstructionRepositoryError::Corruption(
                 "counted activation bundle identities",
@@ -366,11 +360,6 @@ impl WorkspaceInstructionRepository {
                     "counted activation manifest preexisted",
                 ))
             }
-            RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => {
-                Err(WorkspaceInstructionRepositoryError::Corruption(
-                    "counted activation discovery completeness",
-                ))
-            }
             RecordTurnInstructionSnapshotOutcome::TurnUnavailable => {
                 Err(WorkspaceInstructionRepositoryError::Corruption(
                     "counted activation turn unavailable",
@@ -407,9 +396,6 @@ impl WorkspaceInstructionRepository {
                 .commit()
                 .await
                 .map_err(WorkspaceInstructionRepositoryError::ambiguous_commit)?,
-            RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => {
-                transaction.commit().await?;
-            }
             RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_)
             | RecordTurnInstructionSnapshotOutcome::TurnUnavailable => {
                 transaction.rollback().await?;
@@ -445,14 +431,12 @@ impl WorkspaceInstructionRepository {
         if &current_placement != placement {
             return Err(WorkspaceInstructionRepositoryError::PlacementChanged);
         }
-        if let Some((existing, complete)) =
+        if let Some(existing) =
             load_manifest(connection, manifest.session(), manifest.turn()).await?
         {
-            return Ok(if complete {
-                RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(existing.id())
-            } else {
-                RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete
-            });
+            return Ok(RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(
+                existing.id(),
+            ));
         }
         let classified_entries = i64::try_from(snapshot.classified_entries())
             .map_err(|_| WorkspaceInstructionRepositoryError::Corruption("entry count"))?;
@@ -561,9 +545,6 @@ impl WorkspaceInstructionRepository {
         .bind(snapshot.is_complete())
         .execute(&mut *connection)
         .await?;
-        if !snapshot.is_complete() {
-            return Ok(RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete);
-        }
         sqlx::query(
             "INSERT INTO turn_instruction_manifest
                 (turn_instruction_manifest_id, session_id, turn_id,
@@ -602,12 +583,7 @@ impl WorkspaceInstructionRepository {
         let existing = load_manifest(&mut transaction, session, turn).await?;
         transaction.rollback().await?;
         match existing {
-            Some((manifest, true)) => {
-                Ok(TurnInstructionManifestPreflight::Available(manifest.id()))
-            }
-            Some((_manifest, false)) => Err(WorkspaceInstructionRepositoryError::Corruption(
-                "manifest discovery incomplete",
-            )),
+            Some(manifest) => Ok(TurnInstructionManifestPreflight::Available(manifest.id())),
             None => Ok(TurnInstructionManifestPreflight::Absent),
         }
     }
@@ -694,12 +670,12 @@ async fn load_manifest(
     connection: &mut sqlx::PgConnection,
     session: SessionId,
     turn: TurnId,
-) -> Result<Option<(TurnInstructionManifest, bool)>, WorkspaceInstructionRepositoryError> {
+) -> Result<Option<TurnInstructionManifest>, WorkspaceInstructionRepositoryError> {
     let row = sqlx::query(
         "SELECT m.turn_instruction_manifest_id,
                 m.eligibility_hash_algorithm, m.eligibility_hash,
                 m.admitted_set_hash_algorithm, m.admitted_set_hash,
-                m.manifest_hash_algorithm, m.manifest_hash, d.scan_complete
+                m.manifest_hash_algorithm, m.manifest_hash
            FROM turn_instruction_manifest AS m
            JOIN instruction_discovery AS d
              ON d.instruction_discovery_id = m.instruction_discovery_id
@@ -739,7 +715,7 @@ async fn load_manifest(
     .ok_or(WorkspaceInstructionRepositoryError::Corruption(
         "manifest hash",
     ))?;
-    Ok(Some((manifest, row.try_get("scan_complete")?)))
+    Ok(Some(manifest))
 }
 
 fn digest(bytes: Vec<u8>) -> Result<InstructionDigest, WorkspaceInstructionRepositoryError> {

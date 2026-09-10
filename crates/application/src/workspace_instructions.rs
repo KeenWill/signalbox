@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashSet,
+    num::NonZeroUsize,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -62,11 +63,11 @@ pub enum InstructionDiscoveryFindingKind {
     NonUtf8Source,
     /// Portable skill frontmatter or registration shape was invalid.
     InvalidSkill,
-    /// A fixed discovery resource limit stopped the scan.
+    /// A configured discovery resource limit stopped the scan.
     LimitReached(InstructionDiscoveryLimitKind),
 }
 
-/// Fixed resource dimension that stopped one otherwise-greedy scan.
+/// Configured resource dimension that stopped one otherwise-greedy scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstructionDiscoveryLimitKind {
     /// The scan classified its maximum number of directory entries.
@@ -98,7 +99,7 @@ impl InstructionDiscoveryFinding {
     }
 }
 
-/// One complete deterministic scan result.
+/// One deterministic scan result with explicit completeness evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstructionDiscoverySnapshot {
     roots: Box<[InstructionDiscoveryRoot]>,
@@ -127,7 +128,7 @@ impl InstructionDiscoverySnapshot {
         &self.findings
     }
 
-    /// Returns the fixed discovery-limit contract version.
+    /// Returns the discovery evidence format version.
     pub const fn limit_set_version(&self) -> u16 {
         self.limit_set_version
     }
@@ -147,7 +148,7 @@ impl InstructionDiscoverySnapshot {
         self.elapsed_millis
     }
 
-    /// Reports whether the scan completed before every fixed limit.
+    /// Reports whether the scan completed before every configured limit.
     pub const fn is_complete(&self) -> bool {
         self.complete
     }
@@ -159,10 +160,10 @@ const VCS_METADATA_DIRECTORIES: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 #[cfg(unix)]
 const BUILD_AND_DEPENDENCY_DIRECTORIES: [&str; 5] =
     ["target", "node_modules", ".venv", "dist", "build"];
-const MAX_CLASSIFIED_ENTRIES: u64 = 100_000;
-const MAX_FINDINGS: usize = 4_096;
-const MAX_CANDIDATE_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_ELAPSED: Duration = Duration::from_secs(30);
+const DEFAULT_CLASSIFIED_ENTRIES: u64 = 100_000;
+const DEFAULT_FINDINGS: usize = 4_096;
+const DEFAULT_CANDIDATE_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_ELAPSED: Duration = Duration::from_secs(30);
 #[cfg(unix)]
 const MAX_FILESYSTEM_WORKERS: usize = 4;
 
@@ -170,16 +171,32 @@ const MAX_FILESYSTEM_WORKERS: usize = 4;
 static FILESYSTEM_WORKERS: LazyLock<Arc<FilesystemWorkerRegistry>> =
     LazyLock::new(|| Arc::new(FilesystemWorkerRegistry::default()));
 
-#[derive(Clone, Copy)]
-struct DiscoveryLimits {
-    classified_entries: u64,
-    findings: usize,
-    candidate_source_bytes: u64,
-    elapsed: Duration,
+/// Resource limits for one workspace-instruction scan; `None` disables a limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InstructionDiscoveryLimits {
+    /// Maximum classified directory entries.
+    pub classified_entries: Option<u64>,
+    /// Positive maximum findings, including the terminal incomplete marker.
+    pub findings: Option<NonZeroUsize>,
+    /// Maximum candidate-source bytes read.
+    pub candidate_source_bytes: Option<u64>,
+    /// Maximum elapsed scan duration.
+    pub elapsed: Option<Duration>,
+}
+
+impl Default for InstructionDiscoveryLimits {
+    fn default() -> Self {
+        Self {
+            classified_entries: Some(DEFAULT_CLASSIFIED_ENTRIES),
+            findings: NonZeroUsize::new(DEFAULT_FINDINGS),
+            candidate_source_bytes: Some(DEFAULT_CANDIDATE_SOURCE_BYTES),
+            elapsed: Some(DEFAULT_ELAPSED),
+        }
+    }
 }
 
 struct DiscoveryState {
-    limits: DiscoveryLimits,
+    limits: InstructionDiscoveryLimits,
     started: Instant,
     classified_entries: u64,
     candidate_source_bytes: u64,
@@ -309,20 +326,13 @@ struct DirectoryLocation<'a> {
 pub fn discover_workspace_instructions(
     roots: Vec<InstructionDiscoveryRoot>,
 ) -> InstructionDiscoverySnapshot {
-    discover_with_limits(
-        roots,
-        DiscoveryLimits {
-            classified_entries: MAX_CLASSIFIED_ENTRIES,
-            findings: MAX_FINDINGS,
-            candidate_source_bytes: MAX_CANDIDATE_SOURCE_BYTES,
-            elapsed: MAX_ELAPSED,
-        },
-    )
+    discover_workspace_instructions_with_limits(roots, InstructionDiscoveryLimits::default())
 }
 
-fn discover_with_limits(
+/// Walks supplied roots under the configured resource limits.
+pub fn discover_workspace_instructions_with_limits(
     mut roots: Vec<InstructionDiscoveryRoot>,
-    limits: DiscoveryLimits,
+    limits: InstructionDiscoveryLimits,
 ) -> InstructionDiscoverySnapshot {
     roots.sort_by(|left, right| (left.kind(), left.path()).cmp(&(right.kind(), right.path())));
     let mut bundles = Vec::new();
@@ -361,7 +371,10 @@ fn walk_root(
     state: &mut DiscoveryState,
 ) -> bool {
     let root_path = PathBuf::from(root.path().as_str());
-    let root_deadline = state.started + state.limits.elapsed;
+    let root_deadline = state
+        .limits
+        .elapsed
+        .and_then(|elapsed| state.started.checked_add(elapsed));
     let root_descriptor =
         match open_directory_no_follow_before_deadline(root_path.clone(), root_deadline) {
             Ok(Ok(Some(descriptor))) => descriptor,
@@ -397,7 +410,10 @@ fn walk_root(
         if !check_elapsed(root.path(), findings, state) {
             return false;
         }
-        let directory_deadline = state.started + state.limits.elapsed;
+        let directory_deadline = state
+            .limits
+            .elapsed
+            .and_then(|elapsed| state.started.checked_add(elapsed));
         let directory_descriptor = match open_directory_beneath_before_deadline(
             &root_descriptor,
             relative_directory.clone(),
@@ -429,7 +445,10 @@ fn walk_root(
             InstructionDiscoveryRootKind::Configured => false,
         };
         if inspect_for_nested_repository {
-            let metadata_deadline = state.started + state.limits.elapsed;
+            let metadata_deadline = state
+                .limits
+                .elapsed
+                .and_then(|elapsed| state.started.checked_add(elapsed));
             match contains_vcs_metadata_before_deadline(&directory_descriptor, metadata_deadline) {
                 Ok(Ok(true)) => continue,
                 Ok(Ok(false)) => {}
@@ -458,8 +477,12 @@ fn walk_root(
         let remaining_entries = state
             .limits
             .classified_entries
+            .unwrap_or(u64::MAX)
             .saturating_sub(state.classified_entries);
-        let deadline = state.started + state.limits.elapsed;
+        let deadline = state
+            .limits
+            .elapsed
+            .and_then(|elapsed| state.started.checked_add(elapsed));
         let classified = Arc::new(AtomicU64::new(0));
         let directory_read = match read_directory_before_deadline(
             &directory_descriptor,
@@ -594,7 +617,7 @@ fn is_excluded_directory_name(name: &OsStr) -> bool {
 #[cfg(unix)]
 fn contains_vcs_metadata_before_deadline(
     directory: &OwnedFd,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<io::Result<bool>, FilesystemTaskError> {
     let directory = rustix::io::dup(directory).map_err(|_| FilesystemTaskError::Unavailable)?;
     run_bounded_filesystem_task(
@@ -768,7 +791,10 @@ fn register_file(
         Some(parent) => match parse_skill_before_deadline(
             bytes,
             parent.to_owned(),
-            state.started + state.limits.elapsed,
+            state
+                .limits
+                .elapsed
+                .and_then(|elapsed| state.started.checked_add(elapsed)),
         ) {
             Ok(SkillParseResult::Parsed(skill)) => Some(skill),
             Ok(SkillParseResult::NonUtf8) => {
@@ -845,7 +871,7 @@ fn register_file(
 fn parse_skill_before_deadline(
     bytes: Vec<u8>,
     parent: String,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<SkillParseResult, FilesystemTaskError> {
     run_bounded_filesystem_task(
         Arc::clone(&FILESYSTEM_WORKERS),
@@ -881,7 +907,7 @@ fn source_path_for_registration(
 fn read_directory_before_deadline(
     directory: &OwnedFd,
     remaining_entries: u64,
-    deadline: Instant,
+    deadline: Option<Instant>,
     classified: Arc<AtomicU64>,
 ) -> Result<io::Result<DirectoryRead>, FilesystemTaskError> {
     let directory = rustix::io::dup(directory).map_err(|_| FilesystemTaskError::Unavailable)?;
@@ -978,7 +1004,7 @@ fn classify_sorted_names(
 fn run_bounded_filesystem_task<T: Send + 'static>(
     registry: Arc<FilesystemWorkerRegistry>,
     max_workers: usize,
-    deadline: Instant,
+    deadline: Option<Instant>,
     worker_name: &'static str,
     task: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, FilesystemTaskError> {
@@ -996,8 +1022,8 @@ fn run_bounded_filesystem_task<T: Send + 'static>(
 fn run_bounded_filesystem_task_with_wait_deadline<T: Send + 'static>(
     registry: Arc<FilesystemWorkerRegistry>,
     max_workers: usize,
-    admission_deadline: Instant,
-    wait_deadline: impl FnOnce() -> Instant,
+    admission_deadline: Option<Instant>,
+    wait_deadline: impl FnOnce() -> Option<Instant>,
     worker_name: &'static str,
     task: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, FilesystemTaskError> {
@@ -1018,19 +1044,26 @@ fn run_bounded_filesystem_task_with_wait_deadline<T: Send + 'static>(
         if state.running < max_workers {
             break;
         }
-        let Some(remaining) = admission_deadline.checked_duration_since(Instant::now()) else {
-            return Err(FilesystemTaskError::Deadline);
-        };
-        let waited = registry
-            .available
-            .wait_timeout(state, remaining)
-            .map_err(|_| FilesystemTaskError::Unavailable)?;
-        state = waited.0;
-        if waited.1.timed_out() && Instant::now() >= admission_deadline {
-            return Err(FilesystemTaskError::Deadline);
+        if let Some(deadline) = admission_deadline {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(FilesystemTaskError::Deadline);
+            };
+            let waited = registry
+                .available
+                .wait_timeout(state, remaining)
+                .map_err(|_| FilesystemTaskError::Unavailable)?;
+            state = waited.0;
+            if waited.1.timed_out() && Instant::now() >= deadline {
+                return Err(FilesystemTaskError::Deadline);
+            }
+        } else {
+            state = registry
+                .available
+                .wait(state)
+                .map_err(|_| FilesystemTaskError::Unavailable)?;
         }
     }
-    if Instant::now() >= admission_deadline {
+    if admission_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         return Err(FilesystemTaskError::Deadline);
     }
 
@@ -1053,15 +1086,20 @@ fn run_bounded_filesystem_task_with_wait_deadline<T: Send + 'static>(
     state.workers.push(worker);
     drop(state);
 
-    let deadline = wait_deadline();
-    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-        return Err(FilesystemTaskError::Deadline);
-    };
-    match receiver.recv_timeout(remaining) {
-        Ok(result) if Instant::now() < deadline => Ok(result),
-        Ok(_) => Err(FilesystemTaskError::Deadline),
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(FilesystemTaskError::Deadline),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(FilesystemTaskError::Unavailable),
+    match wait_deadline() {
+        Some(deadline) => {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(FilesystemTaskError::Deadline);
+            };
+            match receiver.recv_timeout(remaining) {
+                Ok(result) if Instant::now() < deadline => Ok(result),
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => Err(FilesystemTaskError::Deadline),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err(FilesystemTaskError::Unavailable),
+            }
+        }
+        None => receiver
+            .recv()
+            .map_err(|_| FilesystemTaskError::Unavailable),
     }
 }
 
@@ -1089,8 +1127,12 @@ fn read_candidate(
     let remaining_bytes = state
         .limits
         .candidate_source_bytes
+        .unwrap_or(u64::MAX)
         .saturating_sub(state.candidate_source_bytes);
-    let deadline = state.started + state.limits.elapsed;
+    let deadline = state
+        .limits
+        .elapsed
+        .and_then(|elapsed| state.started.checked_add(elapsed));
     let observed = Arc::new(AtomicU64::new(0));
     let worker_observed = Arc::clone(&observed);
     let read_result = run_bounded_filesystem_task(
@@ -1142,7 +1184,7 @@ fn read_candidate(
 #[cfg(all(unix, test))]
 fn read_candidate_before_deadline(
     source_file: impl Read + Send + 'static,
-    wait_deadline: impl FnOnce() -> Instant,
+    wait_deadline: impl FnOnce() -> Option<Instant>,
     source: &std::path::Path,
     fallback: &InstructionPath,
     findings: &mut Vec<InstructionDiscoveryFinding>,
@@ -1151,8 +1193,9 @@ fn read_candidate_before_deadline(
     let remaining_bytes = state
         .limits
         .candidate_source_bytes
+        .unwrap_or(u64::MAX)
         .saturating_sub(state.candidate_source_bytes);
-    let admission_deadline = Instant::now() + Duration::from_secs(30);
+    let admission_deadline = Some(Instant::now() + Duration::from_secs(30));
     let observed = Arc::new(AtomicU64::new(0));
     let worker_observed = Arc::clone(&observed);
     let read_result = run_bounded_filesystem_task_with_wait_deadline(
@@ -1212,6 +1255,7 @@ fn read_candidate_from(
     let remaining_bytes = state
         .limits
         .candidate_source_bytes
+        .unwrap_or(u64::MAX)
         .saturating_sub(state.candidate_source_bytes);
     let mut bytes = Vec::new();
     let read_result = source_file
@@ -1239,7 +1283,7 @@ fn finish_candidate_read(
     remaining_bytes: u64,
 ) -> Result<CandidateRead, bool> {
     if u64::try_from(candidate.bytes.len()).unwrap_or(u64::MAX) > remaining_bytes {
-        state.candidate_source_bytes = state.limits.candidate_source_bytes;
+        state.candidate_source_bytes = state.limits.candidate_source_bytes.unwrap_or(u64::MAX);
         reach_limit(
             path_for_finding(source, fallback),
             InstructionDiscoveryLimitKind::CandidateSourceBytes,
@@ -1298,14 +1342,18 @@ fn open_directory_no_follow(
 #[cfg(unix)]
 fn open_directory_no_follow_before_deadline(
     source: PathBuf,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<io::Result<Option<OwnedFd>>, FilesystemTaskError> {
     run_bounded_filesystem_task(
         Arc::clone(&FILESYSTEM_WORKERS),
         MAX_FILESYSTEM_WORKERS,
         deadline,
         "signalbox-instruction-directory-open",
-        move || open_directory_no_follow(&source, || Instant::now() < deadline),
+        move || {
+            open_directory_no_follow(&source, || {
+                deadline.is_none_or(|deadline| Instant::now() < deadline)
+            })
+        },
     )
 }
 
@@ -1335,7 +1383,7 @@ fn open_directory_beneath(
 fn open_directory_beneath_before_deadline(
     root: &OwnedFd,
     relative: PathBuf,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<io::Result<Option<OwnedFd>>, FilesystemTaskError> {
     let root = rustix::io::dup(root).map_err(|_| FilesystemTaskError::Unavailable)?;
     run_bounded_filesystem_task(
@@ -1343,7 +1391,11 @@ fn open_directory_beneath_before_deadline(
         MAX_FILESYSTEM_WORKERS,
         deadline,
         "signalbox-instruction-directory-open",
-        move || open_directory_beneath(&root, &relative, || Instant::now() < deadline),
+        move || {
+            open_directory_beneath(&root, &relative, || {
+                deadline.is_none_or(|deadline| Instant::now() < deadline)
+            })
+        },
     )
 }
 
@@ -1393,7 +1445,11 @@ fn check_elapsed(
     findings: &mut Vec<InstructionDiscoveryFinding>,
     state: &mut DiscoveryState,
 ) -> bool {
-    if state.started.elapsed() >= state.limits.elapsed {
+    if state
+        .limits
+        .elapsed
+        .is_some_and(|limit| state.started.elapsed() >= limit)
+    {
         return reach_limit(
             fallback.clone(),
             InstructionDiscoveryLimitKind::ElapsedTime,
@@ -1410,7 +1466,11 @@ fn push_finding(
     findings: &mut Vec<InstructionDiscoveryFinding>,
     state: &mut DiscoveryState,
 ) -> bool {
-    if findings.len() >= state.limits.findings.saturating_sub(1) {
+    if state
+        .limits
+        .findings
+        .is_some_and(|limit| findings.len() >= limit.get().saturating_sub(1))
+    {
         return reach_limit(
             path,
             InstructionDiscoveryLimitKind::Findings,
@@ -1445,13 +1505,13 @@ fn reach_limit(
     state: &mut DiscoveryState,
 ) -> bool {
     state.complete = false;
-    findings.truncate(state.limits.findings.saturating_sub(1));
-    if state.limits.findings > 0 {
-        findings.push(InstructionDiscoveryFinding {
-            path,
-            kind: InstructionDiscoveryFindingKind::LimitReached(limit),
-        });
+    if let Some(limit) = state.limits.findings {
+        findings.truncate(limit.get().saturating_sub(1));
     }
+    findings.push(InstructionDiscoveryFinding {
+        path,
+        kind: InstructionDiscoveryFindingKind::LimitReached(limit),
+    });
     false
 }
 
@@ -1686,6 +1746,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unbounded_discovery_finishes_a_scan_that_an_entry_cap_stops() {
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        fs::create_dir(temporary.path().join("nested")).expect("nested directory exists");
+        fs::write(temporary.path().join("AGENTS.md"), "root instructions")
+            .expect("root instructions exist");
+        fs::write(
+            temporary.path().join("nested/AGENTS.md"),
+            "nested instructions",
+        )
+        .expect("nested instructions exist");
+        let root = InstructionDiscoveryRoot::new(
+            InstructionDiscoveryRootKind::Workspace,
+            InstructionPath::try_new(
+                temporary
+                    .path()
+                    .canonicalize()
+                    .expect("root canonicalizes")
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .expect("root path is valid"),
+        );
+        let capped = discover_workspace_instructions_with_limits(
+            vec![root.clone()],
+            InstructionDiscoveryLimits {
+                classified_entries: Some(1),
+                ..InstructionDiscoveryLimits::default()
+            },
+        );
+        assert!(!capped.is_complete());
+        let unbounded = discover_workspace_instructions_with_limits(
+            vec![root],
+            InstructionDiscoveryLimits {
+                classified_entries: None,
+                candidate_source_bytes: None,
+                findings: None,
+                elapsed: None,
+            },
+        );
+        assert!(unbounded.is_complete());
+        assert_eq!(unbounded.bundles().len(), 2);
+        assert!(unbounded.findings().is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn excluded_directories_do_not_consume_their_contents_or_yield_documents() {
@@ -1722,7 +1827,7 @@ mod tests {
         .expect("nested repository agent document is written");
         let root = workspace_root(&temporary);
 
-        let snapshot = discover_with_limits(
+        let snapshot = discover_workspace_instructions_with_limits(
             vec![root],
             test_limits(SMALL_CLASSIFIED_ENTRY_LIMIT, 4, 64, Duration::from_secs(1)),
         );
@@ -1758,7 +1863,7 @@ mod tests {
         .expect("worktree agent document is written");
         let root = workspace_root(&temporary);
 
-        let snapshot = discover_with_limits(
+        let snapshot = discover_workspace_instructions_with_limits(
             vec![root],
             test_limits(SMALL_CLASSIFIED_ENTRY_LIMIT, 4, 64, Duration::from_secs(1)),
         );
@@ -1916,7 +2021,7 @@ mod tests {
             .canonicalize()
             .expect("configured root canonicalizes");
 
-        let snapshot = discover_with_limits(
+        let snapshot = discover_workspace_instructions_with_limits(
             vec![
                 InstructionDiscoveryRoot::new(
                     InstructionDiscoveryRootKind::Configured,
@@ -1948,8 +2053,10 @@ mod tests {
         fs::write(temporary.path().join("AGENTS.md"), "not admitted").expect("candidate exists");
         let root = workspace_root(&temporary);
 
-        let snapshot =
-            discover_with_limits(vec![root], test_limits(0, 4, 64, Duration::from_secs(1)));
+        let snapshot = discover_workspace_instructions_with_limits(
+            vec![root],
+            test_limits(0, 4, 64, Duration::from_secs(1)),
+        );
 
         assert!(!snapshot.is_complete());
         assert_eq!(snapshot.classified_entries(), 0);
@@ -1970,8 +2077,10 @@ mod tests {
         fs::write(temporary.path().join("another"), "also observed").expect("second entry exists");
         let root = workspace_root(&temporary);
 
-        let snapshot =
-            discover_with_limits(vec![root], test_limits(1, 4, 64, Duration::from_secs(1)));
+        let snapshot = discover_workspace_instructions_with_limits(
+            vec![root],
+            test_limits(1, 4, 64, Duration::from_secs(1)),
+        );
 
         assert!(!snapshot.is_complete());
         assert_eq!(snapshot.classified_entries(), 0);
@@ -1992,12 +2101,12 @@ mod tests {
         let root = workspace_root(&temporary);
         let limits = test_limits(4, 4, 1, Duration::from_secs(1));
 
-        let snapshot = discover_with_limits(vec![root], limits);
+        let snapshot = discover_workspace_instructions_with_limits(vec![root], limits);
 
         assert!(!snapshot.is_complete());
         assert_eq!(
             snapshot.candidate_source_bytes(),
-            limits.candidate_source_bytes
+            limits.candidate_source_bytes.unwrap()
         );
         assert!(snapshot.bundles().is_empty());
         assert_eq!(
@@ -2038,7 +2147,7 @@ mod tests {
                 release_sender
                     .send(())
                     .expect("the reader accepts its partial-read release");
-                deadline
+                Some(deadline)
             },
             &source,
             &fallback,
@@ -2074,7 +2183,7 @@ mod tests {
         let first = run_bounded_filesystem_task(
             Arc::clone(&registry),
             1,
-            Instant::now() + Duration::from_millis(5),
+            Some(Instant::now() + Duration::from_millis(5)),
             "signalbox-test-filesystem-worker",
             move || {
                 let mut bytes = Vec::new();
@@ -2090,7 +2199,7 @@ mod tests {
         let second = run_bounded_filesystem_task(
             Arc::clone(&registry),
             1,
-            Instant::now() + Duration::from_millis(5),
+            Some(Instant::now() + Duration::from_millis(5)),
             "signalbox-test-filesystem-worker",
             move || {
                 let mut bytes = Vec::new();
@@ -2120,7 +2229,7 @@ mod tests {
         let result = run_bounded_filesystem_task(
             Arc::clone(&registry),
             1,
-            Instant::now() - Duration::from_millis(1),
+            Some(Instant::now() - Duration::from_millis(1)),
             "signalbox-test-filesystem-worker",
             || (),
         );
@@ -2210,7 +2319,10 @@ mod tests {
             .expect("agent document is written");
         let root = workspace_root(&temporary);
 
-        let snapshot = discover_with_limits(vec![root], test_limits(4, 4, 64, Duration::ZERO));
+        let snapshot = discover_workspace_instructions_with_limits(
+            vec![root],
+            test_limits(4, 4, 64, Duration::ZERO),
+        );
 
         assert!(!snapshot.is_complete());
         assert!(snapshot.bundles().is_empty());
@@ -2232,8 +2344,10 @@ mod tests {
                 .expect("missing path is valid"),
         );
 
-        let snapshot =
-            discover_with_limits(vec![root], test_limits(4, 1, 64, Duration::from_secs(1)));
+        let snapshot = discover_workspace_instructions_with_limits(
+            vec![root],
+            test_limits(4, 1, 64, Duration::from_secs(1)),
+        );
 
         assert!(!snapshot.is_complete());
         assert_eq!(snapshot.findings().len(), 1);
@@ -2490,16 +2604,16 @@ mod tests {
         findings: usize,
         candidate_source_bytes: u64,
         elapsed: Duration,
-    ) -> DiscoveryLimits {
-        DiscoveryLimits {
-            classified_entries,
-            findings,
-            candidate_source_bytes,
-            elapsed,
+    ) -> InstructionDiscoveryLimits {
+        InstructionDiscoveryLimits {
+            classified_entries: Some(classified_entries),
+            findings: Some(NonZeroUsize::new(findings).expect("positive fixture finding limit")),
+            candidate_source_bytes: Some(candidate_source_bytes),
+            elapsed: Some(elapsed),
         }
     }
 
-    fn test_state(limits: DiscoveryLimits) -> DiscoveryState {
+    fn test_state(limits: InstructionDiscoveryLimits) -> DiscoveryState {
         DiscoveryState {
             limits,
             started: Instant::now(),

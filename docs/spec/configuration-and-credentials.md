@@ -156,7 +156,9 @@ human wait when that wait first reaches the daemon. The optional
 delegated requests, and when it is absent the judge reuses the request-producing
 call's selection. The optional `[workspace_instructions]` table is either absent
 or present at version one, and its bounded `registered_roots` array names the
-instruction directories registered outside a session's workspace.
+instruction directories registered outside a session's workspace. Its entry,
+finding, source-byte, and elapsed discovery limits accept finite values or
+`"none"` ([workspace-instructions.md](workspace-instructions.md)).
 
 A credential profile names one account. Its `CredentialReference` is the
 non-secret name that appears in configuration, errors, logs, and durable
