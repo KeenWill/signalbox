@@ -65,7 +65,8 @@ impl DaemonFileMediaExecutor {
             .ok_or_else(DaemonToolExecutorError::pre_dispatch)?
             .join("signalbox-file-media-text-worker");
         let image_worker = worker.with_file_name("signalbox-file-media-image-worker");
-        Self::compose_with_workers(pool, stores, worker, image_worker).await
+        let pdf_worker = worker.with_file_name("signalbox-file-media-pdf-worker");
+        Self::compose_with_workers(pool, stores, worker, image_worker, pdf_worker).await
     }
 
     async fn compose_with_workers(
@@ -73,6 +74,7 @@ impl DaemonFileMediaExecutor {
         stores: Arc<BlobStoreRegistry>,
         worker: std::path::PathBuf,
         image_worker: std::path::PathBuf,
+        pdf_worker: std::path::PathBuf,
     ) -> Result<(CompiledToolCatalog, Self), DaemonToolExecutorError> {
         let declaration = signalbox_file_media_adapters_text::text_family_declaration()
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
@@ -90,6 +92,13 @@ impl DaemonFileMediaExecutor {
             );
             declarations.push(declaration);
         }
+        let pdf = signalbox_file_media_adapter_pdf::declaration()
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        bindings.push(
+            WorkerBinding::try_new(pdf_worker, pdf.clone())
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
+        );
+        declarations.push(pdf);
         let processor = SandboxedFileMediaProcessor::try_new(
             "/usr/bin/bwrap",
             bindings,
@@ -326,7 +335,11 @@ impl VerifiedBlobSource for CatalogFileSource {
     }
     fn read_range(&self, offset: u64, length: NonZeroU64) -> SourceReadFuture<'_> {
         Box::pin(async move {
-            if length.get() > signalbox_blob_store::MAX_BLOB_RANGE_BYTES {
+            if length.get() > signalbox_blob_store::MAX_BLOB_RANGE_BYTES
+                || offset
+                    .checked_add(length.get())
+                    .is_none_or(|end| end > self.length.get())
+            {
                 return Err(SourceReadError::RangeOutOfBounds);
             }
             read_blob_chunk(&self.stores, &self.entry, offset, length)
@@ -335,7 +348,7 @@ impl VerifiedBlobSource for CatalogFileSource {
                     BlobReadError::NotFound | BlobReadError::Missing => SourceReadError::Missing,
                     BlobReadError::Corrupt => SourceReadError::Corrupt,
                     BlobReadError::Unavailable => SourceReadError::Unavailable,
-                    BlobReadError::RangeOutOfBounds { .. } => SourceReadError::RangeOutOfBounds,
+                    BlobReadError::RangeOutOfBounds => SourceReadError::RangeOutOfBounds,
                     BlobReadError::Integrity => SourceReadError::Integrity,
                 })
         })
@@ -370,6 +383,108 @@ fn catalog_resolution_error(error: BlobCatalogRepositoryError) -> FileUseResolut
 mod tests {
     use super::*;
     use signalbox_application::ToolCatalog;
+
+    async fn configured_blob_stores(
+        pool: &PgPool,
+    ) -> Result<(tempfile::TempDir, Arc<BlobStoreRegistry>), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let staging = root.path().join("staging");
+        let store = root.path().join("store");
+        std::fs::create_dir(&staging)?;
+        std::fs::create_dir(&store)?;
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700))?;
+        let configuration = format!(
+            r#"
+[blob_storage]
+version = 1
+staging_directory = {:?}
+max_blob_bytes = 21474836480
+[[blob_storage.stores]]
+name = "fixture"
+namespace_id = "00000000-0000-0000-0000-000000133001"
+kind = "filesystem"
+root_directory = {:?}
+[blob_storage.routes]
+user_attachment = "fixture"
+tool_artifact = "fixture"
+imported_source = "fixture"
+generated_artifact = "fixture"
+"#,
+            staging, store
+        );
+        let document: toml_edit::DocumentMut = configuration.parse()?;
+        let configuration =
+            crate::BlobStorageConfiguration::parse(document.get("blob_storage"), 1)?
+                .ok_or("fixture blob configuration")?;
+        let stores = Arc::new(
+            BlobStoreRegistry::initialize(Some(&configuration), pool.clone())
+                .await?
+                .ok_or("configured fixture stores")?,
+        );
+        Ok((root, stores))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn catalog_blob_source_rejects_nonexact_ranges_before_store_io()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use sha2::{Digest as _, Sha256};
+        use signalbox_blob_store::ExpectedBlob;
+        use signalbox_persistence::blob::{BlobReplicaRecord, BlobStoreBindingRecord};
+
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let (root, stores) = configured_blob_stores(&pool).await?;
+        let bytes = b"exact range";
+        let digest = BlobDigest::from_bytes(Sha256::digest(bytes).into());
+        let length = NonZeroU64::new(u64::try_from(bytes.len())?).expect("nonempty fixture");
+        let expected = ExpectedBlob::try_new(digest, length.get())?;
+        let (name, store) = stores.routed_store(crate::BlobStorageClass::UserAttachment);
+        let published = store
+            .put(expected, Box::new(std::io::Cursor::new(bytes.to_vec())))
+            .await?;
+        let entry = BlobCatalogRepository::new(pool.clone())
+            .register_verified_replica(
+                expected,
+                BlobStoreBindingRecord::new(name.clone(), stores.namespace_id(name)),
+                BlobReplicaRecord::new(name.clone(), published.key().clone()),
+            )
+            .await?;
+        let source = CatalogFileSource {
+            entry,
+            length,
+            stores,
+        };
+        let one = NonZeroU64::new(1).expect("one byte");
+        let two = NonZeroU64::new(2).expect("two bytes");
+        assert_eq!(source.read_range(0, length).await?, bytes);
+        assert_eq!(source.read_range(length.get() - 1, one).await?, b"e");
+        for (offset, requested) in [
+            (length.get() - 1, two),
+            (length.get(), one),
+            (length.get() + 1, one),
+            (u64::MAX, one),
+        ] {
+            assert_eq!(
+                source.read_range(offset, requested).await,
+                Err(SourceReadError::RangeOutOfBounds)
+            );
+        }
+        std::fs::remove_file(root.path().join("store").join(published.key().as_str()))?;
+        assert_eq!(
+            source.read_range(0, one).await,
+            Err(SourceReadError::Missing)
+        );
+        assert_eq!(
+            source.read_range(length.get(), one).await,
+            Err(SourceReadError::RangeOutOfBounds),
+            "range rejection precedes store access"
+        );
+        pool.close().await;
+        Ok(())
+    }
 
     #[test]
     fn catalog_database_failures_keep_the_operator_path() {
@@ -410,42 +525,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let (_database, pool, _) =
             signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
-        let root = tempfile::tempdir()?;
-        let staging = root.path().join("staging");
-        let store = root.path().join("store");
-        std::fs::create_dir(&staging)?;
-        std::fs::create_dir(&store)?;
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700))?;
-        let configuration = format!(
-            r#"
-[blob_storage]
-version = 1
-staging_directory = {:?}
-max_blob_bytes = 21474836480
-[[blob_storage.stores]]
-name = "fixture"
-namespace_id = "00000000-0000-0000-0000-000000133001"
-kind = "filesystem"
-root_directory = {:?}
-[blob_storage.routes]
-user_attachment = "fixture"
-tool_artifact = "fixture"
-imported_source = "fixture"
-generated_artifact = "fixture"
-"#,
-            staging, store
-        );
-        let document: toml_edit::DocumentMut = configuration.parse()?;
-        let configuration =
-            crate::BlobStorageConfiguration::parse(document.get("blob_storage"), 1)?
-                .expect("fixture blob configuration");
-        let stores = Arc::new(
-            BlobStoreRegistry::initialize(Some(&configuration), pool.clone())
-                .await?
-                .expect("configured fixture stores"),
-        );
+        let (_root, stores) = configured_blob_stores(&pool).await?;
         let worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_text_worker")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
@@ -466,11 +546,15 @@ generated_artifact = "fixture"
         let image_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_image_worker")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| worker.with_file_name("signalbox-file-media-image-worker"));
+        let pdf_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_pdf_worker")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| worker.with_file_name("signalbox-file-media-pdf-worker"));
         let (family, executor) = DaemonFileMediaExecutor::compose_with_workers(
             pool.clone(),
             stores,
             worker,
             image_worker,
+            pdf_worker,
         )
         .await?;
         let composed = base.with_compiled_catalog(family)?;
@@ -487,8 +571,120 @@ generated_artifact = "fixture"
                 |tool| tool.effect_class() == signalbox_domain::ToolEffectClass::ExternalEffect
             )
         );
+        use signalbox_file_media_runtime::{
+            FileInspectionStatus, FileReadInput, FileReadRequest, FileReadResult,
+            InspectionRequest, ReadContinuation, ReadViewName,
+        };
+        let source = PdfSource {
+            byte_length: NonZeroU64::new(PDF_FIXTURE.len() as u64).unwrap(),
+        };
+        let inspection_request = InspectionRequest {
+            source: FileUse::new(
+                source.digest(),
+                source.byte_length(),
+                AttachmentKind::Document,
+                DeclaredMediaType::try_new("application/pdf")?,
+                None,
+            ),
+            visible_part: None,
+        };
+        let inspection = executor
+            .registry
+            .inspect(
+                &executor.processor,
+                inspection_request.clone(),
+                &source,
+                &NeverCancelled,
+            )
+            .await?;
+        assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+        let result = executor
+            .registry
+            .read(
+                &executor.processor,
+                FileReadRequest {
+                    inspection: inspection_request,
+                    view: ReadViewName::try_new("text")?,
+                    input: FileReadInput::Initial {
+                        options: serde_json::json!({}),
+                    },
+                },
+                &source,
+                &NeverCancelled,
+            )
+            .await?;
+        let FileReadResult::Text { body, continuation } = result else {
+            panic!("the PDF text view returns text");
+        };
+        assert!(body.contains("bounded PDF fixture"));
+        assert_eq!(continuation, ReadContinuation::Complete);
+        assert!(body.len() < signalbox_file_media_runtime::MAX_TEXT_BODY_BYTES);
         drop(executor);
         pool.close().await;
         Ok(())
     }
+    struct PdfSource {
+        byte_length: NonZeroU64,
+    }
+
+    impl VerifiedBlobSource for PdfSource {
+        fn digest(&self) -> FileDigest {
+            use sha2::Digest as _;
+            FileDigest::from_bytes(sha2::Sha256::digest(PDF_FIXTURE).into())
+        }
+        fn byte_length(&self) -> NonZeroU64 {
+            self.byte_length
+        }
+        fn read_range(&self, offset: u64, length: NonZeroU64) -> SourceReadFuture<'_> {
+            Box::pin(async move {
+                let start =
+                    usize::try_from(offset).map_err(|_| SourceReadError::RangeOutOfBounds)?;
+                let length =
+                    usize::try_from(length.get()).map_err(|_| SourceReadError::RangeOutOfBounds)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or(SourceReadError::RangeOutOfBounds)?;
+                PDF_FIXTURE
+                    .get(start..end)
+                    .map(<[u8]>::to_vec)
+                    .ok_or(SourceReadError::RangeOutOfBounds)
+            })
+        }
+    }
+
+    // One uncompressed page with a fixed Helvetica text stream and exact cross-reference offsets.
+    const PDF_FIXTURE: &[u8] = concat!(
+        "%PDF-1.4\n",
+        "1 0 obj\n",
+        "<< /Type /Catalog /Pages 2 0 R >>\n",
+        "endobj\n",
+        "2 0 obj\n",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n",
+        "endobj\n",
+        "3 0 obj\n",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\n",
+        "endobj\n",
+        "4 0 obj\n",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\n",
+        "endobj\n",
+        "5 0 obj\n",
+        "<< /Length 51 >>\n",
+        "stream\n",
+        "BT /F1 12 Tf 72 720 Td (bounded PDF fixture) Tj ET\n",
+        "endstream\n",
+        "endobj\n",
+        "xref\n",
+        "0 6\n",
+        "0000000000 65535 f \n",
+        "0000000009 00000 n \n",
+        "0000000058 00000 n \n",
+        "0000000115 00000 n \n",
+        "0000000241 00000 n \n",
+        "0000000311 00000 n \n",
+        "trailer\n",
+        "<< /Size 6 /Root 1 0 R >>\n",
+        "startxref\n",
+        "411\n",
+        "%%EOF\n",
+    ).as_bytes();
 }

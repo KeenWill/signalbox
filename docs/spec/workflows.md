@@ -146,8 +146,10 @@ big-endian u64, and its result concatenates that input and a journaled
 big-endian u64 Unix time in seconds. The runner resolves admitted JavaScript
 artifacts from their registrations without requiring a native catalog. Empty
 `Now` requests receive the SDK's typed Unix-millisecond answer. Registration
-effects and durable primitives are composed; other effects are not composed. The
-process protocol and CLI expose registration, start, read and cancellation.
+effects and durable primitives are composed. The compiled catalog also contains
+`approval-judge-eval` revision `1`; `WorkflowRuntime::with_eval` supplies its
+Corpus, Judge and Blob adapters under [evaluation](eval-system.md). The process
+protocol and CLI expose registration, start, read and cancellation.
 `program register REGISTRATION_ID REGISTRATION_JSON` reads a registration
 description; `program start RUN_ID REGISTRATION_ID --input FILE` admits the
 program codec's exact input bytes. `program read RUN_ID` prints retained input,
@@ -201,6 +203,22 @@ rewritten is not a journal; the migration's triggers reject deletion, update,
 and truncation of journal rows.
 
 ## Boundary contracts
+
+`RepoWatchEffects` admits `repo.nextRuleEvent`, `repo.commitEvaluation` and
+`repo.submitPending` under the `repo-watch` grant. Programs receive checked
+rule/event context and propose ordered template actions without database
+handles. [Repository watch](repo-watch.md) owns revalidation and effect
+receipts; the adapter verifies a matching durable journal request and answer
+before releasing a pending receipt, including delivery in a successor run.
+Completed bindings remain recoverable by other runs with the same request. The
+production runner routes these effects through the current repository-watch
+runtime and its serialized checkout-aware command sink, acknowledging receipts
+after durable delivery before the next effect or any attempt outcome. Startup
+and shutdown also reconcile retained receipts against exact durable answers,
+including cancelled, faulted and completed runs. Checked module rejections fault
+only the requesting run; storage and delivery failures retain their
+infrastructure classification. The shared module pool remains available until
+all runtime owners finish, including workflow shutdown reconciliation.
 
 The canonical SDK specifier is `@signalbox/program-sdk/v<version>`, where the
 version is a positive decimal integer with no leading zero. Frame-contract

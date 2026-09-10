@@ -27,11 +27,13 @@ CRATE_DEPS = [
     "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
     "//crates/conversation-import-codex:signalbox_conversation_import_codex",
     "//crates/domain:signalbox_domain",
+    "//crates/file-media-adapter-pdf:signalbox_file_media_adapter_pdf",
     "//crates/file-media-adapters-image:signalbox_file_media_adapters_image",
     "//crates/file-media-adapters-text:signalbox_file_media_adapters_text",
     "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
     "//crates/file-media-provider-runtime:signalbox_file_media_provider_runtime",
     "//crates/file-media-runtime:signalbox_file_media_runtime",
+    "//crates/github-transport:signalbox_github_transport",
     "//crates/model-provider-runtime:signalbox_model_provider_runtime",
     "//crates/model-runtime:signalbox_model_runtime",
     "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
@@ -77,6 +79,7 @@ rust_library(
     proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     deps = [
         "//crates/application:signalbox_application",
+        "//crates/approval-judge-eval:signalbox_approval_judge_eval",
         "//crates/blob-store:signalbox_blob_store",
         "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
         "//crates/blob-store-s3:signalbox_blob_store_s3",
@@ -84,11 +87,13 @@ rust_library(
         "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
         "//crates/conversation-import-codex:signalbox_conversation_import_codex",
         "//crates/domain:signalbox_domain",
+        "//crates/file-media-adapter-pdf:signalbox_file_media_adapter_pdf",
         "//crates/file-media-adapters-image:signalbox_file_media_adapters_image",
         "//crates/file-media-adapters-text:signalbox_file_media_adapters_text",
         "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
         "//crates/file-media-provider-runtime:signalbox_file_media_provider_runtime",
         "//crates/file-media-runtime:signalbox_file_media_runtime",
+        "//crates/github-transport:signalbox_github_transport",
         "//crates/model-provider-runtime:signalbox_model_provider_runtime",
         "//crates/model-runtime:signalbox_model_runtime",
         "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
@@ -159,7 +164,10 @@ rust_binary(
 
 rust_unit_test(
     name = "unit_tests",
-    compile_data = ["//crates/process-protocol:src/request.rs"],
+    compile_data = [
+        "//crates/process-protocol:src/request.rs",
+        "//crates/workflow-runtime:tests/fixtures/eval.js",
+    ],
     crate = ":signalboxd_lib",
     crate_features = CRATE_FEATURES,
     data = [
@@ -168,6 +176,7 @@ rust_unit_test(
         "//:config/signalboxd.example.toml",
         "//crates/convergence:examples/repository.toml",
         "//crates/convergence:fixtures",
+        "//crates/file-media-adapter-pdf:signalbox-file-media-pdf-worker",
         "//crates/file-media-adapters-image:signalbox-file-media-image-worker",
         "//crates/file-media-adapters-text:signalbox-file-media-text-worker",
         "//crates/model-runtime-claude-cli:signalbox-claude-mcp-bridge",
@@ -176,6 +185,7 @@ rust_unit_test(
     env = {
         "NEXTEST_BIN_EXE_signalbox_claude_mcp_bridge": "$(rootpath //crates/model-runtime-claude-cli:signalbox-claude-mcp-bridge)",
         "NEXTEST_BIN_EXE_signalbox_file_media_image_worker": "$(rootpath //crates/file-media-adapters-image:signalbox-file-media-image-worker)",
+        "NEXTEST_BIN_EXE_signalbox_file_media_pdf_worker": "$(rootpath //crates/file-media-adapter-pdf:signalbox-file-media-pdf-worker)",
         "NEXTEST_BIN_EXE_signalbox_file_media_text_worker": "$(rootpath //crates/file-media-adapters-text:signalbox-file-media-text-worker)",
         "TMPDIR": "/tmp",
     },

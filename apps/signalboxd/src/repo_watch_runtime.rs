@@ -1,5 +1,7 @@
 //! Daemon composition of repository ingestion, dispatch, and lifecycle consumption.
 
+mod workflows;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use ring::rand::{SecureRandom, SystemRandom};
@@ -41,7 +43,7 @@ pub(crate) fn git_push_repository<'a>(
     configuration.repositories().iter().find(|repository| {
         repository.repository() == event.repository()
             && repository.repository() == context.head_repository()
-            && repository.push_credential_file().is_some()
+            && repository.admits_push()
     })
 }
 
@@ -72,7 +74,7 @@ pub enum RepositoryWatchRuntimeError {
 pub async fn connect_repository_watch_pool(
     core: &PgPool,
 ) -> Result<PgPool, RepositoryWatchRuntimeError> {
-    // A fresh 256-bit login secret belongs only to this daemon's module pool.
+    // Each database has its own login; PostgreSQL role passwords are cluster-wide.
     let mut secret = [0_u8; 32];
     SystemRandom::new()
         .fill(&mut secret)
@@ -82,14 +84,38 @@ pub async fn connect_repository_watch_pool(
         .begin()
         .await
         .map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
+    let login: String = sqlx::query_scalar(
+        "SELECT 'mod_repo_watch_' || oid::text FROM pg_database WHERE datname = current_database()",
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
+    sqlx::query("SELECT set_config('signalbox.repository_watch_login', $1, true)")
+        .bind(&login)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
     // Parameter binding keeps the secret out of statement text and diagnostics.
     sqlx::query("SELECT set_config('signalbox.repository_watch_password', $1, true)")
         .bind(&password)
         .execute(&mut *transaction)
         .await
         .map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
-    sqlx::query("DO $$ BEGIN EXECUTE format('ALTER ROLE mod_repo_watch PASSWORD %L', current_setting('signalbox.repository_watch_password')); END $$")
-        .execute(&mut *transaction).await.map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
+    sqlx::query(
+        "DO $$
+         DECLARE module_login text := current_setting('signalbox.repository_watch_login');
+         BEGIN
+             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = module_login) THEN
+                 EXECUTE format('CREATE ROLE %I LOGIN NOINHERIT', module_login);
+             END IF;
+             EXECUTE format('ALTER ROLE %I PASSWORD %L', module_login,
+                            current_setting('signalbox.repository_watch_password'));
+             EXECUTE format('GRANT mod_repo_watch TO %I', module_login);
+         END $$",
+    )
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
     transaction
         .commit()
         .await
@@ -97,9 +123,11 @@ pub async fn connect_repository_watch_pool(
     PgPoolOptions::new()
         .after_connect(|connection, _| {
             Box::pin(async move {
-                sqlx::query("SET search_path = mod_repo_watch, pg_catalog")
-                    .execute(connection)
-                    .await?;
+                sqlx::raw_sql(
+                    "SET ROLE mod_repo_watch; SET search_path = mod_repo_watch, pg_catalog",
+                )
+                .execute(connection)
+                .await?;
                 Ok(())
             })
         })
@@ -107,7 +135,7 @@ pub async fn connect_repository_watch_pool(
             core.connect_options()
                 .as_ref()
                 .clone()
-                .username("mod_repo_watch")
+                .username(&login)
                 .password(&password),
         )
         .await
@@ -136,7 +164,6 @@ enum WorkerState {
 
 struct RuntimeState {
     workers: WorkerState,
-    module_pool: PgPool,
     store: RepoWatchStore,
     lifecycle: LifecycleEventSource,
     factory: RepositoryWatchCommandFactory,
@@ -273,43 +300,49 @@ impl RepositoryWatchRuntime {
         )>,
         signalbox_module_repo_watch_v2::StoreError,
     > {
-        let (store, core, configuration) = {
+        use signalbox_application::ApprovalJudgeDispatchAuthority;
+        use signalbox_module_repo_watch_v2::StoreError;
+        use signalbox_persistence::approval_judge::{
+            ApprovalJudgeRepositoryError, load_commissioned_dispatch_authority,
+        };
+        let (core, configuration) = {
             let state = self.state.lock().await;
-            (
-                state.store.clone(),
-                state.core_pool.clone(),
-                state.configuration.clone(),
-            )
-        };
-        let command: Option<uuid::Uuid> = sqlx::query_scalar(
-            "SELECT creation.command_id FROM session
-             JOIN create_session_command AS creation ON creation.created_session_id = session.session_id
-             WHERE session.session_id = $1 AND session.creation_cause = 'module_dispatched'
-               AND session.dispatching_module = 'repo_watch'"
-        ).bind(session.into_uuid()).fetch_optional(&core).await?;
-        let Some(command) = command else {
-            return Ok(None);
-        };
-        let checkout = store
-            .dispatch_checkout(signalbox_domain::DurableCommandId::from_uuid(command))
-            .await?
-            .ok_or(signalbox_module_repo_watch_v2::StoreError::InvalidRetainedCommand)?;
-        let signalbox_domain::RepoWatchEventTarget::PullRequest(context) = checkout.event.target()
-        else {
-            return Ok(None);
+            (state.core_pool.clone(), state.configuration.clone())
         };
         let Some(configuration) = configuration else {
             return Ok(None);
         };
-        Ok(
-            git_push_repository(&configuration, &checkout.event).map(|repository| {
+        let commissioned = load_commissioned_dispatch_authority(
+            &mut *core.acquire().await?, session,
+        ).await.map_err(|error| match error {
+            ApprovalJudgeRepositoryError::Database { source, .. } => StoreError::Database(source),
+            error => {
+                tracing::error!(session_id = %session.into_uuid(), cause = %error, "retained push fence could not be loaded");
+                StoreError::InvalidRetainedCommand
+            }
+        })?;
+        let authority = match commissioned {
+            Some(authority) => Some(authority),
+            None => self.approval_judge_authority(session).await?,
+        };
+        let Some(ApprovalJudgeDispatchAuthority::PullRequest(context)) = authority else {
+            return Ok(None);
+        };
+        Ok(configuration
+            .repositories()
+            .iter()
+            .find(|repository| {
+                repository.repository() == context.repository()
+                    && repository.repository() == context.head_repository()
+                    && repository.admits_push()
+            })
+            .map(|repository| {
                 (
                     repository.clone(),
                     context.head_branch().clone(),
                     context.head_sha().clone(),
                 )
-            }),
-        )
+            }))
     }
 
     /// Reconciles the configured revision set before starting repository tasks.
@@ -326,7 +359,7 @@ impl RepositoryWatchRuntime {
     /// Composes the idle supervisor without activating on-disk rules before recovery.
     pub fn unstarted(module_pool: PgPool, services: RepositoryWatchServices) -> Self {
         let (repository_shutdown, _) = watch::channel(false);
-        let store = RepoWatchStore::new(module_pool.clone());
+        let store = RepoWatchStore::new(module_pool);
         Self {
             measurements_store: store.clone(),
             state: Arc::new(Mutex::new(RuntimeState {
@@ -340,7 +373,6 @@ impl RepositoryWatchRuntime {
                 prepared_sweep: None,
                 commands: None,
                 store,
-                module_pool,
                 lifecycle: LifecycleEventSource::new(services.core_pool.clone()),
                 factory: RepositoryWatchCommandFactory(services.templates),
                 sink: RepositoryWatchCommandSink {
@@ -679,7 +711,6 @@ impl RepositoryWatchRuntime {
         state.pause().await;
         state.listener.shutdown().await;
         state.workers = WorkerState::Prepared;
-        state.module_pool.close().await;
         outcome
     }
 }

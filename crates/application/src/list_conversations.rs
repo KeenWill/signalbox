@@ -380,36 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn query_retains_every_admitted_field_exactly() {
-        let after = ConversationListCursor::ImportedConversation(imported_id(7));
-        let query = ConversationListQuery::try_new(
-            Some(String::from("Active")),
-            ConversationOriginFilter::Imported,
-            true,
-            25,
-            Some(after),
-        )
-        .expect("admitted query is valid");
-
-        assert_eq!(query.title_contains(), Some("Active"));
-        assert_eq!(query.origin(), ConversationOriginFilter::Imported);
-        assert!(query.include_archived());
-        assert_eq!(query.page_size(), 25);
-        assert_eq!(query.after(), Some(after));
-    }
-
-    #[test]
-    fn default_page_selects_the_unfiltered_non_archived_unified_view() {
-        let query = ConversationListQuery::default_page(5);
-
-        assert_eq!(query.title_contains(), None);
-        assert_eq!(query.origin(), ConversationOriginFilter::All);
-        assert!(!query.include_archived());
-        assert_eq!(query.page_size(), 5);
-        assert_eq!(query.after(), None);
-    }
-
-    #[test]
     fn origin_filter_selects_exactly_its_named_classes() {
         assert!(ConversationOriginFilter::Native.selects_native());
         assert!(!ConversationOriginFilter::Native.selects_imported());

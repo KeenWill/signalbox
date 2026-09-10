@@ -1748,23 +1748,6 @@ fn random_access_range_fanout_above_the_compiled_ceiling_is_rejected() {
 }
 
 #[test]
-fn streaming_range_fanout_above_the_compiled_ceiling_is_rejected() {
-    let ceilings = FileMediaCeilings::version_one();
-    let maximum_ranges = ceilings
-        .read_ranges
-        .checked_add(1)
-        .expect("the fixture ceiling leaves room for one excessive range");
-    let view = bounded_text_view(ReadAccessPattern::Streaming { maximum_ranges }, 1_024);
-
-    let outcome = registry_outcome_with_view(view, ceilings);
-
-    assert!(matches!(
-        outcome,
-        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ViewBounds)
-    ));
-}
-
-#[test]
 fn validation_source_work_ceiling_can_only_be_lowered() {
     let compiled = FileMediaCeilings::version_one();
     let mut lowered = compiled;

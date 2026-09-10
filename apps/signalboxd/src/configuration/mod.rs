@@ -4,6 +4,7 @@ mod billing;
 #[cfg(test)]
 mod checked_in_example;
 mod credential_files;
+pub(crate) use credential_files::read_github_app_key;
 mod error;
 mod model_routing;
 mod model_settings;
@@ -123,6 +124,7 @@ pub struct HubModelConfiguration {
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
+    github_credential_profiles: HashMap<String, crate::credential_pools::GithubCredentialProfile>,
     credential_profiles: HashMap<Arc<str>, CredentialProfile>,
     credential_pools: HashMap<Arc<str>, CredentialPool>,
     model_capabilities: ModelCapabilityCatalog,
@@ -213,9 +215,18 @@ impl HubModelConfiguration {
             claude_cli,
             claude_cli_credential_profile,
         } = startup::parse_startup(content, &document)?;
+        let github_credential_profiles = crate::credential_pools::parse_github_credential_profiles(
+            document.get("credential_profiles"),
+        )?;
         let repository_watch = document
             .get("repository_watch")
-            .map(|item| parse_repository_watch_configuration(item, &numeric_bounds))
+            .map(|item| {
+                parse_repository_watch_configuration(
+                    item,
+                    &numeric_bounds,
+                    &github_credential_profiles,
+                )
+            })
             .transpose()?;
         let models = document
             .get("models")
@@ -616,6 +627,7 @@ impl HubModelConfiguration {
             direct_selections,
             aliases,
             routes,
+            github_credential_profiles,
             credential_profiles,
             credential_pools,
             model_capabilities,
@@ -1357,4 +1369,27 @@ pub(crate) fn checked_in_example_configuration()
         EXAMPLE_EXEC_SUPERVISOR,
         executable.to_string_lossy().as_ref(),
     ))
+}
+
+impl HubModelConfiguration {
+    pub(crate) fn reuse_github_credentials(&mut self, previous: &Self) {
+        for (name, profile) in &mut self.github_credential_profiles {
+            if let Some(old) = previous.github_credential_profiles.get(name)
+                && old == profile
+            {
+                *profile = old.clone();
+            }
+        }
+        if let Some(watch) = &mut self.repository_watch {
+            watch.reuse_github_credentials(&self.github_credential_profiles);
+        }
+    }
+
+    /// Looks up a configured GitHub integration profile.
+    pub fn github_credential_profile(
+        &self,
+        name: &str,
+    ) -> Option<&crate::credential_pools::GithubCredentialProfile> {
+        self.github_credential_profiles.get(name)
+    }
 }

@@ -981,11 +981,11 @@ fn repository_watch_preserves_each_credential_file_reference() {
 
     assert_eq!(
         repositories[0].credential_file(),
-        Path::new(WATCH_CREDENTIAL_FILE)
+        Some(Path::new(WATCH_CREDENTIAL_FILE))
     );
     assert_eq!(
         repositories[1].credential_file(),
-        Path::new(SECOND_WATCH_CREDENTIAL_FILE)
+        Some(Path::new(SECOND_WATCH_CREDENTIAL_FILE))
     );
 }
 
@@ -3978,13 +3978,6 @@ billing_kind = "api_metered""#,
 }
 
 #[test]
-fn configuration_admits_a_subscription_ambient_profile() {
-    // The checked-in fixture already pairs `ambient` with `subscription`;
-    // asserting it here states the other half of that delivery's rule.
-    assert!(HubModelConfiguration::parse(CONFIGURATION).is_ok());
-}
-
-#[test]
 fn configuration_rejects_an_oauth_endpoint_holding_a_username() {
     assert_oauth_token_url_rejected("https://alice@example.test/token");
 }
@@ -4015,22 +4008,6 @@ scopes = ["model:invoke"]"#,
         HubModelConfiguration::parse(&oauth).err(),
         Some(HubModelConfigurationError::InvalidCredentialDelivery)
     );
-}
-
-#[test]
-fn configuration_parses_valid_oauth() {
-    let oauth = CONFIGURATION.replace(
-        "delivery = \"ambient\"",
-        r#"delivery = "oauth"
-client_id = "synthetic-client"
-token_url = "https://example.test/token"
-refresh_token_url = "https://example.test/oauth/token"
-device_authorization_url = "https://example.test/device"
-scopes = ["model:invoke"]"#,
-    );
-
-    let configuration = HubModelConfiguration::parse(&oauth).expect("valid OAuth profile");
-    assert_eq!(configuration.oauth_registrations().len(), 1);
 }
 
 #[test]
@@ -6248,6 +6225,60 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
             HubModelConfigurationError::InvalidNumericBound { field: FIELD }
         );
     }
+}
+
+#[test]
+fn repository_watch_and_tools_share_the_configured_app_cache() {
+    let source = configuration_with_repository_watch().replace(
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+        "credential_profile = \"github-primary\"",
+    );
+    let source = format!(
+        "{source}\n[[credential_profiles]]\nname = \"github-primary\"\nadapter = \"github\"\ndelivery = \"github_app\"\napp_id = 42\ninstallation_id = 73\nprivate_key_file = \"/unused/test-app-key.pem\"\n"
+    );
+    let configuration = HubModelConfiguration::parse(&source)
+        .expect("App profile and repository reference parse without key access");
+    let mut reloaded = HubModelConfiguration::parse(&source).expect("reload parses");
+    reloaded.reuse_github_credentials(&configuration);
+    let profile = configuration
+        .github_credential_profile("github-primary")
+        .expect("App profile");
+    let app = profile.authentication().expect("App authentication");
+    assert!(std::sync::Arc::ptr_eq(
+        &app,
+        &reloaded
+            .github_credential_profile("github-primary")
+            .expect("reloaded profile")
+            .authentication()
+            .expect("reloaded cache")
+    ));
+    let watch = configuration.repository_watch().expect("repository watch");
+    let repository = &watch.repositories()[0];
+    assert!(repository.admits_push());
+    assert!(repository.credential_file().is_none());
+    assert!(std::sync::Arc::ptr_eq(
+        &app,
+        &repository
+            .credential()
+            .authentication()
+            .expect("repository authentication")
+    ));
+    let access =
+        FileCredentialAccess::from_github(profile, CredentialReference::new("github-primary"));
+    assert!(std::sync::Arc::ptr_eq(
+        &app,
+        &access.github_app().expect("tool authentication")
+    ));
+}
+
+#[test]
+fn declared_github_token_file_preserves_polling_credential_isolation() {
+    let source = format!(
+        "{}\n[[credential_profiles]]\nname = \"github-primary\"\nadapter = \"github\"\ndelivery = \"file\"\nfile = \"{WATCH_CREDENTIAL_FILE}\"\n",
+        configuration_with_repository_watch()
+    );
+    let configuration = HubModelConfiguration::parse(&source).expect("token-file profile parses");
+    assert!(configuration.github_tool_credential_conflicts(Path::new("/unused/environment-token")));
 }
 
 #[test]

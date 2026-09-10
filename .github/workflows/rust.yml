@@ -50,43 +50,74 @@ jobs:
       web_only: ${{ steps.paths.outputs.web_only }}
       skip_rust: ${{ steps.paths.outputs.skip_rust }}
       postgres: ${{ steps.paths.outputs.postgres }}
+      changed_paths: ${{ steps.paths.outputs.changed_paths }}
     steps:
-      - name: Check out repository history
+      - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
+      - name: Fetch exact comparison revisions
+        id: comparison
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          MERGE_BASE: ${{ github.event_name == 'pull_request' }}
+          GH_TOKEN: ${{ github.token }}
+        shell: python3 {0}
+        run: |
+          import base64
+          import json
+          import os
+          import re
+          import subprocess
+          import urllib.request
+
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+          if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base, head)):
+              raise SystemExit("Comparison requires exact base and head commit SHAs")
+          token = os.environ["GH_TOKEN"]
+          if os.environ["MERGE_BASE"] == "true":
+              url = f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}/compare/{base}...{head}"
+              request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  base = json.load(response)["merge_base_commit"]["sha"]
+              if not re.fullmatch(r"[0-9a-f]{40}", base):
+                  raise SystemExit("GitHub returned an invalid merge-base SHA")
+          # Authenticate only this fetch; checkout credentials remain unpersisted.
+          authorization = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+          environment = dict(os.environ, GIT_CONFIG_COUNT="1",
+                             GIT_CONFIG_KEY_0="http.extraheader",
+                             GIT_CONFIG_VALUE_0=f"AUTHORIZATION: basic {authorization}")
+          subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", base, head],
+                         env=environment, check=True)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"base={base}\nhead={head}\n")
       - name: Classify changed paths
         id: paths
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ steps.comparison.outputs.base }}
+          HEAD_SHA: ${{ steps.comparison.outputs.head }}
         run: |
           docs_only=false
           web_only=false
           skip_rust=false
           postgres=false
           changed_paths="$RUNNER_TEMP/rust-changed-files"
-          if [ "$EVENT_NAME" = pull_request ]; then
-            git diff --no-renames --name-only -z \
-              "$BASE_SHA...$HEAD_SHA" > "$changed_paths"
-          else
-            git diff --no-renames --name-only -z \
-              "$BASE_SHA" "$HEAD_SHA" > "$changed_paths"
-          fi
+          git diff --no-renames --name-only -z \
+            "$BASE_SHA" "$HEAD_SHA" > "$changed_paths"
           docs=0
           web=0
           rust=0
           while IFS= read -r -d '' path; do
             case "$path" in
-              crates/persistence/* | crates/domain/* | crates/application/* \
-                | apps/signalboxd/* | apps/client/* | crates/modules/* \
-                | crates/workflow-runtime/* | crates/tools-*/* \
-                | crates/process-protocol/* | config/* \
-                | tooling/postgres_test_image.rs \
-                | scripts/postgres_integration_suites.py | .github/workflows/* \
-                | MODULE.bazel* | Cargo.lock | BUILD.bazel | */BUILD.bazel)
+              apps/* | crates/* | config/* | clients/web/src/generated/*)
+                postgres=true
+                ;;
+              docs/* | *.md | clients/web/* | clients/native/*)
+                ;;
+              *)
                 postgres=true
                 ;;
             esac
@@ -125,16 +156,49 @@ jobs:
           echo "web_only=$web_only" >> "$GITHUB_OUTPUT"
           echo "skip_rust=$skip_rust" >> "$GITHUB_OUTPUT"
           echo "postgres=$postgres" >> "$GITHUB_OUTPUT"
+          python3 - "$changed_paths" <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          paths = Path(sys.argv[1]).read_bytes().split(b"\0")
+          value = json.dumps([os.fsdecode(path) for path in paths if path], ensure_ascii=True)
+          # Missing or oversized detail keeps every suite; the coarse gate is separate.
+          if len(value) > 200_000:
+              value = "[]"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"changed_paths={value}\n")
+          PYTHON
 
   contract-checks:
+    needs: rust-change-scope
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-builds' }}
     timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
+      - name: Fetch migration baseline trees
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          GH_TOKEN: ${{ github.token }}
+        shell: python3 {0}
+        run: |
+          import base64
+          import os
+          import subprocess
+
+          branches = list(dict.fromkeys(["main", os.environ["BASE_REF"]]))
+          for branch in branches:
+              subprocess.run(["git", "check-ref-format", f"refs/heads/{branch}"], check=True)
+          authorization = base64.b64encode(f"x-access-token:{os.environ['GH_TOKEN']}".encode()).decode()
+          environment = dict(os.environ, GIT_CONFIG_COUNT="1",
+                             GIT_CONFIG_KEY_0="http.extraheader",
+                             GIT_CONFIG_VALUE_0=f"AUTHORIZATION: basic {authorization}")
+          refspecs = [f"+refs/heads/{branch}:refs/remotes/origin/{branch}" for branch in branches]
+          subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", *refspecs],
+                         env=environment, check=True)
       - name: Use Python with Markdown exclusion support
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -147,6 +211,7 @@ jobs:
         with:
           remote-cache: ${{ vars.BAZEL_REMOTE_CACHE }}
       - name: Check generated domain API declarations
+        if: needs.rust-change-scope.outputs.skip_rust != 'true'
         run: |
           bazel test --config=api --jobs=4 --local_test_jobs=1 //:api_documentation_current
       - name: Check documentation consistency
@@ -159,16 +224,17 @@ jobs:
         if: ${{ !cancelled() }}
         run: python3 scripts/check_session_ownership.py
   domain-api-digest:
+    needs: rust-change-scope
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-reports' }}
     env:
       CARGO_BUILD_JOBS: "2"
     timeout-minutes: 30
     continue-on-error: true
     steps:
-      - name: Check out repository history
+      - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -176,6 +242,43 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           remote-cache: ${{ vars.BAZEL_REMOTE_CACHE }}
+      - name: Fetch exact comparison revisions
+        id: comparison
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          MERGE_BASE: 'false'
+          GH_TOKEN: ${{ github.token }}
+        shell: python3 {0}
+        run: |
+          import base64
+          import json
+          import os
+          import re
+          import subprocess
+          import urllib.request
+
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+          if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base, head)):
+              raise SystemExit("Comparison requires exact base and head commit SHAs")
+          token = os.environ["GH_TOKEN"]
+          if os.environ["MERGE_BASE"] == "true":
+              url = f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}/compare/{base}...{head}"
+              request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  base = json.load(response)["merge_base_commit"]["sha"]
+              if not re.fullmatch(r"[0-9a-f]{40}", base):
+                  raise SystemExit("GitHub returned an invalid merge-base SHA")
+          # Authenticate only this fetch; checkout credentials remain unpersisted.
+          authorization = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+          environment = dict(os.environ, GIT_CONFIG_COUNT="1",
+                             GIT_CONFIG_KEY_0="http.extraheader",
+                             GIT_CONFIG_VALUE_0=f"AUTHORIZATION: basic {authorization}")
+          subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", base, head],
+                         env=environment, check=True)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"base={base}\nhead={head}\n")
       - name: Report domain API digest
         continue-on-error: true
         env:
@@ -382,3 +485,4 @@ jobs:
     uses: ./.github/workflows/bazel.yml
     with:
       postgres: ${{ needs.rust-change-scope.outputs.postgres == 'true' }}
+      changed-paths: ${{ needs.rust-change-scope.outputs.changed_paths }}

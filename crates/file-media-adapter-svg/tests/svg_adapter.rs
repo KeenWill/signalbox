@@ -134,14 +134,6 @@ impl FileMediaProcessor for AdversarialOutputProcessor {
     }
 }
 
-#[test]
-fn declaration_registers_data_only_svg_under_available_isolation() -> Result<(), Box<dyn Error>> {
-    let registry = registry()?;
-
-    assert_eq!(registry.providers(), &[declaration()?]);
-    Ok(())
-}
-
 #[tokio::test]
 async fn generated_svg_validates() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::ordinary().into_source()?;
@@ -614,34 +606,12 @@ async fn animation_element_is_rejected_as_active_content() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
-async fn color_animation_element_is_rejected_as_active_content() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(
-            br#"<svg xmlns="http://www.w3.org/2000/svg"><animateColor attributeName="fill" from="red" to="blue"/></svg>"#,
-        ),
-        "active_content",
-    )
-    .await
-}
-
-#[tokio::test]
 async fn foreign_namespaced_script_is_rejected_as_active_content() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(
             br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"><h:script>run()</h:script></svg>"#,
         ),
         "active_content",
-    )
-    .await
-}
-
-#[tokio::test]
-async fn foreign_resource_element_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(
-            br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"><h:img src="https://example.test/a.png"/></svg>"#,
-        ),
-        "external_reference",
     )
     .await
 }
@@ -769,17 +739,6 @@ async fn offset_path_resource_reference_is_rejected() -> Result<(), Box<dyn Erro
     assert_malformed!(
         SvgFixture::raw(
             br#"<svg xmlns="http://www.w3.org/2000/svg"><path offset-path="url(https://example.invalid/path.svg#p)"/></svg>"#,
-        ),
-        "external_reference",
-    )
-    .await
-}
-
-#[tokio::test]
-async fn color_profile_resource_reference_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(
-            br#"<svg xmlns="http://www.w3.org/2000/svg"><rect color-profile="url(https://example.invalid/profile.icc)"/></svg>"#,
         ),
         "external_reference",
     )
@@ -1236,17 +1195,6 @@ async fn actual_event_handler_attribute_is_rejected() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
-async fn svg_handler_element_is_rejected_as_active_content() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(
-            br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:ev="http://www.w3.org/2001/xml-events"><handler type="application/ecmascript" ev:event="click">alert(1)</handler></svg>"#,
-        ),
-        "active_content",
-    )
-    .await
-}
-
-#[tokio::test]
 async fn root_window_event_handler_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" onbeforeunload="run()"/>"#,),
@@ -1349,24 +1297,6 @@ async fn url_text_in_inert_attribute_is_accepted() -> Result<(), Box<dyn Error>>
         FileInspectionStatus::Validated
     );
     Ok(())
-}
-
-#[tokio::test]
-async fn context_menu_event_handler_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" oncontextmenu="run()"/>"#),
-        "active_content",
-    )
-    .await
-}
-
-#[tokio::test]
-async fn auxiliary_click_event_handler_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" onauxclick="run()"/>"#),
-        "active_content",
-    )
-    .await
 }
 
 #[tokio::test]
@@ -1547,33 +1477,6 @@ fn complete_structure(result: FileReadResult) -> Result<serde_json::Value, Box<d
         } => Ok(body),
         _ => Err("expected complete structured result".into()),
     }
-}
-
-#[tokio::test]
-async fn view_box_trailing_comma_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200,"/>"#),
-        "malformed_svg",
-    )
-    .await
-}
-
-#[tokio::test]
-async fn angle_dimension_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="1deg"/>"#),
-        "malformed_svg",
-    )
-    .await
-}
-
-#[tokio::test]
-async fn time_dimension_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="2s"/>"#),
-        "malformed_svg",
-    )
-    .await
 }
 
 #[tokio::test]

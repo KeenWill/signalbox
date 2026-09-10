@@ -303,11 +303,13 @@ impl fmt::Debug for GitHubResult {
 
 ```rust
 pub trait GitHubTransport: marker::Send {
+    fn request_timeout(&self) -> time::Duration;
     fn execute(
         &mut self,
         operation: GitHubOperation,
         credential: &signalbox_model_runtime::CredentialValue,
         egress_policy: &GitHubEgressPolicy,
+        request_timeout: time::Duration,
     ) -> impl future::Future<Output = result::Result<GitHubResult, GitHubTransportFailure>> + marker::Send;
 }
 ```
@@ -452,13 +454,20 @@ pub struct GitHubApiTransport {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl GitHubApiTransport {
     pub fn try_new() -> result::Result<Self, GitHubApiTransportConstructionError>;
+    pub const fn request_timeout(&self) -> time::Duration;
+    pub fn with_app(
+        self,
+        app: option::Option<sync::Arc<signalbox_github_transport::AppAuthentication>>,
+    ) -> Self;
 }
 impl GitHubTransport for GitHubApiTransport {
+    fn request_timeout(&self) -> time::Duration;
     async fn execute(
         &mut self,
         operation: GitHubOperation,
         credential: &signalbox_model_runtime::CredentialValue,
         policy: &GitHubEgressPolicy,
+        request_timeout: time::Duration,
     ) -> result::Result<GitHubResult, GitHubTransportFailure>;
 }
 ```

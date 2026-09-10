@@ -378,6 +378,7 @@ pub enum ServerMessage {
         replica_count: CanonicalU64,
     },
     BlobChunkRead {
+        blob_length_bytes: CanonicalU64,
         digest: CanonicalBlobDigest,
         offset_bytes: CanonicalU64,
         bytes: BlobChunk,
