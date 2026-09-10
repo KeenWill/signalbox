@@ -581,6 +581,15 @@ async fn native_stdin_size_rejection_preserves_request_too_large() {
 }
 
 #[tokio::test]
+async fn native_prompt_size_rejection_preserves_request_too_large() {
+    let result = execute_scenario("native_prompt_too_large", OperationShape::Text).await;
+    let failure = provider_error(&result.evidence);
+
+    assert_eq!(failure.kind, ProviderErrorKind::RequestTooLarge);
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn nonzero_exit_is_a_typed_provider_failure() {
     let result = execute_scenario("process_nonzero", OperationShape::Text).await;
     let failure = provider_error(&result.evidence);
