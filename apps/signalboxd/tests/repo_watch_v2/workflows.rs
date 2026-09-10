@@ -242,6 +242,102 @@ async fn fixture(
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires disposable PostgreSQL"]
+async fn workflow_evaluation_skips_a_quarantined_event() -> Result<(), Box<dyn Error>> {
+    let (_database, core, module, mut effects, repository, rule) = fixture(Case::Dispatch).await?;
+    let poisoned = effects
+        .store
+        .next_rule_context(&repository, &rule)
+        .await?
+        .expect("first eligible context");
+    sqlx::query(
+        "UPDATE gh_event
+            SET normalized_payload = $2,
+                decode_error = $3
+          WHERE event_id = $1",
+    )
+    .bind(poisoned.event.id().into_uuid())
+    .bind(b"not json".as_slice())
+    .bind(StoreError::InvalidRetainedEvent.to_string())
+    .execute(&module)
+    .await?;
+    let now = OffsetDateTime::now_utc();
+    effects
+        .store
+        .ingest_observation(
+            &effects.store.ingest_baseline(&repository).await?,
+            &dispatch_observation(&repository, 3, now),
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+
+    let journal = ProgramJournalRepository::new(core.clone());
+    let host = WorkflowHost::new(journal.clone());
+    let next = RepoWatchRequest::NextRuleEvent {
+        repository: repository.clone(),
+        rule: rule.id().clone(),
+    }
+    .encode()?;
+    let read_run = start(
+        &core,
+        &next,
+        ProgramGrants::new([ProgramCapability::RepoWatch]),
+    )
+    .await?;
+    host.execute_registered(read_run, &mut NoPrimitives, &mut effects)
+        .await?;
+    let context = RuleContext::decode(
+        journal
+            .load(read_run)
+            .await?
+            .expect("read journal")
+            .result()
+            .expect("read result")
+            .as_bytes(),
+    )
+    .expect("checked context");
+    assert!(context.ordinal > poisoned.ordinal);
+
+    let commit = RepoWatchRequest::CommitEvaluation {
+        effect: Uuid::now_v7(),
+        plan: context.plan(),
+        context: Box::new(context),
+    }
+    .encode()?;
+    let commit_run = start(
+        &core,
+        &commit,
+        ProgramGrants::new([ProgramCapability::RepoWatch]),
+    )
+    .await?;
+    host.execute_registered(commit_run, &mut NoPrimitives, &mut effects)
+        .await?;
+    let receipt = effects
+        .store
+        .evaluation_receipts()
+        .await?
+        .pop()
+        .expect("committed evaluation");
+    assert!(matches!(
+        EvaluationOutcome::decode(&receipt.result),
+        Some(EvaluationOutcome::Dispatched(_))
+    ));
+    let decode_error: Option<String> =
+        sqlx::query_scalar("SELECT decode_error FROM gh_event WHERE event_id = $1")
+            .bind(poisoned.event.id().into_uuid())
+            .fetch_one(&module)
+            .await?;
+    assert_eq!(
+        decode_error.as_deref(),
+        Some("repository-watch retained event is invalid")
+    );
+    module.close().await;
+    core.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires disposable PostgreSQL"]
 async fn workflow_evaluations_recover_after_another_run_acknowledges() -> Result<(), Box<dyn Error>>
 {
     for case in [Case::Dispatch, Case::Suppression, Case::Nonmatch] {
