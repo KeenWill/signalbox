@@ -2920,57 +2920,6 @@ mod tests {
     struct SyntheticCredentials;
     struct SyntheticTransport;
 
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct RecordedCreateRequest {
-        repository: String,
-        title: String,
-        body: String,
-        head: String,
-        base: String,
-        credential: Vec<u8>,
-        origin: String,
-    }
-
-    #[derive(Clone, Debug, Default)]
-    struct RecordingCreateTransport(Arc<Mutex<Option<RecordedCreateRequest>>>);
-
-    impl RecordingCreateTransport {}
-
-    impl GitHubTransport for RecordingCreateTransport {
-        async fn execute(
-            &mut self,
-            operation: GitHubOperation,
-            credential: &CredentialValue,
-            policy: &GitHubEgressPolicy,
-        ) -> Result<GitHubResult, GitHubTransportFailure> {
-            let GitHubOperation::CreatePullRequest {
-                repository,
-                arguments,
-            } = operation
-            else {
-                return Err(GitHubTransportFailure::PreDispatchInfrastructure);
-            };
-            *self
-                .0
-                .lock()
-                .expect("recording transport lock is available") = Some(RecordedCreateRequest {
-                repository: repository.as_str().to_owned(),
-                title: arguments.title().to_owned(),
-                body: arguments.body().to_owned(),
-                head: arguments.head().to_owned(),
-                base: arguments.base().to_owned(),
-                credential: credential.expose_bytes().to_vec(),
-                origin: policy.admitted_origin().to_owned(),
-            });
-            Ok(GitHubResult::created_pull_request(serde_json::json!({
-                "number": CREATED_PULL_REQUEST_NUMBER,
-                "url": CREATED_PULL_REQUEST_URL,
-                "head": CREATE_HEAD,
-                "base": CREATE_BASE,
-            })))
-        }
-    }
-
     thread_local! {
         /// Telemetry captured on this thread alone.
         static CAPTURED_TELEMETRY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -3218,7 +3167,7 @@ mod tests {
             .expect("configured repository is admitted");
         let catalog = GitHubPullRequestCreateTools::try_new(
             SyntheticCredentials,
-            RecordingCreateTransport::default(),
+            SyntheticTransport,
             GitHubEgressPolicy::github_api_only(),
             repository,
         )
@@ -3237,7 +3186,7 @@ mod tests {
             .expect("configured repository is admitted");
         let catalog = GitHubPullRequestCreateTools::try_new(
             SyntheticCredentials,
-            RecordingCreateTransport::default(),
+            SyntheticTransport,
             GitHubEgressPolicy::github_api_only(),
             repository,
         )
@@ -3281,13 +3230,13 @@ mod tests {
         assert_eq!(body["base"], arguments.base());
     }
 
-    fn create_executor()
-    -> GitHubPullRequestCreateExecutor<SyntheticCredentials, RecordingCreateTransport> {
+    fn create_executor() -> GitHubPullRequestCreateExecutor<SyntheticCredentials, SyntheticTransport>
+    {
         let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
             .expect("configured repository is admitted");
         GitHubPullRequestCreateTools::try_new(
             SyntheticCredentials,
-            RecordingCreateTransport::default(),
+            SyntheticTransport,
             GitHubEgressPolicy::github_api_only(),
             repository,
         )
