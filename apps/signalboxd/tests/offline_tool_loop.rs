@@ -1322,6 +1322,7 @@ impl CodeHostTransport for UnusedCodeHostTransport {
         &mut self,
         _operation: CodeHostOperation,
         _credential: &CredentialValue,
+        _request_timeout: Option<std::time::Duration>,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         Err(CodeHostTransportFailure::Rejected)
     }
@@ -1331,11 +1332,16 @@ impl CodeHostTransport for UnusedCodeHostTransport {
 struct UnusedGitHubTransport;
 
 impl GitHubTransport for UnusedGitHubTransport {
+    fn request_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
+    }
+
     async fn execute(
         &mut self,
         _operation: GitHubOperation,
         _credential: &CredentialValue,
         _egress_policy: &GitHubEgressPolicy,
+        _request_timeout: std::time::Duration,
     ) -> Result<GitHubResult, GitHubTransportFailure> {
         Err(GitHubTransportFailure::PreDispatchInfrastructure)
     }
@@ -1490,11 +1496,16 @@ impl RecordingGitHubTransport {
 }
 
 impl GitHubTransport for RecordingGitHubTransport {
+    fn request_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
+    }
+
     async fn execute(
         &mut self,
         operation: GitHubOperation,
         credential: &CredentialValue,
         policy: &GitHubEgressPolicy,
+        _request_timeout: std::time::Duration,
     ) -> Result<GitHubResult, GitHubTransportFailure> {
         self.operations
             .lock()
@@ -1599,6 +1610,7 @@ impl CodeHostTransport for RecordingCodeHostTransport {
         &mut self,
         operation: CodeHostOperation,
         credential: &CredentialValue,
+        _request_timeout: Option<std::time::Duration>,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         self.operations
             .lock()

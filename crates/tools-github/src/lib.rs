@@ -1057,12 +1057,17 @@ impl fmt::Debug for GitHubResult {
 
 /// Mockable request transport.
 pub trait GitHubTransport: Send {
+    /// Budget shared by credential preparation and transport dispatch.
+    fn request_timeout(&self) -> Duration;
+
     /// Executes one operation with request-scoped credentials and exact egress.
+    /// `request_timeout` is the budget remaining after credential preparation.
     fn execute(
         &mut self,
         operation: GitHubOperation,
         credential: &CredentialValue,
         egress_policy: &GitHubEgressPolicy,
+        request_timeout: Duration,
     ) -> impl Future<Output = Result<GitHubResult, GitHubTransportFailure>> + Send;
 }
 
@@ -1258,7 +1263,13 @@ where
         }
         let arguments = decode_create_pull_request(invocation.request().arguments())
             .map_err(|_| caller_bug())?;
-        let credential = match self.credentials.resolve(&self.credential_reference).await {
+        let (credential, remaining) = match prepare_credential(
+            self.transport.request_timeout(),
+            self.credentials.resolve(&self.credential_reference),
+            &self.credential_reference,
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) => {
                 let correlation = invocation.correlation();
@@ -1281,7 +1292,7 @@ where
         };
         let mut result = match self
             .transport
-            .execute(operation, &credential, &self.egress_policy)
+            .execute(operation, &credential, &self.egress_policy, remaining)
             .await
         {
             Ok(result) if result.kind() == GitHubResultKind::CreatedPullRequest => result,
@@ -1404,7 +1415,13 @@ where
         let kind = kind_for_name(invocation.request().name().as_str()).ok_or_else(caller_bug)?;
         let operation =
             decode_operation(kind, invocation.request().arguments()).map_err(|_| caller_bug())?;
-        let credential = match self.credentials.resolve(&self.credential_reference).await {
+        let (credential, remaining) = match prepare_credential(
+            self.transport.request_timeout(),
+            self.credentials.resolve(&self.credential_reference),
+            &self.credential_reference,
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) => {
                 let correlation = invocation.correlation();
@@ -1423,7 +1440,7 @@ where
         };
         let mut result = match self
             .transport
-            .execute(operation, &credential, &self.egress_policy)
+            .execute(operation, &credential, &self.egress_policy, remaining)
             .await
         {
             Ok(result) if kind.accepts(&result) => result,
@@ -1450,6 +1467,30 @@ where
         }
         Ok(invocation.bind(ToolExecutorEvidence::CompletedText(content)))
     }
+}
+
+async fn prepare_credential(
+    timeout: Duration,
+    resolution: impl Future<
+        Output = Result<CredentialValue, signalbox_model_runtime::CredentialAccessError>,
+    >,
+    reference: &CredentialReference,
+) -> Result<(CredentialValue, Duration), signalbox_model_runtime::CredentialAccessError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let unavailable = || {
+        signalbox_model_runtime::CredentialAccessError::new(
+            reference.clone(),
+            signalbox_model_runtime::CredentialAccessFailure::Unavailable,
+        )
+    };
+    let credential = tokio::time::timeout_at(deadline, resolution)
+        .await
+        .map_err(|_| unavailable())??;
+    let remaining = deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(unavailable)?;
+    Ok((credential, remaining))
 }
 
 fn truncate_diff_result(value: &mut serde_json::Value) -> Result<(), InvalidGitHubArguments> {
@@ -2317,29 +2358,41 @@ fn create_pull_request_body(
 }
 
 impl GitHubTransport for GitHubApiTransport {
+    fn request_timeout(&self) -> Duration {
+        self.timeout
+    }
+
     async fn execute(
         &mut self,
         operation: GitHubOperation,
         credential: &CredentialValue,
         policy: &GitHubEgressPolicy,
+        request_timeout: Duration,
     ) -> Result<GitHubResult, GitHubTransportFailure> {
+        let mut transport = self.clone();
+        transport.timeout = request_timeout;
         match operation {
             GitHubOperation::CreatePullRequest {
                 repository,
                 arguments,
             } => {
-                self.create_pull_request(repository, arguments, credential, policy)
+                transport
+                    .create_pull_request(repository, arguments, credential, policy)
                     .await
             }
             GitHubOperation::Metadata(arguments) => {
-                self.metadata(arguments, credential, policy).await
+                transport.metadata(arguments, credential, policy).await
             }
-            GitHubOperation::Diff(arguments) => self.diff(arguments, credential, policy).await,
+            GitHubOperation::Diff(arguments) => transport.diff(arguments, credential, policy).await,
             GitHubOperation::ReviewThreads(arguments) => {
-                self.review_threads(arguments, credential, policy).await
+                transport
+                    .review_threads(arguments, credential, policy)
+                    .await
             }
             GitHubOperation::PublishReview(arguments) => {
-                self.publish_review(arguments, credential, policy).await
+                transport
+                    .publish_review(arguments, credential, policy)
+                    .await
             }
         }
     }
@@ -3021,11 +3074,16 @@ mod tests {
     }
 
     impl GitHubTransport for RecordingCreateTransport {
+        fn request_timeout(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(30)
+        }
+
         async fn execute(
             &mut self,
             operation: GitHubOperation,
             credential: &CredentialValue,
             policy: &GitHubEgressPolicy,
+            _request_timeout: std::time::Duration,
         ) -> Result<GitHubResult, GitHubTransportFailure> {
             let GitHubOperation::CreatePullRequest {
                 repository,
@@ -3397,7 +3455,7 @@ mod tests {
         let observer = transport.clone();
 
         let result = transport
-            .execute(operation, &credential, &policy)
+            .execute(operation, &credential, &policy, DEFAULT_TIMEOUT)
             .await
             .expect("synthetic creation succeeds");
         let recorded = observer.recorded();
@@ -3505,11 +3563,16 @@ mod tests {
     }
 
     impl GitHubTransport for RejectingCreateTransport {
+        fn request_timeout(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(30)
+        }
+
         async fn execute(
             &mut self,
             _operation: GitHubOperation,
             _credential: &CredentialValue,
             _policy: &GitHubEgressPolicy,
+            _request_timeout: std::time::Duration,
         ) -> Result<GitHubResult, GitHubTransportFailure> {
             *self
                 .dispatches
@@ -3517,6 +3580,62 @@ mod tests {
                 .expect("dispatch counter lock is available") += 1;
             Err(GitHubTransportFailure::rejected(self.status))
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn credential_preparation_cannot_exceed_the_request_budget() {
+        let reference = CredentialReference::new(GITHUB_CREDENTIAL_REFERENCE);
+        let started = tokio::time::Instant::now();
+        let result =
+            prepare_credential(Duration::from_secs(30), std::future::pending(), &reference).await;
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+        assert_eq!(
+            result.unwrap_err().failure,
+            signalbox_model_runtime::CredentialAccessFailure::Unavailable
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn creation_shares_one_budget_between_credentials_and_dispatch() {
+        struct SlowCredentials;
+        impl CredentialAccess for SlowCredentials {
+            async fn resolve(
+                &self,
+                _reference: &CredentialReference,
+            ) -> Result<CredentialValue, signalbox_model_runtime::CredentialAccessError>
+            {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                Ok(CredentialValue::new(SYNTHETIC_TOKEN))
+            }
+        }
+        struct StalledTransport;
+        impl GitHubTransport for StalledTransport {
+            fn request_timeout(&self) -> Duration {
+                Duration::from_secs(30)
+            }
+            async fn execute(
+                &mut self,
+                _operation: GitHubOperation,
+                _credential: &CredentialValue,
+                _policy: &GitHubEgressPolicy,
+                request_timeout: Duration,
+            ) -> Result<GitHubResult, GitHubTransportFailure> {
+                assert_eq!(request_timeout, Duration::from_secs(10));
+                tokio::time::timeout(request_timeout, std::future::pending::<()>())
+                    .await
+                    .unwrap_err();
+                Err(GitHubTransportFailure::DispatchUnknown)
+            }
+        }
+        let started = tokio::time::Instant::now();
+        let outcome = crate::test_support::create_pull_request_evidence_with_credentials(
+            SlowCredentials,
+            StalledTransport,
+        )
+        .await;
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+        assert!(outcome.result.is_err());
+        assert_eq!(outcome.evidence, None);
     }
 
     /// a definitively rejected creation reaches the workflow as

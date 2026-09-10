@@ -322,6 +322,7 @@ impl CodeHostTransport for GitHubCodeHostTransport {
         &mut self,
         operation: CodeHostOperation,
         credential: &signalbox_model_runtime::CredentialValue,
+        request_timeout: option::Option<time::Duration>,
     ) -> result::Result<CodeHostResult, CodeHostTransportFailure>;
 }
 ```

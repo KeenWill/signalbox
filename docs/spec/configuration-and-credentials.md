@@ -756,8 +756,9 @@ exists only for a profile whose value the daemon reads; a code-host tool instead
 resolves its fixed reference and builds its scrubber inside execution. Every
 provider-controlled text leaving such an adapter, and every checked string in a
 successful code-host result, is scrubbed of that value and its JSON-escaped form
-before it crosses into evidence. An `ambient` or `codex_home` profile gives the
-daemon no value; its output follows the
+before it crosses into evidence. CI job-log downloads also retain the scrubber
+for the App token used by the redirect response. An `ambient` or `codex_home`
+profile gives the daemon no value; its output follows the
 [runtime substrate](runtime-substrate.md).
 
 The GitHub and code-host adapters share `github-primary`, which needs API access
