@@ -913,6 +913,50 @@ fn repository_watch_is_enabled_by_default() {
 }
 
 #[test]
+fn repository_observation_workflows_are_disabled_by_default() {
+    let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+        .expect("repository-watch configuration");
+    assert!(
+        !configured
+            .repository_watch()
+            .expect("configured watch")
+            .workflows_enabled()
+    );
+}
+
+#[test]
+fn repository_observation_workflows_can_be_selected_explicitly() {
+    let configured = HubModelConfiguration::parse(&configuration_with_repository_watch().replace(
+        "[repository_watch]\nversion = 1",
+        "[repository_watch]\nversion = 1\nworkflows_enabled = true",
+    ))
+    .expect("workflow repository-watch configuration");
+    assert!(
+        configured
+            .repository_watch()
+            .expect("configured watch")
+            .workflows_enabled()
+    );
+}
+
+#[test]
+fn repository_observation_workflows_reject_non_boolean_values() {
+    for value in ["1", "\"true\"", "[]"] {
+        let source = configuration_with_repository_watch().replace(
+            "[repository_watch]\nversion = 1",
+            &format!("[repository_watch]\nversion = 1\nworkflows_enabled = {value}"),
+        );
+        assert!(
+            matches!(
+                HubModelConfiguration::parse(&source),
+                Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            ),
+            "workflows_enabled must reject {value}"
+        );
+    }
+}
+
+#[test]
 fn repository_watch_can_be_disabled_explicitly() {
     let configured = HubModelConfiguration::parse(&configuration_with_repository_watch().replace(
         "[repository_watch]\nversion = 1",

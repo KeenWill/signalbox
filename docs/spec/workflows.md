@@ -144,7 +144,9 @@ executors; idle executors are reused and shutdown joins their threads.
 
 The Linux compiled catalog includes `clock` revision `1`: its input is a
 big-endian u64, and its result concatenates that input and a journaled
-big-endian u64 Unix time in seconds. The runner resolves admitted JavaScript
+big-endian u64 Unix time in seconds. `ObserveRepository` revision `1` requests
+one bounded `repo.observe` poll/webhook unit and returns its accepted frontier
+and event range or explicit ambiguity. The runner resolves admitted JavaScript
 artifacts from their registrations without requiring a native catalog. Empty
 `Now` requests receive the SDK's typed Unix-millisecond answer. Registration
 effects and durable primitives are composed. The compiled catalog also contains
@@ -209,14 +211,14 @@ and truncation of journal rows.
 
 ## Boundary contracts
 
-`RepoWatchEffects` admits `repo.nextRuleEvent`, `repo.commitEvaluation` and
-`repo.submitPending` under the `repo-watch` grant. Programs receive checked
-rule/event context and propose ordered template actions without database
-handles. [Repository watch](repo-watch.md) owns revalidation and effect
-receipts; the adapter verifies a matching durable journal request and answer
-before releasing a pending receipt, including delivery in a successor run.
-Completed bindings remain recoverable by other runs with the same request. The
-production runner routes these effects through the current repository-watch
+The repository-watch adapters admit `repo.observe`, `repo.nextRuleEvent`,
+`repo.commitEvaluation` and `repo.submitPending` under the `repo-watch` grant.
+Programs receive checked rule/event context and propose ordered template actions
+without database handles. [Repository watch](repo-watch.md) owns revalidation
+and effect receipts; the adapter verifies a matching durable journal request and
+answer before releasing a pending receipt, including delivery in a successor
+run. Completed bindings remain recoverable by other runs with the same request.
+The production runner routes these effects through the current repository-watch
 runtime and its serialized checkout-aware command sink, acknowledging receipts
 after durable delivery before the next effect or any attempt outcome. Startup
 and shutdown also reconcile retained receipts against exact durable answers,
@@ -224,6 +226,9 @@ including cancelled, faulted and completed runs. Checked module rejections fault
 only the requesting run; storage and delivery failures retain their
 infrastructure classification. The shared module pool remains available until
 all runtime owners finish, including workflow shutdown reconciliation.
+Observation adapters retain completed stage receipts in the module frontier; the
+existing repository worker admits runs and adopts interrupted receipts before
+subsequent observations when selected by `repository_watch.workflows_enabled`.
 
 The canonical SDK specifier is `@signalbox/program-sdk/v<version>`, where the
 version is a positive decimal integer with no leading zero. Frame-contract

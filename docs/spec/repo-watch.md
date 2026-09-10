@@ -120,6 +120,11 @@ strictly increasing, unique action-ordinal order. The module submitter recovers
 exact retained payloads and invokes core session handlers through the daemon's
 command adapter.
 
+`repository_watch.workflows_enabled` defaults to false. When true, the existing
+serialized poll/webhook worker admits finite `ObserveRepository` runs to the
+daemon workflow runner; rule evaluation, command submission and lifecycle
+reactions use the existing workers.
+
 ## Design decisions
 
 Each repository frontier commit includes the complete current repository and
@@ -367,7 +372,21 @@ through either the workflow reader or the existing evaluator. Submission uses
 the retained commands and existing sink, including checkout and pending
 follow-ups, before recording completion. Recovery adopts a completed submission
 or resumes its binding; an unanswered submission without a binding is ambiguous.
-The existing runtime remains the production orchestrator.
+
+`repo.observe` uses the same provider paging, conditional caches, reviewer
+invalidation and request ceilings. Each completed frontier stage atomically
+retains its stable effect identity, exact request and accepted event range on
+`repository_state`, including unchanged observations. The receipt accumulates
+completed stages and records the attempt's success, partial or failure outcome;
+interruption between stages retains a partial result. Observation execution and
+adoption serialize per repository. A successor adopts the receipt before
+provider configuration or another fetch, and exact durable journal delivery
+moves its binding to `workflow_effect_result` before releasing the pending slot
+for the next observation in either mode. Completed observation bindings remain
+recoverable after later observations; changed input conflicts. A finalized
+attempt with no committed frontier stage retains its result there directly. An
+unanswered effect without a receipt is ambiguous. Shutdown cancels admitted
+observation runs and drains their provider work.
 
 The v2 crate depends on the session ownership crate as its only Signalbox
 dependency. It consumes the seam's lifecycle events and emits only the seam's

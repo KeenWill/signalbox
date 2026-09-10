@@ -227,6 +227,7 @@ impl fmt::Debug for WatchedRepositoryConfiguration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryWatchConfiguration {
     enabled: bool,
+    workflows_enabled: bool,
     signal_reviewers: Box<[RepoWatchAuthorLogin]>,
     repositories: Box<[WatchedRepositoryConfiguration]>,
     rules: Box<[RepoWatchRule]>,
@@ -260,6 +261,11 @@ impl ConvergenceSweepConfiguration {
 }
 
 impl RepositoryWatchConfiguration {
+    /// Selects workflow-driven repository observations.
+    pub const fn workflows_enabled(&self) -> bool {
+        self.workflows_enabled
+    }
+
     pub(crate) const fn poll_request_budget(&self) -> std::num::NonZeroUsize {
         self.poll_request_budget
     }
@@ -339,6 +345,7 @@ pub(super) fn parse_repository_watch_configuration(
         &[
             "version",
             "enabled",
+            "workflows_enabled",
             "signal_reviewers",
             "repositories",
             "rules",
@@ -359,6 +366,15 @@ pub(super) fn parse_repository_watch_configuration(
         })
         .transpose()?
         .unwrap_or(true);
+    let workflows_enabled = table
+        .get("workflows_enabled")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        })
+        .transpose()?
+        .unwrap_or(false);
     let reviewer_values = table
         .get("signal_reviewers")
         .and_then(Item::as_array)
@@ -621,6 +637,7 @@ pub(super) fn parse_repository_watch_configuration(
         })?;
     Ok(RepositoryWatchConfiguration {
         enabled,
+        workflows_enabled,
         poll_request_budget,
         webhook_retention,
         signal_reviewers: signal_reviewers.into_boxed_slice(),
