@@ -552,6 +552,29 @@ pub struct FatalRecoveryReporter {
 }
 
 impl FatalRecoveryReporter {
+    /// Scans startup sessions, retaining scoped failures for operator parking.
+    pub async fn scan_startup_sessions<Repository>(
+        &self,
+        repository: Repository,
+    ) -> Result<
+        signalbox_application::StartupScanOutcome,
+        signalbox_application::StartupScanError<Repository::Error>,
+    >
+    where
+        Repository: signalbox_application::StartupScanRepository + Send,
+        Repository::Error: Send + Sync,
+    {
+        signalbox_application::StartupScanService::new(
+            UuidV7StartupScanIdGenerator,
+            SupervisedStartupScanRepository {
+                repository,
+                reporter: self.clone(),
+            },
+        )
+        .execute()
+        .await
+    }
+
     /// Reports recovery for infrastructure that has no session scope.
     pub fn report_recovery_required(&self) {
         self.fatal_signal
@@ -674,6 +697,66 @@ impl FatalRecoveryReporter {
                 }
                 () = tokio::time::sleep(retry_delay), if retry_pending => {}
             }
+        }
+    }
+}
+
+struct SupervisedStartupScanRepository<Repository> {
+    repository: Repository,
+    reporter: FatalRecoveryReporter,
+}
+
+impl<Repository> signalbox_application::StartupScanRepository
+    for SupervisedStartupScanRepository<Repository>
+where
+    Repository: signalbox_application::StartupScanRepository + Send,
+    Repository::Error: Send + Sync,
+{
+    type Error = Repository::Error;
+
+    async fn sessions(&mut self) -> Result<Box<[SessionId]>, Self::Error> {
+        self.repository.sessions().await
+    }
+
+    async fn record_corrupt_session(
+        &mut self,
+        session: SessionId,
+        error: &Self::Error,
+    ) -> Result<(), Self::Error> {
+        if self
+            .repository
+            .record_corrupt_session(session, error)
+            .await
+            .is_err()
+        {
+            self.reporter
+                .report_session_failure(session, SessionExecutionFailure::classified(error));
+        }
+        Ok(())
+    }
+
+    async fn recover<Generator>(
+        &mut self,
+        session: SessionId,
+        identities: signalbox_domain::AcceptedInputTurnFailureIdentities,
+        ids: &mut Generator,
+    ) -> Result<signalbox_application::StartupScanSessionOutcome, Self::Error>
+    where
+        Generator: signalbox_application::StartupScanIdGenerator + Send,
+    {
+        match self.repository.recover(session, identities, ids).await {
+            Err(error)
+                if !matches!(
+                    error.operator_failure_class(),
+                    OperatorFailureClass::IdentityCollision
+                        | OperatorFailureClass::FailClosedCorruption
+                ) =>
+            {
+                self.reporter
+                    .report_session_failure(session, SessionExecutionFailure::classified(&error));
+                Ok(signalbox_application::StartupScanSessionOutcome::NoActiveTurn)
+            }
+            result => result,
         }
     }
 }
@@ -4919,6 +5002,39 @@ mod tests {
         );
         assert_eq!(writes, 1);
         assert!(execution.session_is_suspended(session));
+    }
+
+    #[tokio::test]
+    async fn approval_judge_persistence_corruption_suspends_only_its_session() {
+        use signalbox_persistence::approval_judge::{
+            ApprovalJudgeCorruption, ApprovalJudgeRepositoryError,
+        };
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let error = super::PostgresProviderToolLoopExecutionError::<
+            StagedExecutionFailure,
+            StagedExecutionFailure,
+        >::ApprovalJudge(ApprovalJudgeRepositoryError::Corruption(
+            ApprovalJudgeCorruption::Inconsistent("cancelled judge completion"),
+        ));
+        let (execution, signal) = FatalExecutionSupervisor::new(NoopExecution);
+        let result = supervise_execution_for_session(
+            execution.fatal_signal.clone(),
+            execution.bounded_expirations.clone(),
+            session,
+            ready(Err(error)),
+            super::tool_loop_execution_failure_requires_recovery,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(execution.session_is_suspended(session));
+        let state = signal.triggered.borrow();
+        assert!(!state.process_recovery);
+        let failure = state
+            .pending
+            .get(&session)
+            .expect("failed session is queued for operator parking");
+        assert_eq!(failure.class, OperatorFailureClass::FailClosedCorruption);
+        assert_eq!(failure.cause_code, "approval_judge_persistence");
     }
 
     #[tokio::test]

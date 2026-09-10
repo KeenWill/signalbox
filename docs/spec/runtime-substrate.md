@@ -569,10 +569,11 @@ materialized when the job ends.
 content, so shared telemetry may emit it while the underlying error keeps its
 diagnostic detail internally. The class is one of infrastructure, which states
 whether the commit is ambiguous, fail-closed corruption, identity collision, or
-a caller or hub defect; the daemon treats corruption and caller defects as fatal
-and distinguishes an ambiguous infrastructure failure from a nonambiguous one.
-The sanitized cause code stating what happened is owned by the page that owns
-the behavior raising it: [model-call-execution](model-call-execution.md) for
+a caller or hub defect. A failure stops the daemon only when it has no session
+scope. Session-scoped recovery suspends only the affected session. The daemon
+distinguishes ambiguous infrastructure failures from nonambiguous ones. The
+sanitized cause code stating what happened is owned by the page that owns the
+behavior raising it: [model-call-execution](model-call-execution.md) for
 provider and model-call causes,
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) for
 turn-liveness causes.

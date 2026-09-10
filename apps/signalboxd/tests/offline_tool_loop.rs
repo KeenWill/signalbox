@@ -5667,3 +5667,47 @@ async fn approval_deadline_wakes(restore: bool) -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_corrupt_session_retains_operator_item_without_process_recovery()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    sqlx::query("DROP TRIGGER session_is_append_only ON session")
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query("ALTER TABLE session DROP CONSTRAINT session_creation_cause_shape,
+        DROP CONSTRAINT session_spawning_request_fk, DROP CONSTRAINT session_delegation_relation_fk")
+        .execute(&fixture.pool).await?;
+    sqlx::query("UPDATE session SET spawning_tool_request_id = $2 WHERE session_id = $1")
+        .bind(fixture.session.into_uuid())
+        .bind(Uuid::now_v7())
+        .execute(&fixture.pool)
+        .await?;
+    let (supervisor, signal) = signalboxd::FatalExecutionSupervisor::new(());
+
+    let outcome = supervisor
+        .recovery_reporter()
+        .scan_startup_sessions(PostgresStartupScanRepository::new(fixture.pool.clone()))
+        .await?;
+
+    assert_eq!(outcome.skipped_corrupt_sessions(), &[fixture.session]);
+    let lifecycle = signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(
+        fixture.pool.clone(),
+    )
+    .load(fixture.session)
+    .await?
+    .expect("failed session retains its lifecycle");
+    assert!(lifecycle.state().is_parked());
+    assert_eq!(
+        lifecycle.supervision_failure().unwrap().class,
+        OperatorFailureClass::FailClosedCorruption
+    );
+    assert!(lifecycle.supervision_failure().unwrap().pending);
+    tokio::select! {
+        biased;
+        () = signal.wait_for_process_recovery() => panic!("session corruption stopped scheduling"),
+        () = std::future::ready(()) => {}
+    }
+    Ok(())
+}
