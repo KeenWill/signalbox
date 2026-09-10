@@ -266,6 +266,12 @@ pub struct SessionLifecycleRepository {
     pool: PgPool,
 }
 
+/// Retains an ambiguous supervision write identity across persistence retries.
+#[derive(Debug, Default)]
+pub struct SessionSupervisionWrite {
+    ambiguous: Option<Uuid>,
+}
+
 impl SessionLifecycleRepository {
     /// Uses the supplied pool for atomic transitions and fail-closed loads.
     pub const fn new(pool: PgPool) -> Self {
@@ -316,7 +322,22 @@ impl SessionLifecycleRepository {
         session: SessionId,
         failure: &(impl ClassifyOperatorFailure + Sync),
     ) -> Result<(), SessionLifecycleRepositoryError> {
-        self.record_supervision_failure_with_commit(session, failure, commit)
+        self.record_supervision_failure_with_state(
+            session,
+            failure,
+            &mut SessionSupervisionWrite::default(),
+        )
+        .await
+    }
+
+    /// Records a park or reconciles its retained ambiguous identity without replaying an unresolved write.
+    pub async fn record_supervision_failure_with_state(
+        &self,
+        session: SessionId,
+        failure: &(impl ClassifyOperatorFailure + Sync),
+        state: &mut SessionSupervisionWrite,
+    ) -> Result<(), SessionLifecycleRepositoryError> {
+        self.record_supervision_failure_with_commit(session, failure, state, commit)
             .await
     }
 
@@ -324,12 +345,23 @@ impl SessionLifecycleRepository {
         &self,
         session: SessionId,
         failure: &(impl ClassifyOperatorFailure + Sync),
+        state: &mut SessionSupervisionWrite,
         commit: Commit,
     ) -> Result<(), SessionLifecycleRepositoryError>
     where
         Commit: FnOnce(sqlx::Transaction<'static, sqlx::Postgres>) -> Outcome,
         Outcome: std::future::Future<Output = Result<(), SessionLifecycleRepositoryError>>,
     {
+        if let Some(supervision) = state.ambiguous {
+            if self
+                .supervision_identity_recorded(session, supervision)
+                .await
+                .map_err(SessionLifecycleRepositoryError::CommitAmbiguous)?
+            {
+                return Ok(());
+            }
+            state.ambiguous = None;
+        }
         let supervision = Uuid::now_v7();
         let mut transaction = self.pool.begin().await?;
         sqlx::query(lock_inventory::SESSION_LIFECYCLE_SESSION)
@@ -396,30 +428,39 @@ impl SessionLifecycleRepository {
             outcome,
             Err(SessionLifecycleRepositoryError::CommitAmbiguous(_))
         ) {
-            let recorded = reconcile_supervision_identity(
-                self.pool.options().get_acquire_timeout(),
-                || async {
-                    let mut transaction = self.pool.begin().await?;
-                    sqlx::query(lock_inventory::SESSION_LIFECYCLE_SESSION)
-                        .bind(session_id_to_uuid(session))
-                        .fetch_optional(&mut *transaction)
-                        .await?;
-                    let recorded = sqlx::query_scalar::<_, bool>(
-                        "SELECT EXISTS(SELECT 1 FROM session_supervision WHERE session_id = $1 AND supervision_id = $2)",
-                    )
-                    .bind(session_id_to_uuid(session))
-                    .bind(supervision)
-                    .fetch_one(&mut *transaction)
-                    .await?;
-                    transaction.rollback().await?;
-                    Ok(recorded)
-                },
-            ).await;
-            if matches!(recorded, Ok(true)) {
+            state.ambiguous = Some(supervision);
+            if matches!(
+                self.supervision_identity_recorded(session, supervision)
+                    .await,
+                Ok(true)
+            ) {
                 return Ok(());
             }
         }
         outcome
+    }
+
+    async fn supervision_identity_recorded(
+        &self,
+        session: SessionId,
+        supervision: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        reconcile_supervision_identity(self.pool.options().get_acquire_timeout(), || async {
+            let mut transaction = self.pool.begin().await?;
+            sqlx::query(lock_inventory::SESSION_LIFECYCLE_SESSION)
+                .bind(session_id_to_uuid(session))
+                .fetch_optional(&mut *transaction)
+                .await?;
+            let recorded = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM session_supervision WHERE session_id = $1 AND supervision_id = $2)",
+            )
+            .bind(session_id_to_uuid(session))
+            .bind(supervision)
+            .fetch_one(&mut *transaction)
+            .await?;
+            transaction.rollback().await?;
+            Ok(recorded)
+        }).await
     }
 
     /// Returns a parked session to the state its suspended turn maps to.

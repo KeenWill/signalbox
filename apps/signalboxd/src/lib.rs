@@ -613,12 +613,13 @@ impl FatalRecoveryReporter {
         let retry_delay = pool.options().get_acquire_timeout();
         let repository =
             signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(pool);
-        self.park_failed_sessions_with(retry_delay, nudge, |session, failure| {
+        self.park_failed_sessions_with(retry_delay, nudge, |session, failure, mut state| {
             let repository = repository.clone();
             async move {
-                repository
-                    .record_supervision_failure(session, &failure)
-                    .await
+                let result = repository
+                    .record_supervision_failure_with_state(session, &failure, &mut state)
+                    .await;
+                (state, result)
             }
         })
         .await;
@@ -630,21 +631,34 @@ impl FatalRecoveryReporter {
         nudge: signalbox_application::InProcessEligibilityNudge,
         mut write: Write,
     ) where
-        Write: FnMut(SessionId, SessionExecutionFailure) -> Outcome,
+        Write: FnMut(
+            SessionId,
+            SessionExecutionFailure,
+            signalbox_persistence::session_lifecycle::SessionSupervisionWrite,
+        ) -> Outcome,
         Outcome: std::future::Future<
-                Output = Result<
-                    (),
-                    signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError,
-                >,
+                Output = (
+                    signalbox_persistence::session_lifecycle::SessionSupervisionWrite,
+                    Result<
+                        (),
+                        signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError,
+                    >,
+                ),
             >,
     {
+        let mut writes = std::collections::HashMap::new();
         let mut changed = self.fatal_signal.subscribe();
         loop {
             let pending = changed.borrow_and_update().pending.clone();
             for (session, failure) in pending {
+                let state = writes.remove(&session).unwrap_or_default();
+                let (state, result) = write(session, failure, state).await;
                 let result = self
-                    .record_session_failure(session, &nudge, || write(session, failure))
+                    .record_session_failure(session, &nudge, || std::future::ready(result))
                     .await;
+                if result.is_err() {
+                    writes.insert(session, state);
+                }
                 tracing::error!(
                     session = %session.as_uuid(),
                     failure_class = ?failure.class,
@@ -4801,13 +4815,14 @@ mod tests {
             reporter.park_failed_sessions_with(
                 std::time::Duration::from_secs(1),
                 nudge,
-                |reported, _| {
+                |reported, _, state| {
                     assert_eq!(reported, session);
-                    ready(
+                    ready((
+                        state,
                         outcomes
                             .pop_front()
                             .expect("acknowledgement removes the retry request"),
-                    )
+                    ))
                 },
             ),
         )
@@ -4825,7 +4840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervision_does_not_replay_an_unreconciled_ambiguous_park() {
+    async fn unacknowledged_supervision_keeps_local_suspension() {
         use signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError;
         let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
         let reporter = execution.recovery_reporter();

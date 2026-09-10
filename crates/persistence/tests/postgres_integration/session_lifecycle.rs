@@ -3634,6 +3634,7 @@ async fn ambiguous_supervision_commit_preserves_a_concurrent_operator_resume()
         &pool,
         session,
         &failure,
+        &mut signalbox_persistence::session_lifecycle::SessionSupervisionWrite::default(),
         |transaction| async {
             transaction.commit().await?;
             lifecycle.resume(session).await?;
@@ -3650,6 +3651,61 @@ async fn ambiguous_supervision_commit_preserves_a_concurrent_operator_resume()
     assert!(!resumed.state().is_parked());
     assert!(!resumed.supervision_failure().unwrap().pending);
     pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn supervision_retry_after_identity_read_failure_preserves_operator_resume()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let session = creation_session(118);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(interactive_creation(118))
+        .await?;
+    activate_first_turn(&pool, session, 118).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let failure = signalbox_persistence::startup::StartupScanRepositoryError::from(
+        signalbox_persistence::startup::StartupScanCorruption::Missing("fixture supervision"),
+    );
+    let mut state = signalbox_persistence::session_lifecycle::SessionSupervisionWrite::default();
+    let error = signalbox_persistence::test_support::record_supervision_failure_with_commit(
+        &pool,
+        session,
+        &failure,
+        &mut state,
+        |transaction| async {
+            transaction.commit().await?;
+            lifecycle.resume(session).await?;
+            pool.close().await;
+            Err(SessionLifecycleRepositoryError::CommitAmbiguous(
+                sqlx::Error::PoolClosed,
+            ))
+        },
+    )
+    .await
+    .expect_err("the closed pool prevents the exact-identity read");
+    assert!(matches!(
+        error,
+        SessionLifecycleRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed)
+    ));
+    let fresh = sqlx::PgPool::connect(&database_url).await?;
+    signalbox_persistence::test_support::record_supervision_failure_with_commit(
+        &fresh,
+        session,
+        &failure,
+        &mut state,
+        |_| async { panic!("the retained request must only reconcile its identity") },
+    )
+    .await?;
+    let resumed = SessionLifecycleRepository::new(fresh.clone())
+        .load(session)
+        .await?
+        .unwrap();
+    assert!(!resumed.state().is_parked());
+    assert!(!resumed.supervision_failure().unwrap().pending);
+    fresh.close().await;
     drop(container);
     Ok(())
 }
@@ -3676,6 +3732,7 @@ async fn an_uncommitted_supervision_attempt_does_not_acknowledge_an_identical_pr
         &pool,
         session,
         &failure,
+        &mut signalbox_persistence::session_lifecycle::SessionSupervisionWrite::default(),
         |transaction| async {
             transaction.rollback().await?;
             Err(SessionLifecycleRepositoryError::CommitAmbiguous(

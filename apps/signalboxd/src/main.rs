@@ -3826,11 +3826,13 @@ mod tests {
                 async move {
                     let result = {
                         let (ambiguous, observed) = tokio::sync::oneshot::channel();
+                        let mut supervision_write = signalbox_persistence::session_lifecycle::SessionSupervisionWrite::default();
                         let record =
                         signalbox_persistence::test_support::record_supervision_failure_with_commit(
                             &pool,
                             session,
                             failure,
+                            &mut supervision_write,
                             |transaction| async move {
                                 transaction.commit().await?;
                                 container

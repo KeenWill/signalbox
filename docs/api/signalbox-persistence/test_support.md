@@ -73,6 +73,7 @@ pub async fn record_supervision_failure_with_commit<Commit, Outcome>(
     pool: &sqlx_postgres::PgPool,
     session: signalbox_domain::SessionId,
     failure: &(impl signalbox_application::ClassifyOperatorFailure + marker::Sync),
+    state: &mut session_lifecycle::SessionSupervisionWrite,
     commit: Commit,
 ) -> result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>
 where

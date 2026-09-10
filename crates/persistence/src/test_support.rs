@@ -221,6 +221,7 @@ pub async fn record_supervision_failure_with_commit<Commit, Outcome>(
     pool: &PgPool,
     session: SessionId,
     failure: &(impl signalbox_application::ClassifyOperatorFailure + Sync),
+    state: &mut crate::session_lifecycle::SessionSupervisionWrite,
     commit: Commit,
 ) -> Result<(), crate::session_lifecycle::SessionLifecycleRepositoryError>
 where
@@ -230,7 +231,7 @@ where
         >,
 {
     crate::session_lifecycle::SessionLifecycleRepository::new(pool.clone())
-        .record_supervision_failure_with_commit(session, failure, commit)
+        .record_supervision_failure_with_commit(session, failure, state, commit)
         .await
 }
 

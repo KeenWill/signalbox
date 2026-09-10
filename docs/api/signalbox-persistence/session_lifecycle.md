@@ -140,6 +140,12 @@ impl session_lifecycle::SessionLifecycleRepository {
         session: signalbox_domain::SessionId,
         failure: &(impl signalbox_application::ClassifyOperatorFailure + marker::Sync),
     ) -> result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>;
+    pub async fn record_supervision_failure_with_state(
+        &self,
+        session: signalbox_domain::SessionId,
+        failure: &(impl signalbox_application::ClassifyOperatorFailure + marker::Sync),
+        state: &mut session_lifecycle::SessionSupervisionWrite,
+    ) -> result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>;
     pub async fn resume(
         &self,
         session: signalbox_domain::SessionId,
@@ -180,4 +186,11 @@ impl session_lifecycle::SessionLifecycleRepository {
         actor: signalbox_domain::LifecycleActor,
     ) -> result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>;
 }
+```
+
+## SessionSupervisionWrite
+
+```rust
+pub struct SessionSupervisionWrite {/* private */}
+// derives: fmt::Debug, default::Default
 ```
