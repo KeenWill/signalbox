@@ -72,6 +72,7 @@ pub(super) fn persist_objects(
         |oid| repository.object_content(oid),
         authority.object_format,
         directory.path(),
+        None,
     )?;
     pinned_objects.validate_live(authority)?;
     let publication = ObjectPublicationLock::acquire(pinned_objects)?;
