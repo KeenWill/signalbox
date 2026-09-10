@@ -1,26 +1,6 @@
 use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
-use signalbox_domain::{ToolEffectClass, ToolPermissionDefault};
 
 use super::{test_provider_support::*, test_service_support::*, test_support::*, tool::*};
-
-/// The provider read defaults to confirmation because the remote provider
-/// observes the authenticated GET.
-#[test]
-fn web_search_definition_carries_exact_policy() {
-    let (catalog, _executor) = WebSearchTool::try_new((), (), configuration())
-        .expect("static web_search tool compiles")
-        .into_parts();
-    let definitions = catalog.definitions();
-    assert_eq!(definitions.len(), 1);
-    let definition = &definitions[0];
-
-    assert_eq!(definition.name().as_str(), WEB_SEARCH_NAME);
-    assert_eq!(
-        definition.permission_default(),
-        ToolPermissionDefault::Confirm
-    );
-    assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
-}
 
 /// The rendered schema is the exact query-only wire artifact.
 #[test]

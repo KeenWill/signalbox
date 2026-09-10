@@ -691,7 +691,8 @@ where
 {
     let protocol_error = match error {
         SubmitInputRepositoryError::Database(_)
-        | SubmitInputRepositoryError::CheckoutProvisioningPending => {
+        | SubmitInputRepositoryError::CheckoutProvisioningPending
+        | SubmitInputRepositoryError::BlobStorageUnavailable => {
             ProtocolError::mutation_unavailable(false)
         }
         SubmitInputRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_unavailable(true),

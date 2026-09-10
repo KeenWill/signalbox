@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             manifest_path.display()
         ))
     })?;
-    let pinned = manifest
+    let release = manifest
         .get("release")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
@@ -29,9 +29,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 manifest_path.display()
             ))
         })?;
-    let pinned = version_pin::upstream_version(pinned).ok_or_else(|| {
+    let executable_release = manifest
+        .get("executableRelease")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            std::io::Error::other(format!(
+                "{} declares an executable fork release tag",
+                manifest_path.display()
+            ))
+        })?;
+    if executable_release != release {
+        return Err(std::io::Error::other(format!(
+            "{} pins different archive and executable releases",
+            manifest_path.display()
+        ))
+        .into());
+    }
+    let pinned = version_pin::upstream_version(release).ok_or_else(|| {
         std::io::Error::other(format!(
-            "{} must pin an exact rust-vX.Y.Z-signalbox.N release",
+            "{} must pin an exact rust-vX.Y.Z-fork.N release",
             manifest_path.display()
         ))
     })?;

@@ -120,25 +120,32 @@ fresh `/proc`. A container-process-namespace variant omits the pid unshare and
 read-only binds the existing `/proc`; it is admissible only when an outer
 container already isolates that namespace. The child inherits none of the
 daemon's environment; deployment settings supply additional runtime inputs. The
-optional `[daemon_tools]` keys `sandbox_network` (default `"none"`, or
-`"host"`), `sandbox_read_only_binds` (default `[]`), and `sandbox_path_prepend`
-(default `[]`) select networking, absolute host paths bound read-only at the
-same paths, and absolute directories prepended to `PATH`. Host networking shares
-the daemon's network namespace and DNS configuration without destination
-filtering, independently of web-egress and tool-mapping policies. Optional
-`sandbox_rustup_home` and `sandbox_rustup_toolchain` set `RUSTUP_HOME` and
-`RUSTUP_TOOLCHAIN`; automatic toolchain installation is disabled, `CARGO_HOME`
-stays private and writable, and `npm_config_cache` is `/workspace/.npm`.
+required `[daemon_tools].sandboxed_exec_timeout_bound` is a friendly duration of
+at least one second or `"none"` and bounds the timeout requested from
+`sandboxed_exec`. The optional `[daemon_tools]` keys `sandbox_network` (default
+`"none"`, or `"host"`), `sandbox_read_only_binds` (default `[]`), and
+`sandbox_path_prepend` (default `[]`) select networking, absolute host paths
+bound read-only at the same paths, and absolute directories prepended to `PATH`.
+Host networking shares the daemon's network namespace and DNS configuration
+without destination filtering, independently of web-egress and tool-mapping
+policies. Optional `sandbox_rustup_home` and `sandbox_rustup_toolchain` set
+`RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; automatic toolchain installation is
+disabled, `CARGO_HOME` stays private and writable, and `npm_config_cache` is
+`/workspace/.npm`.
 
 The optional `[tool_approval_postures]` table decides, per exact composed tool
 name, whether a request is approved by policy, judged by the approval judge, or
 parked for a person; a tool whose declaration always confirms keeps that
-requirement under every posture but delegation. The optional `[approval_judge]`
-table decides which configured direct selection judges delegated requests, and
-when it is absent the judge reuses the request-producing call's selection. The
-optional `[workspace_instructions]` table is either absent or present at version
-one, and its bounded `registered_roots` array names the instruction directories
-registered outside a session's workspace.
+requirement under every posture but delegation. Web tools default to delegation
+under either session blanket; explicit `auto` also delegates them and `human`
+parks them for a person. Optional `[tool_settings].approval_wait_timeout` is a
+positive duration or `"none"`, defaults to `"10m"`, and is retained for each
+human wait when that wait first reaches the daemon. The optional
+`[approval_judge]` table decides which configured direct selection judges
+delegated requests, and when it is absent the judge reuses the request-producing
+call's selection. The optional `[workspace_instructions]` table is either absent
+or present at version one, and its bounded `registered_roots` array names the
+instruction directories registered outside a session's workspace.
 
 A credential profile names one account. Its `CredentialReference` is the
 non-secret name that appears in configuration, errors, logs, and durable
@@ -360,22 +367,21 @@ resolves to one secret remain two members, and the cost is bounded to one extra
 successor attempt that fails as its predecessor did.
 
 Settings whose effect the daemon cannot supply are typed startup failures rather
-than retained and inert: `round_robin` and a `switch_now` whose adapter cannot
-prove non-acceptance for that trigger's cause unless it is
-`on_credential_rejected`. Codex pools admit `least_used`, headroom reserves and
-non-`stay` `on_headroom_low`; the other adapters reject them. The Codex adapter
-reads capacity with `account/rateLimits/read` after initialization and merges
-primary and secondary windows from `account/rateLimits/updated` into the current
-call's evidence. Remaining capacity rounds down to whole percentage points. A
-null or absent window preserves its previous value within that call; a
-notification with neither window emits no capacity evidence. Thread startup and
-turn execution do not wait for the capacity read; a rejected or unanswered read
-supplies no new evidence. A notification carrying a window supersedes an
-outstanding read, whose reply is consumed without emitting evidence. A read
-reply received after turn completion still supplies capacity evidence unless
-superseded. Members without retained evidence have unknown capacity:
-`least_used` falls back to configured order within equal priorities, reserves do
-not exclude them, and headroom actions do not fire.
+than retained and inert: `round_robin` is rejected. Codex pools admit
+`least_used`, headroom reserves and non-`stay` `on_headroom_low`; the other
+adapters reject them. The Codex adapter reads capacity with
+`account/rateLimits/read` after initialization and merges primary and secondary
+windows from `account/rateLimits/updated` into the current call's evidence.
+Remaining capacity rounds down to whole percentage points. A null or absent
+window preserves its previous value within that call; a notification with
+neither window emits no capacity evidence. Thread startup and turn execution do
+not wait for the capacity read; a rejected or unanswered read supplies no new
+evidence. A notification carrying a window supersedes an outstanding read, whose
+reply is consumed without emitting evidence. A read reply received after turn
+completion still supplies capacity evidence unless superseded. Members without
+retained evidence have unknown capacity: `least_used` falls back to configured
+order within equal priorities, reserves do not exclude them, and headroom
+actions do not fire.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under
@@ -399,14 +405,10 @@ reports one undifferentiated authentication failure the adapter cannot split;
 every `codex_home` credential rejection follows the pool's configured
 `on_credential_rejected` action.
 
-An HTTP adapter proves non-acceptance only with a decoded native error envelope
-naming the cause in a pre-stream error response. An SSE error record never
-carries that proof, whatever token it holds, because by then the provider has
-begun processing the request. The Codex CLI proves non-acceptance instead
-through its typed failed `turn/completed` closure under the
-[runtime proof rule](runtime-substrate.md), so a `codex_cli` pool admits
-`switch_now` on all three availability causes; an unproven availability failure
-authorizes no successor.
+All adapters admit `switch_now` for quota, rate-limit and overload failures. The
+classified kind and pinned policy determine successor admission; a pre-stream
+rejection and a definitive mid-stream error use the same policy. Non-acceptance
+proof is not required for these known failures.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
 observed it until an operator clears its exact generation. It applies to every
@@ -577,12 +579,12 @@ guarding, output reservation, and post-response usage enforcement use the
 effective serving record's limits for the enabled call, not the selectable
 source record's.
 
-An absent `[web_fetch]` table or empty array admits no outbound `web_fetch`
-request, and every request must match one canonical configured origin before
-dispatch. Each configured entry is a bare HTTP(S) origin canonicalized to its
-scheme, host, and effective port before duplicates are rejected. The GitHub
-egress policy admits exactly `https://api.github.com:443` for authenticated
-requests, and model arguments cannot widen either admission rule.
+An absent `[web_fetch]` table admits every origin permitted by the transport. A
+present table requires each request to match `allowed_origins`; an empty array
+admits no origin. Each configured entry is a bare HTTP(S) origin canonicalized
+to its scheme, host, and effective port before duplicates are rejected. The
+GitHub egress policy admits exactly `https://api.github.com:443` for
+authenticated requests, and model arguments cannot widen either admission rule.
 
 Admission is not delivery: the daemon supplies a surface only for `anthropic`
 and `openai` `file`, `claude_cli` `ambient` and `file`, and `codex_cli`
@@ -831,13 +833,17 @@ before scavenging and fails without removal on ownership, type, or containment
 mismatch. The Codex child uses the home's file backend and token-only
 authentication with ambient credentials, keyrings, helpers, and external stores
 disabled; inability to deliver the home is a typed pre-send failure. An
-access-token rejection during an invocation neither quarantines the profile nor
-permits automatic call retry. Delivery failure evidence and quarantine commit
-atomically and bypass pool trigger policy. OAuth quarantine reads lock only
-currently registered OAuth pool members. Successful re-provisioning clears OAuth
-delivery-origin quarantine and cached access; failure preserves both. Deletion
-holds the dispatch profile lock while removing authorization and cached access,
-advances the retained generation, and preserves registration and history.
+access-token rejection during an invocation refreshes the token and retries the
+same profile in a new durable call. A rejection after that successful refresh,
+or a failed refresh, rotates to the next profile. A successful invocation clears
+the token's rejection-recovery state. An expired access token does not
+quarantine the profile or apply its pool rejection action. Delivery failure
+evidence and quarantine commit atomically and bypass pool trigger policy. OAuth
+quarantine reads lock only currently registered OAuth pool members. Successful
+re-provisioning clears OAuth delivery-origin quarantine and cached access;
+failure preserves both. Deletion holds the dispatch profile lock while removing
+authorization and cached access, advances the retained generation, and preserves
+registration and history.
 
 A `codex_home` profile accepts `max_concurrent_invocations` from 1 through
 1,024. The startup registration bounds per-member invocation reservations; an
@@ -846,6 +852,8 @@ credential pool admission as [contention](credential-availability.md).
 
 ## Planned
 
+- Guard recovery initial and maximum backoff delays and an elapsed bound
+  admitting `none`; see [daemon survival design](../design/daemon-survival.md).
 - Input-modality declarations on model and serving-target records, and the blob
   catalog they feed: [design](../design/configuration-and-credentials.md).
 - Dated rate windows on a model entry; the present grammar admits one flat rate,

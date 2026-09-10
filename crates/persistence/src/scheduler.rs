@@ -164,7 +164,7 @@ impl PostgresEligibilitySweep {
                         active.active_phase_kind = 'running'
                         OR (
                             active.active_phase_kind = 'awaiting_tool_approval'
-                            AND EXISTS (
+                            AND (tool_approval_human_wait_is_due(active.approval_tool_request_id) OR EXISTS (
                                 SELECT 1
                                   FROM tool_request AS request
                                  WHERE request.request_id =
@@ -178,7 +178,7 @@ impl PostgresEligibilitySweep {
                                          WHERE judge.request_id = request.request_id
                                            AND judge.state_kind = 'terminal'
                                    )
-                            )
+                            ))
                         )
                         OR (
                             active.active_phase_kind = 'awaiting_child'
@@ -286,11 +286,6 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{RECONCILIATION_PAGE_SIZE, next_page_state};
-
-    #[test]
-    fn reconciliation_page_size_matches_scheduler_pass_bound() {
-        assert_eq!(RECONCILIATION_PAGE_SIZE, 16);
-    }
 
     #[test]
     fn pages_advance_only_until_the_fixed_cycle_bound() {

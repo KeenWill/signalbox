@@ -832,7 +832,7 @@ fn streaming_text_fallback_follows_probe_and_declaration_miss() {
 }
 
 #[test]
-fn oversized_streaming_text_fallback_becomes_unknown_before_validation() {
+fn streaming_text_fallback_validates_a_prefix_of_a_larger_source() {
     let source = MemorySource::synthetic();
     let mut ceilings = FileMediaCeilings::version_one();
     ceilings.validation_source_bytes = 1;
@@ -844,11 +844,12 @@ fn oversized_streaming_text_fallback_becomes_unknown_before_validation() {
     };
 
     let outcome = inspect(&registry, &processor, &source, "unknown")
-        .expect("oversized streaming fallback becomes unknown");
+        .expect("the bounded prefix validates as text");
 
-    let FileInspection::Unknown { .. } = outcome else {
-        panic!("oversized streaming fallback must produce unknown inspection");
-    };
+    assert_eq!(
+        validated_evidence(outcome),
+        ValidationEvidence::StreamingTextValidation
+    );
 }
 
 #[test]
@@ -1387,7 +1388,7 @@ fn false_source_too_large_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-struct SourceFailureProcessor;
+struct SourceFailureProcessor(SourceReadError);
 
 impl FileMediaProcessor for SourceFailureProcessor {
     fn probe<'a>(
@@ -1396,7 +1397,7 @@ impl FileMediaProcessor for SourceFailureProcessor {
         _source: &'a dyn VerifiedBlobSource,
         _cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
-        Box::pin(async { Err(SourceReadError::Unavailable.into()) })
+        Box::pin(async { Err(self.0.into()) })
     }
 
     fn validate<'a>(
@@ -1426,7 +1427,7 @@ fn processor_boundary_preserves_verified_source_unavailability() {
     let registry = registry_with_view(text_view());
 
     let outcome = block_on_ready(registry.inspect(
-        &SourceFailureProcessor,
+        &SourceFailureProcessor(SourceReadError::Unavailable),
         inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         &source,
         &NeverCancelled,
@@ -1747,23 +1748,6 @@ fn random_access_range_fanout_above_the_compiled_ceiling_is_rejected() {
 }
 
 #[test]
-fn streaming_range_fanout_above_the_compiled_ceiling_is_rejected() {
-    let ceilings = FileMediaCeilings::version_one();
-    let maximum_ranges = ceilings
-        .read_ranges
-        .checked_add(1)
-        .expect("the fixture ceiling leaves room for one excessive range");
-    let view = bounded_text_view(ReadAccessPattern::Streaming { maximum_ranges }, 1_024);
-
-    let outcome = registry_outcome_with_view(view, ceilings);
-
-    assert!(matches!(
-        outcome,
-        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ViewBounds)
-    ));
-}
-
-#[test]
 fn validation_source_work_ceiling_can_only_be_lowered() {
     let compiled = FileMediaCeilings::version_one();
     let mut lowered = compiled;
@@ -1971,4 +1955,33 @@ fn invalid_reader_validation_envelopes_name_validation_bounds() {
             Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ValidationBounds)
         ));
     }
+}
+
+#[test]
+fn processor_boundary_preserves_verified_source_integrity_failure() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(text_view());
+    let processor = SourceFailureProcessor(SourceReadError::Integrity);
+
+    let inspected = block_on_ready(registry.inspect(
+        &processor,
+        inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        &source,
+        &NeverCancelled,
+    ));
+    let read = block_on_ready(registry.read(
+        &processor,
+        FileReadRequest {
+            inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+            view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view"),
+            input: FileReadInput::Initial {
+                options: serde_json::json!({}),
+            },
+        },
+        &source,
+        &NeverCancelled,
+    ));
+
+    assert_eq!(inspected, Err(FileMediaFailure::SourceIntegrity));
+    assert_eq!(read, Err(FileMediaFailure::SourceIntegrity));
 }

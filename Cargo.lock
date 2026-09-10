@@ -3197,7 +3197,7 @@ dependencies = [
  "proc-macro-error-attr3",
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -4407,6 +4407,7 @@ version = "0.0.0"
 dependencies = [
  "crc32fast",
  "image",
+ "serde",
  "serde_json",
  "signalbox-file-media-processor-runtime",
  "signalbox-file-media-runtime",
@@ -4423,6 +4424,7 @@ dependencies = [
  "serde_stacker",
  "signalbox-file-media-processor-runtime",
  "signalbox-file-media-runtime",
+ "signalbox-test-bin",
  "tokio",
 ]
 
@@ -4454,9 +4456,15 @@ dependencies = [
 name = "signalbox-file-media-provider-runtime"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
+ "ring",
+ "serde",
+ "serde_json",
  "signalbox-domain",
  "signalbox-file-media-runtime",
+ "signalbox-model-runtime",
  "signalbox-tools-file-media",
+ "tokio",
 ]
 
 [[package]]
@@ -4469,6 +4477,7 @@ dependencies = [
  "mime",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "signalbox-derive",
  "tokio",
 ]
@@ -4549,6 +4558,7 @@ dependencies = [
 name = "signalbox-model-runtime-claude-cli"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
  "rustix 1.1.4",
  "semver",
  "serde",
@@ -4563,6 +4573,7 @@ dependencies = [
 name = "signalbox-model-runtime-codex-cli"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
  "hex",
  "rustix 1.1.4",
  "schemars 1.2.2",
@@ -5001,6 +5012,11 @@ dependencies = [
  "signalbox-conversation-import-codex",
  "signalbox-derive",
  "signalbox-domain",
+ "signalbox-file-media-adapters-image",
+ "signalbox-file-media-adapters-text",
+ "signalbox-file-media-processor-runtime",
+ "signalbox-file-media-provider-runtime",
+ "signalbox-file-media-runtime",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
  "signalbox-model-runtime-anthropic",
@@ -5019,6 +5035,7 @@ dependencies = [
  "signalbox-tools-code-host",
  "signalbox-tools-conversations",
  "signalbox-tools-exec",
+ "signalbox-tools-file-media",
  "signalbox-tools-git",
  "signalbox-tools-github",
  "signalbox-tools-plan",
@@ -5884,9 +5901,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.4+spec-1.1.0"
+version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
+checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
 dependencies = [
  "indexmap 2.14.0",
  "serde_core",

@@ -155,10 +155,42 @@ not a per-tool cost.
 
 The daemon registers `git_push_configured` when mapped workspace tools are
 composed and a watched repository configures `push_credential_file`; execution
-resolves that session's retained dispatch and current repository configuration
-on every call. The transport pushes without force to the configured repository
-URL and confirms the remote branch equals the resolved commit before
-acknowledging success.
+resolves the session's retained commissioned or repository-dispatched branch and
+head fences and current repository configuration on every call; the judge or CLI
+approval authorizes execution. The transport pushes without force to the
+configured repository URL and confirms the remote branch equals the resolved
+commit before acknowledging success. For a two-parent merge, exactly one parent
+must equal or descend from the retained-head fence; it is the branch parent,
+regardless of parent order. A missing or ambiguous fence binding refuses the
+push with `UnprovenMergeParents`. Multiple merge bases refuse it with
+`AmbiguousMergeBases`, listing base object IDs and an omitted count when the
+detail cannot fit them all; verification does not construct a virtual merge
+base. Before pushing a merge, the executor compares additions and removals
+relative to its base parent against the branch's effects relative to the merge
+base, ignoring line offsets and consuming each matching effect once. A carried
+addition does not require the branch patch's obsolete preimage to remain;
+carried removals must also occur in the branch diff. Rename detection correlates
+parent renames through their common source paths, permitting either parent's
+destination while retaining exact carried destinations. An effect absent from
+the branch diff refuses the push with `MergeDroppedBaseChanges`. Collected
+dropped-hunk previews share a 4 KiB budget, and collection truncation remains
+explicit in the detail. Its bounded JSON detail lists filenames before hunk
+previews, marks each shortened preview with `truncated`, and counts omitted
+filenames and previews explicitly when they cannot fit. Filenames use bytewise
+Git path quoting. Verification supports two-parent merges and refuses larger
+merges with `UnsupportedMergeShape` naming the parent count before capturing the
+push snapshot or traversing ancestry. It retains only the first dropped hunk per
+file. Non-merge pushes are unaffected.
+
+A rename/delete resolution may retain the branch's rename destination with its
+exact branch blob and mode while leaving the base-deleted source absent.
+
+Before constructing merge diffs, verification counts tree-entry occurrences
+across the four compared trees against `MAX_REPOSITORY_INSPECTIONS`, including
+reused subtrees. Cumulative expanded path bytes, including every directory
+prefix, must fit `MAX_WORKTREE_PATH_BYTES` before diffs are constructed. Rename
+detection sets `MAX_MERGE_RENAME_SOURCES` explicitly; repository configuration
+cannot raise the search limit.
 
 The seven local Git tools perform no remote operation.
 
@@ -177,11 +209,13 @@ Each tool family owns its bounded capture, truncation, and completeness
 evidence; no universal true-size field exists, because a traversal cannot always
 know it.
 
-The loop's bounds are on durable content, not on wall-clock time, so one
-model-controlled chain cannot hold the progressing slot indefinitely or exhaust
-daemon memory.
-
-Pending approval has no timeout.
+Human approval waits use `tool_settings.approval_wait_timeout` (ten minutes by
+default, or `none`). The first human wait records its deadline durably; restart
+restores its scheduler wake-up. Deadline wake-ups do not require periodic
+reconciliation; a full nudge buffer retains the wake until capacity is
+available. Expiry records a core-issued `RuntimeSafety` denial with reason
+`approval_wait_timeout` and continues the turn. Judge execution time is not part
+of the human wait.
 
 A tool recovery wait is terminalized only by a proof-bearing interruption or by
 the automatic-reconciliation ledger's claim on that exact ambiguity; resolving
@@ -196,7 +230,10 @@ or in-flight attempt takes the effect-class crash-loss path.
 Foreground waiting on a child through `await_session` is a logical tool
 transition that ends any physical attempt before committing the wait, so restart
 resumes from durable wait and result rows and cannot duplicate an external
-effect.
+effect. A batch can retain multiple foreground waits; continuation and
+interruption associate delivered child results with their await requests in
+proposal order. The next model call closes that batch across the intervening
+child-wait attempts, including when an ordinary tool follows the final wait.
 
 The error kind set stays closed; a family whose failures do not fit maps into it
 and may fix the detail to its own closed token vocabulary.
@@ -259,19 +296,19 @@ judge uses the exact direct selection of the request-producing call. The judge
 prompt carries the session's commissioned goal, template, frozen system prompt,
 and optional dispatch authority, each separately delimited and quoted as
 untrusted evidence, and the prompt treats them as scope to compare with the
-request, never as instruction. The frozen system prompt supplies authority,
-bounded by the dispatch fence; the template name is a label, never authority. A
-goal, when present, may narrow that scope but cannot independently grant or
-widen it. Goal absence does not require escalation. The judge applies the first
-matching rule: escalate human-reserved actions or truncated authority or
-undecodable arguments, deny requests explicitly outside scope, approve plainly
-covered requests and their ordinary constituents, otherwise escalate. Exec
-pushes require both a dispatch fence and an immutable permitted remote in the
-frozen prompt; a mutable remote alias alone does not establish the destination.
-The judge identifies `git_push_configured` as the built-in configured-repository
-transport and judges its branch scope without requiring a remote URL in the
-frozen prompt. An explicit remote-URL restriction still requires a verified
-destination match; an unknown match escalates.
+request, never as instruction. The judge approves ordinary task work inside the
+sandbox and scoped credentials without requiring a separate action grant:
+checkout reads and writes, sandbox execs, builds, tests, dependency
+installation, public web research, own-branch pushes, code-host reads, and
+replies and resolutions on the session's pull request. The frozen prompt,
+dispatch fence, and any goal restrict scope; template names supply no authority
+and goal absence does not require escalation. Human reservations, truncated
+authority, and undecodable arguments escalate; explicit prohibitions deny.
+Actions outside established sandbox or credential scope, including pushes to
+another branch, escalate unless exact authority permits them.
+`git_push_configured` pins its destination to the configured repository URL. The
+fenced head commit is a starting point, so task work may publish new commits to
+its own branch.
 
 For repository-watch pull-request sessions, core persistence loads the session's
 typed creation-dispatch identities. The daemon obtains the retained GitHub event
@@ -288,7 +325,8 @@ pending steering terminalizes the unattended turn under the
 commissioned-dispatch audit, preserving `ToolInadmissible` for requests already
 closed by placement loss. A `KnownFailed`, `Refused`, `Cancelled`, or
 `Ambiguous` terminal judge call for an admissible request retains the attended
-park while immediately admitting a user decision.
+park while immediately admitting a user decision. The daemon operator may
+approve or deny any escalation, including a commissioned session's escalation.
 
 A completed judge call records the provider's offered recommendation, the
 effective recommendation, and the cause when withdrawn authority substitutes
@@ -311,14 +349,15 @@ human, `AlwaysConfirm`, or automatic selection is never overridden, and the
 consuming request still freezes the delegated posture.
 
 Each family supplies its compiled declarations and matching executor and owns
-its exact argument schemas, permission defaults, effect classes, bounds, and
-execution results. The catalog owns only their composition and the name-directed
-executor, which covers exactly the composed families; disagreement between the
-advertised catalog and the executor is a daemon defect. A tool name shared with
-a runner declaration is admitted only when the model-facing definition and
-permission are equal and the local effect class maps exactly, `EffectFree` to
-`Pure` and `ExternalEffect` to `SideEffecting`. Effect class controls crash
-classification, not permission identity.
+its exact argument schemas, permission defaults, effect classes, and execution
+results; deployment configuration supplies its policy bounds. The catalog owns
+only their composition and the name-directed executor, which covers exactly the
+composed families; disagreement between the advertised catalog and the executor
+is a daemon defect. A tool name shared with a runner declaration is admitted
+only when the model-facing definition and permission are equal and the local
+effect class maps exactly, `EffectFree` to `Pure` and `ExternalEffect` to
+`SideEffecting`. Effect class controls crash classification, not permission
+identity.
 
 The workspace read, workspace mutation, local Git, and execution families bind
 one workspace root, and that root is per session;
@@ -332,7 +371,8 @@ retained set a request still holds is never released. Every declaration a
 workspace-root-bound family advertises is a property of the family's code, not
 of the repository it binds. Local Git is the exception: it compiles the pinned
 repository's object format into its argument validators, and session composition
-refuses an object-format disagreement.
+refuses an object-format disagreement. Configured pushes use the same bound
+workspace.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
@@ -355,8 +395,8 @@ in-flight attempt acquires the gate and reloads the attempt before classifying
 prior-process crash loss. Interrupt handling acquires the same gate before its
 command transaction, and the durable attempt cannot remain in flight after the
 gate becomes available to an interrupt. An interrupt that waits behind executor
-work reloads the committed result before closing the batch, so it cannot strand
-an issued request or roll back its command.
+work reloads the complete committed result before closing the batch, so it
+cannot strand an issued request or roll back its command.
 
 If the executor returns an operator failure without trustworthy evidence after
 authorization, the service retains the gate and applies the attempt's
@@ -469,26 +509,31 @@ stay exact on the durable request but replay to the provider as a fixed
 placeholder object, so the paired typed error reaches either provider; the
 placeholder is never durable evidence.
 
-A `web_fetch` request's canonical origin must satisfy the deployment-owned
-web-fetch catalog policy in
-[configuration-and-credentials](configuration-and-credentials.md) before
-dispatch, and the transport that carries an admitted request is stated in
+A `web_fetch` request's canonical origin must satisfy any optional deployment
+restriction in [configuration-and-credentials](configuration-and-credentials.md)
+before dispatch, and the transport that carries an admitted request is stated in
 [web-egress-threat-model](web-egress-threat-model.md). Failure before request
-dispatch returns a fixed sanitized known failure; timeout, transport, or body
-loss after dispatch begins is commit-ambiguous. Both web tools declare
-`ExternalEffect`, and for both the shipped human posture supersedes the
-declaration's confirm default and the session blanket, so a request parks before
-it reaches its transport or credential boundary.
+dispatch returns a fixed sanitized known failure. A `web_fetch` timeout,
+including DNS deadline expiry, returns a typed timeout failure and the turn
+continues. Other transport or body loss after dispatch remains ambiguous.
+`web_fetch` and `web_search` declare `ExternalEffect` and default to delegated
+approval under either session blanket. An explicit `human` tool posture parks
+for a person; `auto` still delegates web requests. The judge decides before
+either tool reaches its transport or credential boundary.
 
 The blob tools authorize only digests present in attachment stubs in the
-rendered frontier for the issuing turn. A visibility or budget closure resolves
-the logical request before the request reaches the executor, and a store failure
-is returned by the executor after it traverses and verifies the recorded
-replicas. Both leave previously charged bytes charged and permit the next model
+rendered frontier for the issuing turn. A visibility closure resolves the
+logical request before it reaches the executor; a store failure is returned
+after the executor traverses the recorded replicas. Both permit the next model
 round; neither enters the crash-loss path nor fails the turn.
-[blob-storage](blob-storage.md) owns the budgets. `session_status_update`
-derives a durable command identity from the physical tool attempt and attributes
-the command and last-writer stamp to the exact `ToolRequestId`.
+[blob-storage](blob-storage.md) owns the per-read page size.
+`session_status_update` derives a durable command identity from the physical
+tool attempt and attributes the command and last-writer stamp to the exact
+`ToolRequestId`.
+
+Composed `file_inspect` and `file_read` declare external effect. Their resolver
+uses the same rendered-frontier attachment proof before source or worker I/O; a
+visibility refusal returns a typed known failure from the executor.
 
 Every code-host declaration, reads included, is `ExternalEffect`; read-only
 declarations default to automatic approval and mutations to confirmation, so the
@@ -549,6 +594,8 @@ the hint until a full nudge buffer has capacity.
 
 ## Planned
 
+- Session-scoped fatal execution parking; see
+  [daemon survival design](../design/daemon-survival.md).
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a `ToolInadmissible`
@@ -559,3 +606,9 @@ the hint until a full nudge buffer has capacity.
   [tool-loop design](../design/tool-loop.md).
 - Runner-locus execution rules: the lost-lease retry exception and the runner
   approval ladder; see [runner protocol design](../design/runner-protocol.md).
+
+A completed image read retains a typed media reference beside its bounded text
+summary. Its storage record carries independent presented and source validation
+identities; terminal evidence is immutable. Rendering preserves that reference
+only from the durable result, and model preparation authenticates it before send
+authorization. Text or JSON tool output cannot construct this authority.

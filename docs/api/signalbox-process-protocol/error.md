@@ -248,11 +248,6 @@ pub enum RejectionDetail {
         max_length_bytes: CanonicalU64,
         requested_length_bytes: CanonicalU64,
     },
-    BlobReadRangeOutOfBounds {
-        offset_bytes: CanonicalU64,
-        length_bytes: CanonicalU64,
-        blob_length_bytes: CanonicalU64,
-    },
     SessionLifecycleCommandRejected {
         session_id: CanonicalUuid,
         reason: SessionLifecycleCommandRejection,

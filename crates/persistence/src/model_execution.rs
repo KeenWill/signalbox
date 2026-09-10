@@ -618,7 +618,7 @@ pub struct PostgresModelCallRepository {
     runner_recovery: Option<crate::runner_protocol::RunnerProtocolStore>,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     credential_pools: CredentialPoolRuntimeCatalog,
-    same_credential_attempt_bound: NonZeroUsize,
+    same_credential_attempt_bound: Option<NonZeroUsize>,
     cache_inclusive_input_targets: HashSet<ResolvedProviderTarget>,
     continuation_usage_limits: ToolContinuationUsageLimitCatalog,
 }
@@ -975,7 +975,8 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositor
         SubmitInputRepositoryError::ModelExecution(_) => {
             ModelCallCorruption::Inconsistent("origin command application").into()
         }
-        SubmitInputRepositoryError::CheckoutProvisioningPending => {
+        SubmitInputRepositoryError::CheckoutProvisioningPending
+        | SubmitInputRepositoryError::BlobStorageUnavailable => {
             ModelCallCorruption::Inconsistent("admission deferral while loading origin").into()
         }
     }

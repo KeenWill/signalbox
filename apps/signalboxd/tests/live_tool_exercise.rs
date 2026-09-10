@@ -223,6 +223,7 @@ async fn run_live_smoke() -> SmokeResult {
     let exec_supervisor_executable = daemon_configuration
         .exec_supervisor_executable()
         .to_path_buf();
+    let sandboxed_exec_timeout_bound = daemon_configuration.sandboxed_exec_timeout_bound();
     let web_fetch_egress_policy = model_configuration.web_fetch_egress_policy();
     let numeric_bounds = model_configuration.numeric_bounds();
     let configured_usize = |field| {
@@ -290,6 +291,7 @@ async fn run_live_smoke() -> SmokeResult {
         &exec_supervisor_executable,
         None,
         &Default::default(),
+        sandboxed_exec_timeout_bound,
         web_fetch_egress_policy,
     )?;
     let (tool_catalog, tool_executor) = tools.into_parts();
@@ -514,6 +516,7 @@ adapter = "application"
 
 [daemon_tools]
 exec_supervisor_executable = "{}"
+sandboxed_exec_timeout_bound = "none"
 
 [git_identity]
 author_name = "Signalbox Live Smoke"
@@ -873,7 +876,9 @@ fn operation_tool_results(
             | MessagePart::Thinking { .. }
             | MessagePart::RedactedThinking { .. }
             | MessagePart::ProviderCompaction { .. }
-            | MessagePart::ProviderReasoning { .. } => None,
+            | MessagePart::ProviderReasoning { .. }
+            | MessagePart::ImageReference(_)
+            | MessagePart::Image(_) => None,
         })
         .collect::<Result<Vec<_>, _>>()?)
 }

@@ -1,8 +1,8 @@
 # Blob storage
 
 Blob storage keeps immutable byte content under its SHA-256 digest, records
-which stores hold each blob, and delivers verified bytes to clients, browsers,
-and models.
+which stores hold each blob, and delivers byte ranges to clients, browsers, and
+models.
 
 ## Overview
 
@@ -37,10 +37,9 @@ the store the route selects, verifies the published object, then records the
 catalog rows. Reads reach the daemon over the process protocol, over the
 same-origin HTTP surface the browser client uses, and through the blob-read tool
 family a model calls. All three serve content through one runtime that walks the
-recorded replicas in order and returns a verified byte range; a metadata read
-answers from the catalog and opens no store. The request and response shapes
-live in `crates/process-protocol` and on
-[process-protocol](process-protocol.md).
+recorded replicas in order and returns a byte range; a metadata read answers
+from the catalog and opens no store. The request and response shapes live in
+`crates/process-protocol` and on [process-protocol](process-protocol.md).
 
 The browser client asks for a descriptor of one use of a blob. The descriptor
 lists the views the server admits: download, a browser-native view for common
@@ -54,7 +53,8 @@ and an optional filename. Transcript presence is distinct from model-context
 inclusion: the transcript and the terminal show an attachment as metadata, the
 model sees a textual stub, and the model reaches the bytes only through the
 blob-read tools. Before a model call is authorized to send, attachment
-preparation verifies a replica of every attachment the rendered request names.
+preparation authenticates catalog evidence and opens a replica of each
+attachment.
 
 ## Design decisions
 
@@ -123,18 +123,15 @@ cost.
 Models reach attachment content the way they reach every other effect: through
 tools, explicitly, within declared bounds.
 
-The per-turn cap on blob-read requests exists alongside the byte budget because
-it bounds complete replica reverification work even when the model repeatedly
-requests a tiny range from a store without generation-pinned reuse.
-
 ## Boundary contracts
 
 The database records which stores hold each blob; a read uses those records, not
 configuration, to find the blob. A replica row is written only after the upload
-was verified. Every content read checks the length and hash of the bytes against
-the recorded replica row before it returns them. Clients never receive a store
-credential, bucket name, path, or presigned URL. The daemon relays every blob
-byte between a client and a store.
+was verified. Ingest and explicit operator reads (`signalbox blob read`) verify
+length and SHA-256. Model preparation and range reads trust the persisted
+digest, length, and replica record without rehashing the object. Clients never
+receive a store credential, bucket name, path, or presigned URL. The daemon
+relays every blob byte between a client and a store.
 
 The digest covers raw bytes only. Filename, media type, purpose, producing
 session, and placement are properties of a use of the blob, never of the blob.
@@ -190,7 +187,7 @@ checked imported-aggregate loads share a process-wide bound of 16 active
 traversals, and a request that cannot acquire one returns unavailable at once.
 Attachment preparation admits at most eight process-wide traversals without
 waiting; explicit and automatic compaction verify the distinct rendered
-attachments and their aggregate byte budget before authorization. How a
+attachments and their per-blob maximum before authorization. How a
 model-originated read or a preparation pass hands off its scheduler slot around
 store I/O is owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
@@ -214,13 +211,20 @@ registers an additional replica in the routed store rather than creating a
 second identity. The daemon derives the storage class from the fixed request
 kind; no operation or client field selects a route.
 
-A read whose range starts at or beyond the end of the blob, or crosses it, is a
-typed range rejection, never a short or empty read. When every candidate fails,
-any unavailable candidate makes the result `unavailable`; otherwise any length
-or digest mismatch makes it `blob_corrupt`, an all-missing set makes it
-`blob_missing`, and an absent catalog identity is `not_found`. A retained
-filesystem handle pins an inode but not its contents, so filesystem replicas are
-completely reverified before every range.
+A process-protocol or tool range crossing EOF returns the available tail; a
+range starting at or beyond EOF returns empty bytes. Both return the blob's
+catalogued length. Empty tool reads open candidates and check their length
+without reading the body. Tool reads retain at most 512 KiB per request and have
+no per-turn byte or request reservations. Filesystem range reads seek to the
+requested offset and read only that page; S3 uses a bounded HTTP range request.
+Filesystem opens check file length and descriptor inode identity. Same-UID
+in-place writes after ingest are an accepted residual under the
+[threat model](git-authority-threat-model.md).
+
+When every candidate fails, any unavailable candidate makes the result
+`unavailable`; otherwise any detected length or digest mismatch makes it
+`blob_corrupt`, an all-missing set makes it `blob_missing`, and an absent
+catalog identity is `not_found`.
 
 Client-facing blob messages and content-part references expose only the digest
 spelling, never placement; the catalog rows alone retain byte length, creation
@@ -257,17 +261,12 @@ caller-supplied semantic input, so part order, digests, kinds, media types, and
 filenames all participate in command replay equality.
 
 Acceptance requires every referenced digest to be catalogued with at least one
-verified replica. The sum of catalogued byte lengths over the distinct digests
-in one input must not exceed `blob_storage.max_blob_bytes`. The same checked sum
-is applied to the complete prospective rendered frontier after the new content
-and its delivery transition, and the acceptance transaction recomputes the
-eventual frontier of every already-queued input whose predecessor can change, in
-canonical queue order, and bounds each result before any accepted-input effect.
-Catalog existence and these sums are current-state validation, so an unseen
-command identifier is claimed first under the command protocol of
-[identity-and-commands](identity-and-commands.md). An input and frontier with no
-attachment digest have both sums zero and touch no blob configuration, catalog,
-or store, so text-only submission works with `[blob_storage]` omitted.
+verified replica. Each blob in the input and prospective rendered frontier must
+fit `blob_storage.max_blob_bytes`; their combined size is unrestricted. Catalog
+existence and per-blob lengths are current-state validation, so an unseen
+command identifier is claimed first under
+[identity-and-commands](identity-and-commands.md). Text-only submission touches
+no blob configuration, catalog, or store.
 
 Command-side and accepted-side parts are separate mirrored records, never shared
 mutable authority. The terminal client renders one accepted user entry as
@@ -275,38 +274,40 @@ exactly one line ending in `parts=<json>`, the canonical compact ordered parts
 array with its fixed member order.
 
 A rendered accepted input shows the model each attachment as a bounded textual
-stub naming kind, media type, filename, byte length, and digest, never the
-bytes. At preparation the daemon derives an allow-set from the attachment stubs
-in the rendered frontier; a catalogued digest outside that set is unauthorized.
-A digest absent from the frontier, a turn byte reservation past 2,097,152, or a
-turn read reservation past 64 closes the prepared attempt as a known failure
-with an exact fixed detail. Both durable counters charge once by tool-request
-identity before authorization, and replay never charges twice.
+stub naming kind, media type, filename, byte length, digest, and a visible-part
+selector consisting of the semantic entry identity and zero-based part ordinal,
+never the bytes. At preparation the daemon derives an allow-set from the
+attachment stubs in the rendered frontier; a catalogued digest outside that set
+is unauthorized. A digest absent from the frontier closes the prepared attempt
+as a known failure with the fixed detail `blob_not_visible`.
 
-Before a prepared call crosses durable send authorization, preparation streams
-and verifies the length and SHA-256 of at least one recorded replica for every
-distinct attachment in the rendered request. The request is first checked-summed
-over the catalogued lengths of its distinct digests, and an oversized sum closes
-the unsent call as too large before any store I/O or send authorization. A
-digest with no recorded replica, or one whose every candidate reads but fails
-verification, closes the unsent call, and neither path permits provider
-interaction or tool authorization. When no candidate verifies and one remains
-temporarily unavailable, preparation leaves the call prepared, records no turn
-outcome, and returns a sanitized unavailable failure so a later pass can retry
-the same call.
+Before durable send authorization, preparation checks each distinct attachment's
+catalogued length against its rendered stub and the per-blob maximum, then opens
+at least one recorded replica and checks its length without reading the body. A
+missing replica or a definitive catalog or length mismatch closes the unsent
+call before provider interaction. If no replica is usable and one is temporarily
+unavailable, the call stays prepared for retry with a sanitized unavailable
+failure.
 
 Imported raw source records of [conversation-import](conversation-import.md)
 converge onto the blob catalog: the import satellite's content hash is an
 ordinary blob reference and the bytes live in a routed store.
 
+Workflow `blob.read` returns complete verified bytes for a digest within the
+existing direct-read range bound, traversal budget and deadline through the
+catalog and recorded stores. Evaluation corpus loading uses the same read path
+and checks the pinned SHA-256 digest before decoding case data.
+
 ## Planned
 
 - A `program_journal` storage class for over-threshold program journal payloads;
   see [blob storage design](../design/blob-storage.md).
-- Generation-pinned verification reuse across ranges and the connection- or
-  turn-scoped verification inventory, seeded by attachment preparation; see
-  [blob storage design](../design/blob-storage.md).
 - Transcript projections that carry blob descriptors and URLs; see
   [blob storage design](../design/blob-storage.md).
 - A modality-unsupported attachment preparation failure for typed media results;
   see [blob storage design](../design/blob-storage.md).
+
+Generated image views publish and verify their independently validated bytes,
+register their generated-artifact replica, then commit the durable tool result.
+Model preparation authenticates that result's presented identity before bounded
+blob reads; catalog presence alone does not authorize image presentation.

@@ -16,10 +16,24 @@ pub const fn neutral_file_digest(
 pub struct ResolvedFileUse<Source> {/* private */}
 // derives: fmt::Debug
 impl<Source> ResolvedFileUse<Source> {
-    pub const fn new(file_use: signalbox_file_media_runtime::FileUse, source: Source) -> Self;
+    pub const fn new(
+        file_use: signalbox_file_media_runtime::FileUse,
+        source: Source,
+        selector: signalbox_file_media_runtime::VisiblePartSelector,
+    ) -> Self;
+    pub fn with_image_target(
+        self,
+        capability: option::Option<signalbox_model_runtime::ImagePresentationCapability>,
+    ) -> Self;
     pub const fn file_use(&self) -> &signalbox_file_media_runtime::FileUse;
     pub const fn source(&self) -> &Source;
-    pub fn into_parts(self) -> (signalbox_file_media_runtime::FileUse, Source);
+    pub fn into_parts(
+        self,
+    ) -> (
+        signalbox_file_media_runtime::FileUse,
+        Source,
+        signalbox_file_media_runtime::VisiblePartSelector,
+    );
 }
 ```
 
@@ -39,6 +53,7 @@ pub type FileUseResolverFuture<'a, Source> = pin::Pin<
 
 ```rust
 pub enum FileUseResolutionError {
+    Operator(signalbox_tools_file_media::FileMediaExecutorError),
     BlobNotVisible,
     BlobMissing,
     BlobCorrupt,
@@ -46,7 +61,7 @@ pub enum FileUseResolutionError {
     Internal,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl convert::From<FileUseResolutionError> for signalbox_file_media_runtime::FileMediaFailure {
+impl convert::From<FileUseResolutionError> for signalbox_tools_file_media::FileMediaServiceFailure {
     fn from(value: FileUseResolutionError) -> Self;
 }
 ```
@@ -63,6 +78,27 @@ pub trait FileUseResolver: marker::Send {
 }
 ```
 
+## FileMediaArtifactPublisher
+
+```rust
+pub trait FileMediaArtifactPublisher: marker::Send + marker::Sync + fmt::Debug {
+    fn publish<'a>(
+        &'a self,
+        artifact: &'a signalbox_file_media_runtime::ValidatedMediaArtifact,
+    ) -> pin::Pin<
+        boxed::Box<
+            dyn future::Future<
+                    Output = result::Result<
+                        (),
+                        signalbox_tools_file_media::FileMediaServiceFailure,
+                    >,
+                > + marker::Send
+                + 'a,
+        >,
+    >;
+}
+```
+
 ## RegistryFileMediaAgentService
 
 ```rust
@@ -76,6 +112,11 @@ impl<Resolver, Processor, Cancellation>
         resolver: Resolver,
         processor: Processor,
         cancellation: Cancellation,
+        continuations: ContinuationAuthority,
+    ) -> Self;
+    pub fn with_artifact_publisher(
+        self,
+        publisher: sync::Arc<dyn FileMediaArtifactPublisher>,
     ) -> Self;
     pub const fn registry(&self) -> &signalbox_file_media_runtime::FileMediaRegistry;
 }

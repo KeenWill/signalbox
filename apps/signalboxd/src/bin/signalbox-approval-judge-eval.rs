@@ -230,8 +230,12 @@ mod approval_judge_tests {
         ApprovalDisposition, DispositionMetrics, MetricRate, decode_corpus,
     };
 
-    const SEED_CORPUS: &[u8] =
-        include_bytes!("../../../../crates/approval-judge-eval/corpora/seed-v1.json");
+    // Three fixed scoring cases isolate metric behavior from the policy corpus.
+    const SCORING_CORPUS: &[u8] = br#"{"cases":[
+        {"id":"read","request":{"tool":"read_file","arguments":"{}"},"expected":"approve","label_provenance":"Scoring fixture: approved read."},
+        {"id":"prohibited","request":{"tool":"read_file","arguments":"{}"},"expected":"deny","label_provenance":"Scoring fixture: prohibited read."},
+        {"id":"another-read","request":{"tool":"read_file","arguments":"{}"},"expected":"approve","label_provenance":"Scoring fixture: another approved read."}
+    ]}"#;
     // Arbitrary admitted-fixture constructor parameters: replay reads neither,
     // they only need to form a request-safe model definition.
     const FIXTURE_MAX_OUTPUT_TOKENS: u32 = 256;
@@ -242,8 +246,37 @@ mod approval_judge_tests {
     const ESCALATE_RATIONALE: &str = "The exact request has unsettled authority.";
 
     #[tokio::test]
+    async fn approval_judge_offline_seed_matches_expected_scorecard() {
+        let corpus = decode_corpus(include_bytes!(
+            "../../../../crates/approval-judge-eval/corpora/seed-v1.json"
+        ))
+        .expect("seed corpus is valid");
+        let responses: super::OfflineResponseFile = serde_json::from_slice(include_bytes!(
+            "../../../../crates/approval-judge-eval/corpora/seed-responses-v1.json"
+        ))
+        .expect("seed responses are valid");
+        let (model, binding) = fixture_model(
+            responses
+                .responses
+                .iter()
+                .map(|response| scripted_decision(response.disposition, &response.rationale)),
+        );
+        let scorecard = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect("seed replay succeeds");
+        let expected: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../../crates/approval-judge-eval/corpora/seed-scorecard-v1.json"
+        ))
+        .expect("expected scorecard is valid");
+        assert_eq!(
+            serde_json::to_value(scorecard).expect("scorecard serializes"),
+            expected
+        );
+    }
+
+    #[tokio::test]
     async fn scorer_reports_case_verdicts() {
-        let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let corpus = decode_corpus(SCORING_CORPUS).expect("the scoring fixture is admitted");
         let response_fixture = [
             (ApprovalDisposition::Approve, APPROVE_RATIONALE),
             (ApprovalDisposition::EscalateToHuman, ESCALATE_RATIONALE),
@@ -266,7 +299,7 @@ mod approval_judge_tests {
 
     #[tokio::test]
     async fn scorer_reports_aggregate_accuracy() {
-        let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let corpus = decode_corpus(SCORING_CORPUS).expect("the scoring fixture is admitted");
         let (model, binding) = fixture_model([
             scripted_decision(ApprovalDisposition::Approve, APPROVE_RATIONALE),
             scripted_decision(ApprovalDisposition::EscalateToHuman, ESCALATE_RATIONALE),
@@ -283,7 +316,7 @@ mod approval_judge_tests {
 
     #[tokio::test]
     async fn scorer_reports_per_disposition_precision_recall() {
-        let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let corpus = decode_corpus(SCORING_CORPUS).expect("the scoring fixture is admitted");
         let (model, binding) = fixture_model([
             scripted_decision(ApprovalDisposition::Approve, APPROVE_RATIONALE),
             scripted_decision(ApprovalDisposition::EscalateToHuman, ESCALATE_RATIONALE),
@@ -401,8 +434,7 @@ mod approval_judge_tests {
 
     #[tokio::test]
     async fn scorer_preflights_every_case_before_model_execution() {
-        let mut corpus =
-            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let mut corpus = decode_corpus(SCORING_CORPUS).expect("the scoring fixture is admitted");
         let invalid_case_id = corpus.cases[1].id.clone();
         corpus.cases[1].request.tool = String::new();
         let (model, binding) = fixture_model([]);

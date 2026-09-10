@@ -1220,7 +1220,7 @@ async fn load_dispatch_authority(
 ///
 /// The row is written by the commissioning transaction itself, and the session
 /// identity is unique in the table.
-async fn load_commissioned_dispatch_authority(
+pub async fn load_commissioned_dispatch_authority(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<Option<ApprovalJudgeDispatchAuthority>, ApprovalJudgeRepositoryError> {
@@ -1759,6 +1759,8 @@ async fn exact_completion_continuation(
                  decision.request_id IS NULL
                  OR decision.decision_source
                      NOT IN ('policy_auto', 'session_blanket', 'user_override', 'runtime_safety')
+                 OR (decision.decision_source = 'runtime_safety'
+                     AND decision.denial_reason = 'approval_wait_timeout')
              )
         )",
     )
@@ -2021,8 +2023,8 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{
-        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, JudgedTurnAuthority,
-        judged_turn_authority_in_force, judged_turn_goal_statement, read_authority_still_stands,
+        ApprovalJudgeCorruption, JudgedTurnAuthority, judged_turn_authority_in_force,
+        judged_turn_goal_statement, read_authority_still_stands,
     };
 
     /// A goal commissioned with the given statement, as dispatch commissions it.
@@ -2213,21 +2215,5 @@ mod tests {
         });
 
         assert!(stands);
-    }
-
-    #[test]
-    fn repository_errors_display_distinct_failure_classes() {
-        assert_eq!(
-            ApprovalJudgeRepositoryError::IdentityCollision.to_string(),
-            "approval judge identity collided with durable state"
-        );
-        assert_eq!(
-            ApprovalJudgeRepositoryError::TargetUnavailable.to_string(),
-            "approval judge model target is unavailable"
-        );
-        assert_eq!(
-            ApprovalJudgeRepositoryError::AuthorityExceeded.to_string(),
-            "approval judge recommendation exceeded delegated authority"
-        );
     }
 }

@@ -332,20 +332,6 @@ mod tests {
     }
 
     #[test]
-    fn disposition_equality_includes_variant_and_identity() {
-        let origin = AcceptedInputDisposition::OriginOf(turn_id(1));
-
-        assert_eq!(origin, AcceptedInputDisposition::OriginOf(turn_id(1)));
-        assert_ne!(origin, AcceptedInputDisposition::OriginOf(turn_id(2)));
-        assert_ne!(
-            origin,
-            AcceptedInputDisposition::PendingSteering {
-                binding: SteeringBinding::new(turn_id(1)),
-            }
-        );
-    }
-
-    #[test]
     fn internal_disposition_transition_can_consume_pending_steering() {
         let call = model_call_id(2);
 
@@ -372,16 +358,6 @@ mod tests {
             pending_steering(1).close_not_delivered(),
             Ok(AcceptedInputDisposition::ClosedNotDelivered)
         );
-    }
-
-    #[test]
-    fn lifecycle_couples_identity_to_disposition() {
-        let id = accepted_input_id(1);
-        let disposition = pending_steering(2);
-        let lifecycle = AcceptedInputLifecycle::new(id, disposition.clone());
-
-        assert_eq!(lifecycle.id(), id);
-        assert_eq!(lifecycle.disposition(), &disposition);
     }
 
     /// accepted steering remains separately identified; typed

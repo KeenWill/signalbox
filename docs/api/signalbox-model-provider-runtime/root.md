@@ -274,6 +274,7 @@ pub struct RuntimeModelCallCapability<Prepared> {/* private */}
 pub enum RuntimeModelCallProviderError {
     UnconfiguredTarget,
     PreparationDefect,
+    ImageIntegrity,
     CorrelationMismatch,
     AuthorizationMismatch,
     ObservationCorrelationMismatch,

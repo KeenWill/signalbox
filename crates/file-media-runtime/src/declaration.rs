@@ -102,12 +102,12 @@ impl ValidationDeclaration {
     }
 }
 
-/// Whether one reader is eligible for the complete-stream UTF-8 fallback.
+/// Whether one reader is eligible for bounded-prefix UTF-8 fallback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamingTextFallback {
     /// The reader never claims untyped bytes as text.
     Disabled,
-    /// The reader may claim only after complete streaming validation.
+    /// The reader may claim only after validating its bounded text prefix.
     Enabled,
 }
 
@@ -223,6 +223,15 @@ impl ReadViewBounds {
     }
 }
 
+/// Whether an image view presents source bytes or produces a staged artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImageViewKind {
+    /// Validates and presents the immutable source directly.
+    Direct,
+    /// Produces encoded output requiring independent validation and publication.
+    Generated,
+}
+
 #[derive(signalbox_derive::Accessors)]
 /// One provider-owned read view.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -238,6 +247,8 @@ pub struct ReadViewDeclaration {
     arguments_schema: CanonicalJsonObjectSchema,
     access: ReadAccessPattern,
     bounds: ReadViewBounds,
+    output_media_types: Vec<CanonicalMediaType>,
+    image_kind: Option<ImageViewKind>,
 }
 
 impl ReadViewDeclaration {
@@ -262,7 +273,30 @@ impl ReadViewDeclaration {
             arguments_schema,
             access,
             bounds,
+            output_media_types: Vec::new(),
+            image_kind: None,
         })
+    }
+
+    /// Declares the finite canonical output types permitted for a rich view.
+    pub fn with_image_output(
+        mut self,
+        kind: ImageViewKind,
+        types: Vec<CanonicalMediaType>,
+    ) -> Self {
+        self.image_kind = Some(kind);
+        self.output_media_types = types;
+        self
+    }
+
+    /// Returns the declared image production path.
+    pub const fn image_kind(&self) -> Option<ImageViewKind> {
+        self.image_kind
+    }
+
+    /// Borrows the permitted rich output types.
+    pub fn output_media_types(&self) -> &[CanonicalMediaType] {
+        &self.output_media_types
     }
 
     /// Returns the declared access posture.

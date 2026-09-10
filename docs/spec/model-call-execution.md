@@ -88,7 +88,7 @@ Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen
 session epoch, pinned target preview, and credential pin authorize that
 stateless estimate; it has no completion semantics and creates no call outcome.
-Attachment verification precedes that interaction. Cancellation or transient
+Attachment preparation precedes that interaction. Cancellation or transient
 attachment loss leaves the turn queued, and any later attempt must render and
 count the then-current preview again. A definitive attachment failure atomically
 activates and closes the exact prospective Prepared call with that evidence.
@@ -155,12 +155,13 @@ terminal evidence to exactly one disposition: completed text, provider
 compaction blocks, provider reasoning items, and tool-call content to
 `Completed`, refusal to `Refused`, a provider error or other proof of
 non-acceptance to `KnownFailed`, cancellation before send or confirmed
-cancellation to `Cancelled`, and loss after possible acceptance to `Ambiguous`.
-The requested selection, the pinned resolved target, and the provider-reported
-identity are three separate facts, and the bridge is the one place that relates
-the third to the second. Exactly one of three relations holds: exact, alias
-concretion (the configured spelling followed by a dated snapshot qualifier), or
-different lineage.
+cancellation to `Cancelled`, transport loss before observed response content to
+transient `KnownFailed`, and loss after content or unclassified protocol failure
+to `Ambiguous`. The requested selection, the pinned resolved target, and the
+provider-reported identity are three separate facts, and the bridge is the one
+place that relates the third to the second. Exactly one of three relations
+holds: exact, alias concretion (the configured spelling followed by a dated
+snapshot qualifier), or different lineage.
 
 `apply_terminal_observation` derives one of seven outcomes from fresh state, and
 persistence commits the outcome atomically with its outbox rows. Ambiguity parks
@@ -170,13 +171,15 @@ also carries an applied-interrupt proof, the turn instead terminalizes as
 reconciliation required, with the wait set, an interrupt-requires-reconciliation
 marker, and a reconciliation outbox record, and releases the slot.
 
-A `KnownFailed` call with proven non-acceptance may be followed by a successor
-call when the bounded same-credential retry below admits it or when its pinned
-pool action is `switch_now`. A `CredentialRejected` failure instead admits that
-`switch_now` successor without non-acceptance proof. `switch_now` uses the next
-admitted member of the same pool. `AvailabilitySuccessorModelCallTurn` is the
-aggregate transition that authorizes either distinct call on a successor turn
-attempt.
+A classified availability `KnownFailed` call may be followed by a successor call
+when the same-credential retry below admits it or when its pinned pool action is
+`switch_now`. Neither requires non-acceptance proof. OAuth access-token recovery
+retries the same profile after refresh and rotates after failed refresh or
+rejection of the refreshed token, retaining each `CredentialRejected` call.
+Other credential rejections admit only the configured rotation. `switch_now`
+uses the next admitted member of the same pool.
+`AvailabilitySuccessorModelCallTurn` is the aggregate transition that authorizes
+either distinct call on a successor turn attempt.
 
 Usage evidence is a projection of terminal physical model calls that never
 materializes the transcript; `UsageReader` in `crates/application/src/usage.rs`
@@ -275,9 +278,10 @@ exactly-once claim could duplicate both an effect and its spend. Refusal never
 admits a successor: it is provider judgment about the request, so another
 account would refuse the same content and substituting one would only seek a
 different answer. Credential resolution failure never admits a successor: it is
-deployment misconfiguration. Credential rejection admits only the configured
-`switch_now` rotation; the rejection remains recorded durably on the failed
-attempt.
+deployment misconfiguration. Credential rejection remains recorded durably on
+the failed attempt. OAuth access-token recovery follows
+[configuration and credentials](configuration-and-credentials.md); other
+credential rejections admit only the configured `switch_now` rotation.
 
 A successful call ends its availability chain, and a later tool round starts a
 fresh one, so a round that exhausts the pool before calling carries no earlier
@@ -335,18 +339,18 @@ read-time derivation.
 A model call is one recorded attempt. The daemon sends each attempt to the
 provider at most once. A retry is a new recorded attempt; no code retries a call
 without recording the retry in the database. Before anything has been sent to
-the provider, the daemon may prepare an unsent call again. After a known failure
-with proven non-acceptance, the failure-observation commit may immediately
-record a new successor attempt on the same credential for a rate-limited,
-overloaded or provider-internal call while the credential remains admitted and
-below the required finite-positive
-`numeric_bounds.max_same_credential_attempts_per_turn` configuration value. The
-contract fixes no numeric value; the initial call and every same-credential
-successor call count toward the configured bound. The commit stores the retry
-deadline on that successor attempt; call preparation and sending both wait for
-the deadline. [Credential availability](credential-availability.md) owns the
-credential-scoped durable transient exclusion, its reset deadline, and
-preparation admission for every session.
+the provider, the daemon may prepare an unsent call again. After a classified
+known failure, the failure-observation commit may immediately record a new
+successor attempt on the same credential for a rate-limited, overloaded or
+provider-internal call while the credential remains admitted and below the
+positive `numeric_bounds.max_same_credential_attempts_per_turn` configuration
+value, or with that value set to `"none"`. The contract fixes no numeric value;
+the initial call and every same-credential successor call count toward the
+configured bound. The commit stores the retry deadline on that successor
+attempt; call preparation and sending both wait for the deadline.
+[Credential availability](credential-availability.md) owns the credential-scoped
+durable transient exclusion, its reset deadline, and preparation admission for
+every session.
 
 When the failure observation commits, the same-credential retry for a
 rate-limit, overload or provider-internal failure is evaluated before any pinned
@@ -358,17 +362,20 @@ pinned action immediately. `switch_now` starts a new attempt on another admitted
 credential and writes the failed member's durable chain exclusion only if no
 stop is requested; any other action terminalizes this turn after recording its
 own durable effect when applicable. Provider-internal failure has no trigger
-action and terminalizes at the bound. A call whose outcome is unknown is never
-retried automatically; the turn parks for recovery. A CLI harness may retry
-inside one provider invocation. Those internal retries remain part of that
-recorded call; the daemon neither observes nor separately records them. A proven
-terminal failure from a CLI remains eligible for the successor rule above. A
-migration constraint enforces one call per attempt. Successor selection and
-preparation skip chain-excluded members; that selection, not a constraint,
-enforces rotation no-reuse. The one-shot send capability, the per-attempt
-dispatch gate, the authorize-send commit, and startup parking of an issued call
-enforce at-most-once sending. Only the rule that no code retries a call without
-recording the retry is unenforced.
+action and terminalizes at the bound. A timeout, connection loss, lost body or
+incomplete stream before observed response content uses that provider-internal
+transient retry path. The adapter retains content progress in either delivery
+mode; output usage and content observations also establish it. Loss after
+content parks for recovery. Startup calls without retained terminal evidence
+remain ambiguous. A CLI harness may retry inside one provider invocation. Those
+internal retries remain part of that recorded call; the daemon neither observes
+nor separately records them. A proven terminal failure from a CLI remains
+eligible for the successor rule above. A migration constraint enforces one call
+per attempt. Successor selection and preparation skip chain-excluded members;
+that selection, not a constraint, enforces rotation no-reuse. The one-shot send
+capability, the per-attempt dispatch gate, the authorize-send commit, and
+startup parking of an issued call enforce at-most-once sending. Only the rule
+that no code retries a call without recording the retry is unenforced.
 
 The terminal transition stores the input, output, cache-creation, and cache-read
 token axes independently; a null axis means the provider did not supply it, and
@@ -444,12 +451,13 @@ serialized by the session-scheduler lock, so one commit can never both
 terminalize the turn and authorize a successor. Every successor pins the same
 resolved target; a same-credential retry retains the credential reference, and a
 rotation successor pins a different one, so no call changes identity mid-flight.
-For each admitted availability cause the adapter must supply distinct typed
-evidence that the request was not accepted; classification as quota, rate limit,
-or overload alone is insufficient. Without the exact applied-interrupt proof a
-physical cancellation is an unstopped known failure, and a stop-requested
-attempt whose call ends known-failed still fails and cannot admit a successor,
-because the physical result has not proven cancellation.
+Classified quota, rate-limit and overload failures admit the configured
+successor without non-acceptance proof, before or during a stream. Transport
+breaks before observed content use transient retry; breaks after content retain
+the ambiguous-loss path. Without the exact applied-interrupt proof a physical
+cancellation is an unstopped known failure, and a stop-requested attempt whose
+call ends known-failed still fails and cannot admit a successor, because the
+physical result has not proven cancellation.
 
 `Completed` admits only text, provider-compaction, provider-reasoning, and
 tool-call parts. A provider-compaction part must be a complete validated
@@ -539,10 +547,10 @@ rendering instead of inventing text.
 
 ## Planned
 
+- Session-scoped fatal execution parking and operator reconciliation; see
+  [daemon survival design](../design/daemon-survival.md).
 - Multipart attachment rendering ([design](../design/model-call-execution.md)).
 - The executable session-tool snapshot
-  ([design](../design/model-call-execution.md)).
-- Reuse of a successful attachment verification within a turn
   ([design](../design/model-call-execution.md)).
 - The process-level exclusion-evidence event
   ([design](../design/model-call-execution.md)).

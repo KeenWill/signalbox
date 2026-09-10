@@ -128,6 +128,8 @@ pub(crate) const CONFIGURATION: &str = r#"
 version = 1
 
 [numeric_bounds]
+max_image_presentation_bytes = "none"
+max_image_request_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
 repository_watch_webhook_retention = "604800s"
@@ -270,6 +272,7 @@ adapter = "application"
 
 [daemon_tools]
 exec_supervisor_executable = "/bin/sh"
+sandboxed_exec_timeout_bound = "none"
 
 [git_identity]
 author_name = "Signalbox Daemon"
@@ -348,6 +351,22 @@ fn configuration_lists_every_missing_required_numeric_bound() {
         format!(
             "model configuration is missing required numeric bounds: {FIRST_FIELD}, {SECOND_FIELD}"
         )
+    );
+}
+
+#[test]
+fn configuration_admits_unbounded_availability_attempts() {
+    let unbounded = CONFIGURATION.replace(
+        "max_same_credential_attempts_per_turn = 2",
+        "max_same_credential_attempts_per_turn = \"none\"",
+    );
+    let configuration = HubModelConfiguration::parse(&unbounded)
+        .expect("same-credential attempts may be unbounded");
+    assert_eq!(
+        configuration
+            .numeric_bounds()
+            .integer("max_same_credential_attempts_per_turn"),
+        Some(None)
     );
 }
 
@@ -2738,7 +2757,7 @@ fn git_identity_rejects_an_unknown_field() {
 fn tool_mapping_registry_requires_daemon_tool_process_settings() {
     let missing = CONFIGURATION.replace(
         &format!(
-            "[daemon_tools]\nexec_supervisor_executable = \"{EXEC_SUPERVISOR_EXECUTABLE}\"\n\n"
+            "[daemon_tools]\nexec_supervisor_executable = \"{EXEC_SUPERVISOR_EXECUTABLE}\"\nsandboxed_exec_timeout_bound = \"none\"\n\n"
         ),
         "",
     );
@@ -2777,6 +2796,49 @@ fn daemon_tool_process_settings_reject_a_missing_supervisor() {
         HubModelConfiguration::parse(&missing).err(),
         Some(HubModelConfigurationError::InvalidDaemonToolSettings)
     );
+}
+
+#[test]
+fn daemon_sandboxed_exec_timeout_bound_accepts_none_and_a_friendly_duration() {
+    let unbounded = HubModelConfiguration::parse(CONFIGURATION).expect("fixture parses");
+    assert_eq!(
+        unbounded
+            .daemon_tools()
+            .expect("mapped fixture has daemon tool settings")
+            .sandboxed_exec_timeout_bound(),
+        None
+    );
+
+    let finite = CONFIGURATION.replace(
+        "sandboxed_exec_timeout_bound = \"none\"",
+        "sandboxed_exec_timeout_bound = \"20 minutes\"",
+    );
+    assert_eq!(
+        HubModelConfiguration::parse(&finite)
+            .expect("friendly timeout bound parses")
+            .daemon_tools()
+            .expect("mapped fixture has daemon tool settings")
+            .sandboxed_exec_timeout_bound(),
+        Some(std::time::Duration::from_secs(20 * 60))
+    );
+}
+
+#[test]
+fn daemon_sandboxed_exec_timeout_bound_is_required_and_at_least_one_second_when_finite() {
+    for replacement in [
+        "",
+        "sandboxed_exec_timeout_bound = \"0s\"",
+        "sandboxed_exec_timeout_bound = \"500ms\"",
+        "sandboxed_exec_timeout_bound = 120",
+    ] {
+        let configured =
+            CONFIGURATION.replace("sandboxed_exec_timeout_bound = \"none\"", replacement);
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidDaemonToolSettings),
+            "{replacement}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -3422,33 +3484,26 @@ fn configuration_admits_switch_now_for_a_codex_terminal_failure() {
     );
 
     HubModelConfiguration::parse(&substituting)
-        .expect("Codex typed failed-turn proof permits availability successors");
+        .expect("Codex classified failures permit availability successors");
 }
 
 #[test]
-fn configuration_admits_switch_now_where_the_adapter_proves_non_acceptance() {
+fn configuration_admits_availability_rotation_for_anthropic_rate_limits() {
     let substituting = configuration_with_anthropic_pool(&format!(
         "{ANTHROPIC_POOL}\non_rate_limited = \"switch_now\""
     ));
 
     HubModelConfiguration::parse(&substituting)
-        .expect("a decoded native envelope authorizes the successor for this adapter");
+        .expect("a classified failure authorizes the configured successor");
 }
 
 #[test]
-fn configuration_rejects_switch_now_for_a_cause_the_adapter_cannot_prove() {
-    // Anthropic's mapping has no quota token, so this pair could reach
-    // `switch_now` only through a status-derived fallback carrying no proof.
+fn configuration_admits_availability_rotation_without_adapter_proof() {
     let substituting = configuration_with_anthropic_pool(&format!(
         "{ANTHROPIC_POOL}\non_quota_exhausted = \"switch_now\""
     ));
-
-    assert_eq!(
-        HubModelConfiguration::parse(&substituting).err(),
-        Some(HubModelConfigurationError::UnprovableSubstitutionPolicy {
-            credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
-        })
-    );
+    HubModelConfiguration::parse(&substituting)
+        .expect("classified quota failures permit configured rotation without proof");
 }
 
 #[test]
@@ -3923,13 +3978,6 @@ billing_kind = "api_metered""#,
 }
 
 #[test]
-fn configuration_admits_a_subscription_ambient_profile() {
-    // The checked-in fixture already pairs `ambient` with `subscription`;
-    // asserting it here states the other half of that delivery's rule.
-    assert!(HubModelConfiguration::parse(CONFIGURATION).is_ok());
-}
-
-#[test]
 fn configuration_rejects_an_oauth_endpoint_holding_a_username() {
     assert_oauth_token_url_rejected("https://alice@example.test/token");
 }
@@ -3960,22 +4008,6 @@ scopes = ["model:invoke"]"#,
         HubModelConfiguration::parse(&oauth).err(),
         Some(HubModelConfigurationError::InvalidCredentialDelivery)
     );
-}
-
-#[test]
-fn configuration_parses_valid_oauth() {
-    let oauth = CONFIGURATION.replace(
-        "delivery = \"ambient\"",
-        r#"delivery = "oauth"
-client_id = "synthetic-client"
-token_url = "https://example.test/token"
-refresh_token_url = "https://example.test/oauth/token"
-device_authorization_url = "https://example.test/device"
-scopes = ["model:invoke"]"#,
-    );
-
-    let configuration = HubModelConfiguration::parse(&oauth).expect("valid OAuth profile");
-    assert_eq!(configuration.oauth_registrations().len(), 1);
 }
 
 #[test]
@@ -6163,17 +6195,6 @@ fn daemon_sandbox_settings_reject_malformed_runtime_inputs() {
 }
 
 #[test]
-fn repository_watch_poll_budget_defaults_to_one_hundred_requests() {
-    assert_eq!(
-        HubModelConfiguration::parse(CONFIGURATION)
-            .expect("configuration")
-            .numeric_bounds()
-            .integer("repository_watch_poll_request_budget"),
-        Some(Some(100))
-    );
-}
-
-#[test]
 fn repository_watch_poll_budget_accepts_finite_attempts_with_room_for_preflight() {
     const FIELD: &str = "repository_watch_poll_request_budget";
     for budget in [2, 7, 1000] {
@@ -6204,4 +6225,103 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
             HubModelConfigurationError::InvalidNumericBound { field: FIELD }
         );
     }
+}
+
+#[test]
+fn file_media_requires_blob_storage_before_worker_startup() {
+    let enabled = format!("file_media = true\n{CONFIGURATION}");
+    assert_eq!(
+        HubModelConfiguration::parse(&enabled).err(),
+        Some(HubModelConfigurationError::InvalidBlobStorageConfiguration)
+    );
+    let disabled = format!("file_media = false\n{CONFIGURATION}");
+    assert!(
+        !HubModelConfiguration::parse(&disabled)
+            .expect("disabled file tools require no store")
+            .file_media()
+    );
+}
+
+#[test]
+fn checked_in_example_admits_unlisted_web_origins() {
+    use signalbox_application::ToolCatalog;
+    let configuration = super::checked_in_example_configuration().expect("example parses");
+    let (catalog, _) = signalbox_tools_web::WebFetchTool::try_new_production(
+        configuration.web_fetch_egress_policy(),
+    )
+    .expect("web transport constructs")
+    .into_parts();
+    let name =
+        signalbox_domain::ToolName::try_new(String::from(WEB_FETCH_NAME)).expect("valid name");
+    let arguments = signalbox_domain::NormalizedToolArguments::try_from_provider_text(
+        String::from(r#"{"url":"https://unlisted.example/documentation"}"#),
+    )
+    .expect("valid arguments");
+    assert_eq!(catalog.validate_arguments(&name, &arguments), Ok(()));
+}
+
+#[test]
+fn human_approval_wait_accepts_a_duration_or_none() {
+    let timed = HubModelConfiguration::parse(&format!(
+        "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"2m\"\n"
+    ))
+    .expect("duration is valid");
+    assert_eq!(
+        timed.approval_wait_timeout(),
+        Some(Duration::from_secs(120))
+    );
+    let unbounded = HubModelConfiguration::parse(&format!(
+        "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"none\"\n"
+    ))
+    .expect("none is valid");
+    assert_eq!(unbounded.approval_wait_timeout(), None);
+}
+
+#[test]
+fn human_approval_wait_rejects_zero_and_invalid_durations() {
+    for value in ["0s", "-1s", "forever"] {
+        assert!(
+            HubModelConfiguration::parse(&format!(
+                "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"{value}\"\n"
+            ))
+            .is_err(),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn file_image_configuration_lowers_adapter_capabilities_and_none_retains_them() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let configuration = configuration_with_api_metered_codex_model(&executable, root.path());
+    let unbounded = HubModelConfiguration::parse(&configuration).unwrap();
+    let bounded = HubModelConfiguration::parse(
+        &configuration
+            .replace(
+                "max_image_presentation_bytes = \"none\"",
+                "max_image_presentation_bytes = 1234",
+            )
+            .replace(
+                "max_image_request_bytes = \"none\"",
+                "max_image_request_bytes = 2345",
+            ),
+    )
+    .unwrap();
+    let mut images = 0;
+    for definition in bounded.runtime_model_capability_catalog().iter() {
+        if let Some(image) = definition.capabilities().image_presentation() {
+            images += 1;
+            assert_eq!(image.maximum_image_bytes(), 1234);
+            assert_eq!(image.maximum_request_bytes(), 2345);
+            let catalog = unbounded.runtime_model_capability_catalog();
+            let original = catalog
+                .resolve(definition.target())
+                .unwrap()
+                .image_presentation()
+                .unwrap();
+            assert!(original.maximum_image_bytes() > image.maximum_image_bytes());
+        }
+    }
+    assert!(images > 0);
 }

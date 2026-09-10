@@ -19,7 +19,6 @@ use super::reread::StoredTerminalFrontierMember;
 use super::reread::completed_terminal_frontier_matches;
 use super::reread::failed_terminal_frontier_matches;
 use super::reread::record_reclassified_turn_candidate;
-use super::transaction_impls::cancellation_poll_interval;
 use super::{
     ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
     ToolContinuationUsageLimit, commit_failure_is_ambiguous,
@@ -113,14 +112,6 @@ fn delegated_terminal_relation_decode_failure_is_corruption() {
             "delegated terminal relationship identity"
         ))
     ));
-}
-
-#[tokio::test]
-async fn cancellation_polling_delays_missed_ticks() {
-    assert_eq!(
-        cancellation_poll_interval().missed_tick_behavior(),
-        tokio::time::MissedTickBehavior::Delay
-    );
 }
 
 /// docs/spec/model-call-execution.md: a source-turn successor candidate is

@@ -86,7 +86,7 @@ pub enum ValidationEvidence {
     StructuralValidation,
     /// A declared candidate was independently structurally validated.
     DeclaredCandidateStructurallyValidated,
-    /// Complete streaming UTF-8 and control policy validation succeeded.
+    /// The bounded text prefix passed UTF-8 and control policy validation.
     StreamingTextValidation,
 }
 
@@ -262,9 +262,11 @@ pub enum ReadContinuation {
     },
 }
 
-/// Bounded typed-read result currently representable without durable media references.
+/// Bounded typed-read result or validated immutable media reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileReadResult {
+    /// Registry-admitted rich presentation with source and presented evidence.
+    Reference(crate::FileMediaReference),
     /// Admitted UTF-8 body.
     Text {
         /// Complete bounded body.
@@ -338,6 +340,29 @@ pub enum ProcessorValidationOutput {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProcessorReadOutput {
+    /// The image source is too large for direct presentation; retain its bounded metadata.
+    ImageDescription,
+    /// Derived encoded bytes travel separately from the control record.
+    GeneratedImage {
+        /// Claimed output media type, independently re-detected before publication.
+        media_type: String,
+        /// Claimed output provider identity.
+        provider: String,
+        /// Claimed output reader identity.
+        reader: String,
+        /// Claimed output reader revision.
+        revision: String,
+        /// Exact binary-channel length claimed by the worker.
+        byte_length: u64,
+        /// Bounded binary payload excluded from control-frame serialization.
+        #[serde(skip)]
+        bytes: Vec<u8>,
+    },
+    /// Requests direct presentation of the validated source without emitting its bytes.
+    DirectReference {
+        /// Untrusted output type, checked against detection and the view declaration.
+        media_type: String,
+    },
     /// Text body and continuation facts.
     Text {
         /// Untrusted text body.
@@ -475,6 +500,8 @@ pub trait FileMediaProcessor: Send + Sync {
 /// Closed application-facing file/media failure algebra.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileMediaFailure {
+    /// Verified-source authority contradicted its own immutable identity or range contract.
+    SourceIntegrity,
     /// Digest is outside the rendered-frontier allow-set.
     BlobNotVisible,
     /// Blob catalog identity is absent.
@@ -535,6 +562,7 @@ pub enum FileMediaFailure {
 impl fmt::Display for FileMediaFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::SourceIntegrity => "verified source integrity failed",
             Self::BlobNotVisible => "blob is not visible to this request",
             Self::BlobMissing => "blob is missing",
             Self::BlobCorrupt => "blob is corrupt",
@@ -585,7 +613,8 @@ impl From<SourceReadError> for FileMediaFailure {
             SourceReadError::Missing => Self::BlobMissing,
             SourceReadError::Corrupt => Self::BlobCorrupt,
             SourceReadError::Unavailable => Self::BlobUnavailable,
-            SourceReadError::RangeOutOfBounds | SourceReadError::Integrity => Self::ProcessorFailed,
+            SourceReadError::RangeOutOfBounds => Self::ProcessorFailed,
+            SourceReadError::Integrity => Self::SourceIntegrity,
         }
     }
 }

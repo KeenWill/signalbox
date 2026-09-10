@@ -118,6 +118,7 @@ fn local_git_construction_telemetry_omits_the_workspace_path() {
                 runner,
                 None,
                 &Default::default(),
+                None,
             ),
             Err(DaemonToolsConstructionError::LocalGit)
         ));
@@ -322,6 +323,7 @@ fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
             process_runner.clone(),
             None,
             &Default::default(),
+            None,
         )
         .expect("workspace-bound tools compile"),
         roots: SessionWorkspaceRoots::try_new(workspace).expect("session workspace roots derive"),
@@ -329,6 +331,7 @@ fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
         exec_runner: process_runner,
         cargo_registry_cache: None,
         sandbox: Default::default(),
+        sandboxed_exec_timeout_bound: None,
     };
     let conversations = ConversationTools::try_new(OfflineConversationPort)
         .expect("offline conversation tools compile");
@@ -412,6 +415,7 @@ fn production_constructor_matches_the_complete_mapped_catalog() {
         &std::env::current_exe().expect("test executable path is available"),
         None,
         &Default::default(),
+        None,
         WebFetchEgressPolicy::deny_all(),
     )
     .expect("production daemon tools compile");
@@ -3108,7 +3112,12 @@ fn bridge_build_direct_invocation_fixture() {
 #[test]
 fn bridge_build_rejects_an_ambiguous_directly_invoked_test_binary() {
     let current = std::env::current_exe().expect("test executable path is available");
-    let artifact_layout = tempfile::tempdir().expect("synthetic artifact layout exists");
+    let artifact_layout = tempfile::tempdir_in(
+        current
+            .parent()
+            .expect("test executable has a parent directory"),
+    )
+    .expect("synthetic artifact layout exists");
     let ambiguous_artifact_directory = artifact_layout.path().join("target/debug/deps");
     fs::create_dir_all(&ambiguous_artifact_directory)
         .expect("ambiguous Cargo artifact directory exists");
@@ -3117,8 +3126,8 @@ fn bridge_build_rejects_an_ambiguous_directly_invoked_test_binary() {
             .file_name()
             .expect("test executable path has a file name"),
     );
-    fs::copy(&current, &ambiguous_artifact)
-        .expect("test executable is copied into the ambiguous artifact layout");
+    fs::hard_link(&current, &ambiguous_artifact)
+        .expect("test executable is linked into the ambiguous artifact layout");
     let invocation_directory =
         tempfile::tempdir().expect("synthetic direct invocation directory exists");
     let output = Command::new(ambiguous_artifact)
@@ -4223,10 +4232,9 @@ fn composed_catalog_applies_an_enforceable_posture() {
     );
 }
 
-/// The shipped posture table and daemon catalog compose both egress tools
-/// into user-approved requests while their declarations stay fail-closed.
+/// The shipped posture table sends both web tools to the judge.
 #[test]
-fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
+fn shipped_web_postures_resolve_both_daemon_tools_to_delegated_approval() {
     let configuration = crate::configuration::checked_in_example_configuration()
         .expect("checked-in configuration is valid");
     let (web_fetch_catalog, _executor) =
@@ -4257,11 +4265,11 @@ fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
 
     assert_eq!(
         web_fetch_definition.approval_posture(),
-        Some(ToolApprovalPosture::Human)
+        Some(ToolApprovalPosture::Delegated)
     );
     assert_eq!(
         web_search_definition.approval_posture(),
-        Some(ToolApprovalPosture::Human)
+        Some(ToolApprovalPosture::Delegated)
     );
     assert_eq!(
         web_fetch_definition.permission_default(),
@@ -4271,6 +4279,35 @@ fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
         web_search_definition.permission_default(),
         ToolPermissionDefault::Confirm
     );
+}
+
+#[test]
+fn web_postures_delegate_unless_a_human_is_explicitly_configured() {
+    let (web_catalog, _) = WebFetchTool::try_new(OfflineTransport, WebFetchEgressPolicy::default())
+        .expect("web tool compiles")
+        .into_parts();
+    let name = ToolName::try_new(String::from(WEB_FETCH_NAME)).expect("web name is valid");
+    let catalog = DaemonToolCatalog::try_new([web_catalog]).expect("one web tool");
+    for (configured, expected) in [
+        (ToolApprovalPosture::Auto, ToolApprovalPosture::Delegated),
+        (
+            ToolApprovalPosture::Delegated,
+            ToolApprovalPosture::Delegated,
+        ),
+        (ToolApprovalPosture::Human, ToolApprovalPosture::Human),
+    ] {
+        let configured_catalog = catalog
+            .clone()
+            .with_approval_postures([(name.clone(), configured)])
+            .expect("composed posture is admitted");
+        assert_eq!(
+            configured_catalog
+                .definition(&name)
+                .expect("web remains composed")
+                .approval_posture(),
+            Some(expected)
+        );
+    }
 }
 
 #[test]
@@ -5533,6 +5570,7 @@ where
 #[track_caller]
 fn completed_text(evidence: ToolExecutorEvidence) -> String {
     match evidence {
+        ToolExecutorEvidence::CompletedMedia { .. } => panic!("expected a text result"),
         ToolExecutorEvidence::CompletedText(text) => text,
         ToolExecutorEvidence::KnownFailed { detail } => {
             panic!("the workspace tool failed: {detail:?}")
@@ -5544,6 +5582,7 @@ fn completed_text(evidence: ToolExecutorEvidence) -> String {
 #[track_caller]
 fn known_failure_detail(evidence: ToolExecutorEvidence) -> String {
     match evidence {
+        ToolExecutorEvidence::CompletedMedia { .. } => panic!("expected a text result"),
         ToolExecutorEvidence::KnownFailed { detail } => detail
             .expect("a session workspace failure carries sanitized detail")
             .as_str()
@@ -6208,14 +6247,6 @@ fn a_derived_binding_names_the_parent_it_walked_through() {
     assert_eq!(binding.derived_parent(), Some(FIXTURE_PARENT_IDENTITY));
 }
 
-/// A configured binding walks through no derived parent.
-#[test]
-fn a_configured_binding_names_no_derived_parent() {
-    let binding = RecordedSessionBinding::ConfiguredRoot;
-
-    assert_eq!(binding.derived_parent(), None);
-}
-
 /// A configured root with no lexical final component — `/srv/workspace/..`,
 /// which is absolute and can name a valid worktree — has no directory name
 /// to append the suffix to. The derivation rejects it rather than answering
@@ -6253,15 +6284,6 @@ fn a_derived_binding_names_the_identity_it_pinned() {
     };
 
     assert_eq!(binding.derived_identity(), Some(FIXTURE_BOUND_IDENTITY));
-}
-
-/// A configured binding pins no derived identity, so it never collides with
-/// a derived root another session composed.
-#[test]
-fn a_configured_binding_names_no_derived_identity() {
-    let binding = RecordedSessionBinding::ConfiguredRoot;
-
-    assert_eq!(binding.derived_identity(), None);
 }
 
 /// `<name>.sessions` bind-mounted onto the configured root is a real

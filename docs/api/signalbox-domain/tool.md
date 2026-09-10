@@ -20,6 +20,7 @@ pub enum ToolApprovalDecision {
 pub struct ToolApprovalResolution {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl ToolApprovalResolution {
+    pub fn approval_timeout(request: ToolRequestId) -> Self;
     pub const fn request(&self) -> ToolRequestId;
     pub const fn decision(&self) -> &ToolApprovalDecision;
     pub const fn source(&self) -> ToolDecisionSource;
@@ -173,6 +174,10 @@ impl DecideToolRequest {
         self,
         request: &ToolRequest,
     ) -> result::Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
+    pub fn prepare_approval_timeout_applied(
+        self,
+        request: &ToolRequest,
+    ) -> result::Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
     pub const fn prepare_request_not_found(self) -> PreparedDecideToolRequest;
     pub const fn prepare_already_resolved(self) -> PreparedDecideToolRequest;
     pub const fn prepare_awaiting_approval_judge(self) -> PreparedDecideToolRequest;
@@ -259,6 +264,60 @@ impl DecideToolRequestPreparationError {
     pub const fn command(&self) -> &DecideToolRequest;
     pub const fn provided_request(&self) -> ToolRequestId;
     pub fn into_parts(self) -> (DecideToolRequest, ToolRequestId);
+}
+```
+
+## MediaValidationEvidence
+
+```rust
+pub enum MediaValidationEvidence {
+    StrongSignature,
+    StructuralValidation,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## MediaValidationIdentity
+
+```rust
+pub struct MediaValidationIdentity {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl MediaValidationIdentity {
+    pub fn try_new(
+        digest: BlobDigest,
+        media_type: string::String,
+        provider: string::String,
+        reader: string::String,
+        revision: string::String,
+        evidence: MediaValidationEvidence,
+    ) -> option::Option<Self>;
+    pub fn media_type(&self) -> &str;
+    pub fn provider(&self) -> &str;
+    pub fn reader(&self) -> &str;
+    pub fn revision(&self) -> &str;
+    pub const fn digest(&self) -> BlobDigest;
+    pub const fn evidence(&self) -> MediaValidationEvidence;
+}
+```
+
+## ToolMediaReference
+
+```rust
+pub struct ToolMediaReference {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ToolMediaReference {
+    pub fn direct_image(
+        identity: MediaValidationIdentity,
+        byte_length: nonzero::NonZeroU64,
+    ) -> option::Option<Self>;
+    pub fn image(
+        presented: MediaValidationIdentity,
+        source: MediaValidationIdentity,
+        byte_length: nonzero::NonZeroU64,
+    ) -> option::Option<Self>;
+    pub const fn presented(&self) -> &MediaValidationIdentity;
+    pub const fn source(&self) -> &MediaValidationIdentity;
+    pub const fn byte_length(&self) -> nonzero::NonZeroU64;
 }
 ```
 
@@ -739,6 +798,10 @@ impl ToolRequestReconstitutionInput {
 ```rust
 pub enum ToolResultContent {
     Text(ToolResultText),
+    Media {
+        text: ToolResultText,
+        reference: ToolMediaReference,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```

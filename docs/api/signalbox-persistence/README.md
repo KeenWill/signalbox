@@ -4,7 +4,7 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
-| approval_judge | 10 | 0 | 0 | [approval_judge](approval_judge.md) |
+| approval_judge | 10 | 0 | 1 | [approval_judge](approval_judge.md) |
 | approval_judge_eval | 5 | 0 | 2 | [approval_judge_eval](approval_judge_eval.md) |
 | attention | 5 | 0 | 0 | [attention](attention.md) |
 | automatic_reconciliation | 2 | 0 | 1 | [automatic_reconciliation](automatic_reconciliation.md) |
@@ -60,7 +60,7 @@
 | submit_input | 5 | 0 | 0 | [submit_input](submit_input.md) |
 | termination_receipt | 2 | 0 | 1 | [termination_receipt](termination_receipt.md) |
 | test_support | 3 | 0 | 6 | [test_support](test_support.md) |
-| tool_loop | 3 | 0 | 0 | [tool_loop](tool_loop.md) |
+| tool_loop | 4 | 0 | 0 | [tool_loop](tool_loop.md) |
 | turn_liveness | 5 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | usage | 3 | 0 | 1 | [usage](usage.md) |
 | workspace | 3 | 0 | 0 | [workspace](workspace.md) |

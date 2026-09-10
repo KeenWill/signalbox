@@ -356,9 +356,10 @@ stream.
 An import begin declares the format and the exact total byte count, and commit
 requires the assembled count to equal the declared count before conversion.
 `begin_blob_upload` live-verifies a recorded replica in the routed store before
-it returns `blob_upload_already_present`. A blob chunk read names an exact range
-of at most 4 MiB; an overflowing or out-of-range request is rejected rather than
-truncated at the end of the blob. When no replica succeeds, `unavailable` takes
+it returns `blob_upload_already_present`. A blob chunk read requests at most 4
+MiB and verifies the complete replica before delivery. It returns the available
+tail across EOF, or empty bytes at or beyond EOF, with `blob_length_bytes`
+naming the total blob length. When no replica succeeds, `unavailable` takes
 precedence over `blob_corrupt`, which takes precedence over `blob_missing`. The
 terminal client answers `publication_ambiguous` and `commit_ambiguous` by
 beginning the same digest, length, and bytes again rather than retrying commit
@@ -686,4 +687,5 @@ event is `turn_failed`; it emits no pool-exhaustion event.
 
 ## Planned
 
-None.
+- Listener probing before stale socket identity-pin cleanup; see
+  [daemon survival design](../design/daemon-survival.md).

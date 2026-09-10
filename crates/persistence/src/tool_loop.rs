@@ -4,7 +4,10 @@
 //! scheduler lock before asking the domain aggregate for authority. Executor
 //! work remains outside database transactions.
 
+mod file_visibility;
+mod media_reference;
 mod placement_loss;
+pub use file_visibility::VisibleToolAttachment;
 mod result_budget;
 pub(crate) use placement_loss::{
     close_lost_runner_requests, resolve_lost_runner_batch, resolve_lost_runner_batch_after_judge,
@@ -53,16 +56,16 @@ use crate::{
     commit_failure_is_ambiguous,
     mapping::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
-        BlobReadRejectionStorageKind, ToolApprovalDecisionSourceStorageKind,
-        ToolAttemptDispositionStorageKind, approval_judge_state_to_str,
-        approval_judge_terminal_disposition_to_str, blob_read_rejection_from_str,
-        blob_read_rejection_to_str, dangerous_tool_auto_approval_from_str,
-        durable_command_id_from_uuid, durable_command_id_to_uuid, positive_u64_from_numeric,
-        session_id_from_uuid, session_id_to_uuid, tool_approval_decision_source_from_str,
+        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
+        ToolResultContentStorageKind, approval_judge_state_to_str,
+        approval_judge_terminal_disposition_to_str, dangerous_tool_auto_approval_from_str,
+        durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
+        session_id_to_uuid, tool_approval_decision_source_from_str,
         tool_approval_decision_source_to_str, tool_approval_posture_from_str,
         tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
         tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
-        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        tool_request_id_to_uuid, tool_result_content_from_str, tool_result_content_to_str,
+        turn_id_from_uuid, turn_id_to_uuid,
     },
     model_execution::{
         insert_snapshot, lock_delegated_child_endpoint_sessions,
@@ -71,14 +74,12 @@ use crate::{
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
 
-/// Largest decoded byte count one `blob_read` request may charge.
+/// Largest decoded byte count one `blob_read` request may return.
 ///
 /// The durable admission here and the daemon's argument validator are the two
 /// constructors of this bound, so it is declared once here and imported at the
 /// tool boundary rather than restated there.
 pub const MAX_BLOB_READ_TOOL_BYTES: u64 = 524_288;
-const MAX_BLOB_READ_TURN_BYTES: u64 = 2_097_152;
-const MAX_BLOB_READ_REQUESTS_PER_TURN: i64 = 64;
 
 const BLOB_NOT_VISIBLE_DETAIL: &str = "blob_not_visible";
 
@@ -86,34 +87,13 @@ const BLOB_NOT_VISIBLE_DETAIL: &str = "blob_not_visible";
 enum BlobReadAdmission {
     Admitted,
     NotVisible,
-    TurnByteBudgetExceeded,
-    TurnReadCountExceeded,
 }
 
 impl BlobReadAdmission {
-    /// Durable rejection spelling this admission records on its charge row.
-    ///
-    /// A visibility refusal returns before any charge exists, so it is absent
-    /// here as well as on the admitted path.
-    const fn rejection(self) -> Option<BlobReadRejectionStorageKind> {
-        match self {
-            Self::Admitted | Self::NotVisible => None,
-            Self::TurnByteBudgetExceeded => {
-                Some(BlobReadRejectionStorageKind::TurnByteBudgetExceeded)
-            }
-            Self::TurnReadCountExceeded => {
-                Some(BlobReadRejectionStorageKind::TurnReadCountExceeded)
-            }
-        }
-    }
-
     fn detail(self) -> Option<&'static str> {
         match self {
             Self::Admitted => None,
             Self::NotVisible => Some(BLOB_NOT_VISIBLE_DETAIL),
-            Self::TurnByteBudgetExceeded | Self::TurnReadCountExceeded => {
-                self.rejection().map(blob_read_rejection_to_str)
-            }
         }
     }
 
@@ -125,31 +105,6 @@ impl BlobReadAdmission {
                 })
             })
             .transpose()
-    }
-
-    fn from_charge(
-        admitted: bool,
-        rejection_reason: Option<String>,
-    ) -> Result<Self, ToolLoopRepositoryError> {
-        match (admitted, rejection_reason.as_deref()) {
-            (true, None) => Ok(Self::Admitted),
-            (false, Some(reason)) => match blob_read_rejection_from_str(reason) {
-                Some(BlobReadRejectionStorageKind::TurnByteBudgetExceeded) => {
-                    Ok(Self::TurnByteBudgetExceeded)
-                }
-                Some(BlobReadRejectionStorageKind::TurnReadCountExceeded) => {
-                    Ok(Self::TurnReadCountExceeded)
-                }
-                None => Err(ToolLoopCorruption::Unsupported {
-                    field: "rejection_reason",
-                    value: reason.to_owned(),
-                }
-                .into()),
-            },
-            (true, Some(_)) | (false, None) => {
-                Err(ToolLoopCorruption::Inconsistent("blob read rejection reason").into())
-            }
-        }
     }
 }
 
@@ -357,6 +312,117 @@ impl PostgresToolLoopRepository {
         result
     }
 
+    /// Arms a durable human-wait deadline and denies an expired wait atomically.
+    /// `None` records an unbounded wait. Repeated passes retain the first deadline.
+    pub async fn expire_human_approval_wait(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<bool, ToolLoopRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        lock_tool_session(&mut transaction, session).await?;
+        let Some(batch) =
+            load_active_batch_from_connection(&mut transaction, session, turn).await?
+        else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let Some(waiting) = batch.awaiting_approval() else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let request = waiting.request();
+        sqlx::query(
+            "INSERT INTO tool_approval_human_wait (request_id, deadline)
+             SELECT request_id, transaction_timestamp() + make_interval(secs => $2)
+               FROM tool_request
+              WHERE request_id = $1 AND tool_request_waits_for_human(request_id)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(request.into_uuid())
+        .bind(timeout.map(|duration| duration.as_secs_f64()))
+        .execute(&mut *transaction)
+        .await?;
+        let expired: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM tool_approval_human_wait
+                WHERE request_id = $1 AND deadline <= transaction_timestamp())",
+        )
+        .bind(request.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !expired {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        let continuation = (batch
+            .requests()
+            .iter()
+            .filter(|request| {
+                request.inadmissible_reason().is_none() && batch.approval(request.id()).is_none()
+            })
+            .count()
+            == 1)
+            .then(|| signalbox_domain::TurnAttemptId::from_uuid(Uuid::now_v7()));
+        let command = DecideToolRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            request,
+            signalbox_domain::ToolApprovalResolution::approval_timeout(request)
+                .decision()
+                .clone(),
+        )
+        .map_err(|_| ToolLoopRepositoryError::InvalidTransition("timeout command identity"))?;
+        let decision = batch
+            .prepare_approval_timeout(command, continuation)
+            .map_err(|_| {
+                ToolLoopRepositoryError::InvalidTransition("approval timeout transition")
+            })?;
+        persist_batch_decision(&mut transaction, &decision).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| ToolLoopRepositoryError::Database {
+                commit_ambiguous: commit_failure_is_ambiguous(&source),
+                source,
+            })?;
+        Ok(true)
+    }
+
+    /// Reads finite undecided human waits and their remaining database-clock delay.
+    /// An absent session selects all pending waits for startup restoration.
+    pub async fn pending_human_approval_waits(
+        &self,
+        session: Option<SessionId>,
+    ) -> Result<Vec<(ToolRequestId, SessionId, std::time::Duration)>, ToolLoopRepositoryError> {
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, f64)>(
+            "SELECT waiting.request_id, active.session_id,
+                    GREATEST(EXTRACT(EPOCH FROM (waiting.deadline - clock_timestamp())), 0)::double precision
+               FROM tool_approval_human_wait AS waiting
+               JOIN turn_lifecycle AS active
+                 ON active.approval_tool_request_id = waiting.request_id
+              WHERE waiting.deadline IS NOT NULL
+                AND active.state_kind = 'active'
+                AND active.active_phase_kind = 'awaiting_tool_approval'
+                AND ($1::uuid IS NULL OR active.session_id = $1)
+                AND tool_request_waits_for_human(waiting.request_id)",
+        )
+        .bind(session.map(SessionId::into_uuid))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(request, session, seconds)| {
+                let delay = std::time::Duration::try_from_secs_f64(seconds).map_err(|_| {
+                    ToolLoopRepositoryError::InvalidTransition("approval deadline delay")
+                })?;
+                Ok((
+                    ToolRequestId::from_uuid(request),
+                    SessionId::from_uuid(session),
+                    delay,
+                ))
+            })
+            .collect()
+    }
+
     /// Finds the exact active turn whose durable execution can make progress.
     ///
     /// This is a reconciliation hint only. Every later tool transaction
@@ -414,7 +480,7 @@ impl PostgresToolLoopRepository {
                             )
                             OR (
                                 active_phase_kind = 'awaiting_tool_approval'
-                                AND EXISTS (
+                                AND (tool_approval_human_wait_is_due(approval_tool_request_id) OR EXISTS (
                                     SELECT 1
                                       FROM tool_request AS request
                                      WHERE request.request_id = approval_tool_request_id
@@ -428,7 +494,7 @@ impl PostgresToolLoopRepository {
                                              WHERE judge.request_id = request.request_id
                                                AND judge.state_kind = 'terminal'
                                        )
-                                )
+                                ))
                             )
                         )
                     )
@@ -1360,46 +1426,39 @@ impl PostgresToolLoopRepository {
                     }
                     _ => return Ok(PrepareToolContinuationOutcome::NoWork),
                 };
-                let child_wait =
-                    batch
-                        .requests()
-                        .iter()
-                        .find_map(|request| match batch.attempt(request.id()) {
-                            Some(ReconstitutedToolAttempt::Ended(attempt)) => match attempt.end() {
-                                ToolAttemptEnd::AwaitingChild {
-                                    spawning_request,
-                                    child,
-                                } => Some((request.id(), *spawning_request, *child)),
-                                ToolAttemptEnd::Completed { .. }
-                                | ToolAttemptEnd::KnownFailed { .. }
-                                | ToolAttemptEnd::Ambiguous => None,
-                            },
-                            Some(ReconstitutedToolAttempt::Current(_)) | None => None,
-                        });
-                let mut projection = match child_wait {
-                    Some((awaiting_request, spawning_request, child)) => batch
-                        .prepare_delegation_result_projection(
-                            identities.result_entries().to_vec(),
-                            identities.result_frontier(),
+                let mut child_outcomes = BTreeMap::new();
+                for request in batch.requests() {
+                    if let Some(ReconstitutedToolAttempt::Ended(attempt)) =
+                        batch.attempt(request.id())
+                        && let ToolAttemptEnd::AwaitingChild {
+                            spawning_request,
+                            child,
+                        } = attempt.end()
+                    {
+                        child_outcomes.insert(
+                            request.id(),
                             load_foreground_delegation_outcome(
                                 &mut transaction,
                                 session,
-                                awaiting_request,
-                                spawning_request,
-                                child,
+                                request.id(),
+                                *spawning_request,
+                                *child,
                             )
                             .await?,
-                        ),
-                    None => batch.prepare_result_projection(
+                        );
+                    }
+                }
+                let mut projection = batch
+                    .prepare_delegation_result_projection(
                         identities.result_entries().to_vec(),
                         identities.result_frontier(),
-                    ),
-                }
-                .map_err(|_| {
-                    ToolLoopRepositoryError::InvalidTransition(
-                        "tool batch is not ready for continuation",
+                        child_outcomes,
                     )
-                })?;
+                    .map_err(|_| {
+                        ToolLoopRepositoryError::InvalidTransition(
+                            "tool batch is not ready for continuation",
+                        )
+                    })?;
                 let pending_inputs: Vec<Uuid> = sqlx::query_scalar(
                     "SELECT accepted_input_id FROM accepted_input
                       WHERE session_id = $1 AND expected_active_turn_id = $2
@@ -2693,6 +2752,22 @@ async fn decode_approval(
                 load_frozen_dangerous_tool_auto_approval(connection, request).await?,
             )
         }
+        ToolApprovalDecisionSourceStorageKind::RuntimeSafety if user_command.is_some() => {
+            let expected = signalbox_domain::ToolApprovalResolution::approval_timeout(request);
+            if expected.decision() != &decision {
+                return Err(ToolLoopCorruption::Inconsistent("approval timeout denial").into());
+            }
+            let command = durable_command_id_from_uuid(
+                user_command.ok_or(ToolLoopCorruption::Missing("timeout command"))?,
+            )
+            .map_err(|_| ToolLoopCorruption::Inconsistent("timeout command identity"))?;
+            if !user_receipts.get(&command).is_some_and(|receipt| {
+                receipt.command().request() == request && receipt.command().decision() == &decision
+            }) {
+                return Err(ToolLoopCorruption::Inconsistent("timeout command receipt").into());
+            }
+            return Ok(expected);
+        }
         ToolApprovalDecisionSourceStorageKind::RuntimeSafety if user_command.is_none() => {
             let expected = ToolApprovalResolutionReconstitutionInput::runtime_safety(request)
                 .reconstitute()
@@ -2868,6 +2943,8 @@ async fn load_user_decision_receipts(
         let request_record = decode_request(row, producing_call, session, turn)?;
         let prepared = if source.as_deref() == Some("lifecycle_closure") {
             command.prepare_lifecycle_closure_applied(&request_record)
+        } else if source.as_deref() == Some("runtime_safety") {
+            command.prepare_approval_timeout_applied(&request_record)
         } else {
             command.prepare_applied(&request_record)
         }
@@ -2927,7 +3004,9 @@ async fn load_attempts(
 ) -> Result<Vec<ReconstitutedToolAttempt>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT attempt.*
-           FROM runner_current_tool_attempt AS attempt
+           FROM tool_attempt AS attempt
+           JOIN runner_current_tool_attempt AS current
+             ON current.attempt_id = attempt.attempt_id
            JOIN tool_request AS request
              ON request.request_id = attempt.request_id
           WHERE request.producing_model_call_id = $1
@@ -3147,16 +3226,27 @@ fn decode_attempt_end(row: &PgRow) -> Result<ToolAttemptEnd, ToolLoopRepositoryE
     let stored_disposition = required::<String>(row, "terminal_disposition_kind")?;
     match tool_attempt_disposition_from_str(&stored_disposition) {
         Some(ToolAttemptDispositionStorageKind::Completed) => {
-            match required::<String>(row, "result_content_kind")?.as_str() {
-                "text" => Ok(ToolAttemptEnd::Completed {
+            let kind = required::<String>(row, "result_content_kind")?;
+            match tool_result_content_from_str(&kind) {
+                Some(ToolResultContentStorageKind::Text) => Ok(ToolAttemptEnd::Completed {
                     result: ToolResultContent::Text(
                         ToolResultText::try_new(required(row, "result_text")?)
                             .map_err(|_| ToolLoopCorruption::Inconsistent("tool result text"))?,
                     ),
                 }),
-                value => Err(ToolLoopCorruption::Unsupported {
+                Some(ToolResultContentStorageKind::Media) => Ok(ToolAttemptEnd::Completed {
+                    result: ToolResultContent::Media {
+                        text: ToolResultText::try_new(required(row, "result_text")?)
+                            .map_err(|_| ToolLoopCorruption::Inconsistent("tool result text"))?,
+                        reference: media_reference::decode(required(
+                            row,
+                            "result_media_reference",
+                        )?)?,
+                    },
+                }),
+                None => Err(ToolLoopCorruption::Unsupported {
                     field: "result_content_kind",
-                    value: value.to_owned(),
+                    value: kind,
                 }
                 .into()),
             }
@@ -3301,6 +3391,12 @@ pub(crate) async fn persist_ended_attempt(
         wait_spawning_request,
         wait_child,
     ) = encode_attempt_end(attempt.end());
+    let media_reference = match attempt.end() {
+        ToolAttemptEnd::Completed {
+            result: ToolResultContent::Media { reference, .. },
+        } => Some(media_reference::encode(reference)?),
+        _ => None,
+    };
     let (limit, error_framing): (Option<i64>, i32) = sqlx::query_as(
         "SELECT context_result_byte_limit,
                 octet_length(jsonb_build_object('error', jsonb_build_object(
@@ -3334,6 +3430,7 @@ pub(crate) async fn persist_ended_attempt(
                 result_text = $3,
                 context_result_text = $14,
                 context_error_detail = $15,
+                result_media_reference = $16,
                 error_kind = $4,
                 error_detail = $5,
                 wait_spawning_request_id = $6,
@@ -3362,6 +3459,7 @@ pub(crate) async fn persist_ended_attempt(
     .bind(Decimal::from(attempt.generation().as_u64()))
     .bind(context_result_text)
     .bind(context_error_detail)
+    .bind(media_reference)
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -3404,10 +3502,25 @@ type EncodedToolAttemptEnd<'a> = (
 fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
     match end {
         ToolAttemptEnd::Completed {
+            result: ToolResultContent::Media { text, .. },
+        } => (
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Completed),
+            Some(tool_result_content_to_str(
+                ToolResultContentStorageKind::Media,
+            )),
+            Some(text.as_str()),
+            None,
+            None,
+            None,
+            None,
+        ),
+        ToolAttemptEnd::Completed {
             result: ToolResultContent::Text(text),
         } => (
             tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Completed),
-            Some("text"),
+            Some(tool_result_content_to_str(
+                ToolResultContentStorageKind::Text,
+            )),
             Some(text.as_str()),
             None,
             None,
@@ -3539,6 +3652,10 @@ async fn persist_batch_decision(
             signalbox_domain::ToolDecisionSource::UserCommand => (
                 ToolApprovalDecisionSourceStorageKind::UserCommand,
                 signalbox_domain::CommandPrincipal::Operator,
+            ),
+            signalbox_domain::ToolDecisionSource::RuntimeSafety => (
+                ToolApprovalDecisionSourceStorageKind::RuntimeSafety,
+                signalbox_domain::CommandPrincipal::Core,
             ),
             signalbox_domain::ToolDecisionSource::LifecycleClosure => (
                 ToolApprovalDecisionSourceStorageKind::LifecycleClosure,
@@ -3823,6 +3940,8 @@ async fn load_decision_receipt(
             let source: Option<String> = row.try_get("decision_source")?;
             if source.as_deref() == Some("lifecycle_closure") {
                 command.prepare_lifecycle_closure_applied(&request_record)
+            } else if source.as_deref() == Some("runtime_safety") {
+                command.prepare_approval_timeout_applied(&request_record)
             } else {
                 command.prepare_applied(&request_record)
             }
@@ -4498,54 +4617,16 @@ async fn admit_tool_preauthorization(
             decoded_bytes,
         } => (digest, Some(decoded_bytes)),
     };
-    let frontier: Uuid = sqlx::query_scalar(
-        "SELECT call.context_frontier_id FROM tool_request AS request
-           JOIN model_call AS call
-             ON call.model_call_id = request.producing_model_call_id
-            AND call.session_id = request.session_id
-          WHERE request.request_id = $1 AND request.session_id = $2 AND request.turn_id = $3",
-    )
-    .bind(tool_request_id_to_uuid(request))
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(ToolLoopCorruption::Missing(
-        "blob authorization producing frontier",
-    ))?;
-    let members = crate::context_compaction::projected_frontier_membership(
+    let visible = !file_visibility::visible_attachment_rows(
         transaction,
         session,
-        signalbox_domain::ContextFrontierId::from_uuid(frontier),
+        turn,
+        request,
+        digest,
+        None,
     )
-    .await
-    .map_err(crate::model_execution::map_projected_membership_error)
-    .map_err(map_model_call_error)?;
-    let sources = members
-        .iter()
-        .map(|member| member.source_session().into_uuid())
-        .collect::<Vec<_>>();
-    let entries = members
-        .iter()
-        .map(|member| member.entry().into_uuid())
-        .collect::<Vec<_>>();
-    let visible: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-            SELECT 1
-              FROM unnest($1::uuid[], $2::uuid[]) AS member(source_session_id, semantic_entry_id)
-              JOIN semantic_transcript_entry AS entry
-                ON entry.source_session_id = member.source_session_id
-               AND entry.semantic_entry_id = member.semantic_entry_id
-              JOIN accepted_input_content_part AS part
-                ON part.accepted_input_id = entry.origin_accepted_input_id
-             WHERE part.part_kind = 'attachment' AND part.blob_digest = $3
-        )",
-    )
-    .bind(&sources)
-    .bind(&entries)
-    .bind(digest.as_bytes().as_slice())
-    .fetch_one(&mut **transaction)
-    .await?;
+    .await?
+    .is_empty();
     if !visible {
         return Ok(BlobReadAdmission::NotVisible);
     }
@@ -4556,84 +4637,7 @@ async fn admit_tool_preauthorization(
         return Err(ToolLoopCorruption::Inconsistent("blob read request byte bound").into());
     }
 
-    let existing = sqlx::query(
-        "SELECT session_id, turn_id, blob_digest, decoded_byte_count, admitted,
-                rejection_reason
-           FROM blob_read_tool_charge
-          WHERE request_id = $1",
-    )
-    .bind(tool_request_id_to_uuid(request))
-    .fetch_optional(&mut **transaction)
-    .await?;
-    if let Some(row) = existing {
-        let recorded_bytes = positive_u64_from_numeric(required(&row, "decoded_byte_count")?)
-            .map_err(|_| ToolLoopCorruption::Inconsistent("blob read charged byte count"))?;
-        if required::<Uuid>(&row, "session_id")? != session_id_to_uuid(session)
-            || required::<Uuid>(&row, "turn_id")? != turn_id_to_uuid(turn)
-            || required::<Vec<u8>>(&row, "blob_digest")? != digest.as_bytes().as_slice()
-            || recorded_bytes != decoded_bytes.get()
-        {
-            return Err(ToolLoopCorruption::Inconsistent("blob read request charge").into());
-        }
-        return BlobReadAdmission::from_charge(
-            required(&row, "admitted")?,
-            row.try_get::<Option<String>, _>("rejection_reason")?,
-        );
-    }
-
-    let totals = sqlx::query(
-        "SELECT count(*) AS request_count,
-                COALESCE(sum(decoded_byte_count), 0) AS decoded_bytes
-           FROM blob_read_tool_charge
-          WHERE turn_id = $1 AND admitted",
-    )
-    .bind(turn_id_to_uuid(turn))
-    .fetch_one(&mut **transaction)
-    .await?;
-    let request_count: i64 = required(&totals, "request_count")?;
-    let decoded_total: Decimal = required(&totals, "decoded_bytes")?;
-    if request_count < 0 || !decoded_total.fract().is_zero() || decoded_total.is_sign_negative() {
-        return Err(ToolLoopCorruption::Inconsistent("blob read turn charge totals").into());
-    }
-    let decoded_total = u64::try_from(decoded_total)
-        .map_err(|_| ToolLoopCorruption::Inconsistent("blob read turn charged bytes"))?;
-    let admission = blob_read_charge_admission(request_count, decoded_total, decoded_bytes);
-    let admitted = admission == BlobReadAdmission::Admitted;
-    let rows = sqlx::query(
-        "INSERT INTO blob_read_tool_charge
-            (request_id, session_id, turn_id, blob_digest, decoded_byte_count, admitted,
-             rejection_reason)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
-    )
-    .bind(tool_request_id_to_uuid(request))
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .bind(digest.as_bytes().as_slice())
-    .bind(Decimal::from(decoded_bytes.get()))
-    .bind(admitted)
-    .bind(admission.rejection().map(blob_read_rejection_to_str))
-    .execute(&mut **transaction)
-    .await?
-    .rows_affected();
-    require_single(rows, "blob read request charge")?;
-    Ok(admission)
-}
-
-fn blob_read_charge_admission(
-    request_count: i64,
-    decoded_total: u64,
-    requested: NonZeroU64,
-) -> BlobReadAdmission {
-    if request_count >= MAX_BLOB_READ_REQUESTS_PER_TURN {
-        BlobReadAdmission::TurnReadCountExceeded
-    } else if decoded_total
-        .checked_add(requested.get())
-        .is_none_or(|total| total > MAX_BLOB_READ_TURN_BYTES)
-    {
-        BlobReadAdmission::TurnByteBudgetExceeded
-    } else {
-        BlobReadAdmission::Admitted
-    }
+    Ok(BlobReadAdmission::Admitted)
 }
 
 fn required<T>(row: &PgRow, column: &'static str) -> Result<T, ToolLoopRepositoryError>
@@ -4671,47 +4675,6 @@ async fn finish_commit<T>(
             transaction.rollback().await?;
             Err(error)
         }
-    }
-}
-
-#[cfg(test)]
-mod blob_read_budget_tests {
-    use super::*;
-
-    #[test]
-    fn exact_blob_read_turn_byte_bound_is_admitted() {
-        assert_eq!(
-            blob_read_charge_admission(
-                3,
-                MAX_BLOB_READ_TURN_BYTES - MAX_BLOB_READ_TOOL_BYTES,
-                NonZeroU64::new(MAX_BLOB_READ_TOOL_BYTES).expect("the tool bound is positive"),
-            ),
-            BlobReadAdmission::Admitted
-        );
-    }
-
-    #[test]
-    fn blob_read_turn_byte_overflow_is_rejected() {
-        assert_eq!(
-            blob_read_charge_admission(
-                4,
-                MAX_BLOB_READ_TURN_BYTES,
-                NonZeroU64::new(1).expect("one is positive"),
-            ),
-            BlobReadAdmission::TurnByteBudgetExceeded
-        );
-    }
-
-    #[test]
-    fn blob_read_turn_request_count_bound_is_rejected() {
-        assert_eq!(
-            blob_read_charge_admission(
-                MAX_BLOB_READ_REQUESTS_PER_TURN,
-                0,
-                NonZeroU64::new(1).expect("one is positive"),
-            ),
-            BlobReadAdmission::TurnReadCountExceeded
-        );
     }
 }
 

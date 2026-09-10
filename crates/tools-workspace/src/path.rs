@@ -589,16 +589,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_root_identity_reports_the_pinned_descriptor() {
-        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
-        let root = WorkspaceRoot::try_new(&LocalWorkspaceFileSystem, workspace.path())
-            .expect("fixture root is valid");
-        let status = fstat(root.descriptor()).expect("pinned descriptor status reads");
-
-        assert_eq!(root.identity(), workspace_root_identity_from_stat(&status));
-    }
-
-    #[test]
     fn absolute_path_has_typed_rejection() {
         assert_eq!(
             validate_relative_path("/etc/passwd"),

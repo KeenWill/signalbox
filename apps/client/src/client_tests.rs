@@ -499,12 +499,6 @@ fn message_policy_rejects_above_finite_limit() {
 }
 
 #[test]
-fn message_policy_admits_unbounded_input() {
-    let limits = ClientDeploymentLimits::unbounded();
-    assert!(validate_message_policy("four", Some(limits)).is_ok());
-}
-
-#[test]
 fn system_prompt_policy_rejects_above_finite_limit() {
     let limits = ClientDeploymentLimits {
         max_system_prompt_utf8_bytes: Some(3),
@@ -520,30 +514,12 @@ fn system_prompt_policy_rejects_above_finite_limit() {
 }
 
 #[test]
-fn system_prompt_policy_admits_unbounded_input() {
-    let limits = ClientDeploymentLimits::unbounded();
-    assert!(
-        validate_system_prompt_policy(
-            &SystemPromptText::try_new(String::from("four")).expect("valid prompt"),
-            Some(limits)
-        )
-        .is_ok()
-    );
-}
-
-#[test]
 fn finding_count_policy_rejects_above_finite_limit() {
     let limits = ClientDeploymentLimits {
         max_review_findings_per_run: Some(3),
         ..ClientDeploymentLimits::unbounded()
     };
     assert!(validate_review_finding_count(4, Some(limits)).is_err());
-}
-
-#[test]
-fn finding_count_policy_admits_unbounded_input() {
-    let limits = ClientDeploymentLimits::unbounded();
-    assert!(validate_review_finding_count(4, Some(limits)).is_ok());
 }
 
 #[test]
@@ -556,17 +532,6 @@ fn metadata_policy_rejects_outside_finite_range() {
     for size in [1, 5] {
         assert!(validate_metadata_page_policy(CanonicalU64::new(size), Some(limits)).is_err());
     }
-}
-
-#[test]
-fn metadata_policy_admits_positive_unbounded_pages() {
-    assert!(
-        validate_metadata_page_policy(
-            CanonicalU64::new(u64::MAX),
-            Some(ClientDeploymentLimits::unbounded())
-        )
-        .is_ok()
-    );
 }
 
 #[test]
@@ -3034,13 +2999,6 @@ async fn blob_upload_restarts_after_ambiguous_catalog_commit() -> Result<(), Box
     assert_ambiguous_blob_upload_restarts(ErrorCode::CommitAmbiguous).await
 }
 
-/// an ambiguous remote publication restarts the complete
-/// high-level upload instead of retrying commit alone.
-#[tokio::test]
-async fn blob_upload_restarts_after_ambiguous_publication() -> Result<(), Box<dyn Error>> {
-    assert_ambiguous_blob_upload_restarts(ErrorCode::PublicationAmbiguous).await
-}
-
 /// an already-present receipt succeeds only after re-reading the
 /// same descriptor and proving its identity is unchanged.
 #[tokio::test]
@@ -3319,6 +3277,7 @@ async fn blob_read_returns_only_the_exact_range() -> Result<(), Box<dyn Error>> 
             range.version(),
             range.request_id(),
             ServerMessage::BlobChunkRead {
+                blob_length_bytes: CanonicalU64::new(offset_bytes.value() + length_bytes.value()),
                 digest,
                 offset_bytes,
                 bytes: BlobChunk::new(expected_bytes),

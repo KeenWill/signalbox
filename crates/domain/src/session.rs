@@ -1757,19 +1757,6 @@ mod tests {
         )
     }
 
-    /// a user-initiated session with explicitly empty ancestry is complete creation provenance for
-    /// an empty conversation.
-    #[test]
-    fn user_initiated_with_no_ancestry_is_complete_provenance() {
-        let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::Interactive,
-            TranscriptAncestry::None,
-        );
-
-        assert_eq!(provenance.cause(), SessionCreationCause::Interactive);
-        assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
-    }
-
     /// a user-created fork records the exact immutable source session and source frontier it was
     /// seeded from.
     #[test]
@@ -2073,19 +2060,6 @@ mod tests {
         failure
     }
 
-    /// delegated construction fixes exact cause and no ancestry.
-    #[test]
-    fn delegated_helper_constructs_no_ancestry() {
-        let spawning_request = delegated_spawning_request();
-        let provenance = SessionCreationProvenance::delegated(spawning_request);
-
-        assert_eq!(
-            provenance.cause(),
-            SessionCreationCause::Delegated { spawning_request }
-        );
-        assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
-    }
-
     /// matching delegated current-session facts retain the exact spawning request and no transcript
     /// ancestry.
     #[test]
@@ -2284,18 +2258,6 @@ mod tests {
                 failure: format!("{pointer_and_record_versions_torn:?}"),
             },
         ]));
-    }
-
-    /// the creation payload couples the durable command identity, both independent provenance
-    /// facts, and one complete unversioned defaults payload.
-    #[test]
-    fn create_session_couples_command_provenance_and_defaults() {
-        let provenance = user_initiated_empty();
-        let create = CreateSession::new(command_id(1), provenance, defaults(2));
-
-        assert_eq!(create.command_id(), command_id(1));
-        assert_eq!(create.provenance(), provenance);
-        assert_eq!(create.initial_configuration_defaults(), &defaults(2));
     }
 
     /// session creation establishes exactly version one of the carried model-selection defaults

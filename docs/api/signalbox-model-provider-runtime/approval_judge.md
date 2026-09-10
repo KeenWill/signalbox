@@ -147,16 +147,34 @@ pub enum ApprovalJudgeModelError {
     AuthorizationMismatch,
     PreparationCorrelationMismatch,
     CorrelationMismatch(signalbox_model_runtime::TokenUsage),
-    Refused(signalbox_model_runtime::TokenUsage),
-    ProviderError(signalbox_model_runtime::TokenUsage),
-    CancellationConfirmed,
+    Refused(
+        signalbox_model_runtime::TokenUsage,
+        option::Option<signalbox_model_runtime::ProviderReportedModel>,
+    ),
+    ProviderError(
+        signalbox_model_runtime::TokenUsage,
+        option::Option<signalbox_model_runtime::ProviderReportedModel>,
+    ),
+    CancellationConfirmed(option::Option<signalbox_model_runtime::ProviderReportedModel>),
     ProvenUnsent,
-    BoundaryLoss(signalbox_model_runtime::TokenUsage),
-    ProviderTargetSubstituted(signalbox_model_runtime::TokenUsage),
-    IncompleteDecision(signalbox_model_runtime::TokenUsage),
-    InvalidDecision(signalbox_model_runtime::TokenUsage),
+    BoundaryLoss(
+        signalbox_model_runtime::TokenUsage,
+        option::Option<signalbox_model_runtime::ProviderReportedModel>,
+    ),
+    ProviderTargetSubstituted(
+        signalbox_model_runtime::TokenUsage,
+        option::Option<signalbox_model_runtime::ProviderReportedModel>,
+    ),
+    IncompleteDecision(
+        signalbox_model_runtime::TokenUsage,
+        option::Option<signalbox_model_runtime::ProviderReportedModel>,
+    ),
+    InvalidDecision(
+        signalbox_model_runtime::TokenUsage,
+        option::Option<signalbox_model_runtime::ProviderReportedModel>,
+    ),
 }
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ApprovalJudgeModelError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -164,6 +182,8 @@ impl error::Error for ApprovalJudgeModelError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl ApprovalJudgeModelError {
-    pub const fn usage(self) -> signalbox_model_runtime::TokenUsage;
+    pub fn reported_model(&self)
+        -> option::Option<&signalbox_model_runtime::ProviderReportedModel>;
+    pub const fn usage(&self) -> signalbox_model_runtime::TokenUsage;
 }
 ```

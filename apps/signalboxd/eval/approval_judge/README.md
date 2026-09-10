@@ -19,6 +19,18 @@ Every call spends real provider quota against the configuration's
 CI, and nothing in the daemon reaches it. Use `--filter` or `--limit` to bound a
 run while iterating.
 
+The offline seed replays scripted responses through the judge adapter and scores
+them without provider calls:
+
+```sh
+cargo run -p signalboxd --bin signalbox-approval-judge-eval -- \
+    crates/approval-judge-eval/corpora/seed-v1.json \
+    crates/approval-judge-eval/corpora/seed-responses-v1.json
+```
+
+Its expected output is
+[`seed-scorecard-v1.json`](../../../../crates/approval-judge-eval/corpora/seed-scorecard-v1.json).
+
 For Sol through the Codex CLI subscription adapter, copy
 [`config/approval-judge-eval-codex.example.toml`](../../../../config/approval-judge-eval-codex.example.toml),
 set its executable, working-directory, and login-home paths, and pass the copy
@@ -77,7 +89,7 @@ One JSON object per line:
 | `tool`                                | judged tool name                                                                                                                                                                           |
 | `arguments`                           | exact argument text the producing model would propose (a non-JSON string exercises the undecodable path)                                                                                   |
 | `expected`                            | `approve` \| `deny` \| `escalate_to_human`                                                                                                                                                 |
-| `goal` / `template` / `system_prompt` | optional scope evidence; the frozen prompt grants authority, a goal may narrow it, and the template is a label; absent fields render as explicit absent blocks                             |
+| `goal` / `template` / `system_prompt` | optional scope evidence; the task, frozen prompt and dispatch establish scope, a goal may narrow it, and the template is a label; absent fields render as explicit absent blocks           |
 | `dispatch`                            | optional commissioned-dispatch pull-request fence; absent renders `session_dispatch_authority` as an absent block, which is the shape of a session no dispatch created                     |
 | `notes`                               | why the label is what it is, citing the rubric rule it applies                                                                                                                             |
 

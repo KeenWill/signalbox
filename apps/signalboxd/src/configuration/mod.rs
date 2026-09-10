@@ -30,10 +30,10 @@ use credential_files::{absolute_search_entries, credential_bytes};
 pub use error::{HubModelConfigurationError, UnknownSessionModel};
 pub(crate) use model_routing::ModelCallInputUsage;
 pub use model_routing::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, AvailabilityCause, BillingKind,
-    CLAUDE_CLI_CREDENTIAL_REFERENCE, CODEX_CLI_CREDENTIAL_REFERENCE, ClaudeCliConfiguration,
-    CodexCliConfiguration, DerivedModelCallCost, ModelAdapter, ModelBillingRates,
-    OPENAI_CREDENTIAL_REFERENCE, ResolvedModelRoute,
+    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, CLAUDE_CLI_CREDENTIAL_REFERENCE,
+    CODEX_CLI_CREDENTIAL_REFERENCE, ClaudeCliConfiguration, CodexCliConfiguration,
+    DerivedModelCallCost, ModelAdapter, ModelBillingRates, OPENAI_CREDENTIAL_REFERENCE,
+    ResolvedModelRoute,
 };
 use model_routing::{
     AdapterMapping, MIGRATED_ANTHROPIC_MODEL_FAMILY, runtime_pool_action, runtime_pool_exhaustion,
@@ -150,10 +150,12 @@ pub struct HubModelConfiguration {
     web_fetch_egress_policy: WebFetchEgressPolicy,
     daemon_tools: Option<DaemonToolConfiguration>,
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
+    approval_wait_timeout: Option<std::time::Duration>,
     approval_judge_selection: Option<DirectModelSelection>,
     convergence: Option<signalbox_convergence::ConvergencePolicy>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
+    file_media: bool,
     workspace_instructions: WorkspaceInstructionConfiguration,
 }
 
@@ -191,11 +193,13 @@ impl HubModelConfiguration {
             compaction_prompt,
             conversation_import_max_source_bytes,
             blob_storage,
+            file_media,
             web_fetch_egress_policy,
             daemon_tools,
             credential_profiles,
             credential_pools,
             tool_approval_postures,
+            approval_wait_timeout,
             approval_judge_selection,
             convergence,
             workspace_instructions,
@@ -544,6 +548,48 @@ impl HubModelConfiguration {
             &target_adapters,
             &selectable_targets,
         )?;
+        let runtime_model_capabilities = RuntimeModelCapabilityCatalog::try_from_definitions(
+            runtime_model_capabilities.iter().map(|definition| {
+                let adapter = target_provider_models
+                    .iter()
+                    .find_map(|(target, provider)| {
+                        (provider == definition.target().as_str())
+                            .then(|| target_adapters.get(target))
+                            .flatten()
+                    });
+                let image = adapter
+                    .and_then(|adapter| match adapter {
+                        ModelAdapter::CodexCli => {
+                            Some(signalbox_model_runtime_codex_cli::image_presentation_capability())
+                        }
+                        ModelAdapter::ClaudeCli => Some(
+                            signalbox_model_runtime_claude_cli::image_presentation_capability(),
+                        ),
+                        _ => None,
+                    })
+                    .map(|capability| {
+                        capability.limited_by(
+                            numeric_bounds
+                                .integer("max_image_presentation_bytes")
+                                .flatten()
+                                .unwrap_or(u64::MAX),
+                            numeric_bounds
+                                .integer("max_image_request_bytes")
+                                .flatten()
+                                .and_then(|bound| usize::try_from(bound).ok())
+                                .unwrap_or(usize::MAX),
+                        )
+                    });
+                signalbox_model_runtime::ModelCapabilityDefinition::new(
+                    definition.target().clone(),
+                    definition
+                        .capabilities()
+                        .clone()
+                        .with_image_presentation(image),
+                )
+            }),
+        )
+        .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         let mut tool_continuation_usage_limits = Vec::with_capacity(routes.len().saturating_mul(2));
@@ -613,10 +659,12 @@ impl HubModelConfiguration {
             web_fetch_egress_policy,
             daemon_tools,
             tool_approval_postures,
+            approval_wait_timeout,
             approval_judge_selection,
             convergence,
             repository_watch,
             blob_storage,
+            file_media,
             workspace_instructions,
         })
     }
@@ -1139,6 +1187,11 @@ impl HubModelConfiguration {
         self.conversation_import_max_source_bytes
     }
 
+    /// Whether the compiled sandboxed file tools are enabled at startup.
+    pub const fn file_media(&self) -> bool {
+        self.file_media
+    }
+
     /// Returns the validated blob-store registry and write routes, when enabled.
     pub const fn blob_storage(&self) -> Option<&BlobStorageConfiguration> {
         self.blob_storage.as_ref()
@@ -1165,6 +1218,11 @@ impl HubModelConfiguration {
     /// call to supply the default when configuration omits the table.
     pub const fn configured_approval_judge_selection(&self) -> Option<DirectModelSelection> {
         self.approval_judge_selection
+    }
+
+    /// Returns the human approval deadline duration; `None` disables expiry.
+    pub const fn approval_wait_timeout(&self) -> Option<std::time::Duration> {
+        self.approval_wait_timeout
     }
 
     /// Returns explicitly configured daemon tool dependencies, when present.

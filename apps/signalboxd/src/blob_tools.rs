@@ -36,9 +36,9 @@ const INVALID_ARGUMENTS: &str = "expected exact canonical blob-read arguments";
 /// preauthorization charges, so the selection stays named at every call site.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BlobToolMode {
-    /// `blob_metadata`: one digest, visibility admission, no byte charge.
+    /// `blob_metadata`: one digest with visibility admission.
     Metadata,
-    /// `blob_read`: digest plus a bounded canonical range, charged by bytes.
+    /// `blob_read`: a visible digest plus a bounded canonical range.
     Read,
 }
 
@@ -71,8 +71,7 @@ struct ReadContract;
 impl ToolContract for ReadContract {
     type Arguments = ReadArguments;
     const NAME: &'static str = BLOB_READ_NAME;
-    const DESCRIPTION: &'static str =
-        "Reads one authorized attached-blob byte range as canonical padded base64.";
+    const DESCRIPTION: &'static str = "Reads up to 512 KiB from an attached blob as base64. Returns a short tail across EOF, or empty bytes at or beyond EOF, with the blob length.";
 }
 
 #[derive(Clone, Debug)]
@@ -262,7 +261,9 @@ impl ToolExecutor for BlobToolExecutor {
                         let registry =
                             self.registry.as_deref().ok_or(BlobReadError::Unavailable)?;
                         let entry = read_blob_entry(&self.repository, digest).await?;
-                        read_blob_chunk(registry, &entry, offset, length).await
+                        read_blob_chunk(registry, &entry, offset, length)
+                            .await
+                            .map(|bytes| (bytes, entry.expected().byte_length()))
                     })
                     .await;
                     drop(permit);
@@ -271,7 +272,8 @@ impl ToolExecutor for BlobToolExecutor {
                 .await
                 .unwrap_or(Err(BlobReadError::Unavailable));
                 match traversal {
-                    Ok(bytes) => completed(&ReadResult {
+                    Ok((bytes, blob_length)) => completed(&ReadResult {
+                        blob_length_bytes: blob_length.to_string(),
                         digest: digest.to_string(),
                         offset_bytes: offset.to_string(),
                         bytes_base64: STANDARD.encode(bytes),
@@ -344,6 +346,7 @@ struct MetadataResult {
 
 #[derive(Serialize)]
 struct ReadResult {
+    blob_length_bytes: String,
     digest: String,
     offset_bytes: String,
     bytes_base64: String,
@@ -358,7 +361,7 @@ fn completed(value: &impl Serialize) -> Result<ToolExecutorEvidence, BlobToolExe
 fn failed(error: BlobReadError) -> Result<ToolExecutorEvidence, BlobToolExecutorError> {
     let detail = match error {
         BlobReadError::NotFound => "blob_not_found",
-        BlobReadError::RangeOutOfBounds { .. } => "range_out_of_bounds",
+        BlobReadError::RangeOutOfBounds => "range_out_of_bounds",
         BlobReadError::Missing => "blob_missing",
         BlobReadError::Corrupt => "blob_corrupt",
         BlobReadError::Unavailable => "blob_unavailable",
@@ -395,6 +398,7 @@ mod tests {
     /// Unwraps completed text evidence so a test body needs no match arm.
     fn completed_text(evidence: ToolExecutorEvidence) -> Result<String, Box<dyn Error>> {
         match evidence {
+            ToolExecutorEvidence::CompletedMedia { .. } => panic!("expected a text result"),
             ToolExecutorEvidence::CompletedText(result) => Ok(result),
             ToolExecutorEvidence::KnownFailed { .. } | ToolExecutorEvidence::Ambiguous => Err(
                 Box::<dyn Error>::from(String::from("the result helper emits completed text")),
@@ -403,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn blob_read_validator_derives_the_exact_bounded_charge() {
+    fn blob_read_validator_derives_the_exact_bounded_page() {
         let digest = BlobDigest::digest(b"attached bytes");
         let validator = BlobValidator {
             mode: BlobToolMode::Read,
@@ -457,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn blob_metadata_validator_derives_visibility_admission_without_a_byte_charge() {
+    fn blob_metadata_validator_derives_visibility_admission() {
         let digest = BlobDigest::digest(b"attached bytes");
         let validator = BlobValidator {
             mode: BlobToolMode::Metadata,
@@ -514,6 +518,7 @@ mod tests {
     fn maximum_blob_read_result_fits_the_existing_text_result_cap() -> Result<(), Box<dyn Error>> {
         let digest = BlobDigest::digest(b"attached bytes");
         let result = completed_text(completed(&ReadResult {
+            blob_length_bytes: MAX_BLOB_READ_TOOL_BYTES.to_string(),
             digest: digest.to_string(),
             offset_bytes: String::from("0"),
             bytes_base64: STANDARD.encode(vec![0_u8; MAX_BLOB_READ_TOOL_BYTES as usize]),

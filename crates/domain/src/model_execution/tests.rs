@@ -590,6 +590,7 @@ fn correlated_observation(
         retry_after: None,
         non_acceptance_proven: false,
         rate_limits: None,
+        credential_recovery: None,
     }
 }
 
