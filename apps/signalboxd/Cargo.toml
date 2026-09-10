@@ -17,6 +17,7 @@ test-support = [
 ]
 
 [dependencies]
+signalbox-file-media-adapter-pdf = { path = "../../crates/file-media-adapter-pdf" }
 signalbox-file-media-runtime = { path = "../../crates/file-media-runtime" }
 signalbox-file-media-processor-runtime = { path = "../../crates/file-media-processor-runtime" }
 signalbox-file-media-provider-runtime = { path = "../../crates/file-media-provider-runtime" }
