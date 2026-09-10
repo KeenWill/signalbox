@@ -1129,11 +1129,20 @@ fn continuation_reconstitutes_exact_frontier_and_pin() {
             .failure(),
         ModelCallExecutionReconstitutionFailure::LifecycleMismatch
     );
-    prepared_denial
+    let released_wait = prepared_denial
         .clone()
         .with_availability_successor()
         .reconstitute()
-        .expect("a released credential wait retains its completed denial frontier");
+        .expect("a durable wait release admits its retained resolved tool frontier");
+    assert_eq!(released_wait.admission_snapshot(), &continuation);
+    assert_eq!(
+        released_wait
+            .prepare_initial_call(model_call_id(39))
+            .expect("the released tool frontier admits a continuation call")
+            .call()
+            .frontier(),
+        continuation.frontier(),
+    );
     let prepared_denial =
         prepared_denial.with_uncommitted_tool_result_projection(projection.clone());
     let prepared_denial_call = prepared_denial

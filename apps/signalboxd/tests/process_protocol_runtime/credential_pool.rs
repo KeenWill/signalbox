@@ -478,3 +478,175 @@ async fn pool_projection_terminal_wait_release_correlates_the_predecessor_over_t
     );
     runtime.stop().await
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn capacity_reconciliation_observes_an_external_reset_while_the_model_is_parked()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::ReconciliationSweepInterval;
+    use signalbox_domain::{ProviderRateLimitSnapshot, ProviderRateLimitWindow};
+    use signalbox_persistence::credential_capacity::retain_credential_capacity_probe;
+    use signalbox_persistence::model_execution::{
+        CredentialPoolRuntimeAction, CredentialPoolRuntimeExhaustion, CredentialPoolRuntimeMember,
+        CredentialPoolRuntimePolicy, CredentialPoolRuntimeTieBreak,
+    };
+    use signalboxd::credential_invocations::CodexCapacityRefresh;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, SystemTime};
+    const PROFILE: &str = "capacity-home";
+    let runtime = RunningRuntime::start().await?;
+    let fixture = tempfile::tempdir()?;
+    let executable = fixture.path().join("capacity-peer");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\nread -r initialize\nprintf '%s\\n' '{\"id\":1,\"result\":{}}'\nread -r initialized\nread -r capacity_read\ncat capacity-response\ncat > unexpected-input\n",
+    )?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+    let initial = SystemTime::now();
+    let deadline = initial + Duration::from_secs(604800);
+    let resets_at = deadline.duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+    let response = fixture.path().join("capacity-response");
+    std::fs::write(
+        &response,
+        serde_json::json!({"id":2,"result":{"rateLimits":{"secondary":{"usedPercent":100,"resetsAt":resets_at}}}}).to_string() + "\n",
+    )?;
+    let configuration = support::parse_model_configuration(&format!(
+        r#"{MODEL_CONFIGURATION}
+[[credential_profiles]]
+name = "{PROFILE}"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "codex_home"
+codex_home = {home:?}
+[codex_cli]
+executable = {executable:?}
+working_directory = {home:?}
+"#,
+        home = fixture.path().to_str().expect("test path"),
+        executable = executable.to_str().expect("test path"),
+    ))?;
+    let pools = configuration
+        .credential_pool_runtime_catalog()
+        .into_keys()
+        .map(|target| {
+            (
+                target,
+                CredentialPoolRuntimePolicy::new(
+                    String::from("capacity-pool"),
+                    vec![CredentialPoolRuntimeMember::new(
+                        PROFILE.to_owned(),
+                        std::num::NonZeroU32::new(1).expect("positive priority"),
+                    )],
+                    CredentialPoolRuntimeExhaustion::Park,
+                    CredentialPoolRuntimeAction::Stay,
+                    CredentialPoolRuntimeAction::Stay,
+                    CredentialPoolRuntimeAction::Stay,
+                    CredentialPoolRuntimeAction::Stay,
+                )
+                .with_capacity_policy(
+                    CredentialPoolRuntimeTieBreak::LeastUsed,
+                    Some(0),
+                    CredentialPoolRuntimeAction::Stay,
+                ),
+            )
+        })
+        .collect();
+    let repository = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("unused-fallback"),
+    )
+    .with_credential_pools(pools);
+    retain_credential_capacity_probe(
+        &runtime.pool,
+        PROFILE,
+        &ProviderRateLimitSnapshot::new(
+            initial,
+            vec![ProviderRateLimitWindow::new(0, None, Some(deadline))],
+        ),
+    )
+    .await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("await reset")).await?;
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    activate_turn(&runtime.pool, session).await?;
+    let PrepareInitialModelCallOutcome::CredentialWait(wait) =
+        prepare_projection_admission(&repository, session).await?
+    else {
+        panic!("zero capacity parks")
+    };
+    let refresh = CodexCapacityRefresh::new(
+        runtime.pool.clone(),
+        &configuration,
+        Some(ReconciliationSweepInterval::try_new(
+            Duration::from_millis(10),
+        )?),
+        Duration::from_secs(5),
+    )?
+    .expect("configured Codex observer");
+    let (shutdown, receiver) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(async move { refresh.run(receiver).await });
+    wait_for_capacity_observation(&runtime.pool, PROFILE, initial, 0).await?;
+    assert!(
+        matches!(
+            prepare_projection_admission(&repository, session).await?,
+            PrepareInitialModelCallOutcome::CredentialWait(_)
+        ),
+        "an unchanged exhausted observation cannot release the wait"
+    );
+    let reset = SystemTime::now();
+    let replacement = fixture.path().join("reset-response");
+    std::fs::write(
+        &replacement,
+        serde_json::json!({"id":2,"result":{"rateLimits":{"secondary":{"usedPercent":0,"resetsAt":resets_at}}}}).to_string() + "\n",
+    )?;
+    std::fs::rename(replacement, &response)?;
+    wait_for_capacity_observation(&runtime.pool, PROFILE, reset, 100).await?;
+    shutdown.send(true)?;
+    task.await?;
+    let calls: i64 = sqlx::query_scalar("SELECT count(*) FROM model_call WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .fetch_one(&runtime.pool)
+        .await?;
+    assert_eq!(
+        calls, 0,
+        "periodic capacity reconciliation never dispatches a model"
+    );
+    let eligible: bool = sqlx::query_scalar("SELECT credential_wait_is_eligible($1)")
+        .bind(wait.attempt().into_uuid())
+        .fetch_one(&runtime.pool)
+        .await?;
+    assert!(eligible);
+    assert!(matches!(
+        prepare_projection_admission(&repository, session).await?,
+        PrepareInitialModelCallOutcome::Checkpointed(_)
+    ));
+    runtime.stop().await?;
+    Ok(())
+}
+
+async fn wait_for_capacity_observation(
+    pool: &sqlx::PgPool,
+    profile: &str,
+    after: std::time::SystemTime,
+    percent: i64,
+) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let snapshot = signalbox_persistence::credential_capacity::load_credential_rate_limits(
+                &mut *pool.acquire().await?,
+                profile,
+            )
+            .await?;
+            if snapshot.is_some_and(|snapshot| {
+                *snapshot.observed_at() > after
+                    && *snapshot.windows()[0].remaining_percent() == percent
+            }) {
+                return Ok::<_, Box<dyn Error>>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await?
+}
