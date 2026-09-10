@@ -2700,8 +2700,8 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn undecodable_event_is_quarantined_and_next_event_is_evaluated()
--> Result<(), Box<dyn Error>> {
+async fn undecodable_event_is_quarantined_and_next_event_is_evaluated() -> Result<(), Box<dyn Error>>
+{
     let (_container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
