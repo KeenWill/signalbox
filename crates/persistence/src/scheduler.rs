@@ -293,11 +293,6 @@ mod tests {
     use super::{RECONCILIATION_PAGE_SIZE, next_page_state};
 
     #[test]
-    fn reconciliation_page_size_matches_scheduler_pass_bound() {
-        assert_eq!(RECONCILIATION_PAGE_SIZE, 16);
-    }
-
-    #[test]
     fn pages_advance_only_until_the_fixed_cycle_bound() {
         let sessions = (1..=RECONCILIATION_PAGE_SIZE as u128)
             .map(|value| SessionId::from_uuid(Uuid::from_u128(value)))

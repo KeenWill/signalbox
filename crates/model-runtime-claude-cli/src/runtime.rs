@@ -377,6 +377,7 @@ impl ClaudeCliRuntime {
     ) -> PreparationOutcome<C, ClaudeCliPreparedRequest<C>> {
         let correlation = operation.correlation;
         let mut operation = ModelOperation {
+            image_presentation: operation.image_presentation,
             correlation: (),
             credential_reference: operation.credential_reference,
             requested_target: operation.requested_target,
@@ -815,6 +816,9 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg("--model")
         .arg(&prepared.resolved_target)
         .current_dir(&prepared.working_directory);
+    if prepared.translated.input_format == crate::image::InputFormat::StreamJson {
+        command.arg("--input-format=stream-json");
+    }
     if let Some(effort) = prepared.reasoning_effort {
         command.arg("--effort").arg(effort);
     }

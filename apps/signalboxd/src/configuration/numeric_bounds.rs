@@ -25,6 +25,8 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
     ("guard_recovery_initial_delay", NumericBoundKind::Duration),
     ("guard_recovery_maximum_delay", NumericBoundKind::Duration),
     ("guard_recovery_elapsed_bound", NumericBoundKind::Duration),
+    ("max_image_presentation_bytes", NumericBoundKind::Integer),
+    ("max_image_request_bytes", NumericBoundKind::Integer),
     ("client_frame_deadline", NumericBoundKind::Duration),
     ("client_write_progress_deadline", NumericBoundKind::Duration),
     (

@@ -343,6 +343,7 @@ async fn streamed_protocol_violation_parks_then_reconciles() -> Result<(), Box<d
     )
     .await?;
     let script = Script::delivering(TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+        response_content_observed: true,
         cause: LossCause::StreamProtocolViolation {
             detail: String::from("thinking block carries more than one signature"),
         },

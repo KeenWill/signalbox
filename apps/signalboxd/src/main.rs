@@ -1569,13 +1569,15 @@ async fn run_hub_incarnation(
     let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
     let automatic_tool_round_limit = configured_usize("max_automatic_tool_rounds_per_turn")?;
     let same_credential_attempt_bound = configured_usize("max_same_credential_attempts_per_turn")?
-        .and_then(NonZeroUsize::new)
-        .ok_or_else(|| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("invalid_same_credential_attempt_bound"),
-            )
-        })?;
+        .map(|bound| {
+            NonZeroUsize::new(bound).ok_or_else(|| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("invalid_same_credential_attempt_bound"),
+                )
+            })
+        })
+        .transpose()?;
     let post_kill_reap_bound = configured_duration("post_kill_reap_bound");
     let native_message_limit = configured_usize("max_native_message_bytes")?;
     let code_host_numeric_bounds = CodeHostNumericBounds::new(
@@ -2058,7 +2060,7 @@ async fn run_hub_incarnation(
                         ));
                     }
                 };
-                Some(executor)
+                Some(executor.with_model_configuration(&model_configuration))
             }
             GuardedAwait::GuardLost => {
                 disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
@@ -2416,7 +2418,9 @@ async fn run_hub_incarnation(
     let pass_blobs = blob_store_registry.clone();
     let compose_pass = move |model_configuration: &HubModelConfiguration| {
         let runtime_models = model_configuration.runtime_model_catalog();
-        let runtime = runtime_factory.build(model_configuration)?;
+        let runtime = runtime_factory
+            .build(model_configuration)?
+            .with_media_preparation(pass_pool.clone(), pass_blobs.clone());
         let compaction: Arc<dyn ContextCompactionModel> = Arc::new(
             RuntimeContextCompactionModel::new(runtime.clone(), runtime_models.clone()),
         );

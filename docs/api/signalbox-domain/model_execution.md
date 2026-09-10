@@ -481,6 +481,11 @@ pub enum ProviderModelCallFailureCause {
 pub struct CorrelatedModelCallTerminalObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl CorrelatedModelCallTerminalObservation {
+    pub fn with_credential_recovery(
+        self,
+        recovery: option::Option<CredentialRejectionRecovery>,
+    ) -> Self;
+    pub const fn credential_recovery(&self) -> option::Option<CredentialRejectionRecovery>;
     pub fn with_rate_limits(self, snapshot: option::Option<ProviderRateLimitSnapshot>) -> Self;
     pub fn rate_limits(&self) -> option::Option<&ProviderRateLimitSnapshot>;
     pub const fn call(&self) -> ModelCallId;
@@ -491,6 +496,16 @@ impl CorrelatedModelCallTerminalObservation {
     pub const fn retry_after(&self) -> option::Option<time::Duration>;
     pub const fn non_acceptance_proven(&self) -> bool;
 }
+```
+
+## CredentialRejectionRecovery
+
+```rust
+pub enum CredentialRejectionRecovery {
+    Refreshed,
+    Unavailable,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## ModelCallTerminalObservation
