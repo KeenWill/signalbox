@@ -5252,16 +5252,8 @@ async fn completed_cancellation_requires_closed_tool_round() -> Result<(), Box<d
         .await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
 
-    assert!(matches!(
-        OutboxDispatcher::new(pool.clone())
-            .dispatch_next(|_| {
-                panic!("a completed cancellation without its closed tool round must not dispatch")
-            })
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidTerminalEventCorrelation
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
+        .await?;
 
     pool.close().await;
     drop(container);

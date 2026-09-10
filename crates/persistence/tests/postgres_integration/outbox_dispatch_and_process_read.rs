@@ -982,7 +982,7 @@ async fn dispatcher_validates_the_allocator_at_exhaustion() -> Result<(), Box<dy
 /// they all describe the event's exact turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn dispatcher_rejects_crosswired_terminal_correlations() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_quarantines_crosswired_terminal_correlations() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = Uuid::from_u128(0x7e1);
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -1121,15 +1121,8 @@ async fn dispatcher_rejects_crosswired_terminal_correlations() -> Result<(), Box
     .execute(&pool)
     .await?;
 
-    let dispatcher = OutboxDispatcher::new(pool.clone());
-    assert!(matches!(
-        dispatcher
-            .dispatch_next(|_| panic!("a cross-wired terminal event must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidTerminalEventCorrelation
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
+        .await?;
 
     pool.close().await;
     drop(container);
@@ -1766,14 +1759,8 @@ async fn turn_activation_dispatch_requires_authoritative_attempt() -> Result<(),
         .await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
 
-    assert!(matches!(
-        dispatcher
-            .dispatch_next(|_| panic!("cross-wired activation must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidLifecycleEventCorrelation
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidLifecycleEventCorrelation)
+        .await?;
 
     pool.close().await;
     drop(container);
@@ -1872,14 +1859,8 @@ async fn terminal_model_call_dispatch_requires_exact_disposition() -> Result<(),
         .execute(&pool)
         .await?;
 
-    assert!(matches!(
-        dispatcher
-            .dispatch_next(|_| panic!("cross-wired terminal transition must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidTerminalEventCorrelation
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
+        .await?;
 
     let authoritative: (String, Option<String>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind
@@ -1900,7 +1881,7 @@ async fn terminal_model_call_dispatch_requires_exact_disposition() -> Result<(),
 /// state.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn model_call_dispatch_rejects_an_unreached_transition() -> Result<(), Box<dyn Error>> {
+async fn model_call_dispatch_quarantines_an_unreached_transition() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0xe98, false).await?;
     let sequence = sqlx::query_scalar(
@@ -1910,7 +1891,6 @@ async fn model_call_dispatch_rejects_an_unreached_transition() -> Result<(), Box
     .fetch_one(&pool)
     .await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
-    let dispatcher = OutboxDispatcher::new(pool.clone());
     sqlx::query("ALTER TABLE model_call_transition_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -1927,14 +1907,7 @@ async fn model_call_dispatch_rejects_an_unreached_transition() -> Result<(), Box
         .execute(&pool)
         .await?;
 
-    assert!(matches!(
-        dispatcher
-            .dispatch_next(|_| panic!("an unreached transition must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidModelCallState
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidModelCallState).await?;
 
     pool.close().await;
     drop(container);
@@ -1984,14 +1957,8 @@ async fn completed_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<
     corrupt_ended_attempt_disposition(&pool, fixture.attempt, "known_failure").await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
 
-    assert!(matches!(
-        OutboxDispatcher::new(pool.clone())
-            .dispatch_next(|_| panic!("a completion with a mismatched attempt must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidTerminalEventCorrelation
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
+        .await?;
 
     pool.close().await;
     drop(container);
@@ -2032,14 +1999,8 @@ async fn refused_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dy
     corrupt_ended_attempt_disposition(&pool, fixture.attempt, "turn_completed").await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
 
-    assert!(matches!(
-        OutboxDispatcher::new(pool.clone())
-            .dispatch_next(|_| panic!("a refusal with a mismatched attempt must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidTerminalEventCorrelation
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
+        .await?;
 
     pool.close().await;
     drop(container);
@@ -2096,16 +2057,8 @@ async fn reconciliation_dispatch_requires_exact_terminal_attempt() -> Result<(),
     corrupt_ended_attempt_disposition(&pool, fixture.attempt, "cancelled").await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
 
-    assert!(matches!(
-        OutboxDispatcher::new(pool.clone())
-            .dispatch_next(|_| {
-                panic!("reconciliation with a mismatched attempt must not be offered")
-            })
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidTerminalEventCorrelation
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
+        .await?;
 
     pool.close().await;
     drop(container);
@@ -2116,7 +2069,7 @@ async fn reconciliation_dispatch_requires_exact_terminal_attempt() -> Result<(),
 /// accepting command.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn dispatcher_rejects_crosswired_accepted_content() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_quarantines_crosswired_accepted_content() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0xe72));
     let turn = TurnId::from_uuid(Uuid::from_u128(0xe73));
@@ -2144,7 +2097,6 @@ async fn dispatcher_rejects_crosswired_accepted_content() -> Result<(), Box<dyn 
     .fetch_one(&pool)
     .await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
-    let dispatcher = OutboxDispatcher::new(pool.clone());
     sqlx::query("ALTER TABLE accepted_input_content_part DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -2160,14 +2112,7 @@ async fn dispatcher_rejects_crosswired_accepted_content() -> Result<(), Box<dyn 
         .execute(&pool)
         .await?;
 
-    assert!(matches!(
-        dispatcher
-            .dispatch_next(|_| panic!("cross-wired accepted content must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::MissingTypedRecord
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::MissingTypedRecord).await?;
 
     pool.close().await;
     drop(container);
@@ -2499,7 +2444,7 @@ async fn accepted_settings_match_submit_command() -> Result<(), Box<dyn Error>> 
 /// rather than trusting only the settings event row.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn dispatcher_rejects_crosswired_turn_settings_origin() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_quarantines_crosswired_turn_settings_origin() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x3771));
     let turn = TurnId::from_uuid(Uuid::from_u128(0x3772));
@@ -2547,14 +2492,8 @@ async fn dispatcher_rejects_crosswired_turn_settings_origin() -> Result<(), Box<
         .execute(&pool)
         .await?;
 
-    assert!(matches!(
-        dispatcher
-            .dispatch_next(|_| panic!("cross-wired turn settings must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidModelSettingsEvent
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidModelSettingsEvent)
+        .await?;
 
     pool.close().await;
     drop(container);
@@ -2565,7 +2504,7 @@ async fn dispatcher_rejects_crosswired_turn_settings_origin() -> Result<(), Box<
 /// immutable defaults epochs.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn dispatcher_rejects_crosswired_defaults_settings_event() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_quarantines_crosswired_defaults_settings_event() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = record_settings_replacement(&pool, 0x3780).await?;
     let dispatcher = OutboxDispatcher::new(pool.clone());
@@ -2593,18 +2532,8 @@ async fn dispatcher_rejects_crosswired_defaults_settings_event() -> Result<(), B
         .execute(&pool)
         .await?;
 
-    let outcome = dispatcher
-        .dispatch_next(|_| panic!("cross-wired defaults settings must not be offered"))
-        .await;
-    assert!(
-        matches!(
-            outcome,
-            Err(OutboxDispatchError::Corruption(
-                OutboxCorruption::InvalidModelSettingsEvent
-            ))
-        ),
-        "unexpected dispatch outcome: {outcome:?}"
-    );
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidModelSettingsEvent)
+        .await?;
 
     pool.close().await;
     drop(container);
@@ -2615,7 +2544,7 @@ async fn dispatcher_rejects_crosswired_defaults_settings_event() -> Result<(), B
 /// replacement command.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn dispatcher_rejects_crosswired_settings_caller() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_quarantines_crosswired_settings_caller() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = record_settings_replacement(&pool, 0x3790).await?;
     let dispatcher = OutboxDispatcher::new(pool.clone());
@@ -2648,14 +2577,8 @@ async fn dispatcher_rejects_crosswired_settings_caller() -> Result<(), Box<dyn E
         .execute(&pool)
         .await?;
 
-    assert!(matches!(
-        dispatcher
-            .dispatch_next(|_| panic!("cross-wired caller settings must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidModelSettingsEvent
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidModelSettingsEvent)
+        .await?;
 
     pool.close().await;
     drop(container);
@@ -2734,14 +2657,8 @@ async fn turn_settings_authenticate_the_defaults_epoch() -> Result<(), Box<dyn E
         .execute(&pool)
         .await?;
 
-    assert!(matches!(
-        dispatcher
-            .dispatch_next(|_| panic!("cross-wired defaults provenance must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidModelSettingsEvent
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidModelSettingsEvent)
+        .await?;
     assert!(matches!(
         ProcessReadRepository::new(pool.clone())
             .read_transcript(session)
