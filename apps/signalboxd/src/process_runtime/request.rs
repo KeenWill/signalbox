@@ -556,6 +556,28 @@ where
         ClientRequest::ReadProgramRun { run_id } => {
             handle_read_program(writer, version, request_id, run_id, services).await
         }
+        ClientRequest::LaunchEvaluation {
+            run_id,
+            registration_id,
+            input,
+        } => {
+            Box::pin(super::evaluation::launch(
+                writer,
+                version,
+                request_id,
+                run_id,
+                registration_id,
+                input,
+                services,
+            ))
+            .await
+        }
+        ClientRequest::ReadEvaluationScorecard { run_id, offset } => {
+            Box::pin(super::evaluation::read(
+                writer, version, request_id, run_id, offset, services,
+            ))
+            .await
+        }
         ClientRequest::CancelProgramRun { command_id, run_id } => {
             Box::pin(async move {
                 handle_cancel_program_run(writer, version, request_id, command_id, run_id, services)
@@ -1418,20 +1440,6 @@ where
                     .await;
                 }
                 let source = source.into_bytes();
-                let source_size = u64::try_from(source.len())
-                    .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
-                let limit = services
-                    .model_configuration
-                    .conversation_import_max_source_bytes();
-                if source.len() > limit {
-                    let detail = RejectionDetail::ConversationImportSourceTooLarge {
-                        limit_bytes: wire_size(limit)?,
-                        declared_size_bytes: CanonicalU64::new(source_size),
-                        actual_size_bytes: Some(CanonicalU64::new(source_size)),
-                    };
-                    drop(source);
-                    return write_import_rejection(writer, version, request_id, detail).await;
-                }
                 let import_permit =
                     import_permit.ok_or(ProcessConnectionError::ImportBudgetClosed)?;
                 handle_import_conversation(
@@ -1439,7 +1447,7 @@ where
                     version,
                     request_id,
                     format,
-                    source,
+                    ConversationImportSource::Inline(source),
                     services.imported_conversations.clone(),
                     import_permit,
                 )
@@ -1458,9 +1466,6 @@ where
                     request_id,
                     format,
                     declared_size_bytes,
-                    services
-                        .model_configuration
-                        .conversation_import_max_source_bytes(),
                     import_permit,
                     acquired_bulk_ingest_at,
                     pending_import,
@@ -1476,9 +1481,6 @@ where
                     version,
                     request_id,
                     chunk.into_bytes(),
-                    services
-                        .model_configuration
-                        .conversation_import_max_source_bytes(),
                     pending_import,
                 )
                 .await
@@ -1491,9 +1493,6 @@ where
                     writer,
                     version,
                     request_id,
-                    services
-                        .model_configuration
-                        .conversation_import_max_source_bytes(),
                     services.imported_conversations.clone(),
                     pending_import,
                 )

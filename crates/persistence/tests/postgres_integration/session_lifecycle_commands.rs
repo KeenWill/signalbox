@@ -383,6 +383,38 @@ async fn lifecycle_stop_settles_an_awaiting_delegated_approval_turn() -> Result<
         panic!("the closure interrupt must settle the parked turn");
     };
 
+    // The provider callback arrives after closure has cancelled the exact judge call.
+    let late_usage = ProviderReportedTokenUsage::unreported().with_input_tokens(Some(1));
+    let completion = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?,
+            late_usage,
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(next_test_submit_uuid()),
+                SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                ContextFrontierId::from_uuid(next_test_submit_uuid()),
+            ),
+            |_| panic!("a cancelled judge cannot append a result"),
+        )
+        .await;
+    assert_eq!(completion?, CompleteApprovalJudgeOutcome::Cancelled);
+    approval_repository
+        .fail(
+            &prepared,
+            FailedApprovalJudgeDisposition::KnownFailed,
+            late_usage,
+        )
+        .await?;
+    let retained_usage: Option<Decimal> = sqlx::query_scalar(
+        "SELECT input_tokens FROM tool_approval_judge_model_call WHERE model_call_id = $1",
+    )
+    .bind(judge_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retained_usage, None);
+
     let approval: (String, String, Option<String>, String) = sqlx::query_as(
         "SELECT approval.decision_kind, approval.decision_source,
                 approval.denial_reason, command.issuer_kind

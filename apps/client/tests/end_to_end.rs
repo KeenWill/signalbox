@@ -839,6 +839,24 @@ const CONVERSATIONS_IMPORT_TITLE: &str = "Imported planning summary";
 /// The normalized entry count of [`CONVERSATIONS_IMPORT_SOURCE`], which is
 /// also the greatest `--through-position` a continuation may select.
 const CONVERSATIONS_IMPORT_ENTRY_COUNT: &str = "2";
+const ZERO_DROPPED_RECORD_FACTS: &str = "dropped_record_count=0 first_dropped_record_position=none";
+
+fn imported_identity_from_zero_drop_receipt(
+    output: &str,
+    prefix: &str,
+) -> Result<String, Box<dyn Error>> {
+    let identity = output
+        .trim_end()
+        .strip_prefix(prefix)
+        .and_then(|receipt| {
+            receipt
+                .strip_suffix(ZERO_DROPPED_RECORD_FACTS)
+                .map(str::trim_end)
+        })
+        .ok_or_else(|| io::Error::other("the import receipt did not carry zero-drop facts"))?;
+    Uuid::parse_str(identity)?;
+    Ok(identity.to_owned())
+}
 
 /// Imports [`CONVERSATIONS_IMPORT_SOURCE`] through the shipped import verb
 /// and returns the inserted imported-conversation identity text.
@@ -863,13 +881,7 @@ async fn import_fixture_conversation(socket: PathBuf) -> Result<String, Box<dyn 
         String::from_utf8_lossy(&imported.stderr)
     );
     let imported_output = String::from_utf8(imported.stdout)?;
-    let imported_identity = imported_output
-        .strip_prefix("inserted imported_conversation_id=")
-        .expect("the fixture import carries the inserted outcome")
-        .trim()
-        .to_owned();
-    Uuid::parse_str(&imported_identity)?;
-    Ok(imported_identity)
+    imported_identity_from_zero_drop_receipt(&imported_output, "inserted imported_conversation_id=")
 }
 
 /// The unified listing presents one origin-tagged line per conversation:
@@ -898,7 +910,7 @@ async fn terminal_client_conversations_lists_native_and_imported_rows() -> Resul
     )));
     assert!(output.contains(&format!(
         "origin=imported imported_conversation_id={imported_identity} \
-         format=claude-code-session-jsonl-v2 \
+         format=claude-code-session-jsonl-v3 \
          entry_count={CONVERSATIONS_IMPORT_ENTRY_COUNT} \
          title={CONVERSATIONS_IMPORT_TITLE}\n"
     )));
@@ -996,7 +1008,7 @@ async fn terminal_client_conversations_imported_row_feeds_continue() -> Result<(
         imported_listed,
         format!(
             "origin=imported imported_conversation_id={imported_identity} \
-             format=claude-code-session-jsonl-v2 \
+             format=claude-code-session-jsonl-v3 \
              entry_count={CONVERSATIONS_IMPORT_ENTRY_COUNT} \
              title={CONVERSATIONS_IMPORT_TITLE}\n"
         )
@@ -1094,11 +1106,10 @@ async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result
     assert!(inserted.status.success());
     assert!(inserted.stderr.is_empty());
     let inserted_output = String::from_utf8(inserted.stdout)?;
-    let inserted_identity = inserted_output
-        .strip_prefix("inserted imported_conversation_id=")
-        .expect("the first receipt carries the inserted outcome")
-        .trim();
-    Uuid::parse_str(inserted_identity)?;
+    let inserted_identity = imported_identity_from_zero_drop_receipt(
+        &inserted_output,
+        "inserted imported_conversation_id=",
+    )?;
 
     let already_imported =
         run_client(socket_directory.socket().to_owned(), arguments, None).await?;
@@ -1106,7 +1117,10 @@ async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result
     assert!(already_imported.stderr.is_empty());
     assert_eq!(
         String::from_utf8(already_imported.stdout)?,
-        format!("already_imported imported_conversation_id={inserted_identity}\n")
+        format!(
+            "already_imported imported_conversation_id={inserted_identity} \
+             {ZERO_DROPPED_RECORD_FACTS}\n"
+        )
     );
 
     shutdown.send(true)?;
@@ -1223,7 +1237,13 @@ async fn terminal_client_completes_an_offline_imported_inspection() -> Result<()
     );
     assert_eq!(
         rows.get(2).map(String::as_str),
-        Some(format!("entry_count={}", fixture.last_position()).as_str())
+        Some(
+            format!(
+                "entry_count={} {ZERO_DROPPED_RECORD_FACTS}",
+                fixture.last_position()
+            )
+            .as_str()
+        )
     );
     assert_eq!(rows.len(), fixture.listed_line_count());
 
@@ -1340,13 +1360,10 @@ async fn import_inspection_source(
         "import failed: {}",
         String::from_utf8_lossy(&imported.stderr)
     );
-    let identity = String::from_utf8(imported.stdout)?
-        .strip_prefix("inserted imported_conversation_id=")
-        .expect("the synthetic import returns an inserted receipt")
-        .trim()
-        .to_owned();
-    Uuid::parse_str(&identity)?;
-    Ok(identity)
+    imported_identity_from_zero_drop_receipt(
+        &String::from_utf8(imported.stdout)?,
+        "inserted imported_conversation_id=",
+    )
 }
 
 /// scan mode selects recursive matching regular files and reports them in deterministic path order.
@@ -1430,8 +1447,10 @@ async fn terminal_client_scan_selects_recursive_files_in_sorted_path_order()
     assert_eq!(
         inserted_output,
         format!(
-            "imported path={:?} imported_conversation_id={first_identity}\n\
-             imported path={:?} imported_conversation_id={second_identity}\n\
+            "imported path={:?} imported_conversation_id={first_identity} \
+             {ZERO_DROPPED_RECORD_FACTS}\n\
+             imported path={:?} imported_conversation_id={second_identity} \
+             {ZERO_DROPPED_RECORD_FACTS}\n\
              scan_summary imported=2 already_imported=0 skipped=0\n",
             first_path, second_path,
         )
@@ -1543,7 +1562,8 @@ async fn terminal_client_scan_replays_as_already_imported() -> Result<(), Box<dy
     assert_eq!(
         inserted_output,
         format!(
-            "imported path={:?} imported_conversation_id={imported_identity}\n\
+            "imported path={:?} imported_conversation_id={imported_identity} \
+             {ZERO_DROPPED_RECORD_FACTS}\n\
              scan_summary imported=1 already_imported=0 skipped=0\n",
             source_path,
         )
@@ -1556,7 +1576,8 @@ async fn terminal_client_scan_replays_as_already_imported() -> Result<(), Box<dy
     assert_eq!(
         String::from_utf8(replayed.stdout)?,
         format!(
-            "already_imported path={:?} imported_conversation_id={imported_identity}\n\
+            "already_imported path={:?} imported_conversation_id={imported_identity} \
+             {ZERO_DROPPED_RECORD_FACTS}\n\
              scan_summary imported=0 already_imported=1 skipped=0\n",
             source_path,
         )
@@ -1572,11 +1593,7 @@ async fn terminal_client_scan_replays_as_already_imported() -> Result<(), Box<dy
 
 fn scan_imported_identity(line: &str, path: &Path) -> Result<String, Box<dyn Error>> {
     let prefix = format!("imported path={:?} imported_conversation_id=", path);
-    let identity = line
-        .strip_prefix(&prefix)
-        .ok_or_else(|| io::Error::other("the scan outcome did not name the selected path"))?;
-    Uuid::parse_str(identity)?;
-    Ok(identity.to_owned())
+    imported_identity_from_zero_drop_receipt(line, &prefix)
 }
 
 /// the terminal model verb observes the complete current defaults facts before sending one
@@ -1830,12 +1847,10 @@ context_window_tokens = 200000
     .await??;
     assert!(imported.status.success());
     let imported_output = String::from_utf8(imported.stdout)?;
-    let imported_conversation_id = imported_output
-        .strip_prefix("inserted imported_conversation_id=")
-        .expect("the synthetic import returns an inserted receipt")
-        .trim()
-        .to_owned();
-    Uuid::parse_str(&imported_conversation_id)?;
+    let imported_conversation_id = imported_identity_from_zero_drop_receipt(
+        &imported_output,
+        "inserted imported_conversation_id=",
+    )?;
 
     let continued = timeout(
         Duration::from_secs(20),

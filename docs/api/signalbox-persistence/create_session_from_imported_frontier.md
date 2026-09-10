@@ -95,16 +95,6 @@ impl convert::From<conversation_import::ImportedConversationRepositoryError>
 pub struct ImportedSessionRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl create_session_from_imported_frontier::ImportedSessionRepository {
-    pub fn with_imported_conversations(
-        pool: sqlx_postgres::PgPool,
-        credential_pin: SessionCredentialPin,
-        imported_conversations: conversation_import::ImportedConversationRepository,
-    ) -> Self;
-    pub fn with_preloaded_conversation(
-        self,
-        conversation: signalbox_domain::ImportedConversation,
-    ) -> Self;
-    #[cfg(feature = "postgres-integration")]
     pub fn new(pool: sqlx_postgres::PgPool, credential_pin: SessionCredentialPin) -> Self;
     pub async fn handle<NextSemanticEntryId>(
         &self,
@@ -124,6 +114,16 @@ impl create_session_from_imported_frontier::ImportedSessionRepository {
         command_id: signalbox_domain::DurableCommandId,
     ) -> result::Result<
         option::Option<signalbox_domain::ReconstitutedSessionCreationFromImportedFrontier>,
+        create_session_from_imported_frontier::ImportedSessionRepositoryError,
+    >;
+    pub async fn load_applied(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+    ) -> result::Result<
+        option::Option<(
+            signalbox_domain::CreateSessionFromImportedFrontier,
+            signalbox_domain::CreateSessionFromImportedFrontierAppliedResult,
+        )>,
         create_session_from_imported_frontier::ImportedSessionRepositoryError,
     >;
 }

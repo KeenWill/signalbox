@@ -589,7 +589,7 @@ impl SessionLifecycleState {
             (
                 Self::Created | Self::Dispatched,
                 Self::Parked {
-                    cause: SessionParkCause::ModulePark,
+                    cause: SessionParkCause::ModulePark | SessionParkCause::UnknownFailure,
                     ..
                 },
             ) => true,

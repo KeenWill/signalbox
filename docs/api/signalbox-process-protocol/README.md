@@ -5,7 +5,7 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | root | 1 | 0 | 0 | [root](root.md) |
-| program | 9 | 0 | 0 | [program](program.md) |
+| program | 11 | 0 | 0 | [program](program.md) |
 | credential_pool | 2 | 0 | 2 | [credential_pool](credential_pool.md) |
 | credential_exclusions | 2 | 0 | 0 | [credential_exclusions](credential_exclusions.md) |
 | delegation | 11 | 0 | 0 | [delegation](delegation.md) |
@@ -13,7 +13,7 @@
 | event | 2 | 0 | 0 | [event](event.md) |
 | frame | 2 | 0 | 4 | [frame](frame.md) |
 | goal | 16 | 0 | 0 | [goal](goal.md) |
-| operator_status | 8 | 0 | 0 | [operator_status](operator_status.md) |
+| operator_status | 10 | 0 | 0 | [operator_status](operator_status.md) |
 | request | 2 | 0 | 0 | [request](request.md) |
 | response | 6 | 0 | 1 | [response](response.md) |
 | review | 32 | 0 | 0 | [review](review.md) |

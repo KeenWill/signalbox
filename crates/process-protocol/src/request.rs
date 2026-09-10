@@ -80,6 +80,14 @@ pub enum ClientRequest {
     },
     /// Read retained input and outcome without executing the program.
     ReadProgramRun { run_id: CanonicalUuid },
+    /// Resolve and pin evaluation input, then admit it to the workflow runner.
+    LaunchEvaluation {
+        run_id: CanonicalUuid,
+        registration_id: CanonicalUuid,
+        input: crate::EvaluationInput,
+    },
+    /// Read a frame-bounded range of the sealed JSON scorecard.
+    ReadEvaluationScorecard { run_id: CanonicalUuid, offset: u64 },
     /// Cancel a retained program run through its journal.
     CancelProgramRun {
         command_id: CommandId,
@@ -910,6 +918,8 @@ impl ClientRequest {
             | Self::RegisterProgram { .. }
             | Self::StartProgramRun { .. }
             | Self::ReadProgramRun { .. }
+            | Self::LaunchEvaluation { .. }
+            | Self::ReadEvaluationScorecard { .. }
             | Self::OverrideDeniedToolRequest { .. } => {}
         }
         match self {

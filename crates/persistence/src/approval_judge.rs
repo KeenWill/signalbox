@@ -197,9 +197,11 @@ pub enum PrepareApprovalJudgeOutcome {
     InFlightAfterRestart(Box<PreparedApprovalJudge>),
 }
 
-/// Durable effect of a successfully completed judge call.
+/// Outcome of recording an approval-judge completion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompleteApprovalJudgeOutcome {
+    /// Cancellation already committed; the late provider observation is discarded.
+    Cancelled,
     /// Approve or deny was recorded and batch progression may continue.
     Decided,
     /// The observation committed and placement loss resolved the request before dispatch.
@@ -424,6 +426,7 @@ impl PostgresApprovalJudgeRepository {
     }
 
     /// Atomically records a completed recommendation and any decision effect.
+    /// A cancelled call retains its cancellation without accepting a late observation.
     pub async fn complete<NextClosedResultEntry>(
         &self,
         prepared: &PreparedApprovalJudge,
@@ -641,6 +644,7 @@ impl PostgresApprovalJudgeRepository {
     }
 
     /// Records a failed or uncertain call while leaving the request parked.
+    /// A cancelled call retains its cancellation without accepting a late failure.
     pub async fn fail(
         &self,
         prepared: &PreparedApprovalJudge,
@@ -655,17 +659,13 @@ impl PostgresApprovalJudgeRepository {
         let encoded = encode_usage(usage);
         if state == ApprovalJudgeStateStorageKind::Terminal {
             let exact: bool = sqlx::query_scalar(
-                "SELECT (terminal_disposition_kind = $1 OR (
-                            terminal_disposition_kind = 'cancelled' AND $7
-                            AND EXISTS (SELECT 1 FROM tool_request AS request
-                                WHERE request.request_id = tool_approval_judge_model_call.request_id
-                                  AND request.inadmissible_reason = 'placement_lost')
-                        ))
+                "SELECT terminal_disposition_kind = 'cancelled' OR (
+                        terminal_disposition_kind = $1
                         AND recommendation_kind IS NULL AND rationale IS NULL
                         AND input_tokens IS NOT DISTINCT FROM $2
                         AND output_tokens IS NOT DISTINCT FROM $3
                         AND cache_creation_input_tokens IS NOT DISTINCT FROM $4
-                        AND cache_read_input_tokens IS NOT DISTINCT FROM $5
+                        AND cache_read_input_tokens IS NOT DISTINCT FROM $5)
                    FROM tool_approval_judge_model_call WHERE model_call_id = $6",
             )
             .bind(approval_judge_terminal_disposition_to_str(
@@ -676,10 +676,6 @@ impl PostgresApprovalJudgeRepository {
             .bind(encoded.cache_creation)
             .bind(encoded.cache_read)
             .bind(prepared.call.into_uuid())
-            .bind(
-                disposition == FailedApprovalJudgeDisposition::KnownFailed
-                    && usage == ProviderReportedTokenUsage::unreported(),
-            )
             .fetch_one(&mut *transaction)
             .await?;
             transaction.rollback().await?;
@@ -1639,6 +1635,13 @@ async fn exact_completed(
     .fetch_one(&mut *connection)
     .await?;
     let terminal_disposition: String = required(&row, "terminal_disposition_kind")?;
+    if approval_judge_terminal_disposition_from_str(&terminal_disposition)
+        == Some(ApprovalJudgeTerminalDispositionStorageKind::Failed(
+            FailedApprovalJudgeDisposition::Cancelled,
+        ))
+    {
+        return Ok(Some(CompleteApprovalJudgeOutcome::Cancelled));
+    }
     let stored_recommendation: String = required(&row, "recommendation_kind")?;
     let stored = approval_judge_recommendation_from_str(&stored_recommendation);
     let offered = approval_judge_recommendation_from_str(&required::<String>(

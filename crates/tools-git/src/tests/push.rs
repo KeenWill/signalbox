@@ -482,6 +482,46 @@ fn plant_push_pack_with_unrelated_objects(
     directory.join(format!("pack-{name}.pack"))
 }
 
+#[test]
+fn packed_commit_range_is_captured_before_the_preparation_deadline() {
+    use crate::tests::support::commit_with_parents;
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let mut commits = Vec::new();
+    let mut tip = fixture.initial;
+    for _ in 0..8000 {
+        tip = commit_with_parents(&repository, &[tip], "packed history");
+        commits.push(tip);
+    }
+    plant_push_pack_with_unrelated_objects(&repository, &commits, 0..0);
+    let authority = fixture.executor().repository_authority;
+    // Leave a generous minute for this bounded range, below the tool's five-minute deadline.
+    let snapshot = crate::push_objects::PushObjectSnapshot::capture_before_deadline(
+        &authority,
+        tip,
+        Some(fixture.initial),
+        Instant::now() + Duration::from_secs(60),
+    )
+    .expect("packed history captures without a growing set of per-object packs");
+    assert_eq!(
+        snapshot
+            .repository
+            .find_commit(tip)
+            .expect("captured tip")
+            .id(),
+        tip
+    );
+    assert!(
+        snapshot
+            .repository
+            .odb()
+            .expect("captured objects")
+            .exists(fixture.initial)
+    );
+}
+
 #[tokio::test]
 async fn push_range_ignores_large_history_in_the_pack_containing_its_tip() {
     const LARGE_HISTORY_BYTES: usize = 200 * 1024 * 1024;
@@ -830,6 +870,28 @@ fn commit_with_push_blob(fixture: &Fixture, blob: git2::Oid) -> git2::Oid {
                 .expect("initial commit")],
         )
         .expect("commit")
+}
+
+#[test]
+fn push_snapshot_decodes_deltas_with_a_non_utf8_temporary_directory() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt, process::Command};
+
+    let directory = tempfile::tempdir().expect("temporary directory parent");
+    let temporary = directory.path().join(OsStr::from_bytes(b"non-utf8-\xff"));
+    fs::create_dir(&temporary).expect("non-UTF-8 temporary directory");
+    let child_test = "tests::push::push_snapshot_decodes_bounded_offset_and_reference_delta_chains";
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", child_test, "--nocapture"])
+        .env("TMPDIR", &temporary)
+        .output()
+        .expect("run delta capture with the non-UTF-8 temporary directory");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let completed = format!("test {child_test} ... ok");
+    assert!(
+        output.status.success() && stdout.lines().any(|line| line == completed),
+        "the delta capture child must run and pass: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

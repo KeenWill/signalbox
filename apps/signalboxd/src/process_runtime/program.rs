@@ -265,7 +265,10 @@ async fn read_program(
     Ok(run)
 }
 
-fn program_byte_prefix(bytes: &[u8], budget: &mut usize) -> (Vec<u8>, ProgramByteExtent) {
+pub(super) fn program_byte_prefix(
+    bytes: &[u8],
+    budget: &mut usize,
+) -> (Vec<u8>, ProgramByteExtent) {
     let mut length = 0;
     for byte in bytes {
         let digits = match byte {
@@ -290,7 +293,7 @@ fn program_byte_prefix(bytes: &[u8], budget: &mut usize) -> (Vec<u8>, ProgramByt
     (bytes[..length].to_vec(), extent)
 }
 
-fn workflow_error(error: WorkflowRuntimeError) -> ProtocolError {
+pub(super) fn workflow_error(error: WorkflowRuntimeError) -> ProtocolError {
     tracing::warn!(cause = error.cause_code(), "program command failed");
     let code = match error {
         WorkflowRuntimeError::Registration(

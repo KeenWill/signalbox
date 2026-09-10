@@ -55,6 +55,7 @@ impl GuardCheckMisses {
 #[derive(Debug)]
 pub struct SingleHubGuard {
     connection: PgConnection,
+    backend_pid: i32,
     misses: GuardCheckMisses,
 }
 
@@ -66,17 +67,19 @@ impl SingleHubGuard {
             .await
             .map_err(SingleHubGuardError::AcquireConnection)?;
         let mut connection = pooled.detach();
-        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
-            .bind(SIGNALBOX_GUARD_NAMESPACE)
-            .bind(HUB_GUARD_NAMESPACE)
-            .fetch_one(&mut connection)
-            .await
-            .map_err(SingleHubGuardError::AcquireLock)?;
+        let (acquired, backend_pid): (bool, i32) =
+            sqlx::query_as("SELECT pg_try_advisory_lock($1, $2), pg_backend_pid()")
+                .bind(SIGNALBOX_GUARD_NAMESPACE)
+                .bind(HUB_GUARD_NAMESPACE)
+                .fetch_one(&mut connection)
+                .await
+                .map_err(SingleHubGuardError::AcquireLock)?;
         if !acquired {
             return Err(SingleHubGuardError::AlreadyRunning);
         }
         Ok(Self {
             connection,
+            backend_pid,
             misses: GuardCheckMisses::default(),
         })
     }
@@ -94,6 +97,38 @@ impl SingleHubGuard {
             match self.misses.record(result)? {
                 GuardCheckStatus::Healthy => return Ok(()),
                 GuardCheckStatus::Retry => sleep(GUARD_CHECK_INTERVAL).await,
+            }
+        }
+    }
+
+    pub(crate) fn monitor_construction(
+        &self,
+        pool: PgPool,
+    ) -> impl std::future::Future<Output = SingleHubGuardError> + Send + use<> {
+        let backend_pid = self.backend_pid;
+        async move {
+            let mut misses = GuardCheckMisses::default();
+            loop {
+                let evidence = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks
+                     WHERE locktype = 'advisory' AND pid = $1 AND granted
+                       AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                       AND classid = $2::int::oid AND objid = $3::int::oid AND objsubid = 2)",
+                )
+                .bind(backend_pid)
+                .bind(SIGNALBOX_GUARD_NAMESPACE)
+                .bind(HUB_GUARD_NAMESPACE)
+                .fetch_one(&pool);
+                let result = match timeout(GUARD_CHECK_TIMEOUT, evidence).await {
+                    Ok(Ok(true)) => Ok(()),
+                    Ok(Ok(false)) => return SingleHubGuardError::GuardLost(None),
+                    Ok(Err(error)) => return SingleHubGuardError::GuardLost(Some(error)),
+                    Err(_) => Err(SingleHubGuardError::GuardLost(None)),
+                };
+                if let Err(error) = misses.record(result) {
+                    return error;
+                }
+                sleep(GUARD_CHECK_INTERVAL).await;
             }
         }
     }

@@ -788,7 +788,7 @@ async fn evaluation_manifest_rejects_empty_selections_before_program_body() {
                 "credential_reference": "recorded-fixture", "provider_model": "recorded-model",
                 "contract_digest": "synthetic-contract", "cache_accounting": "input_excludes_cache"
             },
-            "postures": {}, "speculative_tools": []
+            "postures": {}, "speculative_tools": [], "recorded_responses": null
         });
         let (result, requests) = sdk_script(
             &format!(

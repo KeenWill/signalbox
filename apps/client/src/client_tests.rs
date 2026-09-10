@@ -2544,12 +2544,12 @@ fn import_transport_selects_single_shot_only_when_the_exact_frame_fits()
     let request_id = RequestId::try_new(1)?;
 
     assert!(source_fits_single_shot_import(
-        ConversationImportFormat::CodexRolloutJsonlV1,
+        ConversationImportFormat::CodexRolloutJsonlV2,
         small_source,
         request_id,
     )?);
     assert!(!source_fits_single_shot_import(
-        ConversationImportFormat::CodexRolloutJsonlV1,
+        ConversationImportFormat::CodexRolloutJsonlV2,
         &oversized_source,
         request_id,
     )?);
@@ -2612,7 +2612,7 @@ async fn large_file_import_streams_exact_bounded_assembly_and_commits() -> Resul
         assert_eq!(
             begin.request(),
             &ClientRequest::BeginConversationImport {
-                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                format: ConversationImportFormat::CodexRolloutJsonlV2,
                 declared_size_bytes: CanonicalU64::new(
                     u64::try_from(expected_source.len()).map_err(io::Error::other)?,
                 ),
@@ -2689,6 +2689,8 @@ async fn large_file_import_streams_exact_bounded_assembly_and_commits() -> Resul
             commit.request_id(),
             ServerMessage::ConversationImportInserted {
                 imported_conversation_id,
+                dropped_record_count: CanonicalU64::new(0),
+                first_dropped_record_position: None,
             },
         )
         .map_err(io::Error::other)?;
@@ -2701,14 +2703,20 @@ async fn large_file_import_streams_exact_bounded_assembly_and_commits() -> Resul
 
     let outcome = import_conversation_file(
         &mut client,
-        ConversationImportFormat::CodexRolloutJsonlV1,
+        ConversationImportFormat::CodexRolloutJsonlV2,
         source_file,
     )
     .await?;
 
     assert_eq!(
         outcome,
-        ConversationImportOutcome::Inserted(imported_conversation_id)
+        ConversationImportOutcome::Inserted(
+            imported_conversation_id,
+            crate::conversation_import::ConversationImportDropFacts {
+                dropped_record_count: CanonicalU64::new(0),
+                first_dropped_record_position: None,
+            },
+        )
     );
     server.await??;
     Ok(())
@@ -3462,6 +3470,8 @@ async fn imported_rejects_noncontiguous_positions_before_writing_rows() -> Resul
         response.extend_from_slice(
             &encode_server_line(&frame(ServerMessage::ImportedConversationStart {
                 imported_conversation_id,
+                dropped_record_count: CanonicalU64::new(0),
+                first_dropped_record_position: None,
             })?)
             .map_err(io::Error::other)?,
         );
@@ -3521,6 +3531,8 @@ async fn imported_rejects_an_empty_entry_inventory() -> Result<(), Box<dyn Error
         response.extend_from_slice(
             &encode_server_line(&frame(ServerMessage::ImportedConversationStart {
                 imported_conversation_id,
+                dropped_record_count: CanonicalU64::new(0),
+                first_dropped_record_position: None,
             })?)
             .map_err(io::Error::other)?,
         );
@@ -3595,6 +3607,8 @@ async fn continue_resolves_latest_to_a_concrete_wire_position() -> Result<(), Bo
         response.extend_from_slice(
             &encode_server_line(&frame(ServerMessage::ImportedConversationStart {
                 imported_conversation_id,
+                dropped_record_count: CanonicalU64::new(0),
+                first_dropped_record_position: None,
             })?)
             .map_err(io::Error::other)?,
         );
@@ -6166,7 +6180,8 @@ async fn program_start_sends_exact_file_bytes_and_rejects_another_registration_r
 }
 
 #[tokio::test]
-async fn operator_status_counts_and_displays_repository_ingestion() -> Result<(), Box<dyn Error>> {
+async fn operator_status_counts_and_displays_supervision_and_repository_ingestion()
+-> Result<(), Box<dyn Error>> {
     use signalbox_process_protocol::{
         OperatorStatusEndMessage, OperatorStatusMessage, OperatorStatusRepositoryIngestion,
     };
@@ -6183,6 +6198,12 @@ async fn operator_status_counts_and_displays_repository_ingestion() -> Result<()
         assert_eq!(request.request(), &ClientRequest::ReadOperatorStatus {});
         for message in [
             OperatorStatusMessage::Start {},
+            OperatorStatusMessage::SessionSupervision(Box::new(signalbox_process_protocol::OperatorStatusSessionSupervisionMessage {
+                session_id: CanonicalUuid::from_uuid(Uuid::from_u128(144)),
+                terminal: true,
+                failure_class: signalbox_process_protocol::OperatorStatusSupervisionFailureClass::Corruption,
+                cause_code: String::from("durable_state_corruption"),
+            })),
             OperatorStatusMessage::RepositoryIngestion(Box::new(
                 OperatorStatusRepositoryIngestion {
                     repository: "evidence/project".to_owned(),
@@ -6193,6 +6214,7 @@ async fn operator_status_counts_and_displays_repository_ingestion() -> Result<()
                 },
             )),
             OperatorStatusMessage::End(Box::new(OperatorStatusEndMessage {
+                session_supervision_count: CanonicalU64::new(1),
                 repository_ingestion_count: CanonicalU64::new(1),
                 lifecycle_week_count: CanonicalU64::new(0),
                 lifecycle_deadline_violation_count: CanonicalU64::new(0),
@@ -6228,5 +6250,14 @@ async fn operator_status_counts_and_displays_repository_ingestion() -> Result<()
     assert_eq!(evidence["repository"], "evidence/project");
     assert_eq!(evidence["events_recorded"], "7");
     assert!(evidence["last_successful_observation"].is_null());
+    let supervision = rendered
+        .lines()
+        .find_map(|line| line.strip_prefix("session_supervision "))
+        .expect("terminal operator item is displayed");
+    let supervision: serde_json::Value = serde_json::from_str(supervision)?;
+    assert_eq!(supervision["terminal"], true);
+    assert_eq!(supervision["failure_class"], "corruption");
+    assert_eq!(supervision["cause_code"], "durable_state_corruption");
+    assert!(rendered.contains("session_supervision=1"));
     Ok(())
 }
