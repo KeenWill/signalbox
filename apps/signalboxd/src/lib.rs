@@ -124,7 +124,7 @@ pub use conversation_introspection::{
 pub use credential_pools::{
     CredentialDelivery, CredentialHomeAdmissionFailure, CredentialPool, CredentialPoolAction,
     CredentialPoolExhaustion, CredentialPoolMember, CredentialPoolTieBreak, CredentialPoolTrigger,
-    CredentialProfile, OauthDelivery,
+    CredentialProfile, GithubCredentialDelivery, GithubCredentialProfile, OauthDelivery,
 };
 pub use daemon_tools::{
     BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonFileMediaExecutor,

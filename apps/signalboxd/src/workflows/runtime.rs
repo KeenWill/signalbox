@@ -32,6 +32,9 @@ use signalbox_workflow_runtime::{
 use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot, watch};
 
+mod effects;
+use effects::{AttemptEffects, RuntimeEffects};
+
 #[cfg(target_os = "linux")]
 use super::{CLOCK_ENTRY, CLOCK_REVISION, compiled_catalog};
 use super::{
@@ -45,6 +48,8 @@ pub enum WorkflowRuntimeError {
     Registration(#[source] ProgramRegistrationError),
     #[error("workflow journal: {field_0}")]
     Journal(#[source] ProgramJournalRepositoryError),
+    #[error("workflow receipt: {field_0}")]
+    Receipt(#[source] LiveDeliveryFailure),
     #[error("workflow runtime: {field_0}")]
     Runtime(#[source] std::io::Error),
     #[error("workflow catalog: {field_0}")]
@@ -75,6 +80,7 @@ impl WorkflowRuntimeError {
         match self {
             Self::Registration(_) => "workflow_registration_failed",
             Self::Journal(_) => "workflow_journal_failed",
+            Self::Receipt(_) => "workflow_delivery_failed",
             Self::Runtime(_) => "workflow_runtime_failed",
             Self::Catalog(_) => "workflow_catalog_failed",
             Self::NativeUnavailable => "workflow_native_unavailable",
@@ -105,6 +111,7 @@ pub struct WorkflowRuntime {
     journal: ProgramJournalRepository,
     registrations: ProgramRegistrationRepository,
     wake: mpsc::UnboundedReceiver<WorkflowWake>,
+    repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
     eval: Option<EvalServices>,
     eval_ready: Arc<AtomicBool>,
 }
@@ -149,10 +156,20 @@ impl WorkflowRuntime {
                 journal,
                 registrations,
                 wake: receiver,
+                repository_watch: None,
                 eval: None,
                 eval_ready,
             },
         ))
+    }
+
+    /// Routes repository-watch effects through the daemon's serialized module services.
+    pub fn with_repository_watch(
+        mut self,
+        runtime: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
+    ) -> Self {
+        self.repository_watch = runtime;
+        self
     }
 
     /// Supplies host-owned corpus, blob and judge services for evaluation runs.
@@ -206,7 +223,13 @@ impl WorkflowRuntime {
         stopped: oneshot::Receiver<()>,
         primitives: impl Fn(RuntimeEvents) -> P,
     ) -> Result<(), WorkflowRuntimeError> {
+        let mut receipt_effects =
+            RuntimeEffects::new(self.repository_watch.clone(), self.journal.clone(), None);
         let execution = async {
+            receipt_effects
+                .acknowledge()
+                .await
+                .map_err(WorkflowRuntimeError::Receipt)?;
             let mut listener = self
                 .journal
                 .listen_all()
@@ -227,6 +250,7 @@ impl WorkflowRuntime {
                     self.journal.clone(),
                     run,
                     primitives(events.clone()),
+                    self.repository_watch.clone(),
                     self.eval.clone(),
                     cancelled,
                 ));
@@ -243,7 +267,7 @@ impl WorkflowRuntime {
                                 if let std::collections::btree_map::Entry::Vacant(entry) = active.entry(run) {
                                     let (cancel, cancelled) = oneshot::channel();
                                     entry.insert(Some(cancel));
-                                    attempts.push(cancellable_attempt(self.host.clone(), self.journal.clone(), run, primitives(events.clone()), self.eval.clone(), cancelled));
+                                    attempts.push(cancellable_attempt(self.host.clone(), self.journal.clone(), run, primitives(events.clone()), self.repository_watch.clone(), self.eval.clone(), cancelled));
                                 }
                             }
                             WorkflowWake::Cancel(run) => {
@@ -260,7 +284,12 @@ impl WorkflowRuntime {
                 }
             }
         };
-        interruptible(execution, stopped).await.unwrap_or(Ok(()))
+        let result = interruptible(execution, stopped).await.unwrap_or(Ok(()));
+        receipt_effects
+            .acknowledge()
+            .await
+            .map_err(WorkflowRuntimeError::Receipt)?;
+        result
     }
 }
 
@@ -283,13 +312,23 @@ fn cancellable_attempt<P: LiveDeliverySource + 'static>(
     journal: ProgramJournalRepository,
     run: ProgramRunId,
     primitives: P,
+    repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
     eval: Option<EvalServices>,
     cancelled: oneshot::Receiver<()>,
 ) -> Pin<Box<dyn Future<Output = Result<ProgramRunId, WorkflowRuntimeError>>>> {
     Box::pin(async move {
-        interruptible(attempt(host, journal, run, primitives, eval), cancelled)
+        let mut receipts = RuntimeEffects::new(repository_watch.clone(), journal.clone(), None);
+        let result = interruptible(
+            attempt(host, journal, run, primitives, repository_watch, eval),
+            cancelled,
+        )
+        .await
+        .unwrap_or(Ok(run));
+        receipts
+            .acknowledge()
             .await
-            .unwrap_or(Ok(run))
+            .map_err(WorkflowRuntimeError::Receipt)?;
+        result
     })
 }
 
@@ -298,13 +337,11 @@ fn attempt<P: LiveDeliverySource + 'static>(
     journal: ProgramJournalRepository,
     run: ProgramRunId,
     mut primitives: P,
+    repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
     eval: Option<EvalServices>,
 ) -> Pin<Box<dyn Future<Output = Result<ProgramRunId, WorkflowRuntimeError>>>> {
     Box::pin(async move {
-        let mut effects = UnavailableEffects {
-            rejected: None,
-            eval: eval.map(EvaluationEffects::new),
-        };
+        let mut effects = RuntimeEffects::new(repository_watch, journal.clone(), eval);
         let execution = drive_run(&host, &journal, run, &mut primitives, &mut effects).await;
         let Err(source) = execution else {
             return Ok(run);
@@ -354,10 +391,12 @@ async fn drive_run(
     journal: &ProgramJournalRepository,
     run: ProgramRunId,
     primitives: &mut impl LiveDeliverySource,
-    effects: &mut impl EffectExecutor,
+    effects: &mut impl AttemptEffects,
 ) -> Result<(), WorkflowHostError> {
     loop {
-        let outcome = host.execute_registered(run, primitives, effects).await?;
+        let outcome = host.execute_registered(run, primitives, effects).await;
+        effects.acknowledge().await?;
+        let outcome = outcome?;
         let ProgramExecutionOutcome::Suspended(outstanding) = outcome else {
             return Ok::<(), WorkflowHostError>(());
         };
@@ -525,54 +564,6 @@ impl LiveDeliverySource for ClockSource {
                     reason: RejectReason::UnsupportedOperation,
                 }),
             }
-        })
-    }
-}
-
-#[derive(Default)]
-struct UnavailableEffects {
-    rejected: Option<ProgramCapability>,
-    eval: Option<EvaluationEffects>,
-}
-impl EffectExecutor for UnavailableEffects {
-    fn recovery(&self, request: &EffectRequest) -> EffectRecovery {
-        if let Some(eval) = &self.eval {
-            return eval.recovery(request);
-        }
-        EffectRecovery::Idempotent
-    }
-    fn adopt<'a>(
-        &'a mut self,
-        invocation: EffectInvocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<InlineFramePayload>, LiveDeliveryFailure>> + 'a>>
-    {
-        if let Some(eval) = &mut self.eval {
-            let rejected = &mut self.rejected;
-            return Box::pin(async move {
-                let result = eval.adopt(invocation).await;
-                *rejected = eval.rejected().then_some(invocation.request.capability());
-                result
-            });
-        }
-        Box::pin(async { Ok(None) })
-    }
-    fn execute<'a>(
-        &'a mut self,
-        invocation: EffectInvocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
-        if let Some(eval) = &mut self.eval {
-            let rejected = &mut self.rejected;
-            return Box::pin(async move {
-                let result = eval.execute(invocation).await;
-                *rejected = eval.rejected().then_some(invocation.request.capability());
-                result
-            });
-        }
-        self.rejected = Some(invocation.request.capability());
-        Box::pin(async {
-            Err(LiveDeliveryFailure::new(
-                "daemon workflow effect is unavailable",
-            ))
         })
     }
 }
@@ -1053,6 +1044,8 @@ mod tests {
                 })
             }
         }
+
+        impl AttemptEffects for PendingSessionEffect {}
 
         #[tokio::test(flavor = "current_thread")]
         #[ignore = "requires ephemeral PostgreSQL"]

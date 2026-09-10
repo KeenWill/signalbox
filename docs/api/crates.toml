@@ -38,4 +38,4 @@ crates = [
     "signalbox-tools-workspace",
     "signalbox-web-contract",
 ]
-rustdoc_toolchain = "nightly-2026-09-09"
+rustdoc_toolchain = "nightly-2026-09-10"
