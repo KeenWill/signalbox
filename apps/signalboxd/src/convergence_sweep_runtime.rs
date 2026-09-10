@@ -864,6 +864,7 @@ impl ConvergenceSweepRuntime {
         if response.status() != StatusCode::OK {
             return Err(CensusError::Response);
         }
+        let credential = signalbox_github_transport::response_credential(&response).map(Vec::from);
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| CensusError::Response)? {
             if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
@@ -871,7 +872,7 @@ impl ConvergenceSweepRuntime {
             }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(|_| CensusError::Decode)
+        decode_response(&bytes, credential.as_deref())
     }
 
     async fn graphql(
@@ -887,7 +888,7 @@ impl ConvergenceSweepRuntime {
         if self.numeric_bounds.request_attempts == Some(0) {
             return Err(CensusError::Request);
         }
-        let bytes = 'attempts: loop {
+        let (bytes, credential) = 'attempts: loop {
             attempt += 1;
             let request = self
                 .client
@@ -919,6 +920,8 @@ impl ConvergenceSweepRuntime {
                     if response.status() != StatusCode::OK {
                         return Err(CensusError::Response);
                     }
+                    let credential =
+                        signalbox_github_transport::response_credential(&response).map(Vec::from);
                     let mut bytes = Vec::new();
                     loop {
                         match response.chunk().await {
@@ -932,7 +935,7 @@ impl ConvergenceSweepRuntime {
                                 }
                                 bytes.extend_from_slice(&chunk);
                             }
-                            Ok(None) => break 'attempts bytes,
+                            Ok(None) => break 'attempts (bytes, credential),
                             Err(_)
                                 if self
                                     .numeric_bounds
@@ -957,12 +960,29 @@ impl ConvergenceSweepRuntime {
                 Err(_) => return Err(CensusError::Request),
             }
         };
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| CensusError::Decode)?;
+        let value = decode_response(&bytes, credential.as_deref())?;
         if value.get("errors").is_some() {
             return Err(CensusError::Response);
         }
         Ok(value)
     }
+}
+
+fn decode_response(bytes: &[u8], credential: Option<&[u8]>) -> Result<Value, CensusError> {
+    let mut value = serde_json::from_slice(bytes).map_err(|_| CensusError::Decode)?;
+    if let Some(credential) = credential {
+        let token = std::str::from_utf8(credential)
+            .ok()
+            .filter(|token| !token.is_empty())
+            .ok_or(CensusError::Credential)?;
+        let encoded = Value::String(token.to_owned()).to_string();
+        crate::repo_watch_credentials::scrub_app_json(
+            &mut value,
+            token,
+            &encoded[1..encoded.len() - 1],
+        );
+    }
+    Ok(value)
 }
 
 struct FetchedPullRequest {
@@ -1065,6 +1085,70 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn response_tokens_are_scrubbed_before_convergence_commission_content() {
+        const RESPONSE_TOKEN: &str = "response-installation-secret\"with\\escapes";
+        let encoded = Value::String(RESPONSE_TOKEN.to_owned()).to_string();
+        let escaped = &encoded[1..encoded.len() - 1];
+        let response = json!({"data": {"repository": {"pullRequest": {
+            "state": "OPEN", "isDraft": false, "body": "", "headRefOid": FIXTURE_HEAD_SHA,
+            "headRef": {"target": {"oid": FIXTURE_HEAD_SHA, "statusCheckRollup": {
+                "state": "FAILURE", "contexts": {"nodes": [
+                    {"__typename": "CheckRun", "name": format!("exact {RESPONSE_TOKEN}"), "conclusion": "FAILURE"},
+                    {"__typename": "CheckRun", "name": format!("escaped {escaped}"), "conclusion": "FAILURE"},
+                ]},
+            }}},
+        }}}});
+        let value = decode_response(
+            &serde_json::to_vec(&response).unwrap(),
+            Some(RESPONSE_TOKEN.as_bytes()),
+        )
+        .expect("response decodes with its current token scrubbed");
+        let node = value["data"]["repository"]["pullRequest"].clone();
+        let snapshot = signalbox_convergence::Snapshot {
+            initial: node.clone(),
+            current: node,
+            comparisons: Default::default(),
+            blobs: Default::default(),
+            previous: json!({}),
+            observed_at: None,
+        };
+        let policy_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/convergence/examples/repository.toml");
+        let mut policy =
+            ConvergencePolicy::read(&policy_path).expect("shared convergence policy loads");
+        policy.non_gating_check_patterns.clear();
+        let evaluation =
+            signalbox_convergence::evaluate(&snapshot, &policy).expect("fixture evaluates");
+        let fetched = FetchedPullRequest {
+            base_branch: BranchName::try_new(FIXTURE_BASE_BRANCH.to_owned()).unwrap(),
+            head_branch: BranchName::try_new(FIXTURE_HEAD_BRANCH.to_owned()).unwrap(),
+            head_repository: RepositorySlug::try_new(FIXTURE_HEAD_REPOSITORY.to_owned()).unwrap(),
+            head_sha: CommitSha::try_new(FIXTURE_HEAD_SHA.to_owned()).unwrap(),
+            evaluation,
+        };
+        let content =
+            commission_content(&fixture_target(), &fetched, &fetched.evaluation.verdict).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            value["gating_checks"],
+            json!([
+                {"name": "exact [redacted]", "state": "FAILURE"},
+                {"name": "escaped [redacted]", "state": "FAILURE"},
+            ])
+        );
+        assert!(!content.contains("response-installation-secret"));
+    }
+
+    #[test]
+    fn responses_without_app_credentials_retain_their_observation_fields() {
+        let response = json!({"name": "check without an App token"});
+        assert_eq!(
+            decode_response(&serde_json::to_vec(&response).unwrap(), None).unwrap(),
+            response
+        );
+    }
 
     fn example_numeric_bounds() -> ConvergenceSweepNumericBounds {
         let configured = crate::configuration::checked_in_example_configuration()

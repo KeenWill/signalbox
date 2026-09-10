@@ -109,6 +109,9 @@ sessions to a task that waits for nudge capacity without blocking startup
 recovery. The task clears each removed-target handoff after its nudge is
 retained.
 
+The sweep scrubs the response-scoped App token and its JSON-escaped form before
+convergence evaluation and durable session input construction.
+
 The daemon composes the repository-watch module when `[repository_watch]` is
 configured and enabled. Dispatch actions and lifecycle reactions are retained in
 strictly increasing, unique action-ordinal order. The module submitter recovers

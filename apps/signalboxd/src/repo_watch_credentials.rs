@@ -249,7 +249,7 @@ fn redact_app_token(text: &str, token: &str, escaped: &str) -> String {
         .replace(token, "[redacted]")
 }
 
-fn scrub_app_json(value: &mut serde_json::Value, token: &str, escaped: &str) {
+pub(crate) fn scrub_app_json(value: &mut serde_json::Value, token: &str, escaped: &str) {
     match value {
         serde_json::Value::String(text) => *text = redact_app_token(text, token, escaped),
         serde_json::Value::Array(values) => {
