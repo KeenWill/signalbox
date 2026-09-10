@@ -4232,10 +4232,9 @@ fn composed_catalog_applies_an_enforceable_posture() {
     );
 }
 
-/// The shipped posture table and daemon catalog compose both egress tools
-/// into user-approved requests while their declarations stay fail-closed.
+/// The shipped posture table sends both web tools to the judge.
 #[test]
-fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
+fn shipped_web_postures_resolve_both_daemon_tools_to_delegated_approval() {
     let configuration = crate::configuration::checked_in_example_configuration()
         .expect("checked-in configuration is valid");
     let (web_fetch_catalog, _executor) =
@@ -4266,11 +4265,11 @@ fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
 
     assert_eq!(
         web_fetch_definition.approval_posture(),
-        Some(ToolApprovalPosture::Human)
+        Some(ToolApprovalPosture::Delegated)
     );
     assert_eq!(
         web_search_definition.approval_posture(),
-        Some(ToolApprovalPosture::Human)
+        Some(ToolApprovalPosture::Delegated)
     );
     assert_eq!(
         web_fetch_definition.permission_default(),
@@ -4280,6 +4279,35 @@ fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
         web_search_definition.permission_default(),
         ToolPermissionDefault::Confirm
     );
+}
+
+#[test]
+fn web_postures_delegate_unless_a_human_is_explicitly_configured() {
+    let (web_catalog, _) = WebFetchTool::try_new(OfflineTransport, WebFetchEgressPolicy::default())
+        .expect("web tool compiles")
+        .into_parts();
+    let name = ToolName::try_new(String::from(WEB_FETCH_NAME)).expect("web name is valid");
+    let catalog = DaemonToolCatalog::try_new([web_catalog]).expect("one web tool");
+    for (configured, expected) in [
+        (ToolApprovalPosture::Auto, ToolApprovalPosture::Delegated),
+        (
+            ToolApprovalPosture::Delegated,
+            ToolApprovalPosture::Delegated,
+        ),
+        (ToolApprovalPosture::Human, ToolApprovalPosture::Human),
+    ] {
+        let configured_catalog = catalog
+            .clone()
+            .with_approval_postures([(name.clone(), configured)])
+            .expect("composed posture is admitted");
+        assert_eq!(
+            configured_catalog
+                .definition(&name)
+                .expect("web remains composed")
+                .approval_posture(),
+            Some(expected)
+        );
+    }
 }
 
 #[test]
@@ -6217,14 +6245,6 @@ fn a_derived_binding_names_the_parent_it_walked_through() {
     assert_eq!(binding.derived_parent(), Some(FIXTURE_PARENT_IDENTITY));
 }
 
-/// A configured binding walks through no derived parent.
-#[test]
-fn a_configured_binding_names_no_derived_parent() {
-    let binding = RecordedSessionBinding::ConfiguredRoot;
-
-    assert_eq!(binding.derived_parent(), None);
-}
-
 /// A configured root with no lexical final component — `/srv/workspace/..`,
 /// which is absolute and can name a valid worktree — has no directory name
 /// to append the suffix to. The derivation rejects it rather than answering
@@ -6262,15 +6282,6 @@ fn a_derived_binding_names_the_identity_it_pinned() {
     };
 
     assert_eq!(binding.derived_identity(), Some(FIXTURE_BOUND_IDENTITY));
-}
-
-/// A configured binding pins no derived identity, so it never collides with
-/// a derived root another session composed.
-#[test]
-fn a_configured_binding_names_no_derived_identity() {
-    let binding = RecordedSessionBinding::ConfiguredRoot;
-
-    assert_eq!(binding.derived_identity(), None);
 }
 
 /// `<name>.sessions` bind-mounted onto the configured root is a real

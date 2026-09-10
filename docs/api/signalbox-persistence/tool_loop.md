@@ -89,6 +89,23 @@ impl tool_loop::PostgresToolLoopRepository {
         option::Option<signalbox_domain::ToolBatch>,
         tool_loop::ToolLoopRepositoryError,
     >;
+    pub async fn expire_human_approval_wait(
+        &self,
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+        timeout: option::Option<time::Duration>,
+    ) -> result::Result<bool, tool_loop::ToolLoopRepositoryError>;
+    pub async fn pending_human_approval_waits(
+        &self,
+        session: option::Option<signalbox_domain::SessionId>,
+    ) -> result::Result<
+        vec::Vec<(
+            signalbox_domain::ToolRequestId,
+            signalbox_domain::SessionId,
+            time::Duration,
+        )>,
+        tool_loop::ToolLoopRepositoryError,
+    >;
     pub async fn find_resumable_turn(
         &self,
         session: signalbox_domain::SessionId,
@@ -355,4 +372,25 @@ impl signalbox_application::ToolExecutionTransaction for tool_loop::PostgresTool
                 signalbox_domain::TurnId,
             ) + marker::Send;
 }
+impl tool_loop::PostgresToolLoopRepository {
+    pub async fn resolve_visible_attachment(
+        &self,
+        request: &signalbox_domain::ToolRequest,
+        digest: signalbox_domain::BlobDigest,
+        selector: option::Option<signalbox_application::RenderedAttachmentSelector>,
+    ) -> result::Result<
+        option::Option<tool_loop::VisibleToolAttachment>,
+        tool_loop::ToolLoopRepositoryError,
+    >;
+}
+```
+
+## VisibleToolAttachment
+
+```rust
+pub struct VisibleToolAttachment {
+    pub selector: signalbox_application::RenderedAttachmentSelector,
+    pub part: signalbox_domain::UserContentPart,
+}
+// derives: clone::Clone, fmt::Debug
 ```

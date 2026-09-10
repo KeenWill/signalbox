@@ -35,6 +35,17 @@ impl ToolBatch {
         })
     }
 
+    /// Denies the exact human wait after persistence establishes its deadline elapsed.
+    pub fn prepare_approval_timeout(
+        self,
+        command: DecideToolRequest,
+        continuation_attempt: Option<TurnAttemptId>,
+    ) -> Result<PreparedToolBatchDecision, ToolBatchDecisionError> {
+        self.prepare_decision(command, continuation_attempt, |command, request| {
+            command.prepare_approval_timeout_applied(request)
+        })
+    }
+
     fn prepare_decision(
         self,
         command: DecideToolRequest,

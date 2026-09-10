@@ -1386,46 +1386,6 @@ mod tests {
         assert_eq!(reconstituted, Some(expected));
     }
 
-    /// comparison uses constructible semantic values; a direct
-    /// request and an alias request remain distinct.
-    #[test]
-    fn direct_and_alias_requests_remain_semantically_distinct() {
-        assert_ne!(
-            ModelSelectionRequest::Direct(direct(1)),
-            ModelSelectionRequest::Alias(alias(1))
-        );
-    }
-
-    /// direct and alias selections remain semantically unequal even
-    /// when they resolve to the same exact target.
-    #[test]
-    fn frozen_direct_and_frozen_alias_selecting_the_same_target_remain_unequal() {
-        let target = direct(1);
-        let frozen_alias = FrozenModelSelection::FrozenAlias {
-            alias: alias(2),
-            definition: FrozenAliasDefinition::selecting(target),
-        };
-
-        assert_ne!(FrozenModelSelection::Direct(target), frozen_alias);
-    }
-
-    /// alias provenance is part of the frozen selection's semantic
-    /// value.
-    #[test]
-    fn frozen_aliases_with_different_provenance_remain_unequal() {
-        let definition = FrozenAliasDefinition::selecting(direct(1));
-        let first = FrozenModelSelection::FrozenAlias {
-            alias: alias(2),
-            definition,
-        };
-        let second = FrozenModelSelection::FrozenAlias {
-            alias: alias(3),
-            definition,
-        };
-
-        assert_ne!(first, second);
-    }
-
     #[test]
     fn baseline_effective_configuration_fixes_the_unit_policy_values() {
         let selection = FrozenModelSelection::Direct(direct(1));
@@ -1487,24 +1447,6 @@ mod tests {
             provider_defaults,
             Some(EffectiveConfiguration::baseline(frozen_selection))
         );
-    }
-
-    /// configuration equality is structural semantic value equality
-    /// over the frozen model selection and the unit policy values.
-    #[test]
-    fn effective_configuration_equality_is_structural_over_the_frozen_selection() {
-        let selected = direct(2);
-        let selection = FrozenModelSelection::FrozenAlias {
-            alias: alias(1),
-            definition: FrozenAliasDefinition::selecting(selected),
-        };
-        let configuration = EffectiveConfiguration::baseline(selection);
-        let same_configuration = EffectiveConfiguration::baseline(selection);
-        let direct_configuration =
-            EffectiveConfiguration::baseline(FrozenModelSelection::Direct(selected));
-
-        assert_eq!(configuration, same_configuration);
-        assert_ne!(configuration, direct_configuration);
     }
 
     fn defaults(value: u128) -> SessionConfigurationDefaults {

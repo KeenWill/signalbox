@@ -4,7 +4,9 @@
 //! scheduler lock before asking the domain aggregate for authority. Executor
 //! work remains outside database transactions.
 
+mod file_visibility;
 mod placement_loss;
+pub use file_visibility::VisibleToolAttachment;
 mod result_budget;
 pub(crate) use placement_loss::{
     close_lost_runner_requests, resolve_lost_runner_batch, resolve_lost_runner_batch_after_judge,
@@ -357,6 +359,117 @@ impl PostgresToolLoopRepository {
         result
     }
 
+    /// Arms a durable human-wait deadline and denies an expired wait atomically.
+    /// `None` records an unbounded wait. Repeated passes retain the first deadline.
+    pub async fn expire_human_approval_wait(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<bool, ToolLoopRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        lock_tool_session(&mut transaction, session).await?;
+        let Some(batch) =
+            load_active_batch_from_connection(&mut transaction, session, turn).await?
+        else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let Some(waiting) = batch.awaiting_approval() else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let request = waiting.request();
+        sqlx::query(
+            "INSERT INTO tool_approval_human_wait (request_id, deadline)
+             SELECT request_id, transaction_timestamp() + make_interval(secs => $2)
+               FROM tool_request
+              WHERE request_id = $1 AND tool_request_waits_for_human(request_id)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(request.into_uuid())
+        .bind(timeout.map(|duration| duration.as_secs_f64()))
+        .execute(&mut *transaction)
+        .await?;
+        let expired: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM tool_approval_human_wait
+                WHERE request_id = $1 AND deadline <= transaction_timestamp())",
+        )
+        .bind(request.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !expired {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        let continuation = (batch
+            .requests()
+            .iter()
+            .filter(|request| {
+                request.inadmissible_reason().is_none() && batch.approval(request.id()).is_none()
+            })
+            .count()
+            == 1)
+            .then(|| signalbox_domain::TurnAttemptId::from_uuid(Uuid::now_v7()));
+        let command = DecideToolRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            request,
+            signalbox_domain::ToolApprovalResolution::approval_timeout(request)
+                .decision()
+                .clone(),
+        )
+        .map_err(|_| ToolLoopRepositoryError::InvalidTransition("timeout command identity"))?;
+        let decision = batch
+            .prepare_approval_timeout(command, continuation)
+            .map_err(|_| {
+                ToolLoopRepositoryError::InvalidTransition("approval timeout transition")
+            })?;
+        persist_batch_decision(&mut transaction, &decision).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| ToolLoopRepositoryError::Database {
+                commit_ambiguous: commit_failure_is_ambiguous(&source),
+                source,
+            })?;
+        Ok(true)
+    }
+
+    /// Reads finite undecided human waits and their remaining database-clock delay.
+    /// An absent session selects all pending waits for startup restoration.
+    pub async fn pending_human_approval_waits(
+        &self,
+        session: Option<SessionId>,
+    ) -> Result<Vec<(ToolRequestId, SessionId, std::time::Duration)>, ToolLoopRepositoryError> {
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, f64)>(
+            "SELECT waiting.request_id, active.session_id,
+                    GREATEST(EXTRACT(EPOCH FROM (waiting.deadline - clock_timestamp())), 0)::double precision
+               FROM tool_approval_human_wait AS waiting
+               JOIN turn_lifecycle AS active
+                 ON active.approval_tool_request_id = waiting.request_id
+              WHERE waiting.deadline IS NOT NULL
+                AND active.state_kind = 'active'
+                AND active.active_phase_kind = 'awaiting_tool_approval'
+                AND ($1::uuid IS NULL OR active.session_id = $1)
+                AND tool_request_waits_for_human(waiting.request_id)",
+        )
+        .bind(session.map(SessionId::into_uuid))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(request, session, seconds)| {
+                let delay = std::time::Duration::try_from_secs_f64(seconds).map_err(|_| {
+                    ToolLoopRepositoryError::InvalidTransition("approval deadline delay")
+                })?;
+                Ok((
+                    ToolRequestId::from_uuid(request),
+                    SessionId::from_uuid(session),
+                    delay,
+                ))
+            })
+            .collect()
+    }
+
     /// Finds the exact active turn whose durable execution can make progress.
     ///
     /// This is a reconciliation hint only. Every later tool transaction
@@ -414,7 +527,7 @@ impl PostgresToolLoopRepository {
                             )
                             OR (
                                 active_phase_kind = 'awaiting_tool_approval'
-                                AND EXISTS (
+                                AND (tool_approval_human_wait_is_due(approval_tool_request_id) OR EXISTS (
                                     SELECT 1
                                       FROM tool_request AS request
                                      WHERE request.request_id = approval_tool_request_id
@@ -428,7 +541,7 @@ impl PostgresToolLoopRepository {
                                              WHERE judge.request_id = request.request_id
                                                AND judge.state_kind = 'terminal'
                                        )
-                                )
+                                ))
                             )
                         )
                     )
@@ -2686,6 +2799,22 @@ async fn decode_approval(
                 load_frozen_dangerous_tool_auto_approval(connection, request).await?,
             )
         }
+        ToolApprovalDecisionSourceStorageKind::RuntimeSafety if user_command.is_some() => {
+            let expected = signalbox_domain::ToolApprovalResolution::approval_timeout(request);
+            if expected.decision() != &decision {
+                return Err(ToolLoopCorruption::Inconsistent("approval timeout denial").into());
+            }
+            let command = durable_command_id_from_uuid(
+                user_command.ok_or(ToolLoopCorruption::Missing("timeout command"))?,
+            )
+            .map_err(|_| ToolLoopCorruption::Inconsistent("timeout command identity"))?;
+            if !user_receipts.get(&command).is_some_and(|receipt| {
+                receipt.command().request() == request && receipt.command().decision() == &decision
+            }) {
+                return Err(ToolLoopCorruption::Inconsistent("timeout command receipt").into());
+            }
+            return Ok(expected);
+        }
         ToolApprovalDecisionSourceStorageKind::RuntimeSafety if user_command.is_none() => {
             let expected = ToolApprovalResolutionReconstitutionInput::runtime_safety(request)
                 .reconstitute()
@@ -2861,6 +2990,8 @@ async fn load_user_decision_receipts(
         let request_record = decode_request(row, producing_call, session, turn)?;
         let prepared = if source.as_deref() == Some("lifecycle_closure") {
             command.prepare_lifecycle_closure_applied(&request_record)
+        } else if source.as_deref() == Some("runtime_safety") {
+            command.prepare_approval_timeout_applied(&request_record)
         } else {
             command.prepare_applied(&request_record)
         }
@@ -3533,6 +3664,10 @@ async fn persist_batch_decision(
                 ToolApprovalDecisionSourceStorageKind::UserCommand,
                 signalbox_domain::CommandPrincipal::Operator,
             ),
+            signalbox_domain::ToolDecisionSource::RuntimeSafety => (
+                ToolApprovalDecisionSourceStorageKind::RuntimeSafety,
+                signalbox_domain::CommandPrincipal::Core,
+            ),
             signalbox_domain::ToolDecisionSource::LifecycleClosure => (
                 ToolApprovalDecisionSourceStorageKind::LifecycleClosure,
                 signalbox_domain::CommandPrincipal::Core,
@@ -3816,6 +3951,8 @@ async fn load_decision_receipt(
             let source: Option<String> = row.try_get("decision_source")?;
             if source.as_deref() == Some("lifecycle_closure") {
                 command.prepare_lifecycle_closure_applied(&request_record)
+            } else if source.as_deref() == Some("runtime_safety") {
+                command.prepare_approval_timeout_applied(&request_record)
             } else {
                 command.prepare_applied(&request_record)
             }
@@ -4491,54 +4628,16 @@ async fn admit_tool_preauthorization(
             decoded_bytes,
         } => (digest, Some(decoded_bytes)),
     };
-    let frontier: Uuid = sqlx::query_scalar(
-        "SELECT call.context_frontier_id FROM tool_request AS request
-           JOIN model_call AS call
-             ON call.model_call_id = request.producing_model_call_id
-            AND call.session_id = request.session_id
-          WHERE request.request_id = $1 AND request.session_id = $2 AND request.turn_id = $3",
-    )
-    .bind(tool_request_id_to_uuid(request))
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(ToolLoopCorruption::Missing(
-        "blob authorization producing frontier",
-    ))?;
-    let members = crate::context_compaction::projected_frontier_membership(
+    let visible = !file_visibility::visible_attachment_rows(
         transaction,
         session,
-        signalbox_domain::ContextFrontierId::from_uuid(frontier),
+        turn,
+        request,
+        digest,
+        None,
     )
-    .await
-    .map_err(crate::model_execution::map_projected_membership_error)
-    .map_err(map_model_call_error)?;
-    let sources = members
-        .iter()
-        .map(|member| member.source_session().into_uuid())
-        .collect::<Vec<_>>();
-    let entries = members
-        .iter()
-        .map(|member| member.entry().into_uuid())
-        .collect::<Vec<_>>();
-    let visible: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-            SELECT 1
-              FROM unnest($1::uuid[], $2::uuid[]) AS member(source_session_id, semantic_entry_id)
-              JOIN semantic_transcript_entry AS entry
-                ON entry.source_session_id = member.source_session_id
-               AND entry.semantic_entry_id = member.semantic_entry_id
-              JOIN accepted_input_content_part AS part
-                ON part.accepted_input_id = entry.origin_accepted_input_id
-             WHERE part.part_kind = 'attachment' AND part.blob_digest = $3
-        )",
-    )
-    .bind(&sources)
-    .bind(&entries)
-    .bind(digest.as_bytes().as_slice())
-    .fetch_one(&mut **transaction)
-    .await?;
+    .await?
+    .is_empty();
     if !visible {
         return Ok(BlobReadAdmission::NotVisible);
     }

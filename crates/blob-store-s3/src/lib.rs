@@ -1773,6 +1773,16 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_rejects_a_prefix_outside_the_blob_key_prefix() -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
+            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>staging/</Prefix><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
+        )?;
+
+        assert!(!LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
     fn lifecycle_rejects_a_tag_filtered_rule() -> Result<(), Box<dyn Error>> {
         let rule = first_rule(
             r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><Tag><Key>kind</Key><Value>blob</Value></Tag></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,

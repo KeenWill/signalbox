@@ -86,7 +86,7 @@ pub enum ValidationEvidence {
     StructuralValidation,
     /// A declared candidate was independently structurally validated.
     DeclaredCandidateStructurallyValidated,
-    /// Complete streaming UTF-8 and control policy validation succeeded.
+    /// The bounded text prefix passed UTF-8 and control policy validation.
     StreamingTextValidation,
 }
 
@@ -475,6 +475,8 @@ pub trait FileMediaProcessor: Send + Sync {
 /// Closed application-facing file/media failure algebra.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileMediaFailure {
+    /// Verified-source authority contradicted its own immutable identity or range contract.
+    SourceIntegrity,
     /// Digest is outside the rendered-frontier allow-set.
     BlobNotVisible,
     /// Blob catalog identity is absent.
@@ -535,6 +537,7 @@ pub enum FileMediaFailure {
 impl fmt::Display for FileMediaFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::SourceIntegrity => "verified source integrity failed",
             Self::BlobNotVisible => "blob is not visible to this request",
             Self::BlobMissing => "blob is missing",
             Self::BlobCorrupt => "blob is corrupt",
@@ -585,7 +588,8 @@ impl From<SourceReadError> for FileMediaFailure {
             SourceReadError::Missing => Self::BlobMissing,
             SourceReadError::Corrupt => Self::BlobCorrupt,
             SourceReadError::Unavailable => Self::BlobUnavailable,
-            SourceReadError::RangeOutOfBounds | SourceReadError::Integrity => Self::ProcessorFailed,
+            SourceReadError::RangeOutOfBounds => Self::ProcessorFailed,
+            SourceReadError::Integrity => Self::SourceIntegrity,
         }
     }
 }

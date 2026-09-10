@@ -108,6 +108,12 @@ impl DaemonToolCatalog {
             let Some(entry) = self.entries.get_mut(&name) else {
                 return Err(ConfiguredApprovalPostureError::UnknownTool { name });
             };
+            let posture = match (name.as_str(), posture) {
+                ("web_fetch" | "web_search", ToolApprovalPosture::Auto) => {
+                    ToolApprovalPosture::Delegated
+                }
+                _ => posture,
+            };
             entry.definition = entry.definition.clone().with_approval_posture(posture);
         }
         Ok(self)
@@ -165,6 +171,11 @@ fn configured_composition_contains(name: &ToolName, composition: DaemonToolCompo
         || PLAN_TOOL_NAMES.contains(&name)
         || SESSION_DELEGATION_TOOL_NAMES.contains(&name)
         || BLOB_TOOL_NAMES.contains(&name)
+        || matches!(
+            name,
+            signalbox_tools_file_media::FILE_INSPECT_NAME
+                | signalbox_tools_file_media::FILE_READ_NAME
+        )
         || mapped_family_contains
 }
 

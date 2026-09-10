@@ -150,10 +150,12 @@ pub struct HubModelConfiguration {
     web_fetch_egress_policy: WebFetchEgressPolicy,
     daemon_tools: Option<DaemonToolConfiguration>,
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
+    approval_wait_timeout: Option<std::time::Duration>,
     approval_judge_selection: Option<DirectModelSelection>,
     convergence: Option<signalbox_convergence::ConvergencePolicy>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
+    file_media: bool,
     workspace_instructions: WorkspaceInstructionConfiguration,
 }
 
@@ -191,11 +193,13 @@ impl HubModelConfiguration {
             compaction_prompt,
             conversation_import_max_source_bytes,
             blob_storage,
+            file_media,
             web_fetch_egress_policy,
             daemon_tools,
             credential_profiles,
             credential_pools,
             tool_approval_postures,
+            approval_wait_timeout,
             approval_judge_selection,
             convergence,
             workspace_instructions,
@@ -613,10 +617,12 @@ impl HubModelConfiguration {
             web_fetch_egress_policy,
             daemon_tools,
             tool_approval_postures,
+            approval_wait_timeout,
             approval_judge_selection,
             convergence,
             repository_watch,
             blob_storage,
+            file_media,
             workspace_instructions,
         })
     }
@@ -1139,6 +1145,11 @@ impl HubModelConfiguration {
         self.conversation_import_max_source_bytes
     }
 
+    /// Whether the compiled sandboxed file tools are enabled at startup.
+    pub const fn file_media(&self) -> bool {
+        self.file_media
+    }
+
     /// Returns the validated blob-store registry and write routes, when enabled.
     pub const fn blob_storage(&self) -> Option<&BlobStorageConfiguration> {
         self.blob_storage.as_ref()
@@ -1165,6 +1176,11 @@ impl HubModelConfiguration {
     /// call to supply the default when configuration omits the table.
     pub const fn configured_approval_judge_selection(&self) -> Option<DirectModelSelection> {
         self.approval_judge_selection
+    }
+
+    /// Returns the human approval deadline duration; `None` disables expiry.
+    pub const fn approval_wait_timeout(&self) -> Option<std::time::Duration> {
+        self.approval_wait_timeout
     }
 
     /// Returns explicitly configured daemon tool dependencies, when present.
