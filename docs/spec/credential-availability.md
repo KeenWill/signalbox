@@ -226,9 +226,11 @@ whose live waits retain a headroom exclusion, using the reconciliation-sweep
 interval (or the invocation-recovery interval when absent) and the Codex CLI
 probe bound. This read starts no model thread or turn. A successful out-of-call
 observation has no model-call provenance and follows the same newest-observation
-and transactional wake rules; failed reads retain the prior evidence and retry
-on the next pass. An external quota reset can therefore release a parked wait
-before its previously observed reset deadline.
+and transactional wake rules. Nonempty capacity notifications merge sparse
+windows and supersede a pending read response; probes without usable evidence
+retain the prior observation and retry on the next pass. An external quota reset
+can therefore release a parked wait before its previously observed reset
+deadline.
 
 Contended-wait: no member is admitted and at least one otherwise-admissible
 member is skipped only for its configured invocation bound. Either exhaustion

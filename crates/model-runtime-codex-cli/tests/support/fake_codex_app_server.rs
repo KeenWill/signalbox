@@ -903,7 +903,14 @@ fn capacity_probe() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         std::thread::sleep(Duration::from_secs(60));
     }
-    emit_value(json!({"id":read["id"],"result":{"rateLimits":capacity}}));
+    for update in capacity["updates"].as_array().into_iter().flatten() {
+        emit_value(json!({"method":"account/rateLimits/updated","params":{"rateLimits":update}}));
+    }
+    if capacity["readError"] == true {
+        emit_value(json!({"id":read["id"],"error":{"code":-32600,"message":"read unavailable"}}));
+    } else {
+        emit_value(json!({"id":read["id"],"result":{"rateLimits":capacity}}));
+    }
     // Anything after the rate-limits read is forbidden for this peer.
     let mut extra = String::new();
     let _ = std::io::stdin().read_line(&mut extra)?;
