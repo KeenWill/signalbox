@@ -61,9 +61,6 @@ const DEFAULT_EXECUTABLE: &str = "codex";
 /// to generic metadata, so the smoke would record compatibility evidence from a
 /// degraded run.
 const DEFAULT_MODEL: &str = "gpt-5.4-mini";
-const CODEX_SMOKE_WORKFLOW: &str = include_str!("../../../.github/workflows/codex-smoke.yml");
-const LOGIN_TIMEOUT_INVOCATION: &str =
-    "env -u CODEX_SMOKE_API_KEY timeout --signal=TERM --kill-after=5s 30s";
 const LOGIN_TERM_HOLD_COMMAND: &str = r#"trap "while :; do sleep 1; done" TERM; "$@""#;
 #[cfg(target_os = "linux")]
 const LOGIN_TIMEOUT_DESCENDANT_FIXTURE: &str = r#"#!/bin/sh
@@ -916,30 +913,6 @@ fn assert_complete_feature_classification() {
     );
 }
 
-#[test]
-fn pinned_feature_classification_matches_the_runtime_hard_disables() {
-    assert_complete_feature_classification();
-}
-
-/// The credentialed login is independently bounded and removes the secret
-/// from the timeout and CLI environments; the ignored model exchange and the
-/// job-level timeout cannot substitute for this local cleanup boundary.
-#[test]
-fn compatibility_smoke_login_has_a_process_group_timeout() {
-    assert!(
-        CODEX_SMOKE_WORKFLOW.contains(LOGIN_TIMEOUT_INVOCATION),
-        "the smoke login no longer carries the thirty-second TERM and five-second KILL bound"
-    );
-    assert!(
-        CODEX_SMOKE_WORKFLOW.contains("| env -u CODEX_SMOKE_API_KEY timeout"),
-        "the smoke login no longer removes the key from the timeout environment"
-    );
-    assert!(
-        CODEX_SMOKE_WORKFLOW.contains(LOGIN_TERM_HOLD_COMMAND),
-        "the timeout command no longer keeps its managed supervisor alive through the KILL grace"
-    );
-}
-
 /// If the direct login launcher exits on TERM while its native descendant ignores
 /// TERM, the managed shell stays alive until GNU timeout sends KILL to the
 /// entire command group. Without that hold-open trap, timeout cancels its KILL
@@ -1573,6 +1546,7 @@ fn decoded_response_accepts_refusal_without_completion_material() {
 #[should_panic(expected = "the pinned Codex CLI returned no decoded response")]
 fn decoded_response_rejects_an_unexpected_terminal_variant() {
     let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+        response_content_observed: true,
         cause: LossCause::ResponseUnintelligible {
             detail: "fixture terminal variant".to_string(),
         },

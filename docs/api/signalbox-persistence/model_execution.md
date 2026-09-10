@@ -280,7 +280,10 @@ impl model_execution::PostgresModelCallRepository {
         self,
         credential_pools: model_execution::CredentialPoolRuntimeCatalog,
     ) -> Self;
-    pub fn with_same_credential_attempt_bound(self, bound: nonzero::NonZeroUsize) -> Self;
+    pub fn with_same_credential_attempt_bound(
+        self,
+        bound: option::Option<nonzero::NonZeroUsize>,
+    ) -> Self;
     pub fn with_cache_inclusive_input_targets(
         self,
         targets: set::HashSet<signalbox_domain::ResolvedProviderTarget>,

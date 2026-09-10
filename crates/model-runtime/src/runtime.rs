@@ -24,9 +24,11 @@ use crate::preparation::PreparationOutcome;
 /// serialization, credential access, and request construction without provider
 /// traffic except OAuth delivery exchanges with the authorization server. The
 /// caller may durably authorize the model interaction only after that stage
-/// succeeds. [`execute`](Self::execute) then consumes the
-/// opaque capability and performs no second preparation or credential
-/// access.
+/// succeeds. [`execute`](Self::execute) then consumes the opaque capability
+/// without a second preparation. Its credential access is limited to OAuth
+/// rejection recovery and recording successful token use. Recovery may refresh
+/// the access token through the authorization server; any model retry requires
+/// a new durably authorized call.
 pub trait ModelRuntime<C> {
     /// The adapter-owned, non-cloneable, nonserializable one-shot request
     /// capability produced by preparation and consumed by execution.

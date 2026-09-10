@@ -131,13 +131,6 @@ pub enum HubModelConfigurationError {
         /// Exact pool name carrying the unobservable setting.
         credential_pool: Arc<str>,
     },
-    /// A pool configures `switch_now` for an adapter that cannot prove a
-    /// provider did not accept the request, so the substitution could never
-    /// take effect.
-    UnprovableSubstitutionPolicy {
-        /// Exact pool name carrying the unusable action.
-        credential_pool: Arc<str>,
-    },
     /// The daemon tool mapping registry was incomplete or malformed.
     InvalidToolMappings,
     /// Mapped daemon tools were configured without the required Git identity.
@@ -371,9 +364,6 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidHeadroomReserve => {
                 "model configuration contains an invalid headroom reserve"
-            }
-            Self::UnprovableSubstitutionPolicy { .. } => {
-                "model configuration gives a credential pool a substitution its adapter cannot prove"
             }
             Self::UnobservedCapacityPolicy { .. } => {
                 "model configuration depends on provider capacity no adapter reports"

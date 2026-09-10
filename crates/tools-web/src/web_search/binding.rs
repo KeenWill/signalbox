@@ -152,7 +152,9 @@ pub(super) fn bind_request_outcome(
         } => (evidence, BoundCredentialCheck::BoundedVariants(credential)),
     };
     let has_dynamic_known_failure_detail = match &evidence {
-        ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::Ambiguous => false,
+        ToolExecutorEvidence::CompletedText(_)
+        | ToolExecutorEvidence::CompletedMedia { .. }
+        | ToolExecutorEvidence::Ambiguous => false,
         ToolExecutorEvidence::KnownFailed { detail } => detail.is_some(),
     };
     let fallback_invocation = has_dynamic_known_failure_detail.then(|| invocation.clone());
@@ -326,7 +328,7 @@ pub(super) fn next_fixed_bound_evidence_probe(
     evidence: &ToolExecutorEvidence,
 ) -> Option<ToolExecutorEvidence> {
     match evidence {
-        ToolExecutorEvidence::CompletedText(_) => {
+        ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::CompletedMedia { .. } => {
             Some(ToolExecutorEvidence::KnownFailed { detail: None })
         }
         ToolExecutorEvidence::KnownFailed { .. } => Some(ToolExecutorEvidence::Ambiguous),

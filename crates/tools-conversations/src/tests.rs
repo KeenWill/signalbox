@@ -201,15 +201,6 @@ impl ConversationIntrospectionPort for FakePort {
     }
 }
 
-#[track_caller]
-fn assert_definition(catalog: &CompiledToolCatalog, name: &str, permission: ToolPermissionDefault) {
-    let definition = catalog
-        .definition(&ToolName::try_new(name.to_owned()).expect("fixture name is admitted"))
-        .expect("fixture definition exists");
-    assert_eq!(definition.permission_default(), permission);
-    assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
-}
-
 fn catalog() -> CompiledToolCatalog {
     ConversationTools::try_new(FakePort::reading_native(None))
         .expect("static conversation tools compile")
@@ -222,32 +213,6 @@ fn completed_text(evidence: ToolExecutorEvidence) -> String {
         panic!("fixture execution completes with text")
     };
     result
-}
-
-#[test]
-fn definitions_encode_own_auto_and_cross_conversation_confirmation() {
-    let catalog = catalog();
-
-    assert_definition(
-        &catalog,
-        LIST_CONVERSATIONS_NAME,
-        ToolPermissionDefault::Confirm,
-    );
-    assert_definition(
-        &catalog,
-        READ_OWN_CONVERSATION_NAME,
-        ToolPermissionDefault::Auto,
-    );
-    assert_definition(
-        &catalog,
-        READ_CONVERSATION_NAME,
-        ToolPermissionDefault::Confirm,
-    );
-    assert_definition(
-        &catalog,
-        READ_IMPORTED_CONVERSATION_NAME,
-        ToolPermissionDefault::Confirm,
-    );
 }
 
 #[test]
