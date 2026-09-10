@@ -1,8 +1,8 @@
-//! What the outbox decoder admits, and the stall a row it cannot decode imposes.
+//! What the outbox decoder admits, and how it contains a row it cannot decode.
 //!
-//! Each outbox dispatcher advances one consumer's global cursor: one committed
-//! row it cannot decode is not a lost event for one session, it stalls that
-//! consumer for *every* session. Two separate lines are held against that here.
+//! Each outbox dispatcher advances one consumer's global cursor. An undecodable
+//! row is retained with a durable quarantine record while each consumer moves
+//! past it, so a later event remains deliverable.
 //!
 //! The first is a compile-time line. Every dispatched enum below is enumerated
 //! by an exhaustive `match` with no wildcard arm, which *produces* the
@@ -18,9 +18,8 @@
 //! are fed through the *production* decoder, asserting that what storage admits
 //! and what the decoder produces are the same closed set.
 //!
-//! The third is behavioral: `an_undecodable_committed_row_stalls_every_session`
-//! records what the dispatcher does today when a committed row cannot be
-//! decoded, including the effect on an unrelated session's committed event.
+//! The third is behavioral: `an_undecodable_committed_row_is_quarantined_and_delivery_continues`
+//! proves containment and persistent operator visibility.
 
 #![allow(
     clippy::expect_used,
@@ -44,13 +43,14 @@ use signalbox_persistence::{
     mapping::{
         DelegationPolicyStorageKind, DelegationUpdateStorageKind, DelegationWakeStorageKind,
     },
+    operator_status::ProcessOperatorStatusRepository,
     outbox::{
         DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
         DispatchedDelegationWaitMode, DispatchedDelegationWake, DispatchedModelCallDisposition,
         DispatchedModelCallState, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
         DispatchedSessionCreation, DispatchedToolBatchState, OutboxCorruption,
-        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatcher, decode_bound_action,
+        OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher, decode_bound_action,
         decode_delegation_outcome, decode_delegation_policy_kind, decode_delegation_reason,
         decode_delegation_update_kind, decode_delegation_wake_subject, decode_wait_mode,
     },
@@ -881,27 +881,15 @@ async fn delegation_storage_and_decoder_close_over_the_same_spellings() -> Resul
 }
 
 // ---------------------------------------------------------------------------
-// stall_pin
+// quarantine_containment
 // ---------------------------------------------------------------------------
 
-/// A committed row the dispatcher cannot decode stalls every session, today.
-///
-/// This pins current behavior rather than endorsing it. The dispatcher offers
-/// exactly the next committed sequence and advances its `outbox_consumer_cursor`
-/// cursor only after the consumer accepts; a row that
-/// fails to decode never reaches a consumer, so the cursor cannot move and no
-/// later sequence — for any session — is ever offered. The assertions below
-/// state that as a conjunction because it is one contract: the error repeats,
-/// the cursor holds, and an unrelated session's already-committed event sits
-/// behind it. Splitting them would let each half pass while the combined
-/// behavior regressed.
-///
-/// The concern this documents: with delegation events flowing through the same
-/// selected consumer cursor, an undecodable persisted variant is a consumer-wide stall,
-/// not a per-session one.
+/// A committed row the dispatcher cannot decode is retained and does not stall
+/// a later event for another session.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn an_undecodable_committed_row_stalls_every_session() -> Result<(), Box<dyn Error>> {
+async fn an_undecodable_committed_row_is_quarantined_and_delivery_continues()
+-> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let sessions = CreateSessionRepository::new(pool.clone(), credential_pin());
     sessions
@@ -927,25 +915,20 @@ async fn an_undecodable_committed_row_stalls_every_session() -> Result<(), Box<d
         .await?;
 
     let dispatcher = OutboxDispatcher::new(pool.clone());
-    assert!(matches!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::MissingTypedRecord
-        ))
-    ));
-    assert!(
-        matches!(
-            dispatcher
-                .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-                .await,
-            Err(OutboxDispatchError::Corruption(
-                OutboxCorruption::MissingTypedRecord
-            ))
-        ),
-        "the undecodable row is offered again rather than skipped"
-    );
+    let outcome = dispatcher
+        .dispatch_next(|event| {
+            assert_eq!(event.session(), Some(session(FOLLOWING_SESSION)));
+            OutboxDeliveryDecision::Delivered
+        })
+        .await?;
+    assert_eq!(outcome, OutboxDispatchOutcome::Delivered { sequence: 2 });
+
+    let quarantine: String = sqlx::query_scalar(
+        "SELECT decode_error FROM outbox_event_quarantine WHERE event_sequence = 1",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(quarantine, "outbox typed event record is missing");
 
     let delivered: rust_decimal::Decimal =
         sqlx::query_scalar("SELECT delivered_through FROM outbox_consumer_cursor WHERE consumer_name = 'process_protocol'")
@@ -953,8 +936,8 @@ async fn an_undecodable_committed_row_stalls_every_session() -> Result<(), Box<d
             .await?;
     assert_eq!(
         delivered,
-        rust_decimal::Decimal::from(0_u64),
-        "the durable delivered prefix never advances past a row that cannot be decoded"
+        rust_decimal::Decimal::from(2_u64),
+        "the consumer prefix includes the quarantined row and the delivered successor"
     );
 
     let following: rust_decimal::Decimal =
@@ -965,8 +948,25 @@ async fn an_undecodable_committed_row_stalls_every_session() -> Result<(), Box<d
     assert_eq!(
         following,
         rust_decimal::Decimal::from(2_u64),
-        "an unrelated session's event is committed behind the undecodable row, and the stalled \
-         cursor makes it permanently undeliverable"
+        "the unrelated session's event remains the immediate successor"
+    );
+
+    let mut status = ProcessOperatorStatusRepository::new(pool.clone())
+        .open()
+        .await?;
+    while status.next_item().await?.is_some() {}
+    assert_eq!(
+        status
+            .counts()
+            .expect("completed operator status")
+            .outbox_quarantines(),
+        1
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Idle
     );
 
     pool.close().await;

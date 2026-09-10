@@ -4135,13 +4135,13 @@ async fn tool_failures_close_durably() -> Result<(), Box<dyn Error>> {
              decision_kind, denial_reason, result_kind, rejection_kind,
              result_earliest_undecided_request_id)
          VALUES ($1, 'decide_tool_request', 1, $2,
-                 'deny', E'unsafe\\nreason', 'applied', NULL, NULL)",
+                 'deny', E'unsafe\\treason', 'applied', NULL, NULL)",
     )
     .bind(Uuid::from_u128(deny_seed + 89))
     .bind(denied_request.into_uuid())
     .execute(&pool)
     .await
-    .expect_err("stored decision command reason must reject control characters");
+    .expect_err("stored decision command reason must reject forbidden control characters");
     assert_eq!(
         malformed_command_error
             .as_database_error()
@@ -4174,13 +4174,13 @@ async fn tool_failures_close_durably() -> Result<(), Box<dyn Error>> {
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source, denial_reason,
              user_command_id)
-         VALUES ($1, 'deny', 'user_command', E'unsafe\\nreason', $2)",
+         VALUES ($1, 'deny', 'user_command', E'unsafe\\treason', $2)",
     )
     .bind(denied_request.into_uuid())
     .bind(malformed_command)
     .execute(&mut *malformed_denial)
     .await
-    .expect_err("stored denial reason must reject control characters");
+    .expect_err("stored denial reason must reject forbidden control characters");
     assert_eq!(
         malformed_denial_error
             .as_database_error()
@@ -5252,16 +5252,8 @@ async fn completed_cancellation_requires_closed_tool_round() -> Result<(), Box<d
         .await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
 
-    assert!(matches!(
-        OutboxDispatcher::new(pool.clone())
-            .dispatch_next(|_| {
-                panic!("a completed cancellation without its closed tool round must not dispatch")
-            })
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidTerminalEventCorrelation
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
+        .await?;
 
     pool.close().await;
     drop(container);

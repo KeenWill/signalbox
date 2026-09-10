@@ -2872,6 +2872,23 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testInvalidRequestDecodesToolDenialReasonBoundDetail() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.toolDenialReasonTooLongFrame(
+        maximumBytes: "4096",
+        actualBytes: "4097"
+      )
+    )
+
+    XCTAssertEqual(
+      try ProcessProtocolFixture.rejectionDetail(in: frame.message),
+      .toolDenialReasonTooLong(
+        maximumBytes: SignalboxCanonicalUInt64(rawValue: 4_096),
+        actualBytes: SignalboxCanonicalUInt64(rawValue: 4_097)
+      )
+    )
+  }
+
   func testModelSettingRejectionsDecodeTypedDetails() throws {
     let reasoning = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.unsupportedReasoningLevelFrame(
@@ -3463,6 +3480,30 @@ private enum ProcessProtocolFixture {
           "digest":"\(digest)"
         }
         """
+    )
+  }
+
+  static func toolDenialReasonTooLongFrame(
+    maximumBytes: String,
+    actualBytes: String
+  ) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"error",
+          "code":"invalid_request",
+          "message":"tool denial reason is too long",
+          "detail":{
+            "type":"tool_denial_reason_too_long",
+            "maximum_bytes":"\(maximumBytes)",
+            "actual_bytes":"\(actualBytes)"
+          }
+        }
+      }
+      """.utf8
     )
   }
 
