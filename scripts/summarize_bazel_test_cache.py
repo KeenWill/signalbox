@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -22,12 +22,30 @@ class TestAttempts:
     status: str = "No final summary"
 
 
-def summarize(events: Iterable[dict[str, Any]]) -> str:
+def read_events(lines: Iterable[str]) -> Iterator[dict[str, Any] | None]:
+    """Read complete records; None marks a truncated trailing JSON record."""
+    records = (line for line in lines if line.strip())
+    for line in records:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            # Interior corruption must not silently discard later observations.
+            if next(records, None) is not None:
+                raise
+            yield None
+            return
+        yield event
+
+
+def summarize(events: Iterable[dict[str, Any] | None]) -> str:
     """Count observed attempts; cached historical durations are never execution."""
     targets: dict[str, TestAttempts] = {}
-    finished = False
+    complete = False
     for event in events:
-        finished = finished or "finished" in event
+        if event is None:
+            complete = False
+            continue
+        complete = event.get("lastMessage", False)
         result = event.get("testResult")
         identity = event.get("id", {}).get("testResult")
         if result is not None and identity is not None:
@@ -53,8 +71,8 @@ def summarize(events: Iterable[dict[str, Any]]) -> str:
             attempts = targets.setdefault(identity["label"], TestAttempts())
             attempts.status = summary.get("overallStatus", "Unknown")
     lines = ["## PostgreSQL test-result cache", ""]
-    if not finished:
-        lines.extend(["Partial event stream: Bazel did not report build completion.", ""])
+    if not complete:
+        lines.extend(["Partial event stream: the final BEP message was not received intact.", ""])
     if not targets:
         lines.append("No test-result events were observed; cache reuse is unmeasured.")
         return "\n".join(lines) + "\n"
@@ -80,7 +98,7 @@ def main() -> None:
         print("## PostgreSQL test-result cache\n\nEvent file unavailable; cache reuse is unmeasured.")
         return
     with arguments.events.open() as events:
-        print(summarize(json.loads(line) for line in events if line.strip()), end="")
+        print(summarize(read_events(events)), end="")
 
 
 if __name__ == "__main__":
