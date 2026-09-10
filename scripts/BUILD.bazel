@@ -127,6 +127,19 @@ py_test(
     deps = [":ci_bazel_scope"],
 )
 
+py_library(
+    name = "summarize_bazel_test_cache",
+    srcs = ["summarize_bazel_test_cache.py"],
+    imports = ["."],
+)
+
+py_test(
+    name = "test_summarize_bazel_test_cache",
+    size = "small",
+    srcs = ["test_summarize_bazel_test_cache.py"],
+    deps = [":summarize_bazel_test_cache"],
+)
+
 test_suite(
     name = "checker_tests",
     visibility = ["//visibility:public"],
