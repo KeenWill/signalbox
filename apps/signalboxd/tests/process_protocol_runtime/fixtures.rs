@@ -451,7 +451,7 @@ impl RunningRuntime {
                 let (service, workflows) =
                     signalboxd::workflows::WorkflowRuntime::new(pool.clone())?;
                 let workflows = if let Some(stores) = &blob_store_registry {
-                    workflows.with_eval(signalboxd::workflows::eval::EvalServices::new(
+                    let services = signalboxd::workflows::eval::EvalServices::new(
                         pool.clone(),
                         stores.clone(),
                         Arc::new(
@@ -463,7 +463,8 @@ impl RunningRuntime {
                         signalboxd::workflows::eval::configured_binding(&model_configuration)
                             .unwrap_or_else(|_| signalboxd::workflows::eval::recorded_binding()),
                         Arc::new(model_configuration.clone()),
-                    ))
+                    );
+                    workflows.with_eval(move || Ok(services.clone()))
                 } else {
                     workflows
                 };

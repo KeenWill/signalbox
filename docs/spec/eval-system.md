@@ -57,11 +57,12 @@ insertion. Sealing does not determine workflow terminal status.
 
 The daemon composes Corpus, Judge, Blob and EvalRecord adapters when blob
 storage is available. Evaluation launch resolves the judge binding and encodes
-the exact immutable manifest before generic workflow start. Recorded responses
-are pinned in that manifest, one per trial, and execute through the same judge
-adapter without provider access. The process read command returns byte ranges of
-the sealed scorecard. The typed TypeScript fixture uses the same effect records;
-token counts and pull-request identities use decimal strings.
+the exact immutable manifest before generic workflow start. Each attempt
+composes its adapters from the installed configuration snapshot. Recorded
+responses are pinned in that manifest, one per trial, and execute through the
+same judge adapter without provider access. The process read command returns
+byte ranges of the sealed scorecard. The typed TypeScript fixture uses the same
+effect records; token counts and pull-request identities use decimal strings.
 
 ## Design decisions
 

@@ -82,8 +82,7 @@ async fn evaluation_commands_print_sealed_scorecards_without_provider_access()
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn evaluation_launch_rejects_corrupt_recorded_responses_before_pinning()
--> Result<(), Box<dyn Error>> {
+async fn evaluation_launch_rejects_corrupt_inputs_before_pinning() -> Result<(), Box<dyn Error>> {
     const RESPONSES: &[u8] =
         br#"{"responses":[{"disposition":"approve","rationale":"Synthetic permission."}]}"#;
     let mut fixture = CommittedBlobReadFixture::from_runtime(
@@ -124,6 +123,24 @@ async fn evaluation_launch_rejects_corrupt_recorded_responses_before_pinning()
         }
     ));
     std::fs::write(fixture.object_path(), RESPONSES)?;
+    let corpus_path = fixture
+        .runtime
+        .blob_storage_root
+        .as_ref()
+        .unwrap()
+        .store
+        .join(BlobObjectKey::for_digest(corpus_digest.into_digest()).as_str());
+    let corrupt = std::str::from_utf8(corpus)?.replace("current_time", "altered_time");
+    assert_ne!(corrupt.as_bytes(), corpus);
+    std::fs::write(&corpus_path, corrupt)?;
+    assert!(matches!(
+        program_request(&mut fixture.connection, request.clone()).await?,
+        ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    std::fs::write(corpus_path, corpus)?;
     assert!(matches!(
         program_request(&mut fixture.connection, request).await?,
         ServerMessage::ProgramRunStarted { .. }

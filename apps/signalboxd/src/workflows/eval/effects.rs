@@ -189,6 +189,17 @@ pub struct EvaluationEffects {
     rejected: bool,
 }
 impl EvaluationEffects {
+    pub(crate) fn recovery_for(request: &signalbox_domain::EffectRequest) -> EffectRecovery {
+        if request.capability() == ProgramCapability::Judge
+            && request.method() == "evaluate"
+            && decode::<TrialRequest>(request.payload().as_bytes()).is_ok()
+        {
+            EffectRecovery::Ambiguous
+        } else {
+            EffectRecovery::Idempotent
+        }
+    }
+
     pub fn new(services: EvalServices) -> Self {
         Self {
             services,
@@ -282,14 +293,7 @@ impl EvaluationEffects {
 
 impl EffectExecutor for EvaluationEffects {
     fn recovery(&self, request: &signalbox_domain::EffectRequest) -> EffectRecovery {
-        if request.capability() == ProgramCapability::Judge
-            && request.method() == "evaluate"
-            && decode::<TrialRequest>(request.payload().as_bytes()).is_ok()
-        {
-            EffectRecovery::Ambiguous
-        } else {
-            EffectRecovery::Idempotent
-        }
+        Self::recovery_for(request)
     }
     fn adopt<'a>(
         &'a mut self,

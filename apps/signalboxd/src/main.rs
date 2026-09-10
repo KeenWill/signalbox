@@ -2388,33 +2388,37 @@ async fn run_hub(
     }
     let (workflow_shutdown, workflow_shutdown_receiver) = oneshot::channel();
     let workflows =
-        signalboxd::workflows::WorkflowRuntime::new(pool.clone()).and_then(|(service, runtime)| {
+        signalboxd::workflows::WorkflowRuntime::new(pool.clone()).map(|(service, runtime)| {
             let runtime = if let Some(stores) = &blob_store_registry {
-                let model = eval_runtime_factory
-                    .build(&model_configuration)
-                    .map_err(|error| {
-                        signalboxd::workflows::WorkflowRuntimeError::Runtime(std::io::Error::other(
-                            error,
-                        ))
-                    })?;
-                runtime.with_eval(signalboxd::workflows::eval::EvalServices::new(
-                    pool.clone(),
-                    stores.clone(),
-                    Arc::new(RuntimeApprovalJudgeModel::new(
-                        model,
-                        model_configuration.runtime_model_catalog(),
-                    )),
-                    signalboxd::workflows::eval::configured_binding(&model_configuration)
-                        .unwrap_or_else(|_| signalboxd::workflows::eval::recorded_binding()),
-                    Arc::new(model_configuration.clone()),
-                ))
+                let eval_pool = pool.clone();
+                let eval_stores = stores.clone();
+                let eval_reload = configuration_reload.clone();
+                runtime.with_eval(move || {
+                    let configuration = eval_reload.catalogs().models;
+                    let model = eval_runtime_factory
+                        .build(&configuration)
+                        .map_err(|error| {
+                            signalbox_workflow_runtime::LiveDeliveryFailure::new(error.to_string())
+                        })?;
+                    Ok(signalboxd::workflows::eval::EvalServices::new(
+                        eval_pool.clone(),
+                        eval_stores.clone(),
+                        Arc::new(RuntimeApprovalJudgeModel::new(
+                            model,
+                            configuration.runtime_model_catalog(),
+                        )),
+                        signalboxd::workflows::eval::configured_binding(&configuration)
+                            .unwrap_or_else(|_| signalboxd::workflows::eval::recorded_binding()),
+                        configuration,
+                    ))
+                })
             } else {
                 runtime
             };
-            Ok((
+            (
                 service,
                 runtime.with_repository_watch(workflow_repository_watch),
-            ))
+            )
         });
     let process_runtime = match &workflows {
         Ok((service, _)) => process_runtime.with_workflows(service.clone()),
