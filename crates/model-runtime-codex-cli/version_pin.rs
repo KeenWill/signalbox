@@ -7,7 +7,7 @@ pub(crate) fn is_exact_pin(value: &str) -> bool {
 
 /// Extract the unchanged binary version from an exact fork release tag.
 pub(crate) fn upstream_version(tag: &str) -> Option<&str> {
-    let (version, revision) = tag.strip_prefix("rust-v")?.split_once("-signalbox.")?;
+    let (version, revision) = tag.strip_prefix("rust-v")?.split_once("-fork.")?;
     (is_exact_pin(version)
         && !revision.is_empty()
         && revision.bytes().all(|byte| byte.is_ascii_digit())

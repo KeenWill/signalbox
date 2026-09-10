@@ -38,13 +38,17 @@ fn attachment_frontier_renders_ordered_stubs_without_bytes() {
     ])
     .expect("the interleaved fixture content is valid");
     let expected_stub = format!(
-        r#"{{"signalbox_attachment":{{"kind":"image","media_type":"image/png","display_filename":"scan\".png","byte_length":"17","digest":"{digest}"}}}}"#
+        r#"{{"signalbox_attachment":{{"kind":"image","media_type":"image/png","display_filename":"scan\".png","byte_length":"17","digest":"{digest}","visible_part":"00000000000000000000000000000001_1"}}}}"#
     );
 
-    let rendered = render_model_user_content(content, |candidate| {
-        (candidate == digest)
-            .then_some(NonZeroU64::new(17).expect("the fixture attachment length is positive"))
-    })
+    let rendered = render_model_user_content(
+        identity(1, SemanticTranscriptEntryId::from_uuid),
+        content,
+        |candidate| {
+            (candidate == digest)
+                .then_some(NonZeroU64::new(17).expect("the fixture attachment length is positive"))
+        },
+    )
     .expect("the catalog fact covers the exact attachment");
 
     assert_eq!(rendered.parts()[0].as_str(), "before");
@@ -69,12 +73,16 @@ fn maximum_checked_attachment_metadata_fits_the_named_stub_bound() {
     .expect("the maximum metadata fixture is valid");
 
     let charged = super::super::render::user_content_retained_bytes(&content);
-    let rendered = render_model_user_content(content, |_| Some(NonZeroU64::MAX))
-        .expect("the derived bound covers maximum checked metadata");
+    let rendered = render_model_user_content(
+        identity(1, SemanticTranscriptEntryId::from_uuid),
+        content,
+        |_| Some(NonZeroU64::MAX),
+    )
+    .expect("the derived bound covers maximum checked metadata");
     let stub = rendered.parts()[0].as_str();
 
     assert!(stub.len() <= MAX_RENDERED_ATTACHMENT_STUB_BYTES);
-    assert_eq!(stub.len(), 2_242);
+    assert_eq!(stub.len(), 2_294);
     assert!(charged >= stub.len());
 }
 
@@ -92,9 +100,25 @@ fn repeated_attachment_occurrences_each_count_toward_rendered_content() {
         .expect("two occurrences of one digest");
     let single_charge = super::super::render::user_content_retained_bytes(&single);
     let repeated_charge = super::super::render::user_content_retained_bytes(&repeated);
-    let rendered = render_model_user_content(repeated, |_| Some(NonZeroU64::MIN))
-        .expect("catalog length is available");
+    let rendered = render_model_user_content(
+        identity(1, SemanticTranscriptEntryId::from_uuid),
+        repeated,
+        |_| Some(NonZeroU64::MIN),
+    )
+    .expect("catalog length is available");
 
+    let first: serde_json::Value =
+        serde_json::from_str(rendered.parts()[0].as_str()).expect("first stub JSON");
+    let second: serde_json::Value =
+        serde_json::from_str(rendered.parts()[1].as_str()).expect("second stub JSON");
+    assert_eq!(
+        first["signalbox_attachment"]["visible_part"],
+        "00000000000000000000000000000001_0"
+    );
+    assert_eq!(
+        second["signalbox_attachment"]["visible_part"],
+        "00000000000000000000000000000001_1"
+    );
     assert_eq!(repeated_charge, single_charge * 2);
     assert!(
         repeated_charge
@@ -1165,5 +1189,36 @@ fn frontier_rendering_rejects_cross_turn_tool_result_evidence() {
     assert_eq!(
         error,
         ModelFrontierRenderingError::MissingOrMismatchedToolEvidence { entry: source }
+    );
+}
+
+#[test]
+fn rendered_attachment_selectors_distinguish_entries_and_part_ordinals() {
+    use super::super::RenderedAttachmentSelector;
+    let first = identity(1, SemanticTranscriptEntryId::from_uuid);
+    let second = identity(2, SemanticTranscriptEntryId::from_uuid);
+    assert_eq!(
+        RenderedAttachmentSelector::new(first, 0).to_string(),
+        "00000000000000000000000000000001_0"
+    );
+    assert_eq!(
+        RenderedAttachmentSelector::new(first, 2).to_string(),
+        "00000000000000000000000000000001_2"
+    );
+    assert_eq!(
+        RenderedAttachmentSelector::new(second, 0).to_string(),
+        "00000000000000000000000000000002_0"
+    );
+    assert_eq!(
+        RenderedAttachmentSelector::parse("00000000000000000000000000000001_2"),
+        Some(RenderedAttachmentSelector::new(first, 2))
+    );
+    assert_eq!(
+        RenderedAttachmentSelector::parse("00000000000000000000000000000001_02"),
+        None
+    );
+    assert_eq!(
+        RenderedAttachmentSelector::parse("00000000000000000000000000000001_256"),
+        None
     );
 }

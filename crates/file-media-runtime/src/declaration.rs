@@ -102,12 +102,12 @@ impl ValidationDeclaration {
     }
 }
 
-/// Whether one reader is eligible for the complete-stream UTF-8 fallback.
+/// Whether one reader is eligible for bounded-prefix UTF-8 fallback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamingTextFallback {
     /// The reader never claims untyped bytes as text.
     Disabled,
-    /// The reader may claim only after complete streaming validation.
+    /// The reader may claim only after validating its bounded text prefix.
     Enabled,
 }
 
