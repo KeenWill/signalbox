@@ -53,17 +53,17 @@ computes the existing offline or live scorecard through the pure library and
 returns it as the workflow result. Live scoring counts failed and ambiguous
 repeats as unsuccessful; an offline trial without a verdict faults without a
 scorecard. Missing blobs and inadmissible cases fail before provider work. The
-program calls `eval-record.seal` before returning the scorecard. The host
-re-decodes the pinned corpus, verifies complete manifest trial membership and
-derives the scorecard from retained journal answers; a supplied scorecard must
-agree. `evaluation_run` and `evaluation_trial` commit as one immutable snapshot
-keyed by the workflow run and trial ordinal, preserving corpus labels and
-provenance, verdicts, classified failures, ambiguity and full journal evidence.
-Equal identity and content retries adopt the same receipt, including recovery
-after commit but before delivery; changed identity, evidence or summary
-conflicts. A partial snapshot cannot commit, and sealed rows reject update,
-delete, truncate and late trial insertion. Sealing does not determine workflow
-terminal status.
+program calls `eval-record.seal` before returning the scorecard. On first seal,
+the host re-decodes the pinned corpus, verifies complete manifest trial
+membership and derives the scorecard from retained journal answers; a supplied
+scorecard must agree. `evaluation_run` and `evaluation_trial` commit as one
+immutable snapshot keyed by the workflow run and trial ordinal, preserving
+corpus labels and provenance, verdicts, classified failures, ambiguity and full
+journal evidence. Equal identity and content retries adopt the same receipt,
+including recovery after commit but before delivery, without rereading the
+corpus; changed identity, evidence or summary conflicts. A partial snapshot
+cannot commit, and sealed rows reject update, delete, truncate and late trial
+insertion. Sealing does not determine workflow terminal status.
 
 `WorkflowRuntime::with_eval` supplies the runner's host services and enables
 native eval registration; the default daemon rejects that registration. Operator
