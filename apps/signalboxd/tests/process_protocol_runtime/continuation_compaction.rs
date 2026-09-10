@@ -873,6 +873,14 @@ async fn failed_or_refused_compaction_closes_the_active_checkpoint() -> Result<(
         .fetch_one(&runtime.pool)
         .await?;
         assert_eq!(lifecycle, (String::from("terminal"), None));
+        assert_eq!(
+            signalbox_persistence::goal::GoalRepository::new(runtime.pool.clone())
+                .unchargeable_automatic_resume_turns(session, &[turn])
+                .await?
+                .as_ref(),
+            &[turn],
+            "daemon-owned compaction failure does not spend the goal resume budget"
+        );
         let queued: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'queued'",
         )

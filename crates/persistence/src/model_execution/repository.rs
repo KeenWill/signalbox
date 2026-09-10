@@ -943,7 +943,7 @@ impl PostgresModelCallRepository {
             prepared.session(),
             prepared.turn(),
             prepared.attempt(),
-            serving_evidence,
+            serving_evidence.clone(),
             credential_reference,
             &self.credential_pools,
         )

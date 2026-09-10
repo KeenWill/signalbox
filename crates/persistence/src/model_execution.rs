@@ -87,8 +87,17 @@ use crate::{
     submit_input::{SubmitInputCorruption, SubmitInputRepositoryError},
 };
 
+/// Measures rendered entries following an active-turn summary.
+pub trait ToolContinuationEntryMeasurement: std::fmt::Debug + Send + Sync {
+    /// Returns adapter-serialized bytes for the operation's entries other than its summary.
+    fn additional_entry_bytes(
+        &self,
+        operation: &signalbox_application::PreparedModelOperation,
+    ) -> Option<u64>;
+}
+
 /// Immutable usage boundary for one resolved continuation mode.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ToolContinuationUsageLimit {
     target: ResolvedProviderTarget,
     fast_mode: FastMode,
@@ -99,6 +108,7 @@ pub struct ToolContinuationUsageLimit {
     max_tool_requests: Option<u64>,
     request_overhead_bytes: u64,
     steering_part_framing_bytes: u64,
+    entry_measurement: Option<std::sync::Arc<dyn ToolContinuationEntryMeasurement>>,
 }
 
 impl ToolContinuationUsageLimit {
@@ -121,6 +131,7 @@ impl ToolContinuationUsageLimit {
             ),
             request_overhead_bytes: 0,
             steering_part_framing_bytes: 0,
+            entry_measurement: None,
         }
     }
 
@@ -131,8 +142,18 @@ impl ToolContinuationUsageLimit {
         self
     }
 
-    pub(crate) const fn max_tool_requests(self) -> Option<u64> {
+    pub(crate) const fn max_tool_requests(&self) -> Option<u64> {
         self.max_tool_requests
+    }
+
+    /// Supplies the adapter measurement for model-visible entries after a summary.
+    #[must_use]
+    pub fn with_entry_measurement(
+        mut self,
+        measurement: std::sync::Arc<dyn ToolContinuationEntryMeasurement>,
+    ) -> Self {
+        self.entry_measurement = Some(measurement);
+        self
     }
 
     /// Reserves adapter-rendered fixed request material and each steering part's framing.
@@ -154,7 +175,7 @@ impl ToolContinuationUsageLimit {
         self
     }
 
-    pub(crate) const fn compaction_prompt_bytes(self) -> u64 {
+    pub(crate) const fn compaction_prompt_bytes(&self) -> u64 {
         self.compaction_prompt_bytes
     }
 
@@ -165,15 +186,15 @@ impl ToolContinuationUsageLimit {
         self
     }
 
-    pub(crate) const fn max_output_tokens(self) -> u64 {
+    pub(crate) const fn max_output_tokens(&self) -> u64 {
         self.max_output_tokens
     }
 
-    pub(crate) const fn context_window_tokens(self) -> u64 {
+    pub(crate) const fn context_window_tokens(&self) -> u64 {
         self.context_window_tokens
     }
 
-    const fn replays_provider_compaction(self) -> bool {
+    const fn replays_provider_compaction(&self) -> bool {
         self.replays_provider_compaction
     }
 }

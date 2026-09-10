@@ -457,7 +457,32 @@ impl ModelCallExecution {
         &self,
         call: ModelCallId,
     ) -> Result<PreparedModelCallRequest, ModelCallPreparationError> {
-        let prepared = self.clone().prepare_initial_call(call)?;
+        self.preview_initial_call_consuming_steering(call, Vec::new(), None)
+    }
+
+    /// Derives the complete call request, including pending steering, without committing it.
+    pub fn preview_initial_call_consuming_steering(
+        &self,
+        call: ModelCallId,
+        steering_entries: Vec<SemanticTranscriptEntryId>,
+        steering_frontier: Option<ContextFrontierId>,
+    ) -> Result<PreparedModelCallRequest, ModelCallPreparationError> {
+        let prepared = self.clone().prepare_initial_call_consuming_steering(
+            call,
+            steering_entries,
+            steering_frontier,
+        )?;
+        let frontier_entries = self
+            .frontier_entries
+            .iter()
+            .cloned()
+            .chain(
+                prepared
+                    .consumed_steering()
+                    .iter()
+                    .map(|entry| entry.semantic_entry().clone()),
+            )
+            .collect();
         Ok(PreparedModelCallRequest {
             session: self.session,
             turn: self.turn,
@@ -468,7 +493,7 @@ impl ModelCallExecution {
                 .dangerous_tool_auto_approval(),
             model_settings: self.configuration.effective().model_settings(),
             call: prepared.call().clone(),
-            frontier_entries: self.frontier_entries.clone(),
+            frontier_entries,
             origin_contents: self.origin_contents.clone(),
             attachment_blob_facts: self.attachment_blob_facts.clone(),
             runner_placements: BTreeMap::new(),

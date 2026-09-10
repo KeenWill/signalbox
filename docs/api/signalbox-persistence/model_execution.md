@@ -2,11 +2,22 @@
 
 # model_execution
 
+## ToolContinuationEntryMeasurement
+
+```rust
+pub trait ToolContinuationEntryMeasurement: fmt::Debug + marker::Send + marker::Sync {
+    fn additional_entry_bytes(
+        &self,
+        operation: &signalbox_application::PreparedModelOperation,
+    ) -> option::Option<u64>;
+}
+```
+
 ## ToolContinuationUsageLimit
 
 ```rust
 pub struct ToolContinuationUsageLimit {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, fmt::Debug
 impl model_execution::ToolContinuationUsageLimit {
     pub const fn new(
         target: signalbox_domain::ResolvedProviderTarget,
@@ -16,6 +27,11 @@ impl model_execution::ToolContinuationUsageLimit {
     ) -> Self;
     #[must_use]
     pub const fn with_max_tool_requests(self, maximum: option::Option<u64>) -> Self;
+    #[must_use]
+    pub fn with_entry_measurement(
+        self,
+        measurement: sync::Arc<dyn model_execution::ToolContinuationEntryMeasurement>,
+    ) -> Self;
     #[must_use]
     pub const fn with_request_overhead(self, fixed_bytes: u64, steering_part_bytes: u64) -> Self;
     #[must_use]
