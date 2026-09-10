@@ -156,6 +156,10 @@ session.
 
 Later session creation checks and inserts the selected normalized prefix one
 entry at a time without loading the complete prefix or raw audit records.
+Subsequent submission scheduling reads authenticate the constant-size imported
+seed link and frontier header without loading the normalized prefix again.
+Activation and model-call construction resolve the complete semantic context
+they require.
 
 Every accepted nonempty physical JSONL record is preserved verbatim before
 normalization. An accepted non-message record produces a typed source event
