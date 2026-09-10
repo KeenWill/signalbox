@@ -750,6 +750,18 @@ fn report_database_close_failure(error: &SingleHubGuardError) {
     );
 }
 
+fn startup_failure_after_close(
+    failure: HubRuntimeError,
+    closed: Result<(), signalboxd::SingleHubGuardError>,
+) -> Result<ShutdownOutcome, HubRuntimeError> {
+    if matches!(closed, Err(signalboxd::SingleHubGuardError::GuardLost(_))) {
+        tracing::warn!("database guard lost during startup cleanup");
+        Ok(ShutdownOutcome::GuardLost)
+    } else {
+        Err(failure)
+    }
+}
+
 async fn migrate_hub_database(pool: &sqlx::PgPool) -> Result<(), HubRuntimeError> {
     migrate(pool).await.map_err(|error| {
         tracing::error!(migration_detail = %error, "database migration rejected");
@@ -1687,8 +1699,7 @@ async fn run_hub_incarnation(
     let pool = database.pool().clone();
     let fenced_pool_floor_pool = pool.clone();
     if let Err(error) = migrate_hub_database(&pool).await {
-        let _ = database.close().await;
-        return Err(error);
+        return startup_failure_after_close(error, database.close().await);
     }
     let pending_reload =
         match signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
@@ -1700,8 +1711,7 @@ async fn run_hub_incarnation(
             Ok(pending) => pending,
             Err(error) => {
                 let failure = reload_recovery_failure(&error);
-                let _ = database.close().await;
-                return Err(failure);
+                return startup_failure_after_close(failure, database.close().await);
             }
         };
     let retained_startup = pending_reload
@@ -1927,8 +1937,7 @@ async fn run_hub_incarnation(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Tools(&error),
             );
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let workspace_instruction_runtime = WorkspaceInstructionRuntime::new(
@@ -1949,8 +1958,7 @@ async fn run_hub_incarnation(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static("runner_catalog_construction_failed"),
             );
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let scan_runner_service = runner_service.clone();
@@ -2046,8 +2054,7 @@ async fn run_hub_incarnation(
     )
     .await;
     if let Err(error) = startup {
-        let _ = database.close().await;
-        return Err(error);
+        return startup_failure_after_close(error, database.close().await);
     }
 
     if database.check_guard().await.is_err() {
@@ -2066,8 +2073,7 @@ async fn run_hub_incarnation(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::BlobStorage(&error),
             );
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
         GuardedAwait::GuardLost => {
             let _ = database.close().await;
@@ -2091,8 +2097,7 @@ async fn run_hub_incarnation(
                     SanitizedStartupCause::Static("blob_read_tool_construction_failed"),
                 );
                 drop(blob_store_registry);
-                let _ = database.close().await;
-                return Err(failure);
+                return startup_failure_after_close(failure, database.close().await);
             }
         };
         let (blob_catalog, executor) = blob_tools.into_parts();
@@ -2105,19 +2110,20 @@ async fn run_hub_incarnation(
                 );
                 drop(executor);
                 drop(blob_store_registry);
-                let _ = database.close().await;
-                return Err(failure);
+                return startup_failure_after_close(failure, database.close().await);
             }
         };
         blob_executor = Some(executor);
     }
     let file_media_executor = if model_configuration.file_media() {
         let Some(stores) = blob_store_registry.as_ref() else {
-            let _ = database.close().await;
-            return Err(erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("file_media_requires_blob_storage"),
-            ));
+            return startup_failure_after_close(
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("file_media_requires_blob_storage"),
+                ),
+                database.close().await,
+            );
         };
         let composed = await_while_guarded(
             &mut database,
@@ -2129,11 +2135,13 @@ async fn run_hub_incarnation(
                 tool_catalog = match tool_catalog.with_compiled_catalog(catalog) {
                     Ok(catalog) => catalog,
                     Err(_) => {
-                        let _ = database.close().await;
-                        return Err(erase_startup_cause(
-                            RuntimePhase::Configuration,
-                            SanitizedStartupCause::Static("file_media_catalog_conflict"),
-                        ));
+                        return startup_failure_after_close(
+                            erase_startup_cause(
+                                RuntimePhase::Configuration,
+                                SanitizedStartupCause::Static("file_media_catalog_conflict"),
+                            ),
+                            database.close().await,
+                        );
                     }
                 };
                 Some(executor.with_model_configuration(&model_configuration))
@@ -2144,11 +2152,13 @@ async fn run_hub_incarnation(
                 return Ok(ShutdownOutcome::GuardLost);
             }
             GuardedAwait::Completed(Err(_)) => {
-                let _ = database.close().await;
-                return Err(erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("file_media_worker_unavailable"),
-                ));
+                return startup_failure_after_close(
+                    erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static("file_media_worker_unavailable"),
+                    ),
+                    database.close().await,
+                );
             }
         }
     } else {
@@ -2164,8 +2174,7 @@ async fn run_hub_incarnation(
             drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let listener = match LocalProcessListener::bind(configuration.process_socket_path()) {
@@ -2179,8 +2188,7 @@ async fn run_hub_incarnation(
             drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let snapshot_reader_budget = match signalboxd::shared_snapshot_reader_budget(
@@ -2197,8 +2205,7 @@ async fn run_hub_incarnation(
             let _ = runner_listener.cleanup();
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let web_blob_runtime = match blob_store_registry.as_ref() {
@@ -2216,8 +2223,7 @@ async fn run_hub_incarnation(
                     disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
                         .await;
                     drop(blob_store_registry);
-                    let _ = database.close().await;
-                    return Err(failure);
+                    return startup_failure_after_close(failure, database.close().await);
                 }
             };
             match WebBlobRuntime::new(
@@ -2238,8 +2244,7 @@ async fn run_hub_incarnation(
                     disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
                         .await;
                     drop(blob_store_registry);
-                    let _ = database.close().await;
-                    return Err(failure);
+                    return startup_failure_after_close(failure, database.close().await);
                 }
             }
         }
@@ -2266,8 +2271,7 @@ async fn run_hub_incarnation(
             drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     tracing::info!(
@@ -2335,8 +2339,7 @@ async fn run_hub_incarnation(
                 drop(blob_executor);
                 disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
                 drop(blob_store_registry);
-                let _ = database.close().await;
-                return Err(failure);
+                return startup_failure_after_close(failure, database.close().await);
             }
             GuardedAwait::GuardLost => {
                 let _ = listener.cleanup();
@@ -2404,8 +2407,11 @@ async fn run_hub_incarnation(
         let _ = runner_listener.cleanup();
         drop(tool_executor);
         drop(blob_store_registry);
-        let _ = database.close().await;
-        return outcome;
+        let closed = database.close().await;
+        return match outcome {
+            Ok(outcome) => Ok(outcome),
+            Err(failure) => startup_failure_after_close(failure, closed),
+        };
     }
     let recovered_catalogs = configuration_reload.catalogs();
     let model_configuration = (*recovered_catalogs.models).clone();
@@ -2440,8 +2446,7 @@ async fn run_hub_incarnation(
             let _ = runner_listener.cleanup();
             drop(tool_executor);
             drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
+            return startup_failure_after_close(failure, database.close().await);
         }
     };
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
@@ -3556,6 +3561,68 @@ mod tests {
                 .await?;
         assert_eq!(profile, "startup-profile");
         database.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn startup_database_failure_reacquires_only_when_cleanup_lost_the_guard()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testcontainers_modules::{
+            postgres::Postgres,
+            testcontainers::{ImageExt, runners::AsyncRunner},
+        };
+        let container = Postgres::default()
+            // Same PostgreSQL image as tests/process_substrate.rs.
+            .with_tag("18.4-alpine3.23")
+            .with_cmd(signalbox_persistence::disposable_postgres_server_args())
+            .with_mount(signalbox_persistence::disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(signalbox_persistence::disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?,
+        );
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        let options = signalbox_persistence::local_test_connection_options(&url)?;
+        let control = sqlx::PgPool::connect_with(options.clone()).await?;
+        let database = signalboxd::FencedHubDatabase::connect_with(options.clone(), None).await?;
+        let previous_generation = database.generation();
+        let guard_backend: i32 = sqlx::query_scalar(
+            "SELECT DISTINCT pid FROM pg_locks
+             WHERE locktype = 'advisory' AND mode = 'ExclusiveLock' AND granted
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+        )
+        .fetch_one(&control)
+        .await?;
+        sqlx::query("SELECT pg_terminate_backend($1)")
+            .bind(guard_backend)
+            .execute(&control)
+            .await?;
+        database.pool().close().await;
+        let failure = super::migrate_hub_database(database.pool())
+            .await
+            .expect_err("the interrupted migration cannot use a closed pool");
+        let result = super::startup_failure_after_close(failure, database.close().await);
+        assert!(matches!(
+            super::recovery_incarnation_outcome(result, false),
+            GuardedIncarnationOutcome::Reacquire
+        ));
+
+        let recovered = signalboxd::FencedHubDatabase::connect_with(options, None).await?;
+        assert!(recovered.generation().get() > previous_generation.get());
+        recovered.pool().close().await;
+        let failure = super::migrate_hub_database(recovered.pool())
+            .await
+            .expect_err("an initial pool failure remains a startup error with a healthy guard");
+        let result = super::startup_failure_after_close(failure, recovered.close().await);
+        assert!(
+            matches!(super::recovery_incarnation_outcome(result, false), GuardedIncarnationOutcome::Finished(Err(error)) if error == failure)
+        );
+        control.close().await;
+        drop(container);
         Ok(())
     }
 

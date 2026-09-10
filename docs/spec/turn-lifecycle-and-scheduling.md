@@ -307,7 +307,8 @@ lifecycle projections retain independent operator evidence and remain suspended
 without automatic repair. Operator status exposes both kinds of pending
 supervision item. Successful startup reconstitution settles repaired terminal
 items without resuming them. Other sessions continue. Infrastructure failures
-stop initial startup visibly. During guard recovery, database failures
+stop initial startup visibly. Guard loss observed while closing an incomplete
+startup enters reacquisition. During guard recovery, database failures
 throughout incarnation reconstruction, including repository-watch startup,
 continue reacquisition with the same capped backoff and elapsed bound, after
 closing the failed incarnation’s fenced pool. Migration validation, fence
