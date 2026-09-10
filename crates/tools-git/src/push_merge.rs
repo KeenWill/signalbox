@@ -279,8 +279,13 @@ pub(super) fn verify_merge(
             Patch::from_buffers(old_bytes, None, new_bytes, None, Some(&mut diff_options()))
                 .map_err(repository_failure)?;
         let result_hunks = text_hunks(&patch)?;
-        let preserves_branch =
-            preserves_nonconflicting_text(old_bytes, new_bytes, &branch_hunks, &base_hunks);
+        let preserves_branch = preserves_nonconflicting_text(
+            old_bytes,
+            new_bytes,
+            &branch_hunks,
+            &base_hunks,
+            generated,
+        );
         let mut retained = BTreeMap::new();
         for effect in result_hunks
             .iter()
@@ -380,6 +385,7 @@ pub(super) fn verify_merge(
             new.as_ref().map_or(&[], git2::Blob::content),
             &branch_hunks,
             &base_hunks,
+            false,
         ) && let Some(hunk) = branch_hunks.first()
         {
             record_dropped_hunk(&mut dropped, &mut preview_bytes, path, hunk);
@@ -495,7 +501,7 @@ fn permits_regenerated_hunk(
         own.old_lines
             .as_ref()
             .is_some_and(|range| range.start <= base_range.end && base_range.start <= range.end)
-            && !own.effects().eq(base.effects())
+            && (generated || !own.effects().eq(base.effects()))
             && (generated
                 || (test_source
                     && base.effects().all(is_json_fixture_literal)
@@ -546,6 +552,7 @@ fn preserves_nonconflicting_text(
     result: &[u8],
     branch: &[Hunk],
     base: &[Hunk],
+    generated: bool,
 ) -> bool {
     let lines: Vec<_> = ancestor.split_inclusive(|byte| *byte == b'\n').collect();
     let mut edits: Vec<_> = branch
@@ -604,7 +611,7 @@ fn preserves_nonconflicting_text(
         let base_changed = region.iter().any(|(_, side, _)| *side);
         let branch_text = replacement(false);
         let base_text = replacement(true);
-        if branch_changed && base_changed && branch_text != base_text {
+        if branch_changed && base_changed && (generated || branch_text != base_text) {
             spans.push(std::mem::take(&mut fixed));
         } else {
             fixed.extend_from_slice(if branch_changed {
