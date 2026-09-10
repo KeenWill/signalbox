@@ -144,10 +144,10 @@ fn conversation_page_messages_have_exact_closed_shapes() -> Result<(), Box<dyn s
                 imported_conversation_id: uuid(4),
                 title: Some(String::from("Imported plan")),
                 entry_count: CanonicalU64::new(7),
-                source_format: ImportedConversationSourceFormat::CodexRolloutJsonlV1,
+                source_format: ImportedConversationSourceFormat::CodexRolloutJsonlV2,
             },
         },
-        r#"{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":"Imported plan","entry_count":"7","source_format":"codex_rollout_jsonl_v1"}}"#,
+        r#"{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":"Imported plan","entry_count":"7","source_format":"codex_rollout_jsonl_v2"}}"#,
     )?;
     assert_server_message_round_trip(
         request(4)?,
@@ -229,7 +229,7 @@ fn conversation_summary_admits_structurally_valid_long_imported_title()
             imported_conversation_id: uuid(4),
             title: Some("long title x".repeat(31)),
             entry_count: CanonicalU64::new(1),
-            source_format: ImportedConversationSourceFormat::ClaudeCodeSessionJsonlV2,
+            source_format: ImportedConversationSourceFormat::ClaudeCodeSessionJsonlV3,
         },
     };
     ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message)?;

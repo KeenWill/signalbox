@@ -149,6 +149,28 @@ pub struct ImportedEntryWindow {
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
+## ImportedEntryInventory
+
+```rust
+pub struct ImportedEntryInventory {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl conversation_import_discovery::ImportedEntryInventory {
+    pub const fn conversation(&self) -> signalbox_domain::ImportedConversationId;
+    pub const fn entry_count(&self) -> u64;
+}
+```
+
+## ImportedEntryPage
+
+```rust
+pub struct ImportedEntryPage {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl conversation_import_discovery::ImportedEntryPage {
+    pub fn items(&self) -> &[conversation_import_discovery::ImportedEntryProjection];
+    pub const fn has_more(&self) -> bool;
+}
+```
+
 ## ImportedConversationDiscoveryCorruption
 
 ```rust
@@ -228,6 +250,24 @@ pub struct ImportedConversationDiscoveryRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl conversation_import_discovery::ImportedConversationDiscoveryRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
+    pub async fn entry_inventory(
+        &self,
+        conversation: signalbox_domain::ImportedConversationId,
+    ) -> result::Result<
+        option::Option<conversation_import_discovery::ImportedEntryInventory>,
+        conversation_import_discovery::ImportedConversationDiscoveryError,
+    >;
+    pub async fn entry_page(
+        &self,
+        inventory: conversation_import_discovery::ImportedEntryInventory,
+        after_position: u64,
+        limit: nonzero::NonZeroUsize,
+        maximum_text_bytes_per_entry: usize,
+        maximum_text_bytes: usize,
+    ) -> result::Result<
+        conversation_import_discovery::ImportedEntryPage,
+        conversation_import_discovery::ImportedConversationDiscoveryError,
+    >;
     pub async fn list(
         &self,
         request: conversation_import_discovery::ImportedConversationPageRequest,

@@ -94,26 +94,44 @@ fn terminal_attempt_end_matches(
 fn reconstitute_inner(
     input: &AcceptedInputSchedulingReconstitutionInput,
 ) -> Result<AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionFailure> {
-    let imported_session = match (
+    let (imported_session, bounded_imported_seed) = match (
         input.session.creation_provenance().ancestry(),
         input.imported_session.as_ref(),
+        input.bounded_imported_seed.as_ref(),
     ) {
-        (TranscriptAncestry::None, None) => None,
-        (TranscriptAncestry::None, Some(_)) => {
+        (TranscriptAncestry::None, None, None) => (None, None),
+        (TranscriptAncestry::None, Some(_), _) | (TranscriptAncestry::None, _, Some(_)) => {
             return Err(AcceptedInputSchedulingReconstitutionFailure::UnexpectedImportedSession);
         }
-        (TranscriptAncestry::ImportedConversation { .. }, None) => {
+        (TranscriptAncestry::ImportedConversation { .. }, None, None) => {
             return Err(AcceptedInputSchedulingReconstitutionFailure::MissingImportedSession);
         }
-        (TranscriptAncestry::ImportedConversation { .. }, Some(imported))
-            if imported.session() == &input.session =>
-        {
-            Some(imported)
-        }
-        (TranscriptAncestry::ImportedConversation { .. }, Some(_)) => {
+        (TranscriptAncestry::ImportedConversation { .. }, Some(_), Some(_)) => {
             return Err(AcceptedInputSchedulingReconstitutionFailure::ImportedSessionMismatch);
         }
-        (TranscriptAncestry::SingleSource { .. }, _) => {
+        (TranscriptAncestry::ImportedConversation { .. }, Some(imported), None)
+            if imported.session() == &input.session =>
+        {
+            (Some(imported), None)
+        }
+        (TranscriptAncestry::ImportedConversation { .. }, Some(_), None) => {
+            return Err(AcceptedInputSchedulingReconstitutionFailure::ImportedSessionMismatch);
+        }
+        (
+            TranscriptAncestry::ImportedConversation {
+                source_frontier, ..
+            },
+            None,
+            Some(seed),
+        ) if seed.owning_session() == input.session.id()
+            && seed.declared_member_count() == source_frontier.through_position().as_u64() =>
+        {
+            (None, Some(seed))
+        }
+        (TranscriptAncestry::ImportedConversation { .. }, None, Some(_)) => {
+            return Err(AcceptedInputSchedulingReconstitutionFailure::ImportedSessionMismatch);
+        }
+        (TranscriptAncestry::SingleSource { .. }, _, _) => {
             return Err(AcceptedInputSchedulingReconstitutionFailure::UnsupportedSessionAncestry);
         }
     };
@@ -521,8 +539,9 @@ fn reconstitute_inner(
         }
     }
 
-    let initial_seed_frontier =
-        imported_session.map(|imported| imported.seed_snapshot().frontier().snapshot());
+    let initial_seed_frontier = imported_session
+        .map(|imported| imported.seed_snapshot().frontier().snapshot())
+        .or_else(|| bounded_imported_seed.map(|seed| seed.seed_frontier()));
     let mut snapshots = imported_session
         .into_iter()
         .map(|imported| {
@@ -1398,7 +1417,9 @@ fn reconstitute_inner(
     let mut active_executing_tool_batch = None;
     let mut queued_seen = false;
     let mut referenced_snapshots = consumed_snapshots;
-    referenced_snapshots.extend(initial_seed_frontier);
+    if imported_session.is_some() {
+        referenced_snapshots.extend(initial_seed_frontier);
+    }
     referenced_snapshots.extend(
         preceding_non_accepted_terminals
             .values()

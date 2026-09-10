@@ -479,13 +479,13 @@ generated_artifact = "primary"
 
     fn configuration() -> Result<BlobStorageConfiguration, Box<dyn Error>> {
         let document = DocumentMut::from_str(CONFIGURATION)?;
-        BlobStorageConfiguration::parse(document.get("blob_storage"), 1)?
+        BlobStorageConfiguration::parse(document.get("blob_storage"))?
             .ok_or_else(|| io::Error::other("the fixture enables blob storage").into())
     }
 
     fn aliased_s3_configuration() -> Result<BlobStorageConfiguration, Box<dyn Error>> {
         let document = DocumentMut::from_str(ALIASED_S3_CONFIGURATION)?;
-        BlobStorageConfiguration::parse(document.get("blob_storage"), 1)?
+        BlobStorageConfiguration::parse(document.get("blob_storage"))?
             .ok_or_else(|| io::Error::other("the fixture enables blob storage").into())
     }
 

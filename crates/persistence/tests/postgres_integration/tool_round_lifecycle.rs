@@ -6380,3 +6380,87 @@ async fn repository_watch_push_evidence_requires_a_completed_configured_push()
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_wait_after_tool_result_can_be_interrupted() -> Result<(), Box<dyn Error>> {
+    use super::model_call_execution_and_recovery::credential_wait::park_policy;
+    let (_container, pool, _) = migrated_postgres().await?;
+    // Disjoint identities identify the tool result, credential wait and interrupt.
+    const SEED: u128 = 0x1379_0000;
+    const MEMBER: &str = "tool-wait-member";
+    let (fixture, repository) = completed_continuation_fixture(&pool, SEED).await?;
+    let target: Uuid = sqlx::query_scalar(
+        "SELECT effective_provider_model_identity_id FROM model_call WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let repository = repository.with_credential_pools(std::collections::HashMap::from([(
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(target)),
+        park_policy("tool-wait-pool", &[MEMBER]),
+    )]));
+    sqlx::query("INSERT INTO credential_pool_transient_exclusion (observation_model_call_id, credential_reference, cause_kind, reset_at) VALUES ($1,$2,'overloaded',transaction_timestamp() + interval '1 hour')")
+        .bind(fixture.call.into_uuid()).bind(MEMBER).execute(&pool).await?;
+    let outcome = repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    SEED + 0x30,
+                ))],
+                ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0x31)),
+                ModelCallId::from_uuid(Uuid::from_u128(SEED + 0x32)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 0x33)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0x34)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0x35)),
+            ),
+            |_| panic!("fixture has no steering"),
+        )
+        .await?;
+    let signalbox_application::PrepareToolContinuationOutcome::CredentialWait(wait) = outcome
+    else {
+        panic!("the completed result parks before preparing a continuation call: {outcome:?}");
+    };
+    let outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(SEED + 0x40)),
+                fixture.session,
+                UserContent::try_text("interrupt the parked tool continuation".to_owned()).unwrap(),
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(SEED + 0x41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(SEED + 0x42))),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let terminal: (String, Uuid) = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind, attempt.continued_from_attempt_id FROM turn_lifecycle lifecycle JOIN turn_attempt attempt ON attempt.turn_attempt_id = lifecycle.terminal_attempt_id WHERE lifecycle.turn_id = $1",
+    ).bind(fixture.turn.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(
+        terminal,
+        ("cancelled".to_owned(), wait.attempt().into_uuid())
+    );
+    let calls: i64 = sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+        .bind(fixture.turn.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        calls, 1,
+        "interrupting the wait never prepares another model call"
+    );
+    Ok(())
+}

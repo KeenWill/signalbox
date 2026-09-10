@@ -217,8 +217,14 @@ async fn restart_scan_recovers_lost_attempt_once_and_unblocks_successor()
     let terminal_frontier_uuid = Uuid::from_u128(0xfb1);
     let mut scan = StartupScanService::new(
         FixedStartupScanIds::new(
-            [SemanticTranscriptEntryId::from_uuid(failure_entry_uuid)],
-            [ContextFrontierId::from_uuid(terminal_frontier_uuid)],
+            [
+                SemanticTranscriptEntryId::from_uuid(failure_entry_uuid),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xeb3)),
+            ],
+            [
+                ContextFrontierId::from_uuid(terminal_frontier_uuid),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xfb3)),
+            ],
         ),
         PostgresStartupScanRepository::new(restarted_pool.clone()),
     );

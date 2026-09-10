@@ -266,12 +266,17 @@ impl RepoWatchStore {
     }
 }
 
-async fn completed_receipt(
+pub(crate) async fn completed_receipt(
     tx: &mut Transaction<'_, Postgres>,
     effect: Uuid,
     method: &str,
     input: &[u8],
 ) -> Result<Option<Vec<u8>>, StoreError> {
+    let conflicting: bool = sqlx::query_scalar("SELECT CASE WHEN $2 = 'repo.observe' THEN EXISTS (SELECT 1 FROM rule_evaluation_cursor WHERE effect_id=$1) OR EXISTS (SELECT 1 FROM dispatch_ledger WHERE effect_id=$1) ELSE EXISTS (SELECT 1 FROM repository_state WHERE observation_effect_id=$1) END")
+        .bind(effect).bind(method).fetch_one(&mut **tx).await?;
+    if conflicting {
+        return Err(StoreError::WorkflowInputRejected);
+    }
     let row: Option<(String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
         "SELECT method, effect_input, effect_result FROM workflow_effect_result WHERE effect_id = $1",
     )
@@ -288,7 +293,10 @@ async fn completed_receipt(
     .transpose()
 }
 
-async fn receipt_lock(tx: &mut Transaction<'_, Postgres>, effect: Uuid) -> Result<(), StoreError> {
+pub(crate) async fn receipt_lock(
+    tx: &mut Transaction<'_, Postgres>,
+    effect: Uuid,
+) -> Result<(), StoreError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('repo-effect:' || $1::text, 0))")
         .bind(effect)
         .execute(&mut **tx)

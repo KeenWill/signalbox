@@ -365,16 +365,6 @@ pub enum RejectionDetail {
     ConversationImportAlreadyInProgress {},
     /// This connection has no in-progress conversation import.
     ConversationImportNotInProgress {},
-    /// The declared or observed source size exceeds the configured total bound.
-    ConversationImportSourceTooLarge {
-        /// Configured maximum assembled source size.
-        limit_bytes: CanonicalU64,
-        /// Exact total source size declared at begin.
-        declared_size_bytes: CanonicalU64,
-        /// Exact observed size at append or commit, or null at begin.
-        #[serde(deserialize_with = "deserialize_required_nullable")]
-        actual_size_bytes: Option<CanonicalU64>,
-    },
     /// The observed source size did not equal the size declared at begin.
     ConversationImportSourceSizeMismatch {
         /// Exact total source size declared at begin.
@@ -455,7 +445,6 @@ impl RejectionDetail {
         match self {
             Self::ConversationImportAlreadyInProgress {}
             | Self::ConversationImportNotInProgress {}
-            | Self::ConversationImportSourceTooLarge { .. }
             | Self::ConversationImportSourceSizeMismatch { .. }
             | Self::ConversationImportConversionFailed { .. } => true,
             Self::BlobUploadAlreadyInProgress {}
@@ -638,7 +627,6 @@ pub(crate) fn validate_rejection_detail(
         | RejectionDetail::ImportedFrontierPositionOutOfRange { .. } => true,
         RejectionDetail::ConversationImportAlreadyInProgress {}
         | RejectionDetail::ConversationImportNotInProgress {}
-        | RejectionDetail::ConversationImportSourceTooLarge { .. }
         | RejectionDetail::ConversationImportSourceSizeMismatch { .. }
         | RejectionDetail::ConversationImportConversionFailed { .. }
         | RejectionDetail::BulkIngestAlreadyInProgress { .. }
@@ -663,21 +651,6 @@ pub(crate) fn validate_conversation_import_detail(
     let valid = match detail {
         RejectionDetail::ConversationImportAlreadyInProgress {}
         | RejectionDetail::ConversationImportNotInProgress {} => true,
-        RejectionDetail::ConversationImportSourceTooLarge {
-            limit_bytes,
-            declared_size_bytes,
-            actual_size_bytes,
-        } => {
-            limit_bytes.value() > 0
-                && match actual_size_bytes {
-                    Some(actual) => {
-                        actual.value() > limit_bytes.value()
-                            && (declared_size_bytes.value() <= limit_bytes.value()
-                                || declared_size_bytes == actual)
-                    }
-                    None => declared_size_bytes.value() > limit_bytes.value(),
-                }
-        }
         RejectionDetail::ConversationImportSourceSizeMismatch {
             declared_size_bytes,
             actual_size_bytes,
@@ -691,6 +664,7 @@ pub(crate) fn validate_conversation_import_detail(
             | ConversationImportRejectionClass::InvalidUtf8
             | ConversationImportRejectionClass::InvalidJson
             | ConversationImportRejectionClass::JsonDepthExceeded
+            | ConversationImportRejectionClass::RawRecordTooLarge
             | ConversationImportRejectionClass::TopLevelNotObject
             | ConversationImportRejectionClass::InvalidRecordType
             | ConversationImportRejectionClass::InvalidSourceMetadata

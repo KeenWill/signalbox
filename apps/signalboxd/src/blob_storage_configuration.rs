@@ -118,10 +118,8 @@ impl fmt::Debug for BlobStorageConfiguration {
 impl BlobStorageConfiguration {
     pub(crate) fn parse(
         item: Option<&Item>,
-        minimum_blob_bytes: u64,
     ) -> Result<Option<Self>, BlobStorageConfigurationError> {
-        item.map(|item| parse_configuration(item, minimum_blob_bytes))
-            .transpose()
+        item.map(parse_configuration).transpose()
     }
 
     /// Returns the absolute directory used for connection-local upload spools.
@@ -188,7 +186,6 @@ impl Error for BlobStorageConfigurationError {}
 
 fn parse_configuration(
     item: &Item,
-    minimum_blob_bytes: u64,
 ) -> Result<BlobStorageConfiguration, BlobStorageConfigurationError> {
     let table = item.as_table().ok_or(BlobStorageConfigurationError)?;
     reject_unknown_fields(
@@ -211,9 +208,6 @@ fn parse_configuration(
         .and_then(|value| u64::try_from(value).ok())
         .filter(|value| *value > 0)
         .ok_or(BlobStorageConfigurationError)?;
-    if max_blob_bytes < minimum_blob_bytes {
-        return Err(BlobStorageConfigurationError);
-    }
     let store_tables = table
         .get("stores")
         .and_then(Item::as_array_of_tables)
@@ -431,7 +425,7 @@ generated_artifact = "archive"
         content: &str,
     ) -> Result<Option<BlobStorageConfiguration>, super::BlobStorageConfigurationError> {
         let document = DocumentMut::from_str(content).expect("the fixture is valid TOML");
-        BlobStorageConfiguration::parse(document.get("blob_storage"), 1)
+        BlobStorageConfiguration::parse(document.get("blob_storage"))
     }
 
     fn oversized_store_catalog() -> String {
@@ -612,12 +606,12 @@ generated_artifact = "archive"
     }
 
     #[test]
-    fn catalog_rejects_a_blob_limit_below_the_import_limit() {
+    fn catalog_accepts_its_blob_limit_without_an_import_source_minimum() {
         let document = DocumentMut::from_str(VALID).expect("the fixture is valid TOML");
 
-        let result = BlobStorageConfiguration::parse(document.get("blob_storage"), u64::MAX);
+        let result = BlobStorageConfiguration::parse(document.get("blob_storage"));
 
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
