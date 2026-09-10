@@ -262,7 +262,11 @@ pub(super) fn verify_merge(
             .map(|delta| blob(delta.new_file()))
             .transpose()?
             .flatten();
-        let generated = source_path
+        let base_path = base_index
+            .and_then(|index| base_changes.get_delta(index))
+            .and_then(|delta| delta.new_file().path())
+            .unwrap_or(source_path);
+        let generated = base_path
             .extension()
             .is_some_and(|extension| extension == "md")
             && base_blob.as_ref().is_some_and(|blob| {
@@ -500,19 +504,29 @@ fn permits_regenerated_hunk(
     branch.iter().any(|own| {
         own.old_lines
             .as_ref()
-            .is_some_and(|range| range.start <= base_range.end && base_range.start <= range.end)
+            .is_some_and(|range| overlapping_edits(range, base_range))
             && (generated || !own.effects().eq(base.effects()))
             && (generated
                 || (test_source
                     && base.effects().all(is_json_fixture_literal)
                     && own.effects().all(is_json_fixture_literal)
                     && result.iter().any(|hunk| {
-                        hunk.old_lines.as_ref().is_some_and(|range| {
-                            range.start <= base_range.end && base_range.start <= range.end
-                        }) && hunk.effects().all(is_json_fixture_literal)
+                        hunk.old_lines
+                            .as_ref()
+                            .is_some_and(|range| overlapping_edits(range, base_range))
+                            && hunk.effects().all(is_json_fixture_literal)
                             && hunk.effects().any(|effect| effect.starts_with(b"+"))
                     })))
     })
+}
+
+fn overlapping_edits(left: &Range<usize>, right: &Range<usize>) -> bool {
+    match (left.is_empty(), right.is_empty()) {
+        (true, true) => left.start == right.start,
+        (true, false) => right.start < left.start && left.start < right.end,
+        (false, true) => left.start < right.start && right.start < left.end,
+        (false, false) => left.start < right.end && right.start < left.end,
+    }
 }
 
 fn is_json_fixture_literal(effect: &[u8]) -> bool {
@@ -579,7 +593,7 @@ fn preserves_nonconflicting_text(
         let mut end = edits[index].0.end;
         let first = index;
         index += 1;
-        while index < edits.len() && edits[index].0.start <= end {
+        while index < edits.len() && overlapping_edits(&(start..end), edits[index].0) {
             end = end.max(edits[index].0.end);
             index += 1;
         }
