@@ -48,7 +48,8 @@ pub(super) async fn result_byte_limit(
     .bind(producing_call.into_uuid())
     // Result entry/attempt identities are assigned later; all UUID encodings
     // have the request ID's width. Reserve the widest physical position and
-    // the empty result envelope, without charging source response payloads.
+    // the empty result envelope for every persisted request, including
+    // inadmissible proposals, without charging source response payloads.
     .bind(Decimal::from(u64::MAX))
     .bind(truncation_marker(0, usize::MAX))
     .fetch_one(&mut *connection)
@@ -106,8 +107,8 @@ pub(super) async fn result_byte_limit(
     let safe_prefix = window
         .saturating_sub(output)
         .saturating_sub(limit.compaction_prompt_bytes());
-    // The following response can admit more tools than the producing response.
-    // An unbounded response reserves the default batch allowance.
+    // This finite allowance uses the cap or default, not an unknown future count.
+    // A larger response that exhausts headroom takes the compaction path.
     let framing_per_result = framing
         .checked_div(count)
         .ok_or(ToolLoopCorruption::Inconsistent("empty tool result batch"))?;

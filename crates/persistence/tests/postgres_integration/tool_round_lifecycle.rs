@@ -5545,24 +5545,40 @@ async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
 -> Result<(), Box<dyn Error>> {
-    assert_next_batch_reservation(Some(32)).await
+    assert_next_batch_reservation(Some(32), 32, false).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn unbounded_proposals_reserve_headroom_for_a_subsequent_tool_response()
 -> Result<(), Box<dyn Error>> {
-    assert_next_batch_reservation(None).await
+    assert_next_batch_reservation(None, 32, false).await
 }
 
-async fn assert_next_batch_reservation(max_requests: Option<u64>) -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn rejected_proposals_continue_when_their_result_envelopes_fit() -> Result<(), Box<dyn Error>>
+{
+    assert_next_batch_reservation(Some(32), 40, false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn rejected_proposals_exceeding_the_finite_allowance_require_compaction()
+-> Result<(), Box<dyn Error>> {
+    assert_next_batch_reservation(Some(1), 40, true).await
+}
+
+async fn assert_next_batch_reservation(
+    max_requests: Option<u64>,
+    next_tool_count: usize,
+    expect_compaction: bool,
+) -> Result<(), Box<dyn Error>> {
     // Only supplies distinct identities for the two model responses.
     const FIXTURE_SEED: u128 = 0x269_1000;
     const INPUT_TOKENS: u64 = 141_000;
     const FIRST_OUTPUT_TOKENS: u64 = 117;
     const OUTPUT_CEILING: u64 = 8_192;
-    let next_tool_count =
-        usize::try_from(signalbox_application::ToolProposalLimits::DEFAULT_MAX_REQUESTS)?;
     let (container, pool, _) = migrated_postgres().await?;
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
         FIXTURE_SEED + 6,
@@ -5688,7 +5704,22 @@ async fn assert_next_batch_reservation(max_requests: Option<u64>) -> Result<(), 
     });
     let followup_input =
         INPUT_TOKENS + FIRST_OUTPUT_TOKENS + serde_json::to_vec(&result_envelope)?.len() as u64;
-    let (fixture, repository, _, _) = commit_authorized_tool_batch(
+    let proposals = (0..next_tool_count)
+        .map(|index| {
+            let name = ToolName::try_new("current_time".to_owned()).expect("fixture name");
+            let arguments = NormalizedToolArguments::try_from_provider_text("{}".to_owned())
+                .expect("fixture arguments");
+            match max_requests.filter(|limit| index as u64 >= *limit) {
+                Some(limit) => ToolCallProposal::inadmissible(
+                    name,
+                    arguments,
+                    signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded { limit },
+                ),
+                None => ToolCallProposal::new(name, arguments),
+            }
+        })
+        .collect::<Vec<_>>();
+    let (fixture, repository, _, _) = commit_authorized_tool_proposals(
         FIXTURE_SEED + 0x100,
         (
             RestartModelCallFixture {
@@ -5698,7 +5729,7 @@ async fn assert_next_batch_reservation(max_requests: Option<u64>) -> Result<(), 
             repository,
             *authorized,
         ),
-        &vec![("current_time", "{}"); next_tool_count],
+        &proposals,
         InitialToolApproval::PolicyAuto,
         ProviderReportedTokenUsage::unreported()
             .with_input_tokens(Some(followup_input))
@@ -5732,7 +5763,10 @@ async fn assert_next_batch_reservation(max_requests: Option<u64>) -> Result<(), 
             ),
         )
         .await?;
-    for _ in 1..next_tool_count {
+    let admitted_count = max_requests.map_or(next_tool_count, |limit| {
+        next_tool_count.min(usize::try_from(limit).unwrap_or(usize::MAX))
+    });
+    for _ in 1..admitted_count {
         let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
         tools
             .prepare_next_attempt(
@@ -5771,7 +5805,7 @@ async fn assert_next_batch_reservation(max_requests: Option<u64>) -> Result<(), 
     .bind(continuation.into_uuid())
     .fetch_all(&pool)
     .await?;
-    assert_eq!(details.len(), next_tool_count);
+    assert_eq!(details.len(), admitted_count);
     for (exact, admitted) in details {
         let detail = "\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES);
         assert_eq!(exact, detail);
@@ -5813,8 +5847,26 @@ async fn assert_next_batch_reservation(max_requests: Option<u64>) -> Result<(), 
         .await?;
     assert_eq!(
         checkpointed,
-        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(following_call),
-        "a bounded result must leave room to report the following tool's typed failure"
+        if expect_compaction {
+            signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(
+                fixture.turn,
+            )
+        } else {
+            signalbox_application::PrepareToolContinuationOutcome::Checkpointed(following_call)
+        },
+        "the finite allowance admits fitting results and compacts larger batches"
+    );
+    let rejected_results: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM semantic_transcript_entry entry
+           JOIN tool_request request ON request.request_id = entry.tool_result_request_id
+          WHERE request.producing_model_call_id = $1 AND entry.payload_kind = 'tool_inadmissible'",
+    )
+    .bind(continuation.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        rejected_results,
+        i64::try_from(next_tool_count - admitted_count)?
     );
     pool.close().await;
     drop(container);
