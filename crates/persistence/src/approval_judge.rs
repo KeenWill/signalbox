@@ -1759,6 +1759,8 @@ async fn exact_completion_continuation(
                  decision.request_id IS NULL
                  OR decision.decision_source
                      NOT IN ('policy_auto', 'session_blanket', 'user_override', 'runtime_safety')
+                 OR (decision.decision_source = 'runtime_safety'
+                     AND decision.denial_reason = 'approval_wait_timeout')
              )
         )",
     )
