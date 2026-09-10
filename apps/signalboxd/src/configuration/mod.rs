@@ -43,8 +43,8 @@ use model_routing::{
 use model_settings::{
     RuntimeCapabilityProjection, parse_model_capabilities, parse_model_settings_overlay,
     parse_model_settings_profiles, parse_provider_compaction_capability,
-    project_runtime_model_capabilities, record_reasoning_replay_family,
-    validate_adapter_model_settings,
+    project_runtime_model_capabilities, record_reasoning_replay_family, runtime_reasoning_level,
+    runtime_service_tier, validate_adapter_model_settings,
 };
 pub use numeric_bounds::NumericBoundsConfiguration;
 #[cfg(test)]
@@ -774,21 +774,7 @@ impl HubModelConfiguration {
                 let adapter = self
                     .adapter_for_provider_model(definition.provider_model())
                     .ok_or(HubModelConfigurationError::ConflictingTarget)?;
-                let fixed = match adapter {
-                    ModelAdapter::Anthropic => {
-                        signalbox_model_runtime_anthropic::serialized_request_bytes(&operation)
-                    }
-                    ModelAdapter::OpenAi => {
-                        signalbox_model_runtime_openai::serialized_request_bytes(&operation)
-                    }
-                    ModelAdapter::CodexCli => {
-                        signalbox_model_runtime_codex_cli::serialized_request_bytes(&operation)
-                    }
-                    ModelAdapter::ClaudeCli => {
-                        signalbox_model_runtime_claude_cli::serialized_request_bytes(&operation)
-                    }
-                }
-                .ok_or(HubModelConfigurationError::InvalidField)?;
+                let fixed = self.continuation_request_bytes(route.target, adapter, &operation)?;
                 let framing_sample = signalbox_model_runtime::ConversationMessage::user_text("x");
                 let framing = match adapter {
                     ModelAdapter::Anthropic => {
@@ -836,6 +822,56 @@ impl HubModelConfiguration {
             }
         }
         Ok(limits)
+    }
+
+    fn continuation_request_bytes(
+        &self,
+        target: ResolvedProviderTarget,
+        adapter: ModelAdapter,
+        operation: &signalbox_model_runtime::ModelOperation<()>,
+    ) -> Result<usize, HubModelConfigurationError> {
+        let mut operation = operation.clone();
+        let mut maximum = None;
+        // Session and turn overlays may select any supported setting, including
+        // clearing one. Shared targets must cover every selectable route.
+        for (selection, route) in &self.routes {
+            if route.target != target {
+                continue;
+            }
+            let capabilities = self
+                .model_capabilities
+                .resolve(*selection)
+                .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+            for reasoning in std::iter::once(None)
+                .chain(capabilities.reasoning_levels().iter().copied().map(Some))
+            {
+                operation.settings.reasoning_level = reasoning.map(runtime_reasoning_level);
+                for tier in std::iter::once(None)
+                    .chain(capabilities.service_tiers().iter().copied().map(Some))
+                {
+                    operation.settings.service_tier = tier.map(runtime_service_tier);
+                    let bytes = match adapter {
+                        ModelAdapter::Anthropic => {
+                            signalbox_model_runtime_anthropic::serialized_request_bytes(&operation)
+                        }
+                        ModelAdapter::OpenAi => {
+                            signalbox_model_runtime_openai::serialized_request_bytes(&operation)
+                        }
+                        ModelAdapter::CodexCli => {
+                            signalbox_model_runtime_codex_cli::serialized_request_bytes(&operation)
+                        }
+                        ModelAdapter::ClaudeCli => {
+                            signalbox_model_runtime_claude_cli::serialized_request_bytes(&operation)
+                        }
+                    };
+                    // An incompatible combination cannot produce a real request.
+                    if let Some(bytes) = bytes {
+                        maximum = Some(maximum.map_or(bytes, |prior: usize| prior.max(bytes)));
+                    }
+                }
+            }
+        }
+        maximum.ok_or(HubModelConfigurationError::InvalidField)
     }
 
     /// Returns the adapter route for one configured direct selection.

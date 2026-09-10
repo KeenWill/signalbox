@@ -81,15 +81,16 @@ checkpoint through its last safe boundary, then prepares the continuation from
 the results and appended summary after rechecking headroom including the frozen
 system prompt, tool definitions, summary preface, message framing, pending
 steering, every model-visible entry appended after the summary (including runner
-placement boundaries), and output reservation. A placement boundary following a
-summary retains the summarized batch's complete-result authority. Admission
-retires the checkpoint when it prepares a call or parks for credential
-availability. Checkpoints schedule a follow-up eligibility pass and survive
-restarts; tool results are reused without execution. Successful compaction
-preserves the same turn and goal lineage for every session kind. A failed or
-refused automatic compaction, including failure before preparing its dedicated
-call, closes the active checkpoint, as does a one-byte summary that still lacks
-continuation headroom.
+placement boundaries), and output reservation. Fixed request overhead reserves
+the largest supported reasoning and service-tier serialization for the selected
+fast mode. A placement boundary following a summary retains the summarized
+batch's complete-result authority. Admission retires the checkpoint when it
+prepares a call or parks for credential availability. Checkpoints schedule a
+follow-up eligibility pass and survive restarts; tool results are reused without
+execution. Successful compaction preserves the same turn and goal lineage for
+every session kind. A failed or refused automatic compaction, including failure
+before preparing its dedicated call, closes the active checkpoint, as does a
+one-byte summary that still lacks continuation headroom.
 
 Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen
