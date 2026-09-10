@@ -2426,6 +2426,38 @@ async fn merge_verification_rejects_a_dropped_nearly_disjoint_large_replacement(
 }
 
 #[tokio::test]
+async fn merge_verification_keeps_newline_heavy_replacements_atomic() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let old = "\n".repeat(256 * 1024);
+    let new = format!("{old}base change\n");
+    let ancestor = merge_test_commit(&repository, &old, &[]);
+    let branch = merge_test_commit(&repository, &old, &[ancestor]);
+    let base = merge_test_commit(&repository, &new, &[ancestor]);
+    let preserved = merge_test_commit(&repository, &new, &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, preserved, branch, transport.clone());
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("base replacement survives");
+    assert!(transport.has_request());
+
+    let dropped = merge_test_commit(&repository, &old, &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, dropped, branch, transport.clone());
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+    let Err(GitPushFailure::MergeDroppedBaseChanges(details)) = result else {
+        panic!("whole-object replacement must refuse: {result:?}");
+    };
+    assert_eq!(details.len(), 1);
+    assert!(details[0].first_dropped_hunk.starts_with("object "));
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
 async fn merge_verification_streams_long_lines_and_rejects_dropped_base_content() {
     exercise_streamed_merge(256 * 1024).await;
 }

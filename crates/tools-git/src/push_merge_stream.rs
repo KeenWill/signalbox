@@ -219,6 +219,9 @@ impl Effects {
     }
 }
 
+// At 48 bytes per record, each line index is at most 6 MiB; blobs remain unbounded.
+const MAX_INDEXED_LINES: u64 = 131_072;
+
 struct Lines {
     content: File,
     index: File,
@@ -231,7 +234,7 @@ struct Line {
     hash: [u8; 32],
 }
 impl Lines {
-    fn new(content: ObjectContent, deadline: Instant) -> Result<Self, GitPushFailure> {
+    fn new(content: ObjectContent, deadline: Instant) -> Result<Option<Self>, GitPushFailure> {
         let mut reader = BufReader::with_capacity(IO_BYTES, content.file);
         reader.rewind().map_err(failed)?;
         let mut index = BufWriter::new(tempfile::tempfile().map_err(failed)?);
@@ -242,6 +245,9 @@ impl Lines {
             let buffer = reader.fill_buf().map_err(failed)?;
             if buffer.is_empty() {
                 break;
+            }
+            if count == MAX_INDEXED_LINES {
+                return Ok(None);
             }
             let used = bstr::ByteSlice::find_byte(buffer, b'\n').map_or(buffer.len(), |i| i + 1);
             hash.update(&buffer[..used]);
@@ -258,11 +264,11 @@ impl Lines {
             write_line(&mut index, offset, length, hash.finalize().into())?;
             count += 1;
         }
-        Ok(Self {
+        Ok(Some(Self {
             content: reader.into_inner(),
             index: index.into_inner().map_err(failed)?,
             count,
-        })
+        }))
     }
     fn line(&self, number: u64) -> Result<Line, GitPushFailure> {
         let mut record = [0; 48];
@@ -349,8 +355,12 @@ pub(super) fn text_hunks(
     let previous_effects = hunks.effects;
     let previous_preview = hunks.preview;
     let mut work = MAX_MATCH_WORK;
-    let old = Lines::new(old, deadline)?;
-    let new = Lines::new(new, deadline)?;
+    let Some(old) = Lines::new(old, deadline)? else {
+        return Ok(TextDiff::WholeObject);
+    };
+    let Some(new) = Lines::new(new, deadline)? else {
+        return Ok(TextDiff::WholeObject);
+    };
     // Pending ranges and both search frontiers live on disk, including for
     // highly unbalanced splits. Only the current range occupies resident memory.
     let mut pending = Ranges::new()?;
@@ -825,6 +835,90 @@ mod tests {
                 .expect("comparison"),
             None
         );
+    }
+
+    fn newline_content(bytes: usize) -> ObjectContent {
+        ObjectContent::decode(
+            &mut std::io::repeat(b'\n').take(bytes as u64),
+            bytes,
+            git2::ObjectType::Blob,
+            None,
+        )
+        .expect("generated newline-heavy blob")
+    }
+
+    #[test]
+    fn newline_heavy_files_fall_back_before_reading_the_whole_blob() {
+        for (old, new) in [
+            (newline_content(256 * 1024), content("new\n")),
+            (content("old\n"), newline_content(256 * 1024)),
+        ] {
+            let mut old_position = old.file.try_clone().expect("old position observer");
+            let mut new_position = new.file.try_clone().expect("new position observer");
+            let mut hunks = Hunks::new().expect("hunks");
+            hunks.single(b"mode change").expect("existing effect");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            assert_eq!(
+                text_hunks(old, new, &mut hunks, deadline).expect("bounded indexing"),
+                TextDiff::WholeObject
+            );
+            assert!(old_position.stream_position().expect("old position") < 256 * 1024);
+            assert!(new_position.stream_position().expect("new position") < 256 * 1024);
+            let mut allowed = Hunks::new().expect("allowed");
+            allowed.single(b"mode change").expect("existing effect");
+            let mut allowed = allowed.permitted(deadline).expect("allowed effects");
+            assert_eq!(
+                hunks
+                    .first_dropped(&mut allowed, MAX_MERGE_DETAIL_BYTES, deadline)
+                    .expect("existing effects survive without partial lines"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn line_index_admits_its_exact_budget_with_or_without_a_terminal_newline() {
+        for last in *b"\nx" {
+            let content = newline_content(131_072);
+            content
+                .file
+                .write_all_at(&[last], 131_071)
+                .expect("last byte");
+            let lines = Lines::new(content, Instant::now() + Duration::from_secs(30))
+                .expect("line index")
+                .expect("exactly 131072 lines fit");
+            assert_eq!(lines.count, 131_072);
+            assert_eq!(
+                lines.index.metadata().expect("index size").len(),
+                6 * 1024 * 1024
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "generates two 1 GiB newline-heavy blobs to measure bounded line-index scratch"]
+    fn newline_heavy_gigabyte_versions_bound_line_index_scratch() {
+        let old = newline_content(1024 * 1024 * 1024);
+        let new = newline_content(1024 * 1024 * 1024);
+        new.file
+            .write_all_at(b"x", 1024 * 1024 * 1024 - 1)
+            .expect("changed final byte");
+        let mut old_position = old.file.try_clone().expect("old position observer");
+        let mut new_position = new.file.try_clone().expect("new position observer");
+        let mut hunks = Hunks::new().expect("hunks");
+        assert_eq!(
+            text_hunks(
+                old,
+                new,
+                &mut hunks,
+                Instant::now() + Duration::from_secs(30)
+            )
+            .expect("bounded newline-heavy diff"),
+            TextDiff::WholeObject
+        );
+        assert!(old_position.stream_position().expect("old position") < 256 * 1024);
+        assert_eq!(new_position.stream_position().expect("new position"), 0);
+        assert_eq!(hunks.effects, 0);
     }
 
     #[test]
