@@ -622,6 +622,276 @@ fn bisect(
     Err(GitPushFailure::Repository)
 }
 
+fn changed_ranges(old: &Lines, new: &Lines, deadline: Instant) -> Result<Ranges, GitPushFailure> {
+    let mut ranges = Ranges::new()?;
+    let old_size = old.content.metadata().map_err(failed)?.len();
+    let new_size = new.content.metadata().map_err(failed)?.len();
+    if old_size <= crate::limits::MAX_DIFF_BYTES as u64
+        && new_size <= crate::limits::MAX_DIFF_BYTES as u64
+    {
+        let mut a = vec![0; old_size as usize];
+        let mut b = vec![0; new_size as usize];
+        old.content.read_exact_at(&mut a, 0).map_err(failed)?;
+        new.content.read_exact_at(&mut b, 0).map_err(failed)?;
+        let mut options = git2::DiffOptions::new();
+        options.context_lines(0).interhunk_lines(0);
+        let patch =
+            git2::Patch::from_buffers(&a, None, &b, None, Some(&mut options)).map_err(failed)?;
+        for index in 0..patch.num_hunks() {
+            check(deadline)?;
+            let (h, _) = patch.hunk(index).map_err(failed)?;
+            let a = h.old_start().saturating_sub(u32::from(h.old_lines() != 0)) as u64;
+            let c = h.new_start().saturating_sub(u32::from(h.new_lines() != 0)) as u64;
+            ranges.push([a, a + h.old_lines() as u64, c, c + h.new_lines() as u64])?;
+        }
+    } else {
+        visit_changes(old, new, deadline, |range| ranges.push(range))?;
+    }
+    Ok(ranges)
+}
+fn visit_changes(
+    old: &Lines,
+    new: &Lines,
+    deadline: Instant,
+    mut emit: impl FnMut([u64; 4]) -> Result<(), GitPushFailure>,
+) -> Result<(), GitPushFailure> {
+    // Pending ranges and both search frontiers live on disk, including for
+    // highly unbalanced splits. Only the current range occupies resident memory.
+    let mut pending = Ranges::new()?;
+    pending.push([0, old.count, 0, new.count])?;
+
+    while let Some([mut a, mut b, mut c, mut d]) = pending.pop()? {
+        check(deadline)?;
+        if a == b && c == d {
+            continue;
+        }
+        while a < b && c < d && old.line(a)?.hash == new.line(c)?.hash {
+            check(deadline)?;
+            a += 1;
+            c += 1;
+        }
+        let mut suffix = false;
+        while a < b && c < d && old.line(b - 1)?.hash == new.line(d - 1)?.hash {
+            check(deadline)?;
+            b -= 1;
+            d -= 1;
+            suffix = true;
+        }
+        if suffix {
+            pending.push([0; 4])?;
+        }
+        if a == b && c == d {
+            continue;
+        }
+        if a == b || c == d || !have_common_line(old, new, [a, b, c, d], deadline)? {
+            emit([a, b, c, d])?;
+            continue;
+        }
+        let (x, y) = bisect(old, new, [a, b, c, d], deadline)?;
+        if (x == a && y == c) || (x == b && y == d) {
+            return Err(GitPushFailure::Repository);
+        }
+        pending.push([x, b, y, d])?;
+        pending.push([a, x, c, y])?;
+    }
+    Ok(())
+}
+
+fn range_at(ranges: &Ranges, number: u64) -> Result<Option<[u64; 4]>, GitPushFailure> {
+    if number == ranges.count {
+        return Ok(None);
+    }
+    let mut bytes = [0; 32];
+    ranges
+        .file
+        .read_exact_at(&mut bytes, number * 32)
+        .map_err(failed)?;
+    let mut values = [0; 4];
+    for (value, bytes) in values.iter_mut().zip(bytes.as_chunks::<8>().0.iter()) {
+        *value = u64::from_le_bytes(*bytes);
+    }
+    Ok(Some(values))
+}
+fn append_hashes(
+    out: &mut File,
+    lines: &Lines,
+    start: u64,
+    end: u64,
+    deadline: Instant,
+) -> Result<(), GitPushFailure> {
+    for line in start..end {
+        check(deadline)?;
+        out.write_all(&lines.line(line)?.hash).map_err(failed)?;
+    }
+    Ok(())
+}
+fn replacement_hashes(
+    ancestor: &Lines,
+    side: &Lines,
+    edits: &Ranges,
+    selected: std::ops::Range<u64>,
+    region: std::ops::Range<u64>,
+    deadline: Instant,
+) -> Result<File, GitPushFailure> {
+    let mut out = tempfile::tempfile().map_err(failed)?;
+    let mut cursor = region.start;
+    for index in selected {
+        let [a, b, c, d] = range_at(edits, index)?.ok_or(GitPushFailure::Repository)?;
+        append_hashes(&mut out, ancestor, cursor, a, deadline)?;
+        append_hashes(&mut out, side, c, d, deadline)?;
+        cursor = b;
+    }
+    append_hashes(&mut out, ancestor, cursor, region.end, deadline)?;
+    Ok(out)
+}
+fn same_file(a: &File, b: &File, deadline: Instant) -> Result<bool, GitPushFailure> {
+    let size = a.metadata().map_err(failed)?.len();
+    if size != b.metadata().map_err(failed)?.len() {
+        return Ok(false);
+    }
+    let mut offset = 0;
+    let mut x = [0; IO_BYTES];
+    let mut y = [0; IO_BYTES];
+    while offset < size {
+        check(deadline)?;
+        let n = (size - offset).min(IO_BYTES as u64) as usize;
+        a.read_exact_at(&mut x[..n], offset).map_err(failed)?;
+        b.read_exact_at(&mut y[..n], offset).map_err(failed)?;
+        if x[..n] != y[..n] {
+            return Ok(false);
+        }
+        offset += n as u64;
+    }
+    Ok(true)
+}
+fn copy_hashes(from: &mut File, to: &mut File, deadline: Instant) -> Result<(), GitPushFailure> {
+    from.rewind().map_err(failed)?;
+    let mut buffer = [0; IO_BYTES];
+    loop {
+        check(deadline)?;
+        let n = from.read(&mut buffer).map_err(failed)?;
+        if n == 0 {
+            break;
+        }
+        to.write_all(&buffer[..n]).map_err(failed)?;
+    }
+    Ok(())
+}
+// Fixed line-hash spans are separated by conflict wildcards; all storage stays on disk.
+pub(super) fn preserves_nonconflicting_text(
+    ancestor: ObjectContent,
+    branch: ObjectContent,
+    base: ObjectContent,
+    result: ObjectContent,
+    deadline: Instant,
+) -> Result<bool, GitPushFailure> {
+    let ancestor = Lines::new(ancestor, deadline)?;
+    let branch = Lines::new(branch, deadline)?;
+    let base = Lines::new(base, deadline)?;
+    let result = Lines::new(result, deadline)?;
+    let own = changed_ranges(&ancestor, &branch, deadline)?;
+    let main = changed_ranges(&ancestor, &base, deadline)?;
+    let mut fixed = tempfile::tempfile().map_err(failed)?;
+    let mut spans = Ranges::new()?;
+    let (mut i, mut j, mut cursor, mut span_start) = (0, 0, 0, 0);
+    loop {
+        check(deadline)?;
+        let a = range_at(&own, i)?;
+        let b = range_at(&main, j)?;
+        let start = match (a, b) {
+            (None, None) => break,
+            (Some(a), None) => a[0],
+            (None, Some(b)) => b[0],
+            (Some(a), Some(b)) => a[0].min(b[0]),
+        };
+        let mut end = start;
+        let (first_i, first_j) = (i, j);
+        loop {
+            let before = (i, j);
+            while let Some(r) = range_at(&own, i)? {
+                if r[0] > end {
+                    break;
+                }
+                end = end.max(r[1]);
+                i += 1;
+            }
+            while let Some(r) = range_at(&main, j)? {
+                if r[0] > end {
+                    break;
+                }
+                end = end.max(r[1]);
+                j += 1;
+            }
+            if before == (i, j) {
+                break;
+            }
+        }
+        append_hashes(&mut fixed, &ancestor, cursor, start, deadline)?;
+        let mut a = replacement_hashes(&ancestor, &branch, &own, first_i..i, start..end, deadline)?;
+        let mut b = replacement_hashes(&ancestor, &base, &main, first_j..j, start..end, deadline)?;
+        if i != first_i && j != first_j && !same_file(&a, &b, deadline)? {
+            let span_end = fixed.stream_position().map_err(failed)? / 32;
+            spans.push([span_start, span_end, 0, 0])?;
+            span_start = span_end;
+        } else {
+            copy_hashes(
+                if i != first_i { &mut a } else { &mut b },
+                &mut fixed,
+                deadline,
+            )?;
+        }
+        cursor = end;
+    }
+    append_hashes(&mut fixed, &ancestor, cursor, ancestor.count, deadline)?;
+    let end = fixed.stream_position().map_err(failed)? / 32;
+    spans.push([span_start, end, 0, 0])?;
+    let mut cursor = 0;
+    for index in 0..spans.count {
+        let [a, b, _, _] = range_at(&spans, index)?.ok_or(GitPushFailure::Repository)?;
+        let count = b - a;
+        if count > result.count.saturating_sub(cursor) {
+            return Ok(false);
+        }
+        let maximum = result.count - count;
+        let mut candidate = if index == 0 {
+            cursor
+        } else if index + 1 == spans.count {
+            maximum
+        } else {
+            cursor
+        };
+        let mut matched = false;
+        while candidate <= maximum {
+            check(deadline)?;
+            let mut equal = true;
+            for line in 0..count {
+                check(deadline)?;
+                let mut hash = [0; 32];
+                fixed
+                    .read_exact_at(&mut hash, (a + line) * 32)
+                    .map_err(failed)?;
+                if hash != result.line(candidate + line)?.hash {
+                    equal = false;
+                    break;
+                }
+            }
+            if equal {
+                matched = true;
+                cursor = candidate + count;
+                break;
+            }
+            if index == 0 || index + 1 == spans.count {
+                break;
+            }
+            candidate += 1;
+        }
+        if !matched {
+            return Ok(false);
+        }
+    }
+    Ok(cursor == result.count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

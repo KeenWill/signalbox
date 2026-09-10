@@ -191,6 +191,7 @@ pub(super) fn verify_merge(
         }
         own_by_path.entry(source_path).or_insert(index);
     }
+    let mut checked_branch = HashSet::new();
     for (index, delta) in carried.deltas().enumerate() {
         let path = delta
             .new_file()
@@ -213,6 +214,7 @@ pub(super) fn verify_merge(
         };
         let own_index = own_by_path.get(source_path).copied();
         let base_index = base_by_path.get(source_path).copied();
+        checked_branch.extend(own_index);
         // Capture compared paths only, in addition to the rename candidates.
         for delta in std::iter::once(delta)
             .chain(own_index.and_then(|index| own.get_delta(index)))
@@ -256,7 +258,7 @@ pub(super) fn verify_merge(
             preview_bytes,
             deadline,
         )?;
-        let invalid = match missing_base {
+        let mut invalid = match missing_base {
             Some(detail) => Some(detail),
             None => hunks(&carried, index, Some(source_path), &source, deadline)?.first_dropped(
                 &mut permitted,
@@ -265,9 +267,96 @@ pub(super) fn verify_merge(
                 deadline,
             )?,
         };
+        if invalid.is_none() {
+            let own_delta = own_index.and_then(|index| own.get_delta(index));
+            let base_delta = base_index.and_then(|index| base_changes.get_delta(index));
+            let ancestor = base_delta.or(own_delta).map(|delta| delta.old_file());
+            let empty = Side {
+                oid: Oid::ZERO_SHA1,
+                mode: git2::FileMode::Unreadable,
+                path: Some(path),
+            };
+            let old = ancestor.unwrap_or(empty);
+            if !preserves_nonconflicting_text(
+                &source,
+                [
+                    old,
+                    own_delta.map_or(old, Change::new_file),
+                    base_delta.map_or(old, Change::new_file),
+                    delta.new_file(),
+                ],
+                deadline,
+            )? {
+                let mut none = Hunks::new()?.permitted(streamed::EffectsToMatch::Text, deadline)?;
+                invalid = hunks(&carried, index, Some(source_path), &source, deadline)?
+                    .first_dropped(
+                        &mut none,
+                        streamed::EffectsToMatch::Text,
+                        preview_bytes,
+                        deadline,
+                    )?;
+            }
+        }
         if let Some((preview, truncated)) = invalid {
             preview_bytes -= preview.len();
             dropped.insert(path.to_owned(), (preview, truncated));
+        }
+    }
+
+    for (index, delta) in own.deltas().enumerate() {
+        if checked_branch.contains(&index) {
+            continue;
+        }
+        let path = delta.new_file().path().ok_or(GitPushFailure::Repository)?;
+        let source_path = delta.old_file().path().ok_or(GitPushFailure::Repository)?;
+        let base_delta = base_by_path
+            .get(source_path)
+            .and_then(|index| base_changes.get_delta(*index));
+        let base = base_delta.map_or(delta.old_file(), Change::new_file);
+        let result_path = base_delta
+            .and_then(|delta| delta.new_file().path())
+            .unwrap_or(path);
+        let result = match merge_tree.get_path(result_path) {
+            Ok(entry) => Side {
+                oid: entry.id(),
+                mode: if entry.kind() == Some(ObjectType::Commit) {
+                    git2::FileMode::Commit
+                } else {
+                    git2::FileMode::Blob
+                },
+                path: Some(result_path),
+            },
+            Err(error) if error.code() == git2::ErrorCode::NotFound => Side {
+                oid: Oid::ZERO_SHA1,
+                mode: git2::FileMode::Unreadable,
+                path: Some(result_path),
+            },
+            Err(error) => return Err(repository_failure(error)),
+        };
+        for side in [delta.old_file(), delta.new_file(), base, result] {
+            if !side.id().is_zero() && side.mode() != git2::FileMode::Commit {
+                source
+                    .capture(&database, side.id())
+                    .map_err(repository_failure)?;
+            }
+        }
+        if !preserves_nonconflicting_text(
+            &source,
+            [delta.old_file(), delta.new_file(), base, result],
+            deadline,
+        )? {
+            let mut none = Hunks::new()?.permitted(streamed::EffectsToMatch::Text, deadline)?;
+            if let Some((preview, truncated)) = hunks(&own, index, None, &source, deadline)?
+                .first_dropped(
+                    &mut none,
+                    streamed::EffectsToMatch::Text,
+                    preview_bytes,
+                    deadline,
+                )?
+            {
+                preview_bytes -= preview.len();
+                dropped.insert(path.to_owned(), (preview, truncated));
+            }
         }
     }
 
@@ -289,6 +378,47 @@ pub(super) fn verify_merge(
                 .collect::<Result<_, GitPushFailure>>()?,
         ))
     }
+}
+
+fn preserves_nonconflicting_text(
+    source: &ObjectSource,
+    sides: [Side<'_>; 4],
+    deadline: Instant,
+) -> Result<bool, GitPushFailure> {
+    if sides
+        .iter()
+        .any(|side| side.mode() == git2::FileMode::Commit)
+    {
+        return Ok(true);
+    }
+    let mut contents = Vec::new();
+    for side in sides {
+        let mut content = if side.id().is_zero() {
+            crate::streamed_object::ObjectContent::decode(
+                &mut std::io::empty(),
+                0,
+                ObjectType::Blob,
+                Some(deadline),
+            )
+            .map_err(repository_failure)?
+        } else {
+            source
+                .content(side.id())
+                .map_err(repository_failure)?
+                .ok_or(GitPushFailure::Repository)?
+        };
+        if content
+            .prefix(crate::limits::MAX_DIFF_BYTES)
+            .map_err(repository_failure)?
+            .contains(&0)
+        {
+            return Ok(true);
+        }
+        contents.push(content);
+    }
+    let [ancestor, branch, base, result]: [_; 4] =
+        contents.try_into().map_err(repository_failure)?;
+    streamed::preserves_nonconflicting_text(ancestor, branch, base, result, deadline)
 }
 
 fn diff_options() -> DiffOptions {
