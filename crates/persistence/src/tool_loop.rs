@@ -516,8 +516,9 @@ impl PostgresToolLoopRepository {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, session).await?;
-            let predecessor = sqlx::query_scalar::<_, Uuid>(
-                "SELECT attempt.issuing_turn_attempt_id
+            let resumed = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+                "SELECT attempt.issuing_turn_attempt_id, attempt.attempt_id,
+                        request.producing_model_call_id
                    FROM turn_lifecycle AS lifecycle
                    JOIN session_delegation_wait AS waiting
                      ON waiting.awaiting_tool_request_id =
@@ -541,6 +542,12 @@ impl PostgresToolLoopRepository {
                     AND attempt.wait_spawning_request_id =
                         waiting.spawning_tool_request_id
                     AND attempt.wait_child_session_id = waiting.child_session_id
+                   JOIN tool_request AS request
+                     ON request.request_id = attempt.request_id
+                    AND request.session_id = attempt.session_id
+                    AND request.turn_id = attempt.turn_id
+                    AND request.producing_model_call_id =
+                        lifecycle.active_tool_round_call_id
                   WHERE lifecycle.session_id = $1
                     AND lifecycle.turn_id = $2
                     AND lifecycle.state_kind = 'active'
@@ -551,7 +558,7 @@ impl PostgresToolLoopRepository {
             .bind(turn_id_to_uuid(turn))
             .fetch_optional(&mut *transaction)
             .await?;
-            let Some(predecessor) = predecessor else {
+            let Some((predecessor, awaited_attempt, producing_call)) = resumed else {
                 return Ok(false);
             };
             sqlx::query(
@@ -585,6 +592,18 @@ impl PostgresToolLoopRepository {
             .await?
             .rows_affected();
             require_single(rows, "foreground child-wait continuation")?;
+            outbox::append(
+                &mut transaction,
+                OutboxEvent::ToolBatchTransition {
+                    session,
+                    turn,
+                    producing_call: signalbox_domain::ModelCallId::from_uuid(producing_call),
+                    state: ToolBatchOutboxState::ChildWaitResumed(tool_attempt_id_from_uuid(
+                        awaited_attempt,
+                    )),
+                },
+            )
+            .await?;
             Ok(true)
         }
         .await;

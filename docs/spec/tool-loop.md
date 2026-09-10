@@ -112,7 +112,9 @@ not a blanket but a distinct decider that can still deny or escalate.
 Every decision records its source, so unattended operation is inspectable
 without presenting policy as human consent, and only an explicit user, delegate,
 or consumed-override decision emits an approval-decided event naming its
-decider, its decision, and, for a delegate, its rationale.
+decider, its decision, and, for a delegate, its rationale; a delivered
+foreground child wait emits a child-wait-resumed tool-batch event naming the
+awaited attempt in the commit that reopens the parent turn.
 
 A denial reason is bounded and free of control characters, so a client can
 render it directly.

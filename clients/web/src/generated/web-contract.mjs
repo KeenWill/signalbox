@@ -6548,6 +6548,23 @@ const schemas = {
               "tool_attempt_id"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "tool_attempt_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "child_wait_resumed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "tool_attempt_id"
+            ],
+            "type": "object"
           }
         ]
       },

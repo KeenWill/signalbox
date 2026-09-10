@@ -639,6 +639,11 @@ pub enum DispatchedToolBatchState {
         /// Ambiguous tool attempt.
         attempt: ToolAttemptId,
     },
+    /// One delivered foreground child wait resumed its parent turn.
+    ChildWaitResumed {
+        /// Exact tool attempt that entered the durable wait.
+        attempt: ToolAttemptId,
+    },
 }
 
 /// Closed runner state carried by one dispatched session transition.
@@ -1687,6 +1692,23 @@ pub(crate) async fn load_event(
                                         event.tool_attempt_id
                                     AND recovery_request.producing_model_call_id =
                                         event.producing_model_call_id
+                                WHEN 'child_wait_resumed' THEN
+                                    event.frontier_id IS NULL
+                                    AND resumed_attempt.attempt_id =
+                                        event.tool_attempt_id
+                                    AND resumed_attempt.state_kind = 'terminal'
+                                    AND resumed_attempt.terminal_disposition_kind =
+                                        'awaiting_child'
+                                    AND resumed_request.producing_model_call_id =
+                                        event.producing_model_call_id
+                                    AND EXISTS (
+                                        SELECT 1
+                                          FROM turn_attempt AS continuation
+                                         WHERE continuation.continued_from_attempt_id =
+                                               resumed_attempt.issuing_turn_attempt_id
+                                           AND continuation.turn_id = event.turn_id
+                                           AND continuation.session_id = event.session_id
+                                    )
                                 ELSE false
                             END
                        FROM tool_batch_transition_outbox_event AS event
@@ -1716,6 +1738,12 @@ pub(crate) async fn load_event(
                        LEFT JOIN tool_request AS recovery_request
                          ON recovery_request.request_id =
                             recovery_attempt.request_id
+                       LEFT JOIN tool_attempt AS resumed_attempt
+                         ON resumed_attempt.attempt_id = event.tool_attempt_id
+                        AND resumed_attempt.turn_id = event.turn_id
+                        AND resumed_attempt.session_id = event.session_id
+                       LEFT JOIN tool_request AS resumed_request
+                         ON resumed_request.request_id = resumed_attempt.request_id
                       WHERE event.event_sequence = $1
                         AND event.session_id = $2",
             )
@@ -1739,6 +1767,11 @@ pub(crate) async fn load_event(
                 }
                 ("recovery_required", None, Some(attempt)) => {
                     DispatchedToolBatchState::RecoveryRequired {
+                        attempt: ToolAttemptId::from_uuid(attempt),
+                    }
+                }
+                ("child_wait_resumed", None, Some(attempt)) => {
+                    DispatchedToolBatchState::ChildWaitResumed {
                         attempt: ToolAttemptId::from_uuid(attempt),
                     }
                 }
@@ -3699,6 +3732,7 @@ pub(crate) enum ToolBatchOutboxState {
     Proposed(ContextFrontierId),
     ResultsProjected(ContextFrontierId),
     RecoveryRequired(ToolAttemptId),
+    ChildWaitResumed(ToolAttemptId),
 }
 
 /// Acquires the global append allocator at an explicit transaction boundary.
@@ -3983,6 +4017,9 @@ async fn append_tool_batch_transition(
         ToolBatchOutboxState::RecoveryRequired(attempt) => {
             ("recovery_required", None, Some(attempt))
         }
+        ToolBatchOutboxState::ChildWaitResumed(attempt) => {
+            ("child_wait_resumed", None, Some(attempt))
+        }
     };
     let event_sequence: Decimal = sqlx::query_scalar(
         "WITH header AS (
@@ -4066,11 +4103,12 @@ async fn append_tool_batch_transition(
            LEFT JOIN semantic_transcript_entry AS payload
              ON payload.source_session_id = member.source_session_id
             AND payload.semantic_entry_id = member.semantic_entry_id
-           LEFT JOIN tool_attempt AS attempt
-             ON attempt.attempt_id = CASE transition.transition_kind
-                 WHEN 'results_projected' THEN payload.tool_result_attempt_id
-                 WHEN 'recovery_required' THEN transition.tool_attempt_id
-             END
+             LEFT JOIN tool_attempt AS attempt
+               ON attempt.attempt_id = CASE transition.transition_kind
+                   WHEN 'results_projected' THEN payload.tool_result_attempt_id
+                   WHEN 'recovery_required' THEN transition.tool_attempt_id
+                   WHEN 'child_wait_resumed' THEN transition.tool_attempt_id
+               END
             AND attempt.request_id = request.request_id
             AND attempt.state_kind = 'terminal'
           WHERE transition.event_sequence = $1",

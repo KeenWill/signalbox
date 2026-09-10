@@ -2037,7 +2037,8 @@ async fn parent_only_interrupt_closes_foreground_wait_without_result() -> Result
 /// Successive foreground results reopen the same batch across more than one continued attempt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn successive_foreground_results_resume_the_same_tool_batch() -> Result<(), Box<dyn Error>> {
+async fn successive_foreground_results_resume_the_same_tool_batch_and_emit_transitions()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xab00;
     let child = Uuid::from_u128(seed + 0x101);
@@ -2299,6 +2300,7 @@ async fn successive_foreground_results_resume_the_same_tool_batch() -> Result<()
             SubmitInputAppliedResult::PendingSteering(_)
         ))
     ));
+    drain_outbox(&pool, |_| {}).await?;
 
     assert_eq!(
         repository.find_resumable_turn(fixture.session).await?,
@@ -2310,6 +2312,25 @@ async fn successive_foreground_results_resume_the_same_tool_batch() -> Result<()
             .resume_child_wait(fixture.session, fixture.turn, continuation)
             .await?
     );
+    assert!(matches!(
+        OutboxDispatcher::new(pool.clone())
+            .dispatch_next(|event| {
+                assert_eq!(event.session(), Some(fixture.session));
+                assert_eq!(
+                    event.kind(),
+                    &DispatchedOutboxEventKind::ToolBatchTransition {
+                        turn: fixture.turn,
+                        producing_call: fixture.call,
+                        state: DispatchedToolBatchState::ChildWaitResumed {
+                            attempt: await_attempt,
+                        },
+                    }
+                );
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { .. }
+    ));
     let resumed = repository
         .load_active_batch(fixture.session, fixture.turn)
         .await?

@@ -1893,6 +1893,11 @@ impl ProcessUpdateEvent {
                             tool_attempt_id: wire_uuid(attempt.into_uuid()),
                         }
                     }
+                    DispatchedToolBatchState::ChildWaitResumed { attempt } => {
+                        ToolBatchState::ChildWaitResumed {
+                            tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                        }
+                    }
                 },
             },
             Self::ToolApprovalDecided {

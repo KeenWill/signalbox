@@ -373,6 +373,9 @@ pub enum DispatchedToolBatchState {
     RecoveryRequired {
         attempt: signalbox_domain::ToolAttemptId,
     },
+    ChildWaitResumed {
+        attempt: signalbox_domain::ToolAttemptId,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
