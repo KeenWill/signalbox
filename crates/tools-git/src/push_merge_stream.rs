@@ -707,9 +707,9 @@ mod tests {
     }
     #[test]
     fn disk_diff_matches_minimum_edit_counts_for_repeated_line_sequences() {
-        let deadline = Instant::now() + Duration::from_secs(30);
         let mut seed = 19u64;
         for case in 0..256 {
+            let deadline = Instant::now() + Duration::from_secs(30);
             let mut sequence = |length: usize| -> Vec<u8> {
                 (0..length)
                     .map(|_| {
