@@ -24,7 +24,34 @@ use signalbox_workflow_runtime::{
     effects::{EffectExecutor, EffectInvocation, EffectRecovery},
 };
 use signalboxd::workflows::repo_watch::effects::{RepoWatchEffects, RepoWatchRequest};
-use std::{future::Future, pin::Pin};
+use std::{
+    future::Future,
+    io::{self, Write},
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
+use tracing::instrument::WithSubscriber;
+
+#[derive(Clone, Default)]
+struct WarningCapture(Arc<Mutex<Vec<u8>>>);
+
+impl Write for WarningCapture {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().expect("warning capture lock").extend(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl WarningCapture {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().expect("warning capture lock").clone())
+            .expect("UTF-8 warning")
+    }
+}
 
 struct NoPrimitives;
 impl LiveDeliverySource for NoPrimitives {
@@ -340,6 +367,112 @@ async fn workflow_evaluation_quarantines_undecodable_event_and_advances()
     .fetch_one(&module)
     .await?;
     assert!(!readable, "the readable event view excludes quarantine");
+    module.close().await;
+    core.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires disposable PostgreSQL"]
+async fn workflow_quarantine_warning_follows_successful_commit() -> Result<(), Box<dyn Error>> {
+    let (_database, core, module, effects, repository, rule) = fixture(Case::Dispatch).await?;
+    let poisoned = effects
+        .store
+        .next_rule_context(&repository, &rule)
+        .await?
+        .expect("first eligible context");
+    sqlx::query("UPDATE gh_event SET normalized_payload = $2 WHERE event_id = $1")
+        .bind(poisoned.event.id().into_uuid())
+        .bind(b"not json".as_slice())
+        .execute(&module)
+        .await?;
+    let now = OffsetDateTime::now_utc();
+    effects
+        .store
+        .ingest_observation(
+            &effects.store.ingest_baseline(&repository).await?,
+            &dispatch_observation(&repository, 3, now),
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    sqlx::query(
+        "CREATE FUNCTION reject_workflow_quarantine_commit()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'fixture quarantine commit failure';
+         END;
+         $$",
+    )
+    .execute(&module)
+    .await?;
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER reject_workflow_quarantine_commit
+         AFTER UPDATE OF decode_error ON gh_event
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+         WHEN (NEW.decode_error IS NOT NULL)
+         EXECUTE FUNCTION reject_workflow_quarantine_commit()",
+    )
+    .execute(&module)
+    .await?;
+
+    let failed_capture = WarningCapture::default();
+    let failed_writer = failed_capture.clone();
+    let failed_subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || failed_writer.clone())
+        .finish();
+    let failed = effects
+        .store
+        .next_rule_context(&repository, &rule)
+        .with_subscriber(failed_subscriber)
+        .await;
+    assert!(matches!(failed, Err(StoreError::Database(_))));
+    assert!(
+        !failed_capture
+            .text()
+            .contains("repository-watch event quarantined"),
+        "a rolled-back quarantine is not logged"
+    );
+    let decode_error: Option<String> =
+        sqlx::query_scalar("SELECT decode_error FROM gh_event WHERE event_id = $1")
+            .bind(poisoned.event.id().into_uuid())
+            .fetch_one(&module)
+            .await?;
+    assert!(
+        decode_error.is_none(),
+        "the failed commit rolls back quarantine"
+    );
+
+    sqlx::query("DROP TRIGGER reject_workflow_quarantine_commit ON gh_event")
+        .execute(&module)
+        .await?;
+    let committed_capture = WarningCapture::default();
+    let committed_writer = committed_capture.clone();
+    let committed_subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || committed_writer.clone())
+        .finish();
+    let successor = effects
+        .store
+        .next_rule_context(&repository, &rule)
+        .with_subscriber(committed_subscriber)
+        .await?
+        .expect("successor context");
+    assert!(successor.ordinal > poisoned.ordinal);
+    assert_eq!(
+        committed_capture
+            .text()
+            .matches("repository-watch event quarantined")
+            .count(),
+        1,
+        "the durable quarantine is logged once"
+    );
+
     module.close().await;
     core.close().await;
     Ok(())

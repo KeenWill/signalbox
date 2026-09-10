@@ -123,11 +123,13 @@ impl RepoWatchStore {
         if !eligible {
             return Ok(None);
         }
+        let mut quarantined = Vec::new();
         loop {
             let next: Option<(Decimal, Uuid, Vec<u8>)> = sqlx::query_as("SELECT event.repository_event_ordinal, event.event_id, event.normalized_payload FROM rule_revision revision LEFT JOIN rule_evaluation_cursor cursor ON cursor.repository = revision.repository AND cursor.rule_id = revision.rule_id AND cursor.rule_revision = revision.revision JOIN gh_readable_event event ON event.repository = revision.repository AND event.repository_event_ordinal > GREATEST(revision.activated_after_event_ordinal, COALESCE(cursor.event_ordinal, 0)) WHERE revision.repository = $1 AND revision.rule_id = $2 AND revision.revision = $3 ORDER BY event.repository_event_ordinal LIMIT 1")
                 .bind(repository.as_str()).bind(rule.id().as_str()).bind(Decimal::from(rule.version().get())).fetch_optional(&mut *tx).await?;
             let Some((ordinal, id, bytes)) = next else {
                 tx.commit().await?;
+                log_quarantined_events(repository, &quarantined);
                 return Ok(None);
             };
             let Some(event) = crate::event_decode::event(RepoWatchEventId::from_uuid(id), &bytes)
@@ -144,12 +146,7 @@ impl RepoWatchStore {
                 .rows_affected()
                     == 1;
                 if marked {
-                    tracing::warn!(
-                        repository = repository.as_str(),
-                        event_id = %id,
-                        %error,
-                        "repository-watch event quarantined"
-                    );
+                    quarantined.push(id);
                 }
                 continue;
             };
@@ -165,6 +162,7 @@ impl RepoWatchStore {
                 singleton_key: key,
             };
             tx.commit().await?;
+            log_quarantined_events(repository, &quarantined);
             return Ok(Some(context));
         }
     }
@@ -258,12 +256,7 @@ impl RepoWatchStore {
                         == 1;
                     tx.commit().await?;
                     if marked {
-                        tracing::warn!(
-                            repository = event.repository().as_str(),
-                            event_id = %id,
-                            %error,
-                            "repository-watch event quarantined"
-                        );
+                        log_quarantined_events(event.repository(), &[id]);
                     }
                     return Err(StoreError::InvalidRetainedEvent);
                 }
@@ -314,6 +307,18 @@ impl RepoWatchStore {
             .bind(event.repository().as_str()).bind(rule.id().as_str()).bind(Decimal::from(rule.version().get())).bind(ordinal).bind(effect).bind(input).bind(&result).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(result)
+    }
+}
+
+fn log_quarantined_events(repository: &RepositorySlug, event_ids: &[Uuid]) {
+    let error = StoreError::InvalidRetainedEvent.to_string();
+    for id in event_ids {
+        tracing::warn!(
+            repository = repository.as_str(),
+            event_id = %id,
+            %error,
+            "repository-watch event quarantined"
+        );
     }
 }
 
