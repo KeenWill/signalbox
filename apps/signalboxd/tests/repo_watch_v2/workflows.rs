@@ -4,6 +4,9 @@
 #[path = "workflows/production.rs"]
 mod production;
 
+#[path = "workflows/boundaries.rs"]
+mod boundaries;
+
 use super::*;
 use signalbox_domain::{
     InlineFramePayload, ProgramCapability, ProgramRunId,

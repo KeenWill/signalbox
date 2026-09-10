@@ -330,11 +330,11 @@ the dispatch ledger. Both bind stable effect identities to exact method/input
 bytes independently of runs; equal recovery adopts before configuration lookup
 and changed input conflicts. Receipts remain discoverable for successor runs
 until durable journal adoption; an unadopted evaluation prevents selecting the
-next event for that revision. Submission uses the retained commands and existing
-sink, including checkout and pending follow-ups, before recording completion.
-Recovery adopts a completed submission or resumes its binding; an unanswered
-submission without a binding is ambiguous. The existing runtime remains the
-production orchestrator.
+next event for that revision through either the workflow reader or the existing
+evaluator. Submission uses the retained commands and existing sink, including
+checkout and pending follow-ups, before recording completion. Recovery adopts a
+completed submission or resumes its binding; an unanswered submission without a
+binding is ambiguous. The existing runtime remains the production orchestrator.
 
 The v2 crate depends on the session ownership crate as its only Signalbox
 dependency. It consumes the seam's lifecycle events and emits only the seam's

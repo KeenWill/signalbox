@@ -592,6 +592,8 @@ pub enum StoreError {
     InvalidRuleFieldInventory,
     /// Planned commands do not form one complete ordered rule/event batch.
     InvalidDispatchBatch,
+    /// A workflow input conflicts with its receipt or current rule/event context.
+    WorkflowInputRejected,
     /// Core could not encode or decode an exact retained command payload.
     InvalidRetainedCommand,
     /// A complete configured set repeated one repository-scoped rule identity.
@@ -628,6 +630,7 @@ impl fmt::Display for StoreError {
             Self::InvalidDispatchBatch => {
                 "repository-watch commands do not form one ordered dispatch batch"
             }
+            Self::WorkflowInputRejected => "repository-watch workflow input was rejected",
             Self::InvalidRetainedCommand => "repository-watch retained command payload is invalid",
             Self::DuplicateRuleIdentity => {
                 "repository-watch configured rule set repeats an identity"
@@ -654,6 +657,7 @@ impl Error for StoreError {
             | Self::ProjectionRepositoryMismatch
             | Self::InvalidRuleFieldInventory
             | Self::InvalidDispatchBatch
+            | Self::WorkflowInputRejected
             | Self::InvalidRetainedCommand
             | Self::DuplicateRuleIdentity => None,
         }

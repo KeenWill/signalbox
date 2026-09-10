@@ -78,6 +78,7 @@ impl RepoWatchStore {
              JOIN gh_event AS event ON event.repository = active.repository
               AND event.repository_event_ordinal > GREATEST(revision.activated_after_event_ordinal, COALESCE(cursor.event_ordinal, 0))
              WHERE active.repository = $1 AND active.rule_id = $2 AND active.active_revision = $3
+               AND cursor.effect_id IS NULL
              ORDER BY event.repository_event_ordinal LIMIT 1")
             .bind(repository.as_str()).bind(rule.id().as_str()).bind(Decimal::from(rule.version().get()))
             .fetch_optional(&self.pool).await?;

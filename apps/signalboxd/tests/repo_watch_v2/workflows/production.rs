@@ -85,7 +85,7 @@ async fn restart_releases_delivered_evaluations_for_every_run_outcome() -> Resul
         ReceiptRunEnd::Faulted,
         ReceiptRunEnd::Completed,
     ] {
-        let (_database, core, store, runtime, repository, rule, _files) =
+        let (_database, core, _module, store, runtime, repository, rule, _files) =
             production_fixture().await?;
         let context = store
             .next_rule_context(&repository, &rule)
@@ -170,7 +170,8 @@ async fn restart_releases_delivered_evaluations_for_every_run_outcome() -> Resul
 #[ignore = "requires disposable PostgreSQL"]
 async fn program_error_after_evaluation_answer_releases_the_next_event()
 -> Result<(), Box<dyn Error>> {
-    let (_database, core, store, runtime, repository, rule, _files) = production_fixture().await?;
+    let (_database, core, _module, store, runtime, repository, rule, _files) =
+        production_fixture().await?;
     let context = store
         .next_rule_context(&repository, &rule)
         .await?
@@ -233,9 +234,10 @@ export default async function(input) {
     Ok(())
 }
 
-async fn production_fixture() -> Result<
+pub(super) async fn production_fixture() -> Result<
     (
         TestDatabase,
+        PgPool,
         PgPool,
         RepoWatchStore,
         RepositoryWatchRuntime,
@@ -322,6 +324,7 @@ async fn production_fixture() -> Result<
     Ok((
         database,
         core,
+        module,
         store,
         repository_watch,
         repository,
@@ -334,7 +337,7 @@ async fn production_fixture() -> Result<
 #[ignore = "requires disposable PostgreSQL"]
 async fn production_runtime_reads_commits_and_submits_repository_watch_effects()
 -> Result<(), Box<dyn Error>> {
-    let (_database, core, store, repository_watch, repository, rule, _files) =
+    let (_database, core, _module, store, repository_watch, repository, rule, _files) =
         production_fixture().await?;
     let (service, runner) = WorkflowRuntime::new(core.clone())?;
     let runner = runner.with_repository_watch(Some(repository_watch.clone()));

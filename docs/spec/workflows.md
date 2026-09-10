@@ -212,7 +212,10 @@ production runner routes these effects through the current repository-watch
 runtime and its serialized checkout-aware command sink, acknowledging receipts
 after durable delivery before the next effect or any attempt outcome. Startup
 and shutdown also reconcile retained receipts against exact durable answers,
-including cancelled, faulted and completed runs.
+including cancelled, faulted and completed runs. Checked module rejections fault
+only the requesting run; storage and delivery failures retain their
+infrastructure classification. The shared module pool remains available until
+all runtime owners finish, including workflow shutdown reconciliation.
 
 The canonical SDK specifier is `@signalbox/program-sdk/v<version>`, where the
 version is a positive decimal integer with no leading zero. Frame-contract

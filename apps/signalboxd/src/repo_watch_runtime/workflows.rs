@@ -3,37 +3,35 @@
 
 use super::*;
 use crate::{
-    repo_watch_dispatch::CheckoutCommandSink, workflows::repo_watch::effects::RepoWatchEffects,
+    repo_watch_dispatch::CheckoutCommandSink,
+    workflows::repo_watch::effects::{RepoWatchEffectFailure, RepoWatchEffects},
 };
 use signalbox_domain::InlineFramePayload;
 use signalbox_persistence::program_journal::ProgramJournalRepository;
-use signalbox_workflow_runtime::{
-    LiveDeliveryFailure,
-    effects::{EffectExecutor, EffectInvocation},
-};
+use signalbox_workflow_runtime::{LiveDeliveryFailure, effects::EffectInvocation};
 
 impl RepositoryWatchRuntime {
     pub(crate) async fn adopt_workflow_effect(
         &self,
         invocation: EffectInvocation<'_>,
-    ) -> Result<Option<InlineFramePayload>, LiveDeliveryFailure> {
+    ) -> Result<Option<InlineFramePayload>, RepoWatchEffectFailure> {
         self.state
             .lock()
             .await
             .workflow_effects()
-            .adopt(invocation)
+            .adopt_checked(invocation)
             .await
     }
 
     pub(crate) async fn execute_workflow_effect(
         &self,
         invocation: EffectInvocation<'_>,
-    ) -> Result<InlineFramePayload, LiveDeliveryFailure> {
+    ) -> Result<InlineFramePayload, RepoWatchEffectFailure> {
         self.state
             .lock()
             .await
             .workflow_effects()
-            .execute(invocation)
+            .execute_checked(invocation)
             .await
     }
 

@@ -4,7 +4,7 @@
 use super::*;
 use crate::{
     repo_watch_runtime::RepositoryWatchRuntime,
-    workflows::repo_watch::effects::{self, RepoWatchRequest},
+    workflows::repo_watch::effects::{self, RepoWatchEffectFailure, RepoWatchRequest},
 };
 
 pub(super) trait AttemptEffects: EffectExecutor {
@@ -29,6 +29,18 @@ impl RuntimeEffects {
             journal,
             rejected: None,
         }
+    }
+    fn classify<T>(
+        &mut self,
+        result: Result<T, RepoWatchEffectFailure>,
+        capability: ProgramCapability,
+    ) -> Result<T, LiveDeliveryFailure> {
+        result.map_err(|error| {
+            if matches!(error, RepoWatchEffectFailure::Rejected(_)) {
+                self.rejected = Some(capability);
+            }
+            error.into()
+        })
     }
 }
 
@@ -60,8 +72,8 @@ impl EffectExecutor for RuntimeEffects {
             if RepoWatchRequest::decode(invocation.request).is_some()
                 && let Some(runtime) = &self.repository_watch
             {
-                let result = runtime.adopt_workflow_effect(invocation).await?;
-                return Ok(result);
+                let result = runtime.adopt_workflow_effect(invocation).await;
+                return self.classify(result, invocation.request.capability());
             }
             Ok(None)
         })
@@ -76,8 +88,8 @@ impl EffectExecutor for RuntimeEffects {
             if RepoWatchRequest::decode(invocation.request).is_some()
                 && let Some(runtime) = &self.repository_watch
             {
-                let result = runtime.execute_workflow_effect(invocation).await?;
-                return Ok(result);
+                let result = runtime.execute_workflow_effect(invocation).await;
+                return self.classify(result, invocation.request.capability());
             }
             self.rejected = Some(invocation.request.capability());
             Err(LiveDeliveryFailure::new(
