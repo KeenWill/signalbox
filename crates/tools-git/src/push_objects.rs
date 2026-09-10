@@ -215,7 +215,6 @@ fn retain_boundary(
 struct SourceFile {
     directory: usize,
     name: PathBuf,
-    file: Option<File>,
     identity: FileSnapshotIdentity,
 }
 
@@ -441,13 +440,29 @@ impl ObjectSource {
         self.files.push(SourceFile {
             directory,
             name: PathBuf::from(path.file_name().ok_or(LocalGitFailure::Repository)?),
-            file: Some(file),
             identity,
         });
         if self.files.len() > MAX_REPOSITORY_INSPECTIONS {
             return Err(LocalGitFailure::Repository);
         }
         Ok(index)
+    }
+
+    fn reopen_file(&self, source: usize) -> Result<File, LocalGitFailure> {
+        let entry = &self.files[source];
+        let file = File::from(
+            openat(
+                &self.directories[entry.directory].directory,
+                &entry.name,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(rejected)?,
+        );
+        if file_snapshot_identity(&file.metadata().map_err(rejected)?) != entry.identity {
+            return Err(LocalGitFailure::Repository);
+        }
+        Ok(file)
     }
 
     fn read(
@@ -458,12 +473,7 @@ impl ObjectSource {
     ) -> Result<Vec<u8>, LocalGitFailure> {
         self.check_deadline()?;
         let entry = &self.files[source];
-        let mut file = entry
-            .file
-            .as_ref()
-            .ok_or(LocalGitFailure::Repository)?
-            .try_clone()
-            .map_err(rejected)?;
+        let mut file = self.reopen_file(source)?;
         file.seek(SeekFrom::Start(offset as u64))
             .map_err(rejected)?;
         let mut bytes = vec![0; length];
@@ -620,18 +630,11 @@ impl ObjectSource {
         let path = PathBuf::from(&hex[..2]).join(&hex[2..]);
         if open_child(&self.objects, &path)?.is_some() {
             let source = self.open_file(&path)?;
-            let file = self.files[source]
-                .file
-                .as_ref()
-                .ok_or(LocalGitFailure::Repository)?
-                .try_clone()
-                .map_err(rejected)?;
+            let file = self.reopen_file(source)?;
             let mut content = self.decode_loose(file)?;
             if self.store(database, &mut content)? != oid {
                 return Err(LocalGitFailure::Repository);
             }
-            // Keep the source identity while releasing verified loose-object descriptors.
-            self.files[source].file = None;
             return Ok(());
         }
         self.capture_pack(database, oid)
@@ -688,6 +691,7 @@ impl ObjectSource {
             }
         }
         let (pack_index, mut offset) = location.ok_or(LocalGitFailure::Repository)?;
+        let pack_file = self.reopen_file(self.packs[pack_index].source)?;
         let mut selected = HashSet::new();
         let mut entries = Vec::new();
         let mut content = loop {
@@ -699,12 +703,7 @@ impl ObjectSource {
             if offset < 12 || offset >= pack.end {
                 return Err(LocalGitFailure::Repository);
             }
-            let mut file = self.files[pack.source]
-                .file
-                .as_ref()
-                .ok_or(LocalGitFailure::Repository)?
-                .try_clone()
-                .map_err(rejected)?;
+            let mut file = pack_file.try_clone().map_err(rejected)?;
             file.seek(SeekFrom::Start(offset as u64))
                 .map_err(rejected)?;
             let mut remaining = file.take((pack.end - offset) as u64);
@@ -771,12 +770,7 @@ impl ObjectSource {
         let pack = &self.packs[pack_index];
         while let Some((offset, size)) = entries.pop() {
             self.check_deadline()?;
-            let mut file = self.files[pack.source]
-                .file
-                .as_ref()
-                .ok_or(LocalGitFailure::Repository)?
-                .try_clone()
-                .map_err(rejected)?;
+            let mut file = pack_file.try_clone().map_err(rejected)?;
             file.seek(SeekFrom::Start(offset)).map_err(rejected)?;
             let mut decoder =
                 ZlibDecoder::new(std::io::BufReader::new(file.take(pack.end as u64 - offset)));
@@ -785,7 +779,10 @@ impl ObjectSource {
             let limit = crate::limits::object_byte_limit(self.max_object_bytes, content.kind);
             content = content.apply_delta(delta.file, Some(limit), self.deadline)?;
         }
-        if self.store(database, &mut content)? != oid {
+        if file_snapshot_identity(&pack_file.metadata().map_err(rejected)?)
+            != self.files[pack.source].identity
+            || self.store(database, &mut content)? != oid
+        {
             return Err(LocalGitFailure::Repository);
         }
         Ok(())
@@ -836,11 +833,6 @@ impl ObjectSource {
                 .map_err(rejected)?,
             );
             if file_snapshot_identity(&current.metadata().map_err(rejected)?) != entry.identity {
-                return Err(LocalGitFailure::Repository);
-            }
-            if let Some(file) = &entry.file
-                && file_snapshot_identity(&file.metadata().map_err(rejected)?) != entry.identity
-            {
                 return Err(LocalGitFailure::Repository);
             }
         }
