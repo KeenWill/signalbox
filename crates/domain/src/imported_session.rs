@@ -29,6 +29,11 @@ pub struct CreateSessionFromImportedFrontierAppliedResult {
 }
 
 impl CreateSessionFromImportedFrontierAppliedResult {
+    /// Records the session created by a checked streaming persistence path.
+    pub const fn from_session(session: SessionId) -> Self {
+        Self { session }
+    }
+
     /// Returns the exact created session.
     pub const fn session(&self) -> SessionId {
         self.session

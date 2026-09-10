@@ -91,6 +91,7 @@ pub type ImportedRawBlobReadFuture<'storage> = pin::Pin<
 
 ```rust
 pub trait ImportedRawBlobStorage: fmt::Debug + marker::Send + marker::Sync {
+    fn maximum_blob_bytes(&self) -> u64;
     fn publish(
         &self,
         blobs: boxed::Box<[conversation_import::ImportedRawBlobInput]>,
@@ -252,6 +253,7 @@ impl conversation_import::ImportedConversationRepository {
         pool: sqlx_postgres::PgPool,
         blob_storage: sync::Arc<dyn conversation_import::ImportedRawBlobStorage>,
     ) -> Self;
+    pub fn maximum_raw_record_bytes(&self) -> u64;
     #[cfg(feature = "postgres-integration")]
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn resolve_or_insert(

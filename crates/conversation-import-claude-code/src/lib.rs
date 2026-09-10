@@ -117,6 +117,11 @@ pub enum ClaudeCodeJsonlConversionFailure {
         /// One-based tool-result block position.
         result_block: u64,
     },
+    /// One physical record exceeded the configured raw-record byte ceiling.
+    RawRecordTooLarge {
+        /// One-based physical line number.
+        line: u64,
+    },
     /// A required source or entry position could not be represented.
     PositionExhausted,
     /// The converted candidate violated an imported-conversation invariant.
@@ -270,6 +275,7 @@ impl StreamingResilientImportedConversationConverter for ResilientClaudeCodeJson
         &mut self,
         conversation: ImportedConversationId,
         source: Reader,
+        maximum_record_bytes: u64,
         next_entry_id: NextEntryId,
     ) -> impl Iterator<
         Item = Result<
@@ -281,7 +287,7 @@ impl StreamingResilientImportedConversationConverter for ResilientClaudeCodeJson
         Reader: BufRead + Send,
         NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
     {
-        let mut records = read_jsonl_records(source);
+        let mut records = read_jsonl_records(source, maximum_record_bytes);
         let mut next_entry_id = next_entry_id;
         let mut saw_record = false;
         let mut finished = false;
@@ -298,6 +304,12 @@ impl StreamingResilientImportedConversationConverter for ResilientClaudeCodeJson
                 Some(Err(JsonlRecordReadFailure::PositionExhausted)) => {
                     finished = true;
                     return Some(Err(StreamConversionError::Conversion(position_error())));
+                }
+                Some(Err(JsonlRecordReadFailure::RecordTooLarge { line })) => {
+                    finished = true;
+                    return Some(Err(StreamConversionError::Conversion(conversion_error(
+                        ClaudeCodeJsonlConversionFailure::RawRecordTooLarge { line },
+                    ))));
                 }
                 None if !saw_record => {
                     finished = true;
@@ -351,6 +363,7 @@ fn record_local_failure(
 ) -> Result<ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConversionError> {
     match error.failure() {
         ClaudeCodeJsonlConversionFailure::EmptySource
+        | ClaudeCodeJsonlConversionFailure::RawRecordTooLarge { .. }
         | ClaudeCodeJsonlConversionFailure::PositionExhausted
         | ClaudeCodeJsonlConversionFailure::InvalidAggregate(_) => Err(error),
         failure => Ok(failure),
@@ -1377,6 +1390,7 @@ mod tests {
             .convert_resilient_from_reader(
                 conversation(),
                 BufReader::with_capacity(4, Cursor::new(&source)),
+                u64::MAX,
                 || {
                     let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(
                         streamed_next_identity,
@@ -1478,6 +1492,28 @@ mod tests {
         assert_eq!(
             error.failure(),
             ClaudeCodeJsonlConversionFailure::EmptySource
+        );
+    }
+
+    #[test]
+    fn streamed_conversion_rejects_an_oversized_record_before_parsing() {
+        let error = ResilientClaudeCodeJsonlConverter
+            .convert_resilient_from_reader(
+                conversation(),
+                BufReader::with_capacity(2, Cursor::new(b"{\"type\":\"system\"}\n")),
+                3,
+                || panic!("oversized record must not consume an entry identity"),
+            )
+            .next()
+            .expect("the oversized physical record is observed")
+            .expect_err("the record byte ceiling rejects before conversion");
+
+        let signalbox_application::StreamConversionError::Conversion(error) = error else {
+            panic!("the in-memory fixture cannot fail its source read")
+        };
+        assert_eq!(
+            error.failure(),
+            ClaudeCodeJsonlConversionFailure::RawRecordTooLarge { line: 1 }
         );
     }
 

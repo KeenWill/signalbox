@@ -111,6 +111,7 @@ pub trait StreamingResilientImportedConversationConverter:
         &mut self,
         conversation: signalbox_domain::ImportedConversationId,
         source: Reader,
+        maximum_record_bytes: u64,
         next_entry_id: NextEntryId,
     ) -> impl iterator::Iterator<
         Item = result::Result<

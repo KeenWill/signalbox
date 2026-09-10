@@ -520,6 +520,7 @@ pub enum ConversationImportRejectionClass {
     InvalidUtf8,
     InvalidJson,
     JsonDepthExceeded,
+    RawRecordTooLarge,
     TopLevelNotObject,
     InvalidRecordType,
     InvalidSourceMetadata,

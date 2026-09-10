@@ -8,6 +8,7 @@
 pub struct CreateSessionFromImportedFrontierAppliedResult {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl CreateSessionFromImportedFrontierAppliedResult {
+    pub const fn from_session(session: SessionId) -> Self;
     pub const fn session(&self) -> SessionId;
 }
 ```

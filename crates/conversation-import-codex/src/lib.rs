@@ -136,6 +136,11 @@ pub enum CodexRolloutJsonlConversionFailure {
         /// One-based result-block position.
         block: u64,
     },
+    /// One physical record exceeded the configured raw-record byte ceiling.
+    RawRecordTooLarge {
+        /// One-based physical line number.
+        line: u64,
+    },
     /// A required source or entry position could not be represented.
     PositionExhausted,
     /// The converted candidate violated an imported-conversation invariant.
@@ -289,6 +294,7 @@ impl StreamingResilientImportedConversationConverter for ResilientCodexRolloutJs
         &mut self,
         conversation: ImportedConversationId,
         source: Reader,
+        maximum_record_bytes: u64,
         next_entry_id: NextEntryId,
     ) -> impl Iterator<
         Item = Result<
@@ -300,7 +306,7 @@ impl StreamingResilientImportedConversationConverter for ResilientCodexRolloutJs
         Reader: BufRead + Send,
         NextEntryId: FnMut() -> ImportedTranscriptEntryId + Send,
     {
-        let mut records = read_jsonl_records(source);
+        let mut records = read_jsonl_records(source, maximum_record_bytes);
         let mut next_entry_id = next_entry_id;
         let mut saw_record = false;
         let mut finished = false;
@@ -317,6 +323,12 @@ impl StreamingResilientImportedConversationConverter for ResilientCodexRolloutJs
                 Some(Err(JsonlRecordReadFailure::PositionExhausted)) => {
                     finished = true;
                     return Some(Err(StreamConversionError::Conversion(position_error())));
+                }
+                Some(Err(JsonlRecordReadFailure::RecordTooLarge { line })) => {
+                    finished = true;
+                    return Some(Err(StreamConversionError::Conversion(conversion_error(
+                        CodexRolloutJsonlConversionFailure::RawRecordTooLarge { line },
+                    ))));
                 }
                 None if !saw_record => {
                     finished = true;
@@ -370,6 +382,7 @@ fn record_local_failure(
 ) -> Result<CodexRolloutJsonlConversionFailure, CodexRolloutJsonlConversionError> {
     match error.failure() {
         CodexRolloutJsonlConversionFailure::EmptySource
+        | CodexRolloutJsonlConversionFailure::RawRecordTooLarge { .. }
         | CodexRolloutJsonlConversionFailure::PositionExhausted
         | CodexRolloutJsonlConversionFailure::InvalidAggregate(_) => Err(error),
         failure => Ok(failure),
@@ -1534,6 +1547,7 @@ mod tests {
             .convert_resilient_from_reader(
                 conversation(),
                 BufReader::with_capacity(4, Cursor::new(&source)),
+                u64::MAX,
                 || {
                     let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(
                         streamed_next_identity,

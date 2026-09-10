@@ -139,6 +139,7 @@ pub trait StreamingResilientImportedConversationConverter:
         &mut self,
         conversation: ImportedConversationId,
         source: Reader,
+        maximum_record_bytes: u64,
         next_entry_id: NextEntryId,
     ) -> impl Iterator<
         Item = Result<

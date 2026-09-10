@@ -160,6 +160,9 @@ pub type ImportedRawBlobReadFuture<'storage> = Pin<
 
 /// Deployment adapter for sequential publication and checked aggregate reads.
 pub trait ImportedRawBlobStorage: fmt::Debug + Send + Sync {
+    /// Returns the largest raw record this deployment can retain.
+    fn maximum_blob_bytes(&self) -> u64;
+
     /// Publishes or verifies each distinct source record in supplied order.
     fn publish(&self, blobs: Box<[ImportedRawBlobInput]>) -> ImportedRawBlobPublicationFuture<'_>;
 
@@ -196,6 +199,10 @@ pub fn corrupt_integration_imported_blob(
 
 #[cfg(feature = "postgres-integration")]
 impl ImportedRawBlobStorage for IntegrationImportedRawBlobStorage {
+    fn maximum_blob_bytes(&self) -> u64 {
+        u64::MAX
+    }
+
     fn publish(&self, blobs: Box<[ImportedRawBlobInput]>) -> ImportedRawBlobPublicationFuture<'_> {
         Box::pin(async move {
             let store = BlobStoreName::try_new("integration")
@@ -451,6 +458,11 @@ impl ImportedConversationRepository {
     /// Uses the supplied pool for atomic insertion and checked complete loads.
     pub fn with_blob_storage(pool: PgPool, blob_storage: Arc<dyn ImportedRawBlobStorage>) -> Self {
         Self { pool, blob_storage }
+    }
+
+    /// Returns the largest raw record the configured source store can retain.
+    pub fn maximum_raw_record_bytes(&self) -> u64 {
+        self.blob_storage.maximum_blob_bytes()
     }
 
     /// Uses the deterministic integration-store fixture.
@@ -787,7 +799,6 @@ impl ImportedConversationRepository {
                 entry_count,
                 source_session_id.as_deref(),
                 display_title.as_deref(),
-                dropped_records,
             )
             .await
             .map_err(StreamingImportedConversationError::Repository)?;
@@ -1368,7 +1379,6 @@ async fn stream_source_digest(
         .ok_or_else(|| invalid_ordinal("streamed raw-record count"))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn stream_staging_matches_existing(
     transaction: &mut Transaction<'_, Postgres>,
     conversation: ImportedConversationId,
@@ -1376,7 +1386,6 @@ async fn stream_staging_matches_existing(
     entry_count: u64,
     source_session_id: Option<&[u8]>,
     display_title: Option<&str>,
-    dropped_records: ImportedConversationDropFacts,
 ) -> Result<bool, ImportedConversationRepositoryError> {
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
@@ -1386,8 +1395,6 @@ async fn stream_staging_matches_existing(
                 AND declared_entry_count = $3
                 AND source_session_id IS NOT DISTINCT FROM $4
                 AND display_title IS NOT DISTINCT FROM $5
-                AND dropped_record_count = $6
-                AND first_dropped_record_position IS NOT DISTINCT FROM $7
          )
          AND NOT EXISTS (
              (SELECT raw_record_position, content_hash, conversion_digest,
@@ -1437,8 +1444,6 @@ async fn stream_staging_matches_existing(
     .bind(Decimal::from(entry_count))
     .bind(source_session_id)
     .bind(display_title)
-    .bind(Decimal::from(dropped_records.count()))
-    .bind(dropped_records.first_source_line().map(Decimal::from))
     .fetch_one(&mut **transaction)
     .await
     .map_err(Into::into)
@@ -1713,6 +1718,87 @@ pub(crate) async fn load_normalized_prefix_from_connection(
     .await
 }
 
+/// Checks one normalized prefix without loading its members.
+pub(crate) async fn normalized_prefix_exists_from_connection(
+    connection: &mut PgConnection,
+    frontier: ImportedTranscriptFrontier,
+) -> Result<Option<bool>, ImportedConversationRepositoryError> {
+    let row = sqlx::query(
+        "SELECT conversation.storage_version,
+                conversation.declared_entry_count,
+                inventory.actual_entry_count,
+                inventory.inventory_is_complete,
+                target.imported_transcript_entry_id AS target_entry_id
+           FROM imported_conversation AS conversation
+           CROSS JOIN LATERAL (
+               SELECT COUNT(*)::numeric AS actual_entry_count,
+                      COUNT(*)::numeric = conversation.declared_entry_count
+                      AND MIN(imported_entry_position) = 1
+                      AND MAX(imported_entry_position) =
+                          conversation.declared_entry_count
+                          AS inventory_is_complete
+                 FROM imported_transcript_entry
+                WHERE imported_conversation_id =
+                      conversation.imported_conversation_id
+           ) AS inventory
+           LEFT JOIN imported_transcript_entry AS target
+             ON target.imported_conversation_id =
+                    conversation.imported_conversation_id
+            AND target.imported_entry_position = $2
+          WHERE conversation.imported_conversation_id = $1",
+    )
+    .bind(frontier.conversation().into_uuid())
+    .bind(Decimal::from(frontier.through_position().as_u64()))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    require_i16(&row, "storage_version", STORAGE_VERSION)?;
+    let declared_entry_count = positive_u64(row.try_get("declared_entry_count")?)
+        .map_err(|reason| invalid_ordinal_with_reason("declared entry count", reason))?;
+    let actual_entry_count = u64::try_from(row.try_get::<Decimal, _>("actual_entry_count")?)
+        .map_err(|_| invalid_ordinal("actual entry count"))?;
+    if !row.try_get::<bool, _>("inventory_is_complete")? {
+        return Err(ImportedConversationCorruption::Domain(
+            ImportedConversationReconstitutionFailure::DeclaredEntryCountMismatch {
+                declared: declared_entry_count,
+                actual: usize::try_from(actual_entry_count)
+                    .map_err(|_| invalid_ordinal("actual entry count"))?,
+            },
+        )
+        .into());
+    }
+    Ok(Some(
+        row.try_get::<Option<Uuid>, _>("target_entry_id")?
+            .map(ImportedTranscriptEntryId::from_uuid)
+            == Some(frontier.through_entry()),
+    ))
+}
+
+/// Loads and checks one normalized entry so callers can page a prefix.
+pub(crate) async fn load_normalized_entry_from_connection(
+    connection: &mut PgConnection,
+    conversation: ImportedConversationId,
+    position: ImportedTranscriptPosition,
+) -> Result<Option<ImportedTranscriptEntryInput>, ImportedConversationRepositoryError> {
+    let row = sqlx::query(
+        "SELECT imported_entry_position, imported_transcript_entry_id,
+                raw_record_position, record_entry_position,
+                source_speaker_kind, content_encoding,
+                source_metadata_encoding
+           FROM imported_transcript_entry
+          WHERE imported_conversation_id = $1
+            AND imported_entry_position = $2",
+    )
+    .bind(conversation.into_uuid())
+    .bind(Decimal::from(position.as_u64()))
+    .fetch_optional(&mut *connection)
+    .await?;
+    row.map(|row| decode_normalized_entry(row, conversation, position))
+        .transpose()
+}
+
 /// Loads one conversation's normalized runtime entries without audit bytes.
 pub async fn load_normalized_entries(
     pool: &PgPool,
@@ -1787,50 +1873,61 @@ async fn load_normalized_entries_from_connection(
     let mut expected_position = ImportedTranscriptPosition::first();
     let mut identities = BTreeSet::new();
     for row in rows {
-        let position = decode_entry_position(row.try_get("imported_entry_position")?)?;
-        let identity =
-            ImportedTranscriptEntryId::from_uuid(row.try_get("imported_transcript_entry_id")?);
-        if position != expected_position {
+        let entry = decode_normalized_entry(row, conversation, expected_position)?;
+        expected_position = expected_position
+            .checked_next()
+            .ok_or_else(|| invalid_ordinal("normalized entry position"))?;
+        if !identities.insert(entry.identity()) {
             return Err(ImportedConversationCorruption::Domain(
-                ImportedConversationReconstitutionFailure::EntryPositionMismatch {
-                    entry: identity,
-                    expected: expected_position,
-                    actual: position,
+                ImportedConversationReconstitutionFailure::DuplicateEntry {
+                    entry: entry.identity(),
                 },
             )
             .into());
         }
-        expected_position = expected_position
-            .checked_next()
-            .ok_or_else(|| invalid_ordinal("normalized entry position"))?;
-        if !identities.insert(identity) {
-            return Err(ImportedConversationCorruption::Domain(
-                ImportedConversationReconstitutionFailure::DuplicateEntry { entry: identity },
-            )
-            .into());
-        }
-        let raw_position = decode_raw_position(row.try_get("raw_record_position")?)?;
-        let within_position = decode_within_position(row.try_get("record_entry_position")?)?;
-        let source_speaker =
-            decode_source_speaker(row.try_get::<String, _>("source_speaker_kind")?.as_str())?;
-        let content_encoding: Vec<u8> = row.try_get("content_encoding")?;
-        let content = decode_content(&content_encoding)
-            .map_err(|failure| encoding_corruption("content", failure))?;
-        let source_encoding: Vec<u8> = row.try_get("source_metadata_encoding")?;
-        let source = decode_source_metadata(&source_encoding)
-            .map_err(|failure| encoding_corruption("source metadata", failure))?;
-        entries.push(ImportedTranscriptEntryInput::new(
-            identity,
-            conversation,
-            position,
-            raw_position,
-            within_position,
-            source_speaker,
-            content,
-            source,
-        ));
+        entries.push(entry);
     }
     Ok(Some(entries))
+}
+
+fn decode_normalized_entry(
+    row: PgRow,
+    conversation: ImportedConversationId,
+    expected_position: ImportedTranscriptPosition,
+) -> Result<ImportedTranscriptEntryInput, ImportedConversationRepositoryError> {
+    let position = decode_entry_position(row.try_get("imported_entry_position")?)?;
+    let identity =
+        ImportedTranscriptEntryId::from_uuid(row.try_get("imported_transcript_entry_id")?);
+    if position != expected_position {
+        return Err(ImportedConversationCorruption::Domain(
+            ImportedConversationReconstitutionFailure::EntryPositionMismatch {
+                entry: identity,
+                expected: expected_position,
+                actual: position,
+            },
+        )
+        .into());
+    }
+    let raw_position = decode_raw_position(row.try_get("raw_record_position")?)?;
+    let within_position = decode_within_position(row.try_get("record_entry_position")?)?;
+    let source_speaker =
+        decode_source_speaker(row.try_get::<String, _>("source_speaker_kind")?.as_str())?;
+    let content_encoding: Vec<u8> = row.try_get("content_encoding")?;
+    let content = decode_content(&content_encoding)
+        .map_err(|failure| encoding_corruption("content", failure))?;
+    let source_encoding: Vec<u8> = row.try_get("source_metadata_encoding")?;
+    let source = decode_source_metadata(&source_encoding)
+        .map_err(|failure| encoding_corruption("source metadata", failure))?;
+    Ok(ImportedTranscriptEntryInput::new(
+        identity,
+        conversation,
+        position,
+        raw_position,
+        within_position,
+        source_speaker,
+        content,
+        source,
+    ))
 }
 
 pub(crate) struct StoredConversationProjection {

@@ -979,6 +979,10 @@ pub(super) fn claude_conversion_failure_disposition(
             ConversationImportRejectionClass::JsonDepthExceeded,
             Some(line),
         ),
+        Failure::RawRecordTooLarge { line } => import_evidence(
+            ConversationImportRejectionClass::RawRecordTooLarge,
+            Some(line),
+        ),
         Failure::TopLevelNotObject { line } => import_evidence(
             ConversationImportRejectionClass::TopLevelNotObject,
             Some(line),
@@ -1053,6 +1057,10 @@ pub(super) fn codex_conversion_failure_disposition(
         }
         Failure::JsonDepthExceeded { line } => import_evidence(
             ConversationImportRejectionClass::JsonDepthExceeded,
+            Some(line),
+        ),
+        Failure::RawRecordTooLarge { line } => import_evidence(
+            ConversationImportRejectionClass::RawRecordTooLarge,
             Some(line),
         ),
         Failure::TopLevelNotObject { line } => import_evidence(
@@ -1201,9 +1209,11 @@ where
                     let mut ids = UuidV7ImportedConversationIdGenerator;
                     let candidate = ids.next_conversation_id();
                     let format = converter.format();
+                    let maximum_record_bytes = repository.maximum_raw_record_bytes();
                     let records = converter.convert_resilient_from_reader(
                         candidate,
                         BufReader::new(source),
+                        maximum_record_bytes,
                         || ids.next_entry_id(),
                     );
                     match repository

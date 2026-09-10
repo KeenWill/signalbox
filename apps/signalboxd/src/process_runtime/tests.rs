@@ -2550,6 +2550,7 @@ pub(crate) mod tests {
             &mut self,
             _conversation: ImportedConversationId,
             _source: Reader,
+            _maximum_record_bytes: u64,
             _next_entry_id: NextEntryId,
         ) -> impl Iterator<
             Item = Result<
@@ -2632,6 +2633,7 @@ pub(crate) mod tests {
             &mut self,
             _conversation: ImportedConversationId,
             mut source: Reader,
+            _maximum_record_bytes: u64,
             _next_entry_id: NextEntryId,
         ) -> impl Iterator<
             Item = Result<

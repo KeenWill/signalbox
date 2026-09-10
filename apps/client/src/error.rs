@@ -851,6 +851,7 @@ const fn conversation_import_rejection_class_name(
         ConversationImportRejectionClass::InvalidUtf8 => "invalid_utf8",
         ConversationImportRejectionClass::InvalidJson => "invalid_json",
         ConversationImportRejectionClass::JsonDepthExceeded => "json_depth_exceeded",
+        ConversationImportRejectionClass::RawRecordTooLarge => "raw_record_too_large",
         ConversationImportRejectionClass::TopLevelNotObject => "top_level_not_object",
         ConversationImportRejectionClass::InvalidRecordType => "invalid_record_type",
         ConversationImportRejectionClass::InvalidSourceMetadata => "invalid_source_metadata",

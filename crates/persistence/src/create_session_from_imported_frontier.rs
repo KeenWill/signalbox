@@ -16,8 +16,7 @@ use signalbox_domain::{
     ImportedSessionSeedHeaderReconstitutionInput, ImportedSessionSeedReconstitutionInput,
     ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptContent,
     ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptFrontier,
-    ImportedTranscriptPosition, ModelAlias, ModelSelectionRequest,
-    PreparedCreateSessionFromImportedFrontier, ReconstitutedImportedSession,
+    ImportedTranscriptPosition, ModelAlias, ModelSelectionRequest, ReconstitutedImportedSession,
     ReconstitutedSessionCreationFromImportedFrontier, ResolvedContextFrontierReconstitutionInput,
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
@@ -44,7 +43,6 @@ use crate::{
         session_id_from_uuid, session_id_to_uuid, session_placement_event_kind_from_str,
         session_placement_event_kind_to_str,
     },
-    model_execution::{SnapshotAppend, SnapshotAppendError, insert_snapshot_append},
     outbox,
 };
 
@@ -215,10 +213,12 @@ impl ImportedSessionRepository {
             return self.existing_outcome(command, kind).await;
         }
         let frontier = command.imported_frontier();
-        let Some(imported_entries) =
-            conversation_import::load_normalized_prefix_from_connection(&mut transaction, frontier)
-                .await
-                .map_err(map_imported_conversation_error)?
+        let Some(prefix_exists) = conversation_import::normalized_prefix_exists_from_connection(
+            &mut transaction,
+            frontier,
+        )
+        .await
+        .map_err(map_imported_conversation_error)?
         else {
             transaction.rollback().await?;
             return Ok(
@@ -227,13 +227,7 @@ impl ImportedSessionRepository {
                 },
             );
         };
-        if imported_entries.len()
-            != usize::try_from(frontier.through_position().as_u64()).unwrap_or(usize::MAX)
-            || imported_entries
-                .last()
-                .map(ImportedTranscriptEntryInput::identity)
-                != Some(frontier.through_entry())
-        {
+        if !prefix_exists {
             transaction.rollback().await?;
             return Ok(
                 CreateSessionFromImportedFrontierOutcome::ImportedFrontierNotFound {
@@ -271,20 +265,17 @@ impl ImportedSessionRepository {
             return self.existing_outcome(command, kind).await;
         }
 
-        let prepared = match command.prepare_normalized(
-            &imported_entries,
+        let result =
+            signalbox_domain::CreateSessionFromImportedFrontierAppliedResult::from_session(session);
+        if let Err(error) = insert_streamed(
+            &mut transaction,
+            &command,
             session,
             seed_frontier,
             &mut next_semantic_entry_id,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                transaction.rollback().await?;
-                return Err(ImportedSessionRepositoryError::Preparation(error.failure()));
-            }
-        };
-        let result = prepared.applied_result();
-        if let Err(error) = insert_prepared(&mut transaction, prepared, &self.credential_pin).await
+            &self.credential_pin,
+        )
+        .await
         {
             transaction.rollback().await?;
             return Err(error);
@@ -381,14 +372,18 @@ impl CreateSessionFromImportedFrontierTransaction for ImportedSessionRepository 
     }
 }
 
-async fn insert_prepared(
+async fn insert_streamed<NextSemanticEntryId>(
     connection: &mut PgConnection,
-    prepared: PreparedCreateSessionFromImportedFrontier,
+    command: &CreateSessionFromImportedFrontier,
+    session: SessionId,
+    seed_frontier: ContextFrontierId,
+    next_semantic_entry_id: &mut NextSemanticEntryId,
     credential_pin: &crate::SessionCredentialPin,
-) -> Result<(), ImportedSessionRepositoryError> {
-    let command = prepared.command();
-    let session = prepared.session();
-    let defaults = session.configuration_defaults();
+) -> Result<(), ImportedSessionRepositoryError>
+where
+    NextSemanticEntryId: FnMut() -> SemanticTranscriptEntryId,
+{
+    let defaults = command.establish_initial_defaults();
     let command_selection = encode_selection(command.initial_configuration_defaults().model());
     let stored_selection = encode_selection(defaults.defaults().model());
     let frontier = command.imported_frontier();
@@ -401,7 +396,7 @@ async fn insert_prepared(
              imported_frontier_position, imported_relationship_kind)
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
-    .bind(session_id_to_uuid(session.id()))
+    .bind(session_id_to_uuid(session))
     .bind(INTERACTIVE)
     .bind(IMPORTED_ANCESTRY)
     .bind(frontier.conversation().into_uuid())
@@ -418,7 +413,7 @@ async fn insert_prepared(
              root_global_read_intent, provenance_command_id, recorded_at)
          VALUES ($1, 1, NULL, $2, NULL, FALSE, $3, transaction_timestamp())",
     )
-    .bind(session_id_to_uuid(session.id()))
+    .bind(session_id_to_uuid(session))
     .bind(session_placement_event_kind_to_str(
         SessionPlacementEventKind::Created,
     ))
@@ -429,13 +424,13 @@ async fn insert_prepared(
         "INSERT INTO session_current_placement (session_id, current_version)
          VALUES ($1, 1)",
     )
-    .bind(session_id_to_uuid(session.id()))
+    .bind(session_id_to_uuid(session))
     .execute(&mut *connection)
     .await?;
 
     crate::session_credentials::insert_initial_session_credential_event(
         connection,
-        session_id_to_uuid(session.id()),
+        session_id_to_uuid(session),
         durable_command_id_to_uuid(command.command_id()),
         "imported_session",
         credential_pin,
@@ -444,7 +439,7 @@ async fn insert_prepared(
 
     crate::session_lifecycle::insert_created(
         connection,
-        session.id(),
+        session,
         &signalbox_domain::SessionCreationCause::Interactive,
         signalbox_domain::SessionOwnership::Unmonitored,
         signalbox_domain::StartGate::Open,
@@ -453,7 +448,7 @@ async fn insert_prepared(
     .await?;
 
     sqlx::query("INSERT INTO session_scheduler (session_id) VALUES ($1)")
-        .bind(session_id_to_uuid(session.id()))
+        .bind(session_id_to_uuid(session))
         .execute(&mut *connection)
         .await?;
 
@@ -464,7 +459,7 @@ async fn insert_prepared(
              dangerous_tool_auto_approval, system_prompt, model_settings)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
-    .bind(session_id_to_uuid(session.id()))
+    .bind(session_id_to_uuid(session))
     .bind(defaults_version_to_numeric(defaults.version()))
     .bind(stored_selection.kind)
     .bind(stored_selection.direct)
@@ -486,7 +481,7 @@ async fn insert_prepared(
         "INSERT INTO session_current_defaults (session_id, current_version)
          VALUES ($1, $2)",
     )
-    .bind(session_id_to_uuid(session.id()))
+    .bind(session_id_to_uuid(session))
     .bind(defaults_version_to_numeric(defaults.version()))
     .execute(&mut *connection)
     .await?;
@@ -536,7 +531,7 @@ async fn insert_prepared(
         command.initial_configuration_defaults().model_settings(),
     ))
     .bind(APPLIED)
-    .bind(session_id_to_uuid(prepared.applied_result().session()))
+    .bind(session_id_to_uuid(session))
     .bind(runner_placement.runner_selector_kind)
     .bind(runner_placement.runner_selector_id)
     .bind(runner_placement.runner_selector_class)
@@ -550,69 +545,83 @@ async fn insert_prepared(
     .execute(&mut *connection)
     .await?;
 
-    for entry in prepared.semantic_entries() {
-        let SemanticTranscriptEntryPayload::Imported { imported_entry, .. } = entry.payload()
-        else {
-            return Err(
-                ImportedSessionCorruption::Inconsistent("prepared semantic payload").into(),
-            );
-        };
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, NULL, $3)",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(seed_frontier.into_uuid())
+    .bind(Decimal::from(frontier.through_position().as_u64()))
+    .execute(&mut *connection)
+    .await
+    .map_err(ImportedSessionRepositoryError::from_insert_failure)?;
+
+    let mut position = ImportedTranscriptPosition::first();
+    loop {
+        let imported_entry = conversation_import::load_normalized_entry_from_connection(
+            connection,
+            frontier.conversation(),
+            position,
+        )
+        .await
+        .map_err(map_imported_conversation_error)?
+        .ok_or(ImportedSessionCorruption::Inconsistent(
+            "imported prefix member disappeared",
+        ))?;
+        let semantic_entry = next_semantic_entry_id();
         sqlx::query(
             "INSERT INTO semantic_transcript_entry
                 (source_session_id, semantic_entry_id, payload_kind,
                  imported_conversation_id, imported_transcript_entry_id)
              VALUES ($1, $2, 'imported_entry', $3, $4)",
         )
-        .bind(session_id_to_uuid(entry.source_session()))
-        .bind(entry.identity().into_uuid())
+        .bind(session_id_to_uuid(session))
+        .bind(semantic_entry.into_uuid())
         .bind(frontier.conversation().into_uuid())
-        .bind(imported_entry.into_uuid())
+        .bind(imported_entry.identity().into_uuid())
         .execute(&mut *connection)
         .await
         .map_err(ImportedSessionRepositoryError::from_insert_failure)?;
+        sqlx::query(
+            "INSERT INTO context_frontier_delta
+                (owning_session_id, context_frontier_id, member_position,
+                 source_session_id, semantic_entry_id)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(seed_frontier.into_uuid())
+        .bind(Decimal::from(position.as_u64()))
+        .bind(session_id_to_uuid(session))
+        .bind(semantic_entry.into_uuid())
+        .execute(&mut *connection)
+        .await?;
+
+        if position == frontier.through_position() {
+            break;
+        }
+        position = position
+            .checked_next()
+            .ok_or(ImportedSessionCorruption::Inconsistent(
+                "seed member position",
+            ))?;
     }
 
-    let seed_snapshot = prepared.seed_snapshot();
-    let seed_context = seed_snapshot.frontier();
-    let member_count = u64::try_from(seed_snapshot.entry_count())
-        .map_err(|_| ImportedSessionCorruption::Inconsistent("seed member count"))?;
-    insert_snapshot_append(
-        connection,
-        SnapshotAppend {
-            owning_session: seed_context.owning_session(),
-            frontier: seed_context.snapshot(),
-            prefix: None,
-            member_count,
-            prefix_member_count: 0,
-            appended_entries: seed_snapshot.ordered_entries(),
-        },
-    )
-    .await
-    .map_err(|error| match error {
-        SnapshotAppendError::FrontierInsert(error) => {
-            ImportedSessionRepositoryError::from_insert_failure(error)
-        }
-        SnapshotAppendError::MemberInsert(error) => error.into(),
-        SnapshotAppendError::MemberPositionOverflow => {
-            ImportedSessionCorruption::Inconsistent("seed member position").into()
-        }
-    })?;
-
-    let seed = prepared.imported_seed();
     sqlx::query(
         "INSERT INTO imported_session_seed
             (session_id, seed_context_frontier_id)
          VALUES ($1, $2)",
     )
-    .bind(session_id_to_uuid(seed.session()))
-    .bind(seed.seed_frontier().into_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(seed_frontier.into_uuid())
     .execute(&mut *connection)
     .await?;
 
     outbox::append(
         connection,
         outbox::OutboxEvent::SessionCreated {
-            session: session.id(),
+            session,
             cause: signalbox_domain::SessionCreationCause::Interactive,
             ownership: crate::session_lifecycle::creation_ownership(
                 &signalbox_domain::SessionCreationCause::Interactive,

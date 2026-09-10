@@ -828,6 +828,8 @@ pub enum ConversationImportRejectionClass {
     InvalidJson,
     /// One physical record exceeded the JSON container-depth bound.
     JsonDepthExceeded,
+    /// One physical record exceeded the configured raw-record byte ceiling.
+    RawRecordTooLarge,
     /// One physical record's top-level JSON value was not an object.
     TopLevelNotObject,
     /// A modeled record discriminator had an unsupported value shape.

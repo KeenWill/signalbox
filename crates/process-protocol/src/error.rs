@@ -675,6 +675,7 @@ pub(crate) fn validate_conversation_import_detail(
             | ConversationImportRejectionClass::InvalidUtf8
             | ConversationImportRejectionClass::InvalidJson
             | ConversationImportRejectionClass::JsonDepthExceeded
+            | ConversationImportRejectionClass::RawRecordTooLarge
             | ConversationImportRejectionClass::TopLevelNotObject
             | ConversationImportRejectionClass::InvalidRecordType
             | ConversationImportRejectionClass::InvalidSourceMetadata

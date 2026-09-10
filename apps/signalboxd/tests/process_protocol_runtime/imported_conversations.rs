@@ -173,7 +173,11 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
         }
     );
 
-    let declared_size_bytes = CanonicalU64::new(u64::try_from(source.as_bytes().len())?);
+    let mut chunked_bytes = Vec::with_capacity(source.as_bytes().len() + 1);
+    chunked_bytes.push(b'\n');
+    chunked_bytes.extend_from_slice(source.as_bytes());
+    let chunked_source = ConversationImportSource::new(chunked_bytes);
+    let declared_size_bytes = CanonicalU64::new(u64::try_from(chunked_source.as_bytes().len())?);
     connection
         .request_version(
             ProtocolVersion::One,
@@ -195,7 +199,9 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
         .request_version(
             ProtocolVersion::One,
             3,
-            ClientRequest::AppendConversationImport { chunk: source },
+            ClientRequest::AppendConversationImport {
+                chunk: chunked_source,
+            },
         )
         .await?;
     let appended = response_within(&mut connection).await?;
@@ -217,8 +223,8 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
         already_imported.message(),
         &ServerMessage::ConversationImportAlreadyImported {
             imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
-            dropped_record_count: CanonicalU64::new(1),
-            first_dropped_record_position: Some(CanonicalU64::new(2)),
+            dropped_record_count: CanonicalU64::new(2),
+            first_dropped_record_position: Some(CanonicalU64::new(1)),
         }
     );
 
