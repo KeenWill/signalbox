@@ -25,6 +25,7 @@ signalbox-file-media-adapters-image = { path = "../../crates/file-media-adapters
 signalbox-file-media-adapters-text = { path = "../../crates/file-media-adapters-text" }
 signalbox-tools-file-media = { path = "../../crates/tools-file-media" }
 
+signalbox-github-transport = { path = "../../crates/github-transport" }
 signalbox-approval-judge-eval = { path = "../../crates/approval-judge-eval" }
 signalbox-derive = { path = "../../crates/derive" }
 signalbox-convergence = { path = "../../crates/convergence" }
@@ -70,6 +71,7 @@ opentelemetry_sdk = { version = "0.32.0", default-features = false, features = [
 prometheus = { version = "0.14.0", default-features = false }
 reqwest = { version = "0.13.4", default-features = false, features = [
     "blocking",
+    "json",
     "rustls-no-provider",
 ] }
 rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }

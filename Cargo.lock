@@ -3535,6 +3535,8 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -4486,8 +4488,13 @@ dependencies = [
 name = "signalbox-github-transport"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
  "futures-util",
+ "http",
+ "jiff",
  "reqwest",
+ "ring",
+ "serde_json",
  "signalbox-egress-transport",
  "tokio",
 ]
@@ -5017,6 +5024,7 @@ dependencies = [
  "signalbox-file-media-processor-runtime",
  "signalbox-file-media-provider-runtime",
  "signalbox-file-media-runtime",
+ "signalbox-github-transport",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
  "signalbox-model-runtime-anthropic",

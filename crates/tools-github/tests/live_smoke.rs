@@ -113,6 +113,7 @@ async fn execute_read(
             operation,
             credential,
             &GitHubEgressPolicy::github_api_only(),
+            transport.request_timeout(),
         )
         .await?;
     Ok(result)

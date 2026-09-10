@@ -109,6 +109,11 @@ sessions to a task that waits for nudge capacity without blocking startup
 recovery. The task clears each removed-target handoff after its nudge is
 retained.
 
+The sweep scrubs the response-scoped App token and its JSON-escaped form before
+convergence evaluation and durable session input construction. Each convergence
+HTTP request establishes its configured deadline before credential resolution
+and dispatches with only the remaining budget.
+
 The daemon composes the repository-watch module when `[repository_watch]` is
 configured and enabled. Dispatch actions and lifecycle reactions are retained in
 strictly increasing, unique action-ordinal order. The module submitter recovers
@@ -177,9 +182,11 @@ pull-request same-repository head branches; prior completions for those branches
 remain comparison input. Each periodic attempt spends at most
 `numeric_bounds.repository_watch_poll_request_budget` REST and GraphQL requests,
 including its REST-quota preflight; the preflight requires that same number of
-remaining REST requests. Completed discovery, pull-request, and workflow stages
-commit independently. Discovery preserves committed branch heads; branch heads
-are refreshed after pending PR lifecycles and bases, before deriving
+remaining REST requests, read from the authenticated response's
+`x-ratelimit-remaining` header. With `github_app` delivery this is the App
+installation's rate limit. Completed discovery, pull-request, and workflow
+stages commit independently. Discovery preserves committed branch heads; branch
+heads are refreshed after pending PR lifecycles and bases, before deriving
 `base_advanced` facts. Budget exhaustion reports `partial` in logs and operator
 status and retains a durable `poll_cursor` with pending subjects and normalized
 unfinished pages; the next poll resumes those reads, and completion clears the
@@ -314,10 +321,22 @@ interruption of a live turn whose session is closing. Synchronous
 command-identity conflicts settle as rejected before submission continues to the
 next action.
 
+Checkout credential preparation, clone, fetch, checkout, and authentication
+refresh share one 300-second deadline. For App credentials, a clone or fetch
+rejected for authentication refreshes the retained token generation and retries
+once; bounded Git failure output is inspected only for that decision and is not
+persisted.
+
 Dispatched pull-request sessions whose watched repository configures
-`push_credential_file` can use `git_push_configured` for their retained head
-branch on `origin` at `https://github.com/<owner>/<repo>.git`; fork heads are
-unavailable because that destination is the watched repository.
+`push_credential_file` or a `github_app` credential profile can use
+`git_push_configured` for their retained head branch on `origin` at
+`https://github.com/<owner>/<repo>.git`; fork heads are unavailable because that
+destination is the watched repository.
+
+App credential preparation, push attempts, refresh, and remote confirmation
+share one 300-second deadline. An explicit Git authentication rejection
+refreshes the rejected token and retries the push once; concurrent callers share
+the replacement token.
 
 ## Boundary contracts
 
@@ -329,8 +348,16 @@ tables, or name another module schema.
 The module retains an authenticated, HTTPS-only GitHub client for API-relative
 GET requests and GraphQL observation queries. It receives no database handle.
 The daemon's repository-specific client loader rereads the configured credential
-file on each load and returns only an authenticated client handle. Credential
-and client-construction failures have distinct redacted error classes.
+file on each load, or installs a sender that resolves the selected App profile's
+shared installation-token cache at request dispatch. It returns only an
+authenticated client handle. Credential and client-construction failures have
+distinct redacted error classes. App responses scrub the token used for that
+response, including its JSON-escaped form, from observation text, JSON member
+names, and retained validators before poll-cache and PR-state persistence.
+
+App-backed repository-watch and goal-verification clients resolve no credential
+during construction. Each observation request shares one 300-second budget
+across cache waits, token exchanges, authentication retries, and HTTP transport.
 
 The module authenticates through a database-specific PostgreSQL login and
 assumes the role owning `mod_repo_watch`. Startup rotates only that database's

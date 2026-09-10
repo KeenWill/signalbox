@@ -45,6 +45,19 @@ admission. A released wait that selects no member or wait fails through a fresh
 attempt, retaining a predecessor provider cause exactly when its chain issued a
 call.
 
+GitHub App delivery failures are credential unavailability at use and do not
+prevent daemon startup. Missing, unreadable, or invalid private keys,
+installations GitHub cannot find, and rejected token exchanges retain distinct
+sanitized failure classes. Installation tokens refresh within sixty seconds of
+expiry or after a 401, with one retry and shared concurrent refresh; these
+integration credentials do not participate in model-pool selection or
+quarantine.
+
+Installation-token preparation and refresh use the caller's configured request
+deadline. Credential preparation, destination resolution, shared-cache waits,
+and transport dispatch consume the same request budget. Token-exchange responses
+larger than 64 KiB are rejected as credential unavailability before decoding.
+
 ## Design decisions
 
 A rejected daemon-owned OAuth refresh or a credential-home identity that failed

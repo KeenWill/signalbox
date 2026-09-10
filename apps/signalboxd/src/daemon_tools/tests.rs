@@ -214,6 +214,7 @@ impl CodeHostTransport for OfflineCodeHostTransport {
         &mut self,
         _operation: crate::CodeHostOperation,
         _credential: &CredentialValue,
+        _request_timeout: Option<std::time::Duration>,
     ) -> Result<crate::CodeHostResult, crate::CodeHostTransportFailure> {
         Err(crate::CodeHostTransportFailure::Rejected)
     }
@@ -223,11 +224,16 @@ impl CodeHostTransport for OfflineCodeHostTransport {
 struct OfflineGitHubTransport;
 
 impl GitHubTransport for OfflineGitHubTransport {
+    fn request_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
+    }
+
     async fn execute(
         &mut self,
         _operation: crate::GitHubOperation,
         _credential: &CredentialValue,
         _egress_policy: &GitHubEgressPolicy,
+        _request_timeout: std::time::Duration,
     ) -> Result<crate::GitHubResult, crate::GitHubTransportFailure> {
         Err(crate::GitHubTransportFailure::PreDispatchInfrastructure)
     }

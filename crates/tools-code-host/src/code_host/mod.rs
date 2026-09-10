@@ -648,10 +648,12 @@ pub trait CodeHostTransport: Send {
     fn numeric_bounds(&self) -> CodeHostNumericBounds;
 
     /// Executes the exact typed operation with one request-scoped credential.
+    /// `request_timeout` is the budget remaining after credential preparation.
     fn execute(
         &mut self,
         operation: CodeHostOperation,
         credential: &CredentialValue,
+        request_timeout: Option<Duration>,
     ) -> impl Future<Output = Result<CodeHostResult, CodeHostTransportFailure>> + Send;
 }
 
@@ -809,7 +811,13 @@ where
         };
         let operation =
             decode_operation(kind, invocation.request().arguments()).map_err(|_| caller_bug())?;
-        let credential = match self.credentials.resolve(&self.credential_reference).await {
+        let (credential, remaining) = match prepare_credential(
+            self.transport.numeric_bounds().request_timeout(),
+            self.credentials.resolve(&self.credential_reference),
+            &self.credential_reference,
+        )
+        .await
+        {
             Ok(credential) => credential,
             Err(_) => {
                 return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
@@ -823,7 +831,11 @@ where
             }));
         };
         let result_operation = operation.clone();
-        let result = match self.transport.execute(operation, &credential).await {
+        let result = match self
+            .transport
+            .execute(operation, &credential, remaining)
+            .await
+        {
             Ok(result)
                 if kind.accepts_result(&result)
                     && result_operation.accepts_repository_result(&result) =>
@@ -991,6 +1003,33 @@ const fn caller_bug() -> CodeHostExecutorError {
     }
 }
 
+async fn prepare_credential(
+    timeout: Option<Duration>,
+    resolution: impl Future<
+        Output = Result<CredentialValue, signalbox_model_runtime::CredentialAccessError>,
+    >,
+    reference: &CredentialReference,
+) -> Result<(CredentialValue, Option<Duration>), signalbox_model_runtime::CredentialAccessError> {
+    let Some(timeout) = timeout else {
+        return resolution.await.map(|credential| (credential, None));
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+    let unavailable = || {
+        signalbox_model_runtime::CredentialAccessError::new(
+            reference.clone(),
+            signalbox_model_runtime::CredentialAccessFailure::Unavailable,
+        )
+    };
+    let credential = tokio::time::timeout_at(deadline, resolution)
+        .await
+        .map_err(|_| unavailable())??;
+    let remaining = deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(unavailable)?;
+    Ok((credential, Some(remaining)))
+}
+
 struct CredentialScrubber {
     exact: String,
     json_escaped: String,
@@ -1012,13 +1051,36 @@ impl CredentialScrubber {
         })
     }
 
+    fn redact_text(&self, text: &mut String) {
+        *text = text.replace(&self.exact, "[redacted]");
+        if self.json_escaped != self.exact {
+            *text = text.replace(&self.json_escaped, "[redacted]");
+        }
+    }
+
+    fn redact_trailing_prefix(&self, text: &mut String) {
+        let prefix = [&self.exact, &self.json_escaped]
+            .into_iter()
+            .map(|secret| {
+                let limit = secret.len().min(text.len() + 1);
+                (1..limit)
+                    .rev()
+                    .filter(|length| secret.is_char_boundary(*length))
+                    .find(|length| text.ends_with(&secret[..*length]))
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(0);
+        if prefix > 0 {
+            text.truncate(text.len() - prefix);
+            text.push_str("[redacted]");
+        }
+    }
+
     fn redact_value(&self, value: &mut serde_json::Value) {
         match value {
             serde_json::Value::String(text) => {
-                *text = text.replace(&self.exact, "[redacted]");
-                if self.json_escaped != self.exact {
-                    *text = text.replace(&self.json_escaped, "[redacted]");
-                }
+                self.redact_text(text);
             }
             serde_json::Value::Array(values) => {
                 for value in values {
