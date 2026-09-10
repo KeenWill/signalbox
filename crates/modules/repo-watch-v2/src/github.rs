@@ -84,7 +84,7 @@ impl GitHubClient {
         request: reqwest::RequestBuilder,
         path: &str,
     ) -> Result<reqwest::Response, GitHubClientError> {
-        let response = match &self.request_sender {
+        match &self.request_sender {
             Some(send) => send(request, path.to_owned()).await,
             None => request
                 .send()
@@ -94,22 +94,7 @@ impl GitHubClient {
                     status: None,
                     source,
                 }),
-        }?;
-        let quota_header = |name| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-        };
-        tracing::info!(
-            api_resource = quota_header("x-ratelimit-resource"),
-            quota_limit = quota_header("x-ratelimit-limit"),
-            quota_used = quota_header("x-ratelimit-used"),
-            quota_remaining = quota_header("x-ratelimit-remaining"),
-            quota_reset = quota_header("x-ratelimit-reset"),
-            "repository-watch GitHub quota observed"
-        );
-        Ok(response)
+        }
     }
 
     /// Returns the authenticated principal's remaining REST requests.

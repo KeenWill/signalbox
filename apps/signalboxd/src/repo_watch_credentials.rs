@@ -150,8 +150,29 @@ impl RepositoryWatchClientLoader {
         if token.is_empty() {
             return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
         }
-        GitHubClient::try_new("signalbox-repository-watch", token)
-            .map_err(RepositoryWatchClientLoadError::from_construction)
+        let mut authorization = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+        authorization.set_sensitive(true);
+        GitHubClient::try_with_request_sender(
+            "signalbox-repository-watch",
+            std::sync::Arc::new(move |request, path| {
+                let authorization = authorization.clone();
+                Box::pin(async move {
+                    let response = request
+                        .header(reqwest::header::AUTHORIZATION, authorization)
+                        .send()
+                        .await
+                        .map_err(|source| GitHubClientError::Request {
+                            path,
+                            status: None,
+                            source,
+                        })?;
+                    observe_github_quota(&response);
+                    Ok(response)
+                })
+            }),
+        )
+        .map_err(RepositoryWatchClientLoadError::from_construction)
     }
 }
 
@@ -252,10 +273,29 @@ pub(crate) fn app_observation_client(
                 let credential = signalbox_github_transport::response_credential(&response)
                     .ok_or(GitHubClientError::InvalidCredential)?
                     .to_vec();
-                scrub_app_response(response, &path, &credential).await
+                let response = scrub_app_response(response, &path, &credential).await?;
+                observe_github_quota(&response);
+                Ok(response)
             })
         }),
     )
+}
+
+fn observe_github_quota(response: &reqwest::Response) {
+    let quota_header = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    };
+    tracing::info!(
+        api_resource = quota_header("x-ratelimit-resource"),
+        quota_limit = quota_header("x-ratelimit-limit"),
+        quota_used = quota_header("x-ratelimit-used"),
+        quota_remaining = quota_header("x-ratelimit-remaining"),
+        quota_reset = quota_header("x-ratelimit-reset"),
+        "repository-watch GitHub quota observed"
+    );
 }
 
 async fn scrub_app_response(
