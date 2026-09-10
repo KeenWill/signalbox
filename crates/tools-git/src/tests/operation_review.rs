@@ -1447,7 +1447,7 @@ fn streamed_checkout_rejects_non_regular_entries_before_touching_selected_paths(
             &BTreeSet::from(["removed".into(), "unsupported".into()]),
             destination.path(),
             None,
-            |_| {
+            |_, _| {
                 touched = true;
                 Ok(())
             },
@@ -1460,4 +1460,113 @@ fn streamed_checkout_rejects_non_regular_entries_before_touching_selected_paths(
         );
         assert!(!destination.path().join("unsupported").exists());
     }
+}
+
+#[test]
+fn streamed_checkout_rejects_edits_and_replacements_between_copy_pages() {
+    use std::os::unix::fs::FileExt;
+    for replace in [false, true] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository");
+        // More than two pages leaves bytes already copied when the concurrent write occurs.
+        let bytes = vec![b'x'; 2 * crate::streamed_object::IO_BYTES + 1];
+        let oid = repository.blob(&bytes).expect("target blob");
+        let mut builder = repository.treebuilder(None).expect("target builder");
+        builder
+            .insert(TRACKED_PATH, oid, 0o100644)
+            .expect("target entry");
+        let tree = repository
+            .find_tree(builder.write().expect("target tree writes"))
+            .expect("target tree");
+        let executor = fixture.executor();
+        let shell = executor
+            .repository_authority
+            .open_repository_shell()
+            .expect("private shell");
+        shell
+            .capture_objects_on_read(&executor.repository_authority)
+            .expect("pinned objects");
+        let destination = tempfile::tempdir().expect("checkout destination");
+        let output = destination.path().join(TRACKED_PATH);
+        let mut notifications = Vec::new();
+        let mut injected = false;
+        let result = crate::streamed_object::checkout_paths_with_copy_hook(
+            &shell,
+            &tree,
+            &BTreeSet::from([TRACKED_PATH.into()]),
+            destination.path(),
+            None,
+            |_, identity| {
+                notifications.push(identity);
+                Ok(())
+            },
+            |_, _| {
+                if injected {
+                    return;
+                }
+                injected = true;
+                if replace {
+                    let foreign = destination.path().join("foreign");
+                    fs::write(&foreign, b"race").expect("foreign file");
+                    fs::rename(foreign, &output).expect("concurrent replacement");
+                } else {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&output)
+                        .expect("concurrent descriptor")
+                        .write_all_at(b"race", 0)
+                        .expect("concurrent edit");
+                }
+            },
+        );
+        assert_eq!(result, Err(LocalGitFailure::Operation));
+        assert!(injected);
+        assert_eq!(
+            notifications.len(),
+            1,
+            "only the opened descriptor grants rollback ownership"
+        );
+        let observed = file_identity(&fs::metadata(&output).expect("remaining output"));
+        assert_eq!(notifications[0] == Some(observed), !replace);
+        let remaining = fs::read(&output).expect("concurrent bytes remain");
+        assert_eq!(&remaining[..4], b"race");
+        assert_eq!(remaining.len(), if replace { 4 } else { bytes.len() });
+    }
+}
+
+#[test]
+fn branch_switch_rejects_changed_content_before_checkout_capture() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    repository
+        .branch(
+            FIX_BRANCH,
+            &repository
+                .find_commit(fixture.initial)
+                .expect("initial commit"),
+            false,
+        )
+        .expect("target branch");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("current content");
+    let current = commit_all(&repository, MODEL_MESSAGE);
+    let index = fs::read(fixture.root().join(".git/index")).expect("current index");
+    let result = fixture.executor().branch_switch_with_hook(
+        GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        },
+        || {
+            fs::write(fixture.root().join(TRACKED_PATH), b"concurrent content")
+                .expect("concurrent write")
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(repository.head().expect("HEAD").target(), Some(current));
+    assert_eq!(
+        fs::read(fixture.root().join(".git/index")).expect("index remains"),
+        index
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("edit remains"),
+        b"concurrent content"
+    );
 }

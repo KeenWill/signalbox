@@ -176,7 +176,7 @@ pub(super) fn checkout_snapshot(
         checkout_paths,
         destination,
         None,
-        |_| Ok(()),
+        |_, _| Ok(()),
     )
 }
 
