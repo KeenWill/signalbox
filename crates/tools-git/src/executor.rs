@@ -1443,7 +1443,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             })
             .collect::<Vec<_>>();
         let filemode = repository_filemode(repository)?;
+        let mut checkout_identities = crate::streamed_object::CheckoutIdentities::new();
         for path in &checkout_paths {
+            let identity = crate::streamed_object::capture_checkout_identity(
+                &self.repository_authority.root,
+                path,
+            )?;
             validate_checkout_path(
                 &self.filesystem,
                 &self.root,
@@ -1452,6 +1457,14 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 &target_tree,
             )?;
             self.validate_clean_checkout_path(path, &current_index, filemode, &checkout_paths)?;
+            if crate::streamed_object::capture_checkout_identity(
+                &self.repository_authority.root,
+                path,
+            )? != identity
+            {
+                return Err(LocalGitFailure::Operation);
+            }
+            checkout_identities.insert(path.clone(), identity);
         }
         let mut next_index = Index::new_ext(self.repository_authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -1542,6 +1555,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &target_tree,
                     &streamed_paths,
                     &descriptor_path(&self.repository_authority.root),
+                    Some(&checkout_identities),
                     |path| {
                         updated_paths.borrow_mut().insert(path.to_owned());
                         let identity =
