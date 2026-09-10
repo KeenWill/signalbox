@@ -371,6 +371,56 @@ async fn tool_call_and_mcp_result_round_trip_returns_typed_proposal() {
 }
 
 #[tokio::test]
+async fn tool_acknowledgement_tail_returns_only_the_original_proposal() {
+    let result = execute_scenario("tool_acknowledgement_tail", OperationShape::Tool).await;
+    let completion = completed(&result.evidence);
+    let proposal = tool_call(&completion.content);
+
+    assert_eq!(completion.finish, CompletionFinish::ToolUse);
+    assert_eq!(
+        completion.message_id.as_ref().map(|id| id.as_str()),
+        Some(fixtures::MESSAGE_ID)
+    );
+    assert_eq!(completion.content.len(), 1);
+    assert_eq!(proposal.id.as_str(), fixtures::TOOL_ID);
+    assert_eq!(proposal.arguments_json, fixtures::TOOL_ARGUMENTS);
+    assert_eq!(observation_text(&result.observations), "");
+    assert_eq!(completion.usage, expected_usage());
+    let finishes = result
+        .observations
+        .iter()
+        .filter_map(|observation| match &observation.fact {
+            signalbox_model_runtime::ObservationFact::FinishReported(reason) => {
+                Some(reason.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finishes, vec![FinishReason::EndTurn]);
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn tool_acknowledgement_tail_rejects_incomplete_or_conflicting_evidence() {
+    for scenario in [
+        "tool_acknowledgement_tail_without_result",
+        "tool_acknowledgement_tail_reports_tool_use",
+        "tool_acknowledgement_tail_is_empty",
+        "tool_acknowledgement_tail_changes_model",
+        "tool_acknowledgement_tail_proposes_tool",
+    ] {
+        let result = execute_scenario(scenario, OperationShape::Tool).await;
+        assert!(
+            matches!(
+                boundary_loss(&result.evidence).cause,
+                LossCause::StreamProtocolViolation { .. }
+            ),
+            "{scenario}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn tool_arguments_preserve_the_provider_json_lexeme() {
     let result = execute_scenario("noncanonical_tool_arguments", OperationShape::Tool).await;
     let completion = completed(&result.evidence);

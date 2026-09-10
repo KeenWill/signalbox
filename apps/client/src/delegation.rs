@@ -181,7 +181,6 @@ pub(crate) fn delegation_rejection_matches(
         | RejectionDetail::ImportedFrontierPositionOutOfRange { .. }
         | RejectionDetail::ConversationImportAlreadyInProgress {}
         | RejectionDetail::ConversationImportNotInProgress {}
-        | RejectionDetail::ConversationImportSourceTooLarge { .. }
         | RejectionDetail::ConversationImportSourceSizeMismatch { .. }
         | RejectionDetail::ConversationImportConversionFailed { .. } => false,
         RejectionDetail::BulkIngestAlreadyInProgress { .. }
@@ -352,6 +351,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::ProgramRegistered { .. }
         | ServerMessage::ProgramRunStarted { .. }
         | ServerMessage::ProgramRunRead { .. }
+        | ServerMessage::EvaluationScorecardRead { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }

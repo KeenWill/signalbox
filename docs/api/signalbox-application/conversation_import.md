@@ -91,6 +91,65 @@ pub trait ResilientImportedConversationConverter: ImportedConversationConverter 
 }
 ```
 
+## ImportedConversationStreamItem
+
+```rust
+pub enum ImportedConversationStreamItem<Failure> {
+    Converted(signalbox_domain::ImportedConversation),
+    Skipped(ImportedConversationSkippedRecord<Failure>),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## StreamingResilientImportedConversationConverter
+
+```rust
+pub trait StreamingResilientImportedConversationConverter:
+    ResilientImportedConversationConverter
+{
+    fn convert_resilient_from_reader<Reader, NextEntryId>(
+        &mut self,
+        conversation: signalbox_domain::ImportedConversationId,
+        source: Reader,
+        maximum_record_bytes: u64,
+        next_entry_id: NextEntryId,
+    ) -> impl iterator::Iterator<
+        Item = result::Result<
+            ImportedConversationStreamItem<
+                <Self as ResilientImportedConversationConverter>::RecordFailure,
+            >,
+            StreamConversionError<<Self as ImportedConversationConverter>::Error>,
+        >,
+    > + marker::Send
+    where
+        Reader: buf_read::BufRead + marker::Send,
+        NextEntryId:
+            function::FnMut() -> signalbox_domain::ImportedTranscriptEntryId + marker::Send;
+}
+```
+
+## StreamConversionError
+
+```rust
+pub enum StreamConversionError<ConverterError> {
+    SourceRead,
+    Conversion(ConverterError),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl<ConverterError> fmt::Display for StreamConversionError<ConverterError>
+where
+    ConverterError: fmt::Display,
+{
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl<ConverterError> error::Error for StreamConversionError<ConverterError>
+where
+    ConverterError: error::Error + 'static + fmt::Display,
+{
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+```
+
 ## ImportedConversationStoreOutcome
 
 ```rust
@@ -116,15 +175,32 @@ impl ImportedConversationStoreOutcome {
 ```rust
 pub trait ImportedConversationStore {
     type Error;
-    fn resolve_or_insert(
+    fn resolve_or_insert_with_drop_facts(
         &mut self,
         conversation: signalbox_domain::ImportedConversation,
+        dropped_records: ImportedConversationDropFacts,
     ) -> impl future::Future<
         Output = result::Result<
             ImportedConversationStoreOutcome,
             <Self as ImportedConversationStore>::Error,
         >,
     > + marker::Send;
+}
+```
+
+## ImportedConversationDropFacts
+
+```rust
+pub struct ImportedConversationDropFacts {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
+impl ImportedConversationDropFacts {
+    pub const fn none() -> Self;
+    pub const fn try_new(
+        count: u64,
+        first_source_line: option::Option<u64>,
+    ) -> option::Option<Self>;
+    pub const fn count(self) -> u64;
+    pub const fn first_source_line(self) -> option::Option<u64>;
 }
 ```
 
@@ -149,10 +225,6 @@ impl ImportConversationOutcome {
 
 ```rust
 pub enum ImportConversationReport<Failure> {
-    Converted {
-        conversation: signalbox_domain::ImportedConversation,
-        skipped_records: boxed::Box<[ImportedConversationSkippedRecord<Failure>]>,
-    },
     Imported {
         outcome: ImportConversationOutcome,
         skipped_records: boxed::Box<[ImportedConversationSkippedRecord<Failure>]>,
@@ -168,6 +240,7 @@ pub enum ImportConversationReport<Failure> {
 
 ```rust
 pub enum ImportConversationError<ConverterError, StoreError> {
+    SourceRead,
     Conversion(ConverterError),
     ConverterIdentityMismatch {
         supplied: signalbox_domain::ImportedConversationId,

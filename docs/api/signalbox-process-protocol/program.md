@@ -2,6 +2,29 @@
 
 # program
 
+## EvaluationInput
+
+```rust
+pub struct EvaluationInput {
+    pub corpus: CanonicalBlobDigest,
+    pub format: EvaluationCorpusFormat,
+    pub cases: vec::Vec<u32>,
+    pub repeats: u32,
+    pub recorded_responses: option::Option<CanonicalBlobDigest>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## EvaluationCorpusFormat
+
+```rust
+pub enum EvaluationCorpusFormat {
+    Offline,
+    Live,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## ProgramExecutableInput
 
 ```rust

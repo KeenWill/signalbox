@@ -1,7 +1,7 @@
 {
-  "release": "rust-v0.153.4-fork.1",
+  "release": "rust-v0.154.0-fork.1",
   "asset": "codex-x86_64-unknown-linux-musl.tar.gz",
-  "sha256": "af3eb651fd009ff4768205a223e07af2e71d52180ad6bd5e9c58b7c91550fda5",
-  "executableRelease": "rust-v0.153.4-fork.1",
-  "executableSha256": "a82916acec3ec8e11dd4c4b2cf5b7c04cd05a496c5091c53e54fdc675359ce06"
+  "sha256": "5bb9080b43919f98e383d3836522a70892137b73a30c5612002aa35f0b02768d",
+  "executableRelease": "rust-v0.154.0-fork.1",
+  "executableSha256": "ba98f869af40659113f6f14a7cc9b72714a250890b3b9103197c5b3d3e1de64f"
 }

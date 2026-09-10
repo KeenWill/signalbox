@@ -7,11 +7,18 @@ import Foundation
 /// A validated immutable inventory whose entry objects are decoded on demand.
 public final class SignalboxImportedConversationInventory: Sendable {
   public let importedConversationID: SignalboxCanonicalUUID
+  public let dropFacts: SignalboxImportedConversationDropFacts
   private let data: Data
   private let ranges: [Range<Int>]
 
-  init(importedConversationID: SignalboxCanonicalUUID, data: Data, ranges: [Range<Int>]) {
+  init(
+    importedConversationID: SignalboxCanonicalUUID,
+    dropFacts: SignalboxImportedConversationDropFacts,
+    data: Data,
+    ranges: [Range<Int>]
+  ) {
     self.importedConversationID = importedConversationID
+    self.dropFacts = dropFacts
     self.data = data
     self.ranges = ranges
   }
@@ -72,13 +79,20 @@ final class SignalboxImportedEntrySpool {
     offset += encoded.count
   }
 
-  func finish(importedConversationID: SignalboxCanonicalUUID) throws
+  func finish(
+    importedConversationID: SignalboxCanonicalUUID,
+    dropFacts: SignalboxImportedConversationDropFacts
+  ) throws
     -> SignalboxImportedConversationInventory
   {
     try file.close()
     let data = try Data(contentsOf: url, options: .mappedIfSafe)
     return SignalboxImportedConversationInventory(
-      importedConversationID: importedConversationID, data: data, ranges: ranges)
+      importedConversationID: importedConversationID,
+      dropFacts: dropFacts,
+      data: data,
+      ranges: ranges
+    )
   }
 
   private func speaker(_ value: SignalboxImportedSourceSpeaker) -> SignalboxJSONValue {

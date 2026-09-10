@@ -3215,3 +3215,544 @@ async fn a_causeless_failure_is_rejected() -> Result<(), Box<dyn Error>> {
     drop(container);
     Ok(())
 }
+
+/// A corrupt session projection has durable operator evidence without preventing other recovery.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_skips_corrupt_session_while_healthy_turn_reconstitutes()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let corrupt = creation_session(101);
+    let corrupt_terminal = creation_session(103);
+    let healthy = creation_session(102);
+    let create = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
+    create.handle(interactive_creation(101)).await?;
+    create.handle(interactive_creation(102)).await?;
+    create.handle(dispatched_creation(103)).await?;
+    SessionLifecycleRepository::new(pool.clone())
+        .close(
+            corrupt_terminal,
+            SessionTerminalOutcome::Retired {
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
+            },
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+    let healthy_turn = activate_first_turn(&pool, healthy, 102).await?;
+    sqlx::query("DROP TRIGGER session_is_append_only ON session")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session DROP CONSTRAINT session_creation_cause_shape,
+        DROP CONSTRAINT session_spawning_request_fk, DROP CONSTRAINT session_delegation_relation_fk")
+        .execute(&pool).await?;
+    sqlx::query("UPDATE session SET spawning_tool_request_id = $2 WHERE session_id = ANY($1)")
+        .bind(vec![corrupt.into_uuid(), corrupt_terminal.into_uuid()])
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await?;
+    let mut scan = signalbox_application::StartupScanService::new(
+        signalbox_application::UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+
+    let outcome = scan.execute().await?;
+
+    assert_eq!(
+        outcome.skipped_corrupt_sessions(),
+        &[corrupt, corrupt_terminal]
+    );
+    assert_eq!(outcome.recovered_turn_count(), 1);
+    let healthy_terminal: bool =
+        sqlx::query_scalar("SELECT state_kind = 'terminal' FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(healthy_turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(healthy_terminal);
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let parked = lifecycle
+        .load(corrupt)
+        .await?
+        .expect("operator item remains readable");
+    assert!(parked.state().is_parked());
+    assert_eq!(
+        parked.supervision_failure().unwrap().class,
+        OperatorFailureClass::FailClosedCorruption
+    );
+    assert!(parked.supervision_failure().unwrap().pending);
+    let terminal = lifecycle.load(corrupt_terminal).await?.unwrap();
+    assert!(matches!(
+        terminal.state(),
+        SessionLifecycleState::Terminal { .. }
+    ));
+    let terminal_mutation = sqlx::query("UPDATE session_lifecycle SET ended_at = ended_at + interval '1 second' WHERE session_id = $1")
+        .bind(corrupt_terminal.into_uuid()).execute(&pool).await.expect_err("operator evidence does not permit changing terminal lifecycle facts");
+    assert_eq!(
+        terminal_mutation
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let mut status =
+        signalbox_persistence::operator_status::ProcessOperatorStatusRepository::new(pool.clone())
+            .open()
+            .await?;
+    let mut reported = Vec::new();
+    while let Some(item) = status.next_item().await? {
+        if let signalbox_persistence::operator_status::ProcessOperatorStatusItem::SessionSupervision { session, terminal, failure } = item {
+            assert_eq!(failure.class, OperatorFailureClass::FailClosedCorruption);
+            assert!(failure.pending);
+            reported.push((session, terminal));
+        }
+    }
+    assert_eq!(reported, vec![(corrupt, false), (corrupt_terminal, true)]);
+    assert_eq!(status.counts().unwrap().session_supervision(), 2);
+    let repeated = scan.execute().await?;
+    assert_eq!(
+        repeated.skipped_corrupt_sessions(),
+        &[corrupt, corrupt_terminal]
+    );
+    assert!(
+        lifecycle.resume(corrupt).await.is_err(),
+        "unreconstitutable evidence cannot resume"
+    );
+    assert!(lifecycle.load(corrupt).await?.unwrap().state().is_parked());
+
+    sqlx::query("UPDATE session SET spawning_tool_request_id = NULL WHERE session_id = $1")
+        .bind(corrupt.into_uuid())
+        .execute(&pool)
+        .await?;
+    lifecycle
+        .record_supervision_failure(
+            corrupt,
+            &signalbox_persistence::startup::StartupScanRepositoryError::from(
+                signalbox_persistence::startup::StartupScanCorruption::Missing(
+                    "fixture corruption",
+                ),
+            ),
+        )
+        .await?;
+    lifecycle
+        .record_supervision_failure(
+            corrupt,
+            &signalbox_persistence::startup::StartupScanRepositoryError::from(
+                signalbox_persistence::startup::StartupScanCorruption::Missing(
+                    "fixture corruption",
+                ),
+            ),
+        )
+        .await?;
+    let replayed = lifecycle.load(corrupt).await?.unwrap();
+    lifecycle.resume(corrupt).await?;
+    let resumed = lifecycle.load(corrupt).await?.unwrap();
+    assert!(!resumed.state().is_parked());
+    let retained = resumed.supervision_failure().unwrap();
+    assert!(!retained.pending);
+    assert_eq!(
+        retained.cause_code,
+        replayed.supervision_failure().unwrap().cause_code
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Corrupt lifecycle satellites do not prevent independent operator reporting or healthy recovery.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_reports_missing_and_undecodable_lifecycle_without_repair()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let create = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
+    let missing = creation_session(111);
+    let corrupt = creation_session(112);
+    let corrupt_terminal = creation_session(113);
+    let healthy = creation_session(114);
+    for seed in [111, 112, 114] {
+        create.handle(interactive_creation(seed)).await?;
+    }
+    create.handle(dispatched_creation(113)).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    lifecycle
+        .close(
+            corrupt_terminal,
+            SessionTerminalOutcome::Retired {
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
+            },
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+    let missing_turn = queue_first_turn(&pool, missing, 111).await?;
+    let corrupt_turn = activate_first_turn(&pool, corrupt, 112).await?;
+    let healthy_turn = activate_first_turn(&pool, healthy, 114).await?;
+    let original_actor: String =
+        sqlx::query_scalar("SELECT actor_kind FROM session_lifecycle WHERE session_id = $1")
+            .bind(corrupt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    let mut corruption = pool.begin().await?;
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query("ALTER TABLE session_lifecycle DROP CONSTRAINT session_lifecycle_actor_closed, DROP CONSTRAINT session_lifecycle_actor_shape")
+        .execute(&mut *corruption).await?;
+    sqlx::query("DELETE FROM session_lifecycle WHERE session_id = $1")
+        .bind(missing.into_uuid())
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query(
+        "UPDATE session_lifecycle SET actor_kind = 'corrupt_fixture' WHERE session_id = ANY($1)",
+    )
+    .bind(vec![corrupt.into_uuid(), corrupt_terminal.into_uuid()])
+    .execute(&mut *corruption)
+    .await?;
+    corruption.commit().await?;
+    let before: Vec<serde_json::Value> = sqlx::query_scalar("SELECT to_jsonb(session_lifecycle) FROM session_lifecycle WHERE session_id = ANY($1) ORDER BY session_id")
+        .bind(vec![corrupt.into_uuid(), corrupt_terminal.into_uuid()]).fetch_all(&pool).await?;
+    let mut scan = signalbox_application::StartupScanService::new(
+        signalbox_application::UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    let outcome = scan.execute().await?;
+    assert_eq!(
+        outcome.skipped_corrupt_sessions(),
+        &[missing, corrupt, corrupt_terminal]
+    );
+    assert_eq!(outcome.recovered_turn_count(), 1);
+    let after: Vec<serde_json::Value> = sqlx::query_scalar("SELECT to_jsonb(session_lifecycle) FROM session_lifecycle WHERE session_id = ANY($1) ORDER BY session_id")
+        .bind(vec![corrupt.into_uuid(), corrupt_terminal.into_uuid()]).fetch_all(&pool).await?;
+    assert_eq!(after, before);
+    assert!(lifecycle.load(missing).await?.is_none());
+    assert!(lifecycle.load(corrupt).await.is_err());
+    let turns: Vec<(Uuid, bool)> = sqlx::query_as("SELECT turn_id, state_kind = 'terminal' FROM turn_lifecycle WHERE turn_id = ANY($1) ORDER BY turn_id")
+        .bind(vec![missing_turn.into_uuid(), corrupt_turn.into_uuid(), healthy_turn.into_uuid()]).fetch_all(&pool).await?;
+    for (turn, terminal) in turns {
+        assert_eq!(terminal, turn == healthy_turn.into_uuid());
+    }
+    let mut status =
+        signalbox_persistence::operator_status::ProcessOperatorStatusRepository::new(pool.clone())
+            .open()
+            .await?;
+    let mut reported = Vec::new();
+    while let Some(item) = status.next_item().await? {
+        if let signalbox_persistence::operator_status::ProcessOperatorStatusItem::SessionSupervision { session, terminal, failure } = item {
+            assert_eq!(failure.class, OperatorFailureClass::FailClosedCorruption);
+            assert!(failure.pending);
+            reported.push((session, terminal));
+        }
+    }
+    assert_eq!(
+        reported,
+        vec![(missing, false), (corrupt, false), (corrupt_terminal, true)]
+    );
+    assert_eq!(status.counts().unwrap().session_supervision(), 3);
+    let candidates = signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts()
+        .0;
+    assert!(!candidates.contains(&missing));
+    assert!(!candidates.contains(&corrupt));
+    let mut activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                LIFECYCLE_SEED + 111 + 0x700,
+            ))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(
+                LIFECYCLE_SEED + 111 + 0x800,
+            ))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(
+                LIFECYCLE_SEED + 111 + 0x900,
+            ))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        activation.execute(missing).await?,
+        StartEligibleTurnOutcome::NoEligibleTurn
+    ));
+    let model = signalbox_persistence::model_execution::PostgresModelCallRepository::new(
+        pool.clone(),
+        ModelTargetCatalog::try_from_definitions([])
+            .expect("park observation does not require model targets"),
+        model_credential_reference(),
+    );
+    assert!(model.session_is_parked(missing).await?);
+    assert!(model.session_is_parked(corrupt).await?);
+    assert!(lifecycle.resume(corrupt).await.is_err());
+    sqlx::query("UPDATE session_lifecycle SET actor_kind = $2 WHERE session_id = $1")
+        .bind(corrupt.into_uuid())
+        .bind(original_actor)
+        .execute(&pool)
+        .await?;
+    lifecycle.resume(corrupt).await?;
+    let resumed = lifecycle.load(corrupt).await?.unwrap();
+    assert!(!resumed.state().is_parked());
+    assert!(!resumed.supervision_failure().unwrap().pending);
+    assert!(!model.session_is_parked(corrupt).await?);
+    let terminal: bool =
+        sqlx::query_scalar("SELECT state_kind = 'terminal' FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(corrupt_turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(terminal);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn startup_settles_repaired_terminal_supervision_without_resuming()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(115);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(dispatched_creation(115))
+        .await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    lifecycle
+        .close(
+            session,
+            SessionTerminalOutcome::Retired {
+                cause: SessionRetirementCause::AdmissionDeadlineExpired,
+            },
+            LifecycleActor::Watchdog,
+        )
+        .await?;
+    let original_actor: String =
+        sqlx::query_scalar("SELECT actor_kind FROM session_lifecycle WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    let original: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(session_lifecycle) FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut corruption = pool.begin().await?;
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query("ALTER TABLE session_lifecycle DROP CONSTRAINT session_lifecycle_actor_closed, DROP CONSTRAINT session_lifecycle_actor_shape")
+        .execute(&mut *corruption).await?;
+    sqlx::query(
+        "UPDATE session_lifecycle SET actor_kind = 'corrupt_fixture' WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *corruption)
+    .await?;
+    corruption.commit().await?;
+    let mut scan = signalbox_application::StartupScanService::new(
+        signalbox_application::UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    assert_eq!(scan.execute().await?.skipped_corrupt_sessions(), &[session]);
+    assert_eq!(scan.execute().await?.skipped_corrupt_sessions(), &[session]);
+    let pending: bool = sqlx::query_scalar(
+        "SELECT supervision_pending FROM session_supervision WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        pending,
+        "a still-corrupt terminal session keeps its operator item"
+    );
+    let mut repair = pool.begin().await?;
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *repair)
+        .await?;
+    sqlx::query("UPDATE session_lifecycle SET actor_kind = $2 WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .bind(original_actor)
+        .execute(&mut *repair)
+        .await?;
+    repair.commit().await?;
+    let repaired = lifecycle
+        .load(session)
+        .await?
+        .expect("repaired lifecycle exists");
+    let failure = repaired
+        .supervision_failure()
+        .expect("operator cause is retained");
+    assert!(failure.pending);
+    let outcome = scan.execute().await?;
+    assert!(outcome.skipped_corrupt_sessions().is_empty());
+    assert_eq!(outcome.recovered_turn_count(), 0);
+    let settled = lifecycle
+        .load(session)
+        .await?
+        .expect("terminal lifecycle remains");
+    assert_eq!(settled.state(), repaired.state());
+    let settled_failure = settled
+        .supervision_failure()
+        .expect("settled cause remains");
+    assert_eq!(settled_failure.class, failure.class);
+    assert_eq!(settled_failure.cause_code, failure.cause_code);
+    assert!(!settled_failure.pending);
+    let after: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(session_lifecycle) FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(after, original);
+    let mut status =
+        signalbox_persistence::operator_status::ProcessOperatorStatusRepository::new(pool.clone())
+            .open()
+            .await?;
+    while let Some(item) = status.next_item().await? {
+        assert!(!matches!(
+            item,
+            signalbox_persistence::operator_status::ProcessOperatorStatusItem::SessionSupervision { .. }
+        ));
+    }
+    assert_eq!(status.counts().unwrap().session_supervision(), 0);
+    assert!(scan.execute().await?.skipped_corrupt_sessions().is_empty());
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn ambiguous_supervision_commit_preserves_a_concurrent_operator_resume()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(116);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(interactive_creation(116))
+        .await?;
+    activate_first_turn(&pool, session, 116).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let failure = signalbox_persistence::startup::StartupScanRepositoryError::from(
+        signalbox_persistence::startup::StartupScanCorruption::Missing("fixture supervision"),
+    );
+    signalbox_persistence::test_support::record_supervision_failure_with_commit(
+        &pool,
+        session,
+        &failure,
+        &mut signalbox_persistence::session_lifecycle::SessionSupervisionWrite::default(),
+        |transaction| async {
+            transaction.commit().await?;
+            lifecycle.resume(session).await?;
+            Err(SessionLifecycleRepositoryError::CommitAmbiguous(
+                sqlx::Error::PoolClosed,
+            ))
+        },
+    )
+    .await?;
+    let resumed = lifecycle
+        .load(session)
+        .await?
+        .expect("resumed session exists");
+    assert!(!resumed.state().is_parked());
+    assert!(!resumed.supervision_failure().unwrap().pending);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn supervision_retry_after_identity_read_failure_preserves_operator_resume()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let session = creation_session(118);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(interactive_creation(118))
+        .await?;
+    activate_first_turn(&pool, session, 118).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let failure = signalbox_persistence::startup::StartupScanRepositoryError::from(
+        signalbox_persistence::startup::StartupScanCorruption::Missing("fixture supervision"),
+    );
+    let mut state = signalbox_persistence::session_lifecycle::SessionSupervisionWrite::default();
+    let error = signalbox_persistence::test_support::record_supervision_failure_with_commit(
+        &pool,
+        session,
+        &failure,
+        &mut state,
+        |transaction| async {
+            transaction.commit().await?;
+            lifecycle.resume(session).await?;
+            pool.close().await;
+            Err(SessionLifecycleRepositoryError::CommitAmbiguous(
+                sqlx::Error::PoolClosed,
+            ))
+        },
+    )
+    .await
+    .expect_err("the closed pool prevents the exact-identity read");
+    assert!(matches!(
+        error,
+        SessionLifecycleRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed)
+    ));
+    let fresh = sqlx::PgPool::connect(&database_url).await?;
+    signalbox_persistence::test_support::record_supervision_failure_with_commit(
+        &fresh,
+        session,
+        &failure,
+        &mut state,
+        |_| async { panic!("the retained request must only reconcile its identity") },
+    )
+    .await?;
+    let resumed = SessionLifecycleRepository::new(fresh.clone())
+        .load(session)
+        .await?
+        .unwrap();
+    assert!(!resumed.state().is_parked());
+    assert!(!resumed.supervision_failure().unwrap().pending);
+    fresh.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn an_uncommitted_supervision_attempt_does_not_acknowledge_an_identical_prior_cause()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(117);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(interactive_creation(117))
+        .await?;
+    activate_first_turn(&pool, session, 117).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let failure = signalbox_persistence::startup::StartupScanRepositoryError::from(
+        signalbox_persistence::startup::StartupScanCorruption::Missing("fixture supervision"),
+    );
+    lifecycle
+        .record_supervision_failure(session, &failure)
+        .await?;
+    lifecycle.resume(session).await?;
+    let error = signalbox_persistence::test_support::record_supervision_failure_with_commit(
+        &pool,
+        session,
+        &failure,
+        &mut signalbox_persistence::session_lifecycle::SessionSupervisionWrite::default(),
+        |transaction| async {
+            transaction.rollback().await?;
+            Err(SessionLifecycleRepositoryError::CommitAmbiguous(
+                sqlx::Error::PoolClosed,
+            ))
+        },
+    )
+    .await
+    .expect_err("a prior identical cause cannot acknowledge this rolled-back write");
+    assert!(matches!(
+        error,
+        SessionLifecycleRepositoryError::CommitAmbiguous(_)
+    ));
+    let prior = lifecycle
+        .load(session)
+        .await?
+        .expect("prior resumed session exists");
+    assert!(!prior.state().is_parked());
+    assert!(!prior.supervision_failure().unwrap().pending);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

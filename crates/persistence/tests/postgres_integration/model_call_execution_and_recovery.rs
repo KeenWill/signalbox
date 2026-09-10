@@ -4489,6 +4489,7 @@ async fn startup_recovery_leaves_zero_failed_turns() -> Result<(), Box<dyn Error
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4003)),
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4004)),
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4005)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4006)),
             ],
             [
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5001)),
@@ -4496,6 +4497,7 @@ async fn startup_recovery_leaves_zero_failed_turns() -> Result<(), Box<dyn Error
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5003)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5004)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5005)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x5006)),
             ],
         )
         .with_reclassified_turns([TurnId::from_uuid(Uuid::from_u128(0x6202))]),

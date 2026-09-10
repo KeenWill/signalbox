@@ -160,7 +160,7 @@ export class ProductRequestError extends Error {
 
 export class ProductTransportError extends Error {
   constructor(cause: unknown) {
-    super("Can't reach the Signalbox server.", { cause })
+    super('Signalbox daemon unreachable.', { cause })
     this.name = 'ProductTransportError'
   }
 }

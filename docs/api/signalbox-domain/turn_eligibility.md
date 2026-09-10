@@ -1052,6 +1052,10 @@ impl AcceptedInputSchedulingReconstitutionInput {
         selected: DirectModelSelection,
     ) -> Self;
     pub fn with_imported_session(self, imported_session: ReconstitutedImportedSession) -> Self;
+    pub fn with_bounded_imported_seed(
+        self,
+        imported_seed: ImportedSessionSeedHeaderReconstitutionInput,
+    ) -> Self;
     pub fn with_model_call_facts(
         self,
         pinned_targets: vec::Vec<PinnedProviderTargetReconstitutionInput>,
