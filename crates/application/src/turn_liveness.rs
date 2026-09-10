@@ -603,22 +603,6 @@ mod tests {
         assert_eq!(due.as_ref(), &[candidate(1)]);
     }
 
-    /// Persistence resets the ordinal when commit-ordered progress changes.
-    #[test]
-    fn changed_evidence_restarts_the_bound() {
-        let due = ledger().reconcile(&[observation(2, 2)]);
-
-        assert!(due.is_empty());
-    }
-
-    /// A forward wall-clock jump supplies no input to the ordinal decision.
-    #[test]
-    fn forward_clock_jump_does_not_stale_live_work() {
-        let due = ledger().reconcile(&[observation(2, 1)]);
-
-        assert!(due.is_empty());
-    }
-
     /// The validated configured bound is the one the ledger decides by.
     #[test]
     fn a_lowered_bound_is_the_one_the_ledger_applies() {

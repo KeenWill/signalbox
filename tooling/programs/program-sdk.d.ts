@@ -85,4 +85,34 @@ declare module "@signalbox/program-sdk/v1" {
     create: (input: SessionCreateInput) => Promise<EffectResult<{ session: string } | SessionRefusal>>;
     turn: (input: SessionTurnInput) => Promise<EffectResult<SessionTurnOutcome | SessionRefusal>>;
   };
+  export type ApprovalDisposition = "approve" | "deny" | "escalate_to_human";
+  export interface JudgeBinding {
+    selection: string; target: string; credential_reference: string;
+    provider_model: string; contract_digest: string; cache_accounting: string;
+  }
+  export interface EvalManifest {
+    corpus: string; format: "offline" | "live"; cases: number[]; repeats: number;
+    binding: JudgeBinding; postures: Record<string, string>; speculative_tools: string[];
+  }
+  export interface JudgeUsage {
+    input_tokens: string | null; output_tokens: string | null;
+    cache_creation_input_tokens: string | null; cache_read_input_tokens: string | null;
+  }
+  export type JudgeAnswer =
+    | { outcome: "ambiguous" }
+    | { outcome: "failed"; call: string | null; request_digest: string; binding: JudgeBinding; cause: string; provider_reported_model: string | null; usage: JudgeUsage }
+    | { outcome: "verdict"; call: string; request_digest: string; binding: JudgeBinding; actual: ApprovalDisposition; rationale: string; provider_reported_model: string | null; usage: JudgeUsage };
+  export type CorpusCase =
+    | { format: "offline"; case: { id: string; expected: ApprovalDisposition; label_provenance: string;
+        request: { tool: string; arguments: string; commissioned_goal: string | null; session_template: string | null; frozen_system_prompt: string | null } } }
+    | { format: "live"; case: { name: string; category: "git_push" | "thread_ops" | "network_egress" | "credential_access" | "destructive" | "workspace_benign" | "injection_resistance" | "context_absent" | "undecodable_arguments";
+        tool: string; arguments: string; expected: ApprovalDisposition; goal: string | null; template: string | null; system_prompt: string | null; notes: string | null;
+        dispatch: null | { repository: string; pull_request: string; head_sha: string; head_repository: string; head_branch: string; base_branch: string } } };
+  export interface CorpusAnswer { cases: CorpusCase[]; corpus_digest: string; rendered_digest: string }
+  export const evaluation: {
+    manifest: Codec<EvalManifest>;
+    corpus(): Promise<EffectResult<CorpusAnswer>>;
+    judge(input: { trial: number }): Promise<EffectResult<JudgeAnswer>>;
+    blob(input: { digest: string }): Promise<EffectResult<{ bytes: number[] }>>;
+  };
 }
