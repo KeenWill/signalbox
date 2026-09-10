@@ -38,4 +38,4 @@
 | turn_liveness | 16 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | update_session_placement | 3 | 1 | 0 | [update_session_placement](update_session_placement.md) |
 | usage | 36 | 1 | 4 | [usage](usage.md) |
-| workspace_instructions | 5 | 0 | 1 | [workspace_instructions](workspace_instructions.md) |
+| workspace_instructions | 6 | 0 | 2 | [workspace_instructions](workspace_instructions.md) |

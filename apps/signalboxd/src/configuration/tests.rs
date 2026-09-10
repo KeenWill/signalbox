@@ -6249,3 +6249,40 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
         );
     }
 }
+
+#[test]
+fn workspace_instruction_discovery_limits_accept_values_and_none() {
+    for (settings, expected) in [
+        (
+            r#"max_classified_entries = 3
+max_findings = 4
+max_candidate_source_bytes = 5
+max_elapsed = "6s""#,
+            signalbox_application::InstructionDiscoveryLimits {
+                classified_entries: Some(3),
+                findings: Some(4),
+                candidate_source_bytes: Some(5),
+                elapsed: Some(std::time::Duration::from_secs(6)),
+            },
+        ),
+        (
+            r#"max_classified_entries = "none"
+max_findings = "none"
+max_candidate_source_bytes = "none"
+max_elapsed = "none""#,
+            signalbox_application::InstructionDiscoveryLimits {
+                classified_entries: None,
+                findings: None,
+                candidate_source_bytes: None,
+                elapsed: None,
+            },
+        ),
+    ] {
+        let text = format!(
+            "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = []\n{settings}\n"
+        );
+        let configuration =
+            HubModelConfiguration::parse(&text).expect("configured discovery limits");
+        assert_eq!(configuration.workspace_instructions().limits(), expected);
+    }
+}

@@ -71,10 +71,34 @@ impl InstructionDiscoverySnapshot {
 }
 ```
 
+## InstructionDiscoveryLimits
+
+```rust
+pub struct InstructionDiscoveryLimits {
+    pub classified_entries: option::Option<u64>,
+    pub findings: option::Option<usize>,
+    pub candidate_source_bytes: option::Option<u64>,
+    pub elapsed: option::Option<time::Duration>,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl default::Default for InstructionDiscoveryLimits {
+    fn default() -> Self;
+}
+```
+
 ## discover_workspace_instructions
 
 ```rust
 pub fn discover_workspace_instructions(
     roots: vec::Vec<InstructionDiscoveryRoot>,
+) -> InstructionDiscoverySnapshot;
+```
+
+## discover_workspace_instructions_with_limits
+
+```rust
+pub fn discover_workspace_instructions_with_limits(
+    roots: vec::Vec<InstructionDiscoveryRoot>,
+    limits: InstructionDiscoveryLimits,
 ) -> InstructionDiscoverySnapshot;
 ```

@@ -1682,7 +1682,8 @@ async fn run_hub(
             .workspace_instructions()
             .roots()
             .to_vec(),
-    );
+    )
+    .with_discovery_limits(model_configuration.workspace_instructions().limits());
     let checkout_runner = tools.process_runner();
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 

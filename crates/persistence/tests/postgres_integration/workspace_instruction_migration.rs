@@ -3,8 +3,8 @@
 //! The tests cover the truncate guards on every evidence table, the discovery
 //! seal that fixes an exact root, candidate, and finding inventory, canonical
 //! finding paths, completeness paired with terminal limit evidence, candidate
-//! usage within the charged scan totals, and manifests that bind only a
-//! complete discovery under canonical hashes.
+//! usage within the charged scan totals, and manifests that bind discovery
+//! evidence under canonical hashes.
 
 use crate::*;
 
@@ -371,10 +371,10 @@ async fn workspace_instruction_incomplete_discovery_requires_a_terminal_limit()
     Ok(())
 }
 
-/// an append-only manifest cannot bind an incomplete diagnostic scan.
+/// A manifest binds partial discovery with canonical hashes and its incomplete marker.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn workspace_instruction_manifest_requires_a_complete_discovery() -> Result<(), Box<dyn Error>>
+async fn workspace_instruction_manifest_binds_an_incomplete_discovery() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_turn(&pool, 0x68d0).await?;
@@ -401,7 +401,12 @@ async fn workspace_instruction_manifest_requires_a_complete_discovery() -> Resul
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
-    let error = sqlx::query(
+    let manifest = signalbox_domain::TurnInstructionManifest::empty_turn_start(
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0x68d8)),
+        session,
+        turn,
+    );
+    sqlx::query(
         "INSERT INTO turn_instruction_manifest
             (turn_instruction_manifest_id, session_id, turn_id,
              instruction_discovery_id, boundary_kind,
@@ -409,23 +414,70 @@ async fn workspace_instruction_manifest_requires_a_complete_discovery() -> Resul
              admitted_set_hash_algorithm, admitted_set_hash,
              manifest_hash_algorithm, manifest_hash)
          VALUES ($1, $2, $3, $4, 'turn_start',
-                 'sha256_v1', $5, 'sha256_v1', $5, 'sha256_v1', $5)",
+                 'sha256_v1', $5, 'sha256_v1', $6, 'sha256_v1', $7)",
     )
-    .bind(Uuid::from_u128(0x68d8))
+    .bind(manifest.id().into_uuid())
     .bind(session.into_uuid())
     .bind(turn.into_uuid())
     .bind(discovery)
-    .bind(vec![0_u8; 32])
+    .bind(manifest.eligibility_hash().as_bytes().as_slice())
+    .bind(manifest.admitted_set_hash().as_bytes().as_slice())
+    .bind(manifest.manifest_hash().as_bytes().as_slice())
     .execute(&pool)
-    .await
-    .expect_err("an incomplete discovery cannot acquire a manifest");
+    .await?;
+    let complete: bool = sqlx::query_scalar(
+        "SELECT discovery.scan_complete FROM turn_instruction_manifest manifest
+         JOIN instruction_discovery discovery USING (instruction_discovery_id)
+         WHERE manifest.turn_instruction_manifest_id = $1",
+    )
+    .bind(manifest.id().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(!complete);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
 
-    assert_eq!(
-        error
-            .as_database_error()
-            .and_then(|database_error| database_error.constraint()),
-        Some("turn_instruction_manifest_discovery_complete")
-    );
+/// Configured scans persist counts above the default limits.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn workspace_instruction_discovery_stores_counts_above_default_limits()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = queued_turn(&pool, 0x68a0).await?;
+    let discovery = Uuid::now_v7();
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO instruction_discovery_finding
+            (instruction_discovery_id, finding_ordinal, source_path, finding_kind)
+         SELECT $1, ordinal, '/workspace/' || ordinal::text, 'entry_unreadable'
+           FROM generate_series(1, 4097) ordinal",
+    )
+    .bind(discovery)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO instruction_discovery
+            (instruction_discovery_id, session_id, turn_id, limit_set_version,
+             classified_entry_count, finding_count,
+             candidate_source_byte_count, elapsed_millis, scan_complete)
+         VALUES ($1, $2, $3, 2, 100001, 4097, 67108865, 31000, true)",
+    )
+    .bind(discovery)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    let counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT classified_entry_count, finding_count, candidate_source_byte_count
+           FROM instruction_discovery WHERE instruction_discovery_id = $1",
+    )
+    .bind(discovery)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (100001, 4097, 67108865));
     pool.close().await;
     drop(container);
     Ok(())

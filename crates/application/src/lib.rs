@@ -264,7 +264,8 @@ pub use usage::{
 };
 pub use workspace_instructions::{
     InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
-    InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
+    InstructionDiscoveryLimits, InstructionDiscoveryRoot, InstructionDiscoverySnapshot,
+    discover_workspace_instructions, discover_workspace_instructions_with_limits,
 };
 
 /// Verified host-side session attribution for program input.
