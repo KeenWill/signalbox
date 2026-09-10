@@ -423,8 +423,7 @@ const detailContent = (body: DetailBody): ReactNode => {
                   : body.state.type === 'child_wait_resumed'
                     ? 'Awaited attempt'
                     : 'Frontier ID',
-                body.state.type === 'recovery_required' ||
-                body.state.type === 'child_wait_resumed'
+                body.state.type === 'recovery_required' || body.state.type === 'child_wait_resumed'
                   ? body.state.tool_attempt_id
                   : body.state.frontier_id,
               ],
