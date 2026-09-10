@@ -870,6 +870,28 @@ fn commit_with_push_blob(fixture: &Fixture, blob: git2::Oid) -> git2::Oid {
 }
 
 #[test]
+fn push_snapshot_decodes_deltas_with_a_non_utf8_temporary_directory() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt, process::Command};
+
+    let directory = tempfile::tempdir().expect("temporary directory parent");
+    let temporary = directory.path().join(OsStr::from_bytes(b"non-utf8-\xff"));
+    fs::create_dir(&temporary).expect("non-UTF-8 temporary directory");
+    let child_test = "tests::push::push_snapshot_decodes_bounded_offset_and_reference_delta_chains";
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", child_test, "--nocapture"])
+        .env("TMPDIR", &temporary)
+        .output()
+        .expect("run delta capture with the non-UTF-8 temporary directory");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let completed = format!("test {child_test} ... ok");
+    assert!(
+        output.status.success() && stdout.lines().any(|line| line == completed),
+        "the delta capture child must run and pass: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn push_snapshot_decodes_bounded_offset_and_reference_delta_chains() {
     use crate::tests::pack_reads::{DeltaEncoding, plant_delta_chain};
     for encoding in [DeltaEncoding::Offset, DeltaEncoding::Reference] {

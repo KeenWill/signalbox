@@ -734,21 +734,18 @@ impl ObjectSource {
         // Decode the selected chain in a disposable database. Retaining one pack
         // per captured object makes later object lookups scan an expanding pack set.
         let directory = tempfile::tempdir().map_err(rejected)?;
-        let pack_directory = directory.path().join("pack");
-        fs::create_dir(&pack_directory).map_err(rejected)?;
-        let mut indexer = git2::Indexer::new_ext(None, &pack_directory, 0o600, false, self.format)
-            .map_err(rejected)?;
-        indexer.write_all(&pack).map_err(rejected)?;
-        indexer.commit().map_err(rejected)?;
-        let decoded = Odb::new_ext(self.format).map_err(rejected)?;
-        decoded
-            .add_disk_alternate(
-                directory
-                    .path()
-                    .to_str()
-                    .ok_or(LocalGitFailure::Repository)?,
-            )
-            .map_err(rejected)?;
+        let mut options = git2::RepositoryInitOptions::new();
+        options
+            .bare(true)
+            .no_reinit(true)
+            .external_template(false)
+            .object_format(self.format);
+        let repository =
+            git2::Repository::init_opts(directory.path(), &options).map_err(rejected)?;
+        let decoded = repository.odb().map_err(rejected)?;
+        let mut writer = decoded.packwriter().map_err(rejected)?;
+        writer.write_all(&pack).map_err(rejected)?;
+        writer.commit().map_err(rejected)?;
         let object = decoded.read(oid).map_err(rejected)?;
         if database
             .write(object.kind(), object.data())
