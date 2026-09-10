@@ -50,6 +50,11 @@ pub enum HubModelConfigurationError {
     /// A credential profile named no delivery, or its delivery's own fields
     /// were absent or malformed.
     InvalidCredentialDelivery,
+    /// Required GitHub delivery field is absent or invalid.
+    InvalidGithubCredentialField {
+        /// Exact field to correct.
+        field: &'static str,
+    },
     /// One member's Codex home failed path/directory admission.
     InvalidCredentialHome {
         /// Non-secret profile reference identifying the failed member.
@@ -319,6 +324,7 @@ impl fmt::Display for HubModelConfigurationError {
             Self::DisagreeingCredentialBillingKind { .. } => {
                 "model configuration declares a billing kind its credential delivery cannot authenticate"
             }
+            Self::InvalidGithubCredentialField { field } => return write!(formatter, "GitHub credential field `{field}` is missing or invalid"),
             Self::InvalidCredentialDelivery => {
                 "model configuration contains an invalid credential delivery"
             }

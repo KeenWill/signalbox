@@ -7,6 +7,7 @@ rust_package()
 rust_library(
     name = "signalbox_github_transport",
     crate_root = "src/lib.rs",
+    compile_data = glob(["tests/fixtures/**"]),
     deps = ["//crates/egress-transport:signalbox_egress_transport"],
 )
 

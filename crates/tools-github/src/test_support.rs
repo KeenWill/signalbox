@@ -85,10 +85,21 @@ pub(crate) async fn create_pull_request_evidence<Transport>(
 where
     Transport: GitHubTransport + Send,
 {
+    create_pull_request_evidence_with_credentials(FixtureCredentials, transport).await
+}
+
+pub(crate) async fn create_pull_request_evidence_with_credentials<Credentials, Transport>(
+    credentials: Credentials,
+    transport: Transport,
+) -> CreateExecutionOutcome
+where
+    Credentials: CredentialAccess,
+    Transport: GitHubTransport + Send,
+{
     let repository = GitHubRepository::try_from(String::from(FIXTURE_REPOSITORY))
         .expect("fixture repository is admitted");
     let (catalog, executor) = GitHubPullRequestCreateTools::try_new(
-        FixtureCredentials,
+        credentials,
         transport,
         GitHubEgressPolicy::github_api_only(),
         repository,

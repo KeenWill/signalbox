@@ -478,11 +478,36 @@ prompt = "Summarize the prior conversation faithfully for continuation."
 
 # Tool dependencies use the same closed mapping-table pattern as model
 # adapters. The two GitHub-backed families share one non-secret profile; the
-# credential value still arrives only through GITHUB_TOKEN_FILE. Workspace,
+# credential value comes from the declared GitHub profile. Workspace,
 # local Git, and execution tools pin this root for a session with no derived
 # directory, and pin /srv/signalbox/workspace.sessions/<session-uuid> for a
 # session that has one; conversation tools use daemon-composed application
 # reads over the configured database.
+# App credentials are read only when an installation token needs minting.
+[[credential_profiles]]
+name = "github-primary"
+adapter = "github"
+delivery = "github_app"
+app_id = 4890558
+installation_id = 160441975
+private_key_file = "/srv/signalbox/credentials/github-app.pem"
+
+# Token-file alternative: replace the App profile above with this profile.
+# [[credential_profiles]]
+# name = "github-primary"
+# adapter = "github"
+# delivery = "file"
+# file = "/srv/signalbox/credentials/github-token"
+
+# A watched repository can share the App profile and its push authority.
+# [repository_watch]
+# version = 1
+# signal_reviewers = []
+# [[repository_watch.repositories]]
+# repository = "owner/repository"
+# poll_interval_seconds = 60
+# credential_profile = "github-primary"
+
 [[tool_mappings]]
 family = "code_host"
 adapter = "github"
