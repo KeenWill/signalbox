@@ -56,5 +56,3 @@ pub use result::{
     ToolInadmissibleReason, ToolRequestResolution, ToolResultContent, ToolResultText,
     ToolResultTextError, ToolResultTextFailure,
 };
-
-pub(crate) use proposal::MAX_TOOL_REQUESTS_PER_RESPONSE;
