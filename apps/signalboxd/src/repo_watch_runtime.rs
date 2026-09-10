@@ -72,7 +72,7 @@ pub enum RepositoryWatchRuntimeError {
 pub async fn connect_repository_watch_pool(
     core: &PgPool,
 ) -> Result<PgPool, RepositoryWatchRuntimeError> {
-    // A fresh 256-bit login secret belongs only to this daemon's module pool.
+    // Each database has its own login; PostgreSQL role passwords are cluster-wide.
     let mut secret = [0_u8; 32];
     SystemRandom::new()
         .fill(&mut secret)
@@ -82,14 +82,38 @@ pub async fn connect_repository_watch_pool(
         .begin()
         .await
         .map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
+    let login: String = sqlx::query_scalar(
+        "SELECT 'mod_repo_watch_' || oid::text FROM pg_database WHERE datname = current_database()",
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
+    sqlx::query("SELECT set_config('signalbox.repository_watch_login', $1, true)")
+        .bind(&login)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
     // Parameter binding keeps the secret out of statement text and diagnostics.
     sqlx::query("SELECT set_config('signalbox.repository_watch_password', $1, true)")
         .bind(&password)
         .execute(&mut *transaction)
         .await
         .map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
-    sqlx::query("DO $$ BEGIN EXECUTE format('ALTER ROLE mod_repo_watch PASSWORD %L', current_setting('signalbox.repository_watch_password')); END $$")
-        .execute(&mut *transaction).await.map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
+    sqlx::query(
+        "DO $$
+         DECLARE module_login text := current_setting('signalbox.repository_watch_login');
+         BEGIN
+             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = module_login) THEN
+                 EXECUTE format('CREATE ROLE %I LOGIN NOINHERIT', module_login);
+             END IF;
+             EXECUTE format('ALTER ROLE %I PASSWORD %L', module_login,
+                            current_setting('signalbox.repository_watch_password'));
+             EXECUTE format('GRANT mod_repo_watch TO %I', module_login);
+         END $$",
+    )
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| RepositoryWatchRuntimeError::ModuleConnection)?;
     transaction
         .commit()
         .await
@@ -97,9 +121,11 @@ pub async fn connect_repository_watch_pool(
     PgPoolOptions::new()
         .after_connect(|connection, _| {
             Box::pin(async move {
-                sqlx::query("SET search_path = mod_repo_watch, pg_catalog")
-                    .execute(connection)
-                    .await?;
+                sqlx::raw_sql(
+                    "SET ROLE mod_repo_watch; SET search_path = mod_repo_watch, pg_catalog",
+                )
+                .execute(connection)
+                .await?;
                 Ok(())
             })
         })
@@ -107,7 +133,7 @@ pub async fn connect_repository_watch_pool(
             core.connect_options()
                 .as_ref()
                 .clone()
-                .username("mod_repo_watch")
+                .username(&login)
                 .password(&password),
         )
         .await
