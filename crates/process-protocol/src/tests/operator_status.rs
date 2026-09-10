@@ -65,9 +65,10 @@ fn operator_status_request_and_rows_round_trip_in_one_closed_vocabulary()
                 repository_ingestion_count: CanonicalU64::new(0),
                 lifecycle_week_count: CanonicalU64::new(1),
                 lifecycle_deadline_violation_count: CanonicalU64::new(1),
+                outbox_quarantine_count: CanonicalU64::new(2),
             },
         )))),
-        r#"{"type":"operator_status","kind":"end","repository_ingestion_count":"0","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1","session_supervision_count":"0"}"#,
+        r#"{"type":"operator_status","kind":"end","repository_ingestion_count":"0","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1","session_supervision_count":"0","outbox_quarantine_count":"2"}"#,
     )?;
     Ok(())
 }

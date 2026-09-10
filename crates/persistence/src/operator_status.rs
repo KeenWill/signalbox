@@ -38,6 +38,9 @@ pub struct ProcessOperatorStatusCounts {
     lifecycle_deadline_violations: u64,
     #[get(copy)]
     session_supervision: u64,
+    /// Returns the persistent outbox quarantine alarm value, target zero.
+    #[get(copy)]
+    outbox_quarantines: u64,
 }
 
 /// PostgreSQL-backed operator-status read boundary.
@@ -58,11 +61,22 @@ impl ProcessOperatorStatusRepository {
         sqlx::query(REPEATABLE_READ_ONLY)
             .execute(&mut *transaction)
             .await?;
+        let outbox_quarantines =
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM outbox_event_quarantine")
+                .fetch_one(&mut *transaction)
+                .await?
+                .try_into()
+                .map_err(|_| {
+                    ProcessOperatorStatusCorruption::InvalidNumber("outbox quarantine count")
+                })?;
         declare_status_cursors(&mut transaction).await?;
         Ok(ProcessOperatorStatusReader {
             transaction: Some(transaction),
             phase: ProcessOperatorStatusPhase::LifecycleWeeks,
-            counts: ProcessOperatorStatusCounts::default(),
+            counts: ProcessOperatorStatusCounts {
+                outbox_quarantines,
+                ..ProcessOperatorStatusCounts::default()
+            },
             committed_counts: None,
         })
     }

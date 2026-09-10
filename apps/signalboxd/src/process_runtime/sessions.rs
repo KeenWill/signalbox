@@ -1405,6 +1405,7 @@ pub(super) async fn spool_operator_status(
         ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
             OperatorStatusEndMessage {
                 session_supervision_count: CanonicalU64::new(counts.session_supervision()),
+                outbox_quarantine_count: CanonicalU64::new(counts.outbox_quarantines()),
                 repository_ingestion_count: CanonicalU64::new(ingestion_count),
                 lifecycle_week_count: CanonicalU64::new(counts.lifecycle_weeks()),
                 lifecycle_deadline_violation_count: CanonicalU64::new(
