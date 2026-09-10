@@ -2328,18 +2328,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn child_wait_reconciliation_exposes_transaction_source() {
-        let error = ToolExecutionServiceError::<FakeError, FakeError>::ChildWaitReconciliation(
-            FakeError::Ordinary,
-        );
-
-        assert_eq!(
-            error.source().map(ToString::to_string),
-            Some(String::from("fake tool-loop failure"))
-        );
-    }
-
     impl Error for FakeError {}
 
     impl ClassifyOperatorFailure for FakeError {

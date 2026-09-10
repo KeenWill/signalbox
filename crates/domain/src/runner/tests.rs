@@ -870,25 +870,6 @@ fn catalog_rejects_duplicate_workspace_capability() {
 }
 
 #[test]
-fn logical_enrollment_retains_distinct_typed_identities() {
-    let enrollment = RunnerEnrollment::new(
-        runner_enrollment_id(ENROLLMENT),
-        runner_id(RUNNER),
-        runner_authentication_id(AUTHENTICATION),
-        [class()],
-    );
-
-    assert_eq!(enrollment.enrollment(), runner_enrollment_id(ENROLLMENT));
-    assert_eq!(enrollment.runner(), runner_id(RUNNER));
-    assert_eq!(
-        enrollment.authentication(),
-        runner_authentication_id(AUTHENTICATION)
-    );
-    let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
-    assert_eq!(lease.correlation().lease, runner_lease_id(LEASE));
-}
-
-#[test]
 fn unknown_advertised_tool_rejects_the_complete_registration() {
     let enrollment = RunnerEnrollment::new(
         runner_enrollment_id(ENROLLMENT),

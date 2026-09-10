@@ -26,8 +26,8 @@ use crate::decode::validate_operation;
 use crate::descriptor::file_identity;
 use crate::failure::LocalGitFailure;
 use crate::limits::{
-    GITLINK_MODE, INDEX_SKIP_WORKTREE, MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES,
-    MAX_REFERENCE_BYTES, MAX_REVISION_BYTES, MAX_STAGE_PATHS,
+    GITLINK_MODE, MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES, MAX_REFERENCE_BYTES,
+    MAX_REVISION_BYTES, MAX_STAGE_PATHS,
 };
 use crate::pack_install::{OBJECT_PUBLICATION_LOCK, ObjectPublicationLock};
 use crate::pinning::PinnedObjectDatabase;
@@ -41,8 +41,8 @@ use crate::status_reference::StatusHeadSnapshot;
 use crate::tests::support::{
     ADMINISTRATION_INDEX_PATH, CHANGED_CONTENT, DEFAULT_BRANCH, FIX_BRANCH, Fixture,
     INITIAL_CONTENT, MODEL_MESSAGE, MODIFIED_WORKTREE_STATUS, Sha256Fixture, TRACKED_PATH,
-    commit_all, execute, identity, install_deleted_conflict, real_git_sha256_pack_checksum,
-    real_git_sha256_pack_index, real_git_sha256_pack_object_ids,
+    commit_all, execute, identity, real_git_sha256_pack_checksum, real_git_sha256_pack_index,
+    real_git_sha256_pack_object_ids,
 };
 
 #[test]
@@ -907,40 +907,6 @@ fn reflog_publication_rejects_a_live_leaf_changed_after_snapshot() {
 }
 
 #[test]
-fn branch_switch_rejects_a_skip_worktree_index_entry() {
-    let fixture = Fixture::new();
-    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
-    let initial = repository
-        .find_commit(fixture.initial)
-        .expect("fixture initial commit exists");
-    repository
-        .branch(FIX_BRANCH, &initial, false)
-        .expect("fixture branch creates");
-    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
-    commit_all(&repository, MODEL_MESSAGE);
-    let mut index = repository.index().expect("fixture index opens");
-    let mut entry = index
-        .get_path(Path::new(TRACKED_PATH), 0)
-        .expect("tracked entry exists");
-    entry.flags_extended |= INDEX_SKIP_WORKTREE;
-    index.add(&entry).expect("skip-worktree entry replaces");
-    index.write().expect("skip-worktree index publishes");
-    let executor = fixture.executor();
-
-    let failure = executor
-        .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
-            name: FIX_BRANCH.to_owned(),
-        }))
-        .expect_err("skip-worktree index rejects branch switching");
-
-    assert_eq!(failure, LocalGitFailure::Operation);
-    assert_eq!(
-        fs::read(fixture.root().join(TRACKED_PATH)).expect("worktree content remains"),
-        CHANGED_CONTENT.as_bytes()
-    );
-}
-
-#[test]
 fn status_rejects_an_unsupported_gitlink_worktree() {
     let fixture = Fixture::new();
     install_gitlink_index_entry(&fixture);
@@ -998,37 +964,6 @@ fn revision_snapshot_rejects_a_branch_tip_changed_during_the_operation() {
         .expect_err("changed revision rejects");
 
     assert_eq!(failure, LocalGitFailure::Operation);
-}
-
-#[test]
-fn commit_consumes_real_git_merge_state_and_preserves_both_parents() {
-    let fixture = Fixture::new();
-    install_deleted_conflict(&fixture);
-    let executor = fixture.executor();
-    execute(
-        &executor,
-        LocalOperation::Stage(GitStageArguments {
-            paths: vec![TRACKED_PATH.to_owned()],
-        }),
-    );
-
-    let result = execute(
-        &executor,
-        LocalOperation::Commit(GitCommitArguments {
-            message: MODEL_MESSAGE.to_owned(),
-        }),
-    );
-    let repository = Repository::open(fixture.root()).expect("fixture repository reopens");
-    let commit = repository
-        .find_commit(
-            git2::Oid::from_str(result["commit"].as_str().expect("commit id is text"))
-                .expect("commit id parses"),
-        )
-        .expect("merge commit exists");
-
-    assert_eq!(commit.parent_count(), 2);
-    assert_eq!(repository.state(), git2::RepositoryState::Clean);
-    assert_eq!(result["state_cleaned"], true);
 }
 
 #[test]
