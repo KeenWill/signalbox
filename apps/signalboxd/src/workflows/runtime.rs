@@ -41,6 +41,8 @@ pub enum WorkflowRuntimeError {
     Registration(#[source] ProgramRegistrationError),
     #[error("workflow journal: {field_0}")]
     Journal(#[source] ProgramJournalRepositoryError),
+    #[error("workflow receipt: {field_0}")]
+    Receipt(#[source] LiveDeliveryFailure),
     #[error("workflow runtime: {field_0}")]
     Runtime(#[source] std::io::Error),
     #[error("workflow catalog: {field_0}")]
@@ -71,6 +73,7 @@ impl WorkflowRuntimeError {
         match self {
             Self::Registration(_) => "workflow_registration_failed",
             Self::Journal(_) => "workflow_journal_failed",
+            Self::Receipt(_) => "workflow_delivery_failed",
             Self::Runtime(_) => "workflow_runtime_failed",
             Self::Catalog(_) => "workflow_catalog_failed",
             Self::NativeUnavailable => "workflow_native_unavailable",
@@ -198,7 +201,13 @@ impl WorkflowRuntime {
         stopped: oneshot::Receiver<()>,
         primitives: impl Fn(RuntimeEvents) -> P,
     ) -> Result<(), WorkflowRuntimeError> {
+        let mut receipt_effects =
+            RuntimeEffects::new(self.repository_watch.clone(), self.journal.clone());
         let execution = async {
+            receipt_effects
+                .acknowledge()
+                .await
+                .map_err(WorkflowRuntimeError::Receipt)?;
             let mut listener = self
                 .journal
                 .listen_all()
@@ -252,7 +261,12 @@ impl WorkflowRuntime {
                 }
             }
         };
-        interruptible(execution, stopped).await.unwrap_or(Ok(()))
+        let result = interruptible(execution, stopped).await.unwrap_or(Ok(()));
+        receipt_effects
+            .acknowledge()
+            .await
+            .map_err(WorkflowRuntimeError::Receipt)?;
+        result
     }
 }
 
@@ -279,12 +293,18 @@ fn cancellable_attempt<P: LiveDeliverySource + 'static>(
     cancelled: oneshot::Receiver<()>,
 ) -> Pin<Box<dyn Future<Output = Result<ProgramRunId, WorkflowRuntimeError>>>> {
     Box::pin(async move {
-        interruptible(
+        let mut receipts = RuntimeEffects::new(repository_watch.clone(), journal.clone());
+        let result = interruptible(
             attempt(host, journal, run, primitives, repository_watch),
             cancelled,
         )
         .await
-        .unwrap_or(Ok(run))
+        .unwrap_or(Ok(run));
+        receipts
+            .acknowledge()
+            .await
+            .map_err(WorkflowRuntimeError::Receipt)?;
+        result
     })
 }
 
@@ -349,13 +369,9 @@ async fn drive_run(
     effects: &mut impl AttemptEffects,
 ) -> Result<(), WorkflowHostError> {
     loop {
-        let outcome = host.execute_registered(run, primitives, effects).await?;
-        if matches!(
-            outcome,
-            ProgramExecutionOutcome::Completed(_) | ProgramExecutionOutcome::Suspended(_)
-        ) {
-            effects.acknowledge().await?;
-        }
+        let outcome = host.execute_registered(run, primitives, effects).await;
+        effects.acknowledge().await?;
+        let outcome = outcome?;
         let ProgramExecutionOutcome::Suspended(outstanding) = outcome else {
             return Ok::<(), WorkflowHostError>(());
         };

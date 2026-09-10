@@ -170,6 +170,68 @@ pub struct RepoWatchEffects<Ids, Factory, Codec, Sink> {
 }
 
 impl<Ids, Factory, Codec, Sink> RepoWatchEffects<Ids, Factory, Codec, Sink> {
+    /// Reconciles retained receipts with durable answers, including stopped and terminal runs.
+    pub async fn acknowledge_delivered_receipts(
+        &self,
+        journals: &signalbox_persistence::program_journal::ProgramJournalRepository,
+    ) -> Result<(), LiveDeliveryFailure> {
+        let mut receipts: Vec<_> = self
+            .store
+            .evaluation_receipts()
+            .await
+            .map_err(failure)?
+            .into_iter()
+            .map(|receipt| ("repo.commitEvaluation", receipt))
+            .collect();
+        receipts.extend(
+            self.store
+                .submission_receipts()
+                .await
+                .map_err(failure)?
+                .into_iter()
+                .filter_map(|receipt| {
+                    receipt.result.map(|result| {
+                        (
+                            "repo.submitPending",
+                            EffectReceipt {
+                                effect: receipt.effect,
+                                input: receipt.input,
+                                result,
+                            },
+                        )
+                    })
+                }),
+        );
+        for (method, receipt) in receipts {
+            let request = EffectRequest::new(
+                ProgramCapability::RepoWatch,
+                method.into(),
+                InlineFramePayload::new(receipt.input.clone()),
+            );
+            if !matches!(RepoWatchRequest::decode(&request),
+                Some(RepoWatchRequest::CommitEvaluation { effect, .. } | RepoWatchRequest::SubmitPending { effect, .. })
+                    if effect == receipt.effect)
+            {
+                return Err(invalid());
+            }
+            if journals
+                .has_effect_answer(&request, &InlineFramePayload::new(receipt.result.clone()))
+                .await
+                .map_err(failure)?
+            {
+                self.store
+                    .release_evaluation(&receipt)
+                    .await
+                    .map_err(failure)?;
+                self.store
+                    .release_submission(&receipt)
+                    .await
+                    .map_err(failure)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Releases a receipt after loading its exact request and answer from either run.
     pub async fn acknowledge_receipt(
         &self,

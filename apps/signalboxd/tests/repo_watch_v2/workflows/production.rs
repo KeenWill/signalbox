@@ -16,11 +16,236 @@ use std::sync::Arc;
 // Bounds only a stuck fixture; completion is observed from durable state.
 const WORKFLOW_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy, Debug)]
+enum ReceiptRunEnd {
+    Stopped,
+    Cancelled,
+    Faulted,
+    Completed,
+}
+
+async fn finish_receipt_run(
+    journals: &ProgramJournalRepository,
+    run: ProgramRunId,
+    end: ReceiptRunEnd,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{DeliveryKind, ProgramFault, RequestKind};
+    let evidence = InlineFramePayload::new(b"receipt fixture".as_slice());
+    match end {
+        ReceiptRunEnd::Stopped => {}
+        ReceiptRunEnd::Cancelled => {
+            journals
+                .append_delivery(run, DeliveryKind::RunCancel(evidence))
+                .await?;
+        }
+        ReceiptRunEnd::Faulted => {
+            journals
+                .append_delivery(
+                    run,
+                    DeliveryKind::Fault(ProgramFault::ProgramError(evidence)),
+                )
+                .await?;
+        }
+        ReceiptRunEnd::Completed => {
+            let terminal = journals
+                .append_request(run, None, RequestKind::Terminal(evidence))
+                .await?;
+            journals
+                .append_delivery(
+                    run,
+                    DeliveryKind::Answer {
+                        resolves: terminal.ordinal(),
+                        payload: InlineFramePayload::default(),
+                    },
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn wait_for_receipt_release(store: &RepoWatchStore) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(WORKFLOW_TIMEOUT, async {
+        while !store.evaluation_receipts().await?.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok::<_, Box<dyn Error>>(())
+    })
+    .await?
+}
+
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn production_runtime_reads_commits_and_submits_repository_watch_effects()
+async fn restart_releases_delivered_evaluations_for_every_run_outcome() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_domain::{DeliveryKind, RequestKind};
+    for end in [
+        ReceiptRunEnd::Stopped,
+        ReceiptRunEnd::Cancelled,
+        ReceiptRunEnd::Faulted,
+        ReceiptRunEnd::Completed,
+    ] {
+        let (_database, core, store, runtime, repository, rule, _files) =
+            production_fixture().await?;
+        let context = store
+            .next_rule_context(&repository, &rule)
+            .await?
+            .expect("first event");
+        let request = RepoWatchRequest::CommitEvaluation {
+            effect: Uuid::now_v7(),
+            plan: context.plan(),
+            context: Box::new(context),
+        }
+        .encode()?;
+        let journals = ProgramJournalRepository::new(core.clone());
+        let run = start(
+            &core,
+            &request,
+            ProgramGrants::new([ProgramCapability::RepoWatch]),
+        )
+        .await?;
+        let frame = journals
+            .append_request(run, None, RequestKind::Effect(request.clone()))
+            .await?;
+        let mut effects = Effects {
+            store: store.clone(),
+            rules: [(repository.clone(), vec![rule.clone()])].into(),
+            ids: FixedDispatchIds {
+                value: 100,
+                calls: 0,
+            },
+            factory: FixtureSessionFactory {
+                next_command: 200,
+                model: 300,
+            },
+            codec: FixtureCommandCodec,
+            sink: ConflictingSink::default(),
+            source: signalbox_session_ownership::LifecycleEventSource::new(core.clone()),
+        };
+        let answer = effects
+            .execute(EffectInvocation {
+                run,
+                ordinal: frame.ordinal(),
+                request: &request,
+            })
+            .await?;
+        effects.acknowledge_delivered_receipts(&journals).await?;
+        assert_eq!(
+            store.evaluation_receipts().await?.len(),
+            1,
+            "undelivered receipt remains adoptable: {end:?}"
+        );
+        journals
+            .append_delivery(
+                run,
+                DeliveryKind::Answer {
+                    resolves: frame.ordinal(),
+                    payload: answer,
+                },
+            )
+            .await?;
+        finish_receipt_run(&journals, run, end).await?;
+        assert!(
+            store.next_rule_context(&repository, &rule).await?.is_none(),
+            "receipt blocks the next event: {end:?}"
+        );
+
+        let (_service, runner) = WorkflowRuntime::new(core.clone())?;
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(runner.with_repository_watch(Some(runtime)).run(async {
+            let _ = stopped.await;
+        }));
+        wait_for_receipt_release(&store).await?;
+        assert!(
+            store.next_rule_context(&repository, &rule).await?.is_some(),
+            "restart releases the next event: {end:?}"
+        );
+        stop.send(()).expect("runner running");
+        task.await??;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn program_error_after_evaluation_answer_releases_the_next_event()
 -> Result<(), Box<dyn Error>> {
-    let (_database, core, _) = postgres().await?;
+    let (_database, core, store, runtime, repository, rule, _files) = production_fixture().await?;
+    let context = store
+        .next_rule_context(&repository, &rule)
+        .await?
+        .expect("first event");
+    let request = RepoWatchRequest::CommitEvaluation {
+        effect: Uuid::now_v7(),
+        plan: context.plan(),
+        context: Box::new(context),
+    }
+    .encode()?;
+    let (service, runner) = WorkflowRuntime::new(core.clone())?;
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(runner.with_repository_watch(Some(runtime)).run(async {
+        let _ = stopped.await;
+    }));
+    let artifact = r#"import { effect } from "@signalbox/program-sdk/v1";
+export default async function(input) {
+  await effect("repo-watch", "repo.commitEvaluation", input);
+  throw new Error("fixture fails after durable evaluation");
+}"#
+    .to_owned();
+    let registration = service
+        .register_javascript(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            ProgramRegistrationRequest {
+                name: "fault-after-evaluation".into(),
+                revision: "fixture".into(),
+                source: artifact.as_bytes().to_vec(),
+                artifact,
+                grants: ProgramGrants::new([ProgramCapability::RepoWatch]),
+            },
+        )
+        .await?;
+    let run = service
+        .start(
+            ProgramRunId::from_uuid(Uuid::now_v7()),
+            registration.id,
+            request.payload().as_bytes(),
+        )
+        .await?;
+    let journals = ProgramJournalRepository::new(core);
+    let terminal = tokio::time::timeout(WORKFLOW_TIMEOUT, async {
+        loop {
+            let journal = journals.load(run).await?.expect("admitted run");
+            if let Some(terminal) = journal.terminal_delivery() {
+                return Ok::<_, Box<dyn Error>>(terminal.clone());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert!(matches!(
+        terminal.kind(),
+        signalbox_domain::DeliveryKind::Fault(signalbox_domain::ProgramFault::ProgramError(_))
+    ));
+    wait_for_receipt_release(&store).await?;
+    assert!(store.next_rule_context(&repository, &rule).await?.is_some());
+    stop.send(()).expect("runner running");
+    task.await??;
+    Ok(())
+}
+
+async fn production_fixture() -> Result<
+    (
+        TestDatabase,
+        PgPool,
+        RepoWatchStore,
+        RepositoryWatchRuntime,
+        RepositorySlug,
+        RepoWatchRule,
+        tempfile::TempDir,
+    ),
+    Box<dyn Error>,
+> {
+    let (database, core, _) = postgres().await?;
     let module = connect_repository_watch_pool(&core)
         .await
         .expect("module login");
@@ -90,6 +315,23 @@ async fn production_runtime_reads_commits_and_submits_repository_watch_effects()
             .await?;
     }
 
+    Ok((
+        database,
+        core,
+        store,
+        repository_watch,
+        repository,
+        rule,
+        files,
+    ))
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn production_runtime_reads_commits_and_submits_repository_watch_effects()
+-> Result<(), Box<dyn Error>> {
+    let (_database, core, store, repository_watch, repository, rule, _files) =
+        production_fixture().await?;
     let (service, runner) = WorkflowRuntime::new(core.clone())?;
     let runner = runner.with_repository_watch(Some(repository_watch.clone()));
     let (stop, stopped) = tokio::sync::oneshot::channel();

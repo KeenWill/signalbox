@@ -210,7 +210,9 @@ receipts; the adapter verifies a matching durable journal request and answer
 before releasing a receipt, including delivery in a successor run. The
 production runner routes these effects through the current repository-watch
 runtime and its serialized checkout-aware command sink, acknowledging receipts
-after durable delivery before the next effect or suspension.
+after durable delivery before the next effect or any attempt outcome. Startup
+and shutdown also reconcile retained receipts against exact durable answers,
+including cancelled, faulted and completed runs.
 
 The canonical SDK specifier is `@signalbox/program-sdk/v<version>`, where the
 version is a positive decimal integer with no leading zero. Frame-contract

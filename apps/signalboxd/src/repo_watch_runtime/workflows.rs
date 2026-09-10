@@ -5,8 +5,7 @@ use super::*;
 use crate::{
     repo_watch_dispatch::CheckoutCommandSink, workflows::repo_watch::effects::RepoWatchEffects,
 };
-use signalbox_domain::{InlineFramePayload, ProgramRunId};
-use signalbox_module_repo_watch_v2::workflow::EffectReceipt;
+use signalbox_domain::InlineFramePayload;
 use signalbox_persistence::program_journal::ProgramJournalRepository;
 use signalbox_workflow_runtime::{
     LiveDeliveryFailure,
@@ -38,17 +37,15 @@ impl RepositoryWatchRuntime {
             .await
     }
 
-    pub(crate) async fn acknowledge_workflow_receipt(
+    pub(crate) async fn acknowledge_workflow_receipts(
         &self,
         journals: &ProgramJournalRepository,
-        run: ProgramRunId,
-        receipt: &EffectReceipt,
     ) -> Result<(), LiveDeliveryFailure> {
         self.state
             .lock()
             .await
             .workflow_effects()
-            .acknowledge_receipt(journals, run, receipt)
+            .acknowledge_delivered_receipts(journals)
             .await
     }
 }
