@@ -23,6 +23,24 @@ pub(super) fn check(deadline: Instant) -> Result<(), GitPushFailure> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum EffectsToMatch {
+    #[cfg(test)]
+    All,
+    Text,
+    Metadata,
+}
+impl EffectsToMatch {
+    fn includes(self, origin: u8) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::All => true,
+            Self::Text => matches!(origin, b'+' | b'-'),
+            Self::Metadata => !matches!(origin, b'+' | b'-' | b'<' | b'>' | b'='),
+        }
+    }
+}
+
 pub(super) struct Hunks {
     file: BufWriter<File>,
     effects: u64,
@@ -42,17 +60,24 @@ impl Hunks {
     }
     pub(super) fn bytes(&mut self, bytes: &[u8]) -> Result<(), GitPushFailure> {
         let hash: [u8; 32] = Sha256::digest(bytes).into();
-        self.effect(hash, bytes.len() as u64, bytes)
+        self.effect(
+            hash,
+            bytes.first().copied().unwrap_or_default(),
+            bytes.len() as u64,
+            bytes,
+        )
     }
     fn effect(
         &mut self,
         hash: [u8; 32],
+        origin: u8,
         length: u64,
         preview: &[u8],
     ) -> Result<(), GitPushFailure> {
         let kept = preview.len().min(MAX_MERGE_DETAIL_BYTES - self.preview);
         self.file.write_all(&[2]).map_err(failed)?;
         self.file.write_all(&hash).map_err(failed)?;
+        self.file.write_all(&[origin]).map_err(failed)?;
         self.file.write_all(&length.to_le_bytes()).map_err(failed)?;
         self.file
             .write_all(&(kept as u32).to_le_bytes())
@@ -75,12 +100,18 @@ impl Hunks {
         file.rewind().map_err(failed)?;
         Ok(BufReader::new(file))
     }
-    pub(super) fn permitted(&mut self, deadline: Instant) -> Result<Effects, GitPushFailure> {
+    pub(super) fn permitted(
+        &mut self,
+        selection: EffectsToMatch,
+        deadline: Instant,
+    ) -> Result<Effects, GitPushFailure> {
         let mut effects = Effects::new(self.effects)?;
         let mut reader = self.reader()?;
         while let Some(record) = record(&mut reader)? {
             check(deadline)?;
-            if let Record::Effect { hash, .. } = record {
+            if let Record::Effect { hash, origin, .. } = record
+                && selection.includes(origin)
+            {
                 effects.change(hash, true, deadline)?;
             }
         }
@@ -89,6 +120,7 @@ impl Hunks {
     pub(super) fn first_dropped(
         &mut self,
         permitted: &mut Effects,
+        selection: EffectsToMatch,
         budget: usize,
         deadline: Instant,
     ) -> Result<Option<(String, bool)>, GitPushFailure> {
@@ -108,10 +140,14 @@ impl Hunks {
                 }
                 Record::Effect {
                     hash,
+                    origin,
                     length,
                     bytes,
                 } => {
-                    if !dropped && !permitted.change(hash, false, deadline)? {
+                    if !dropped
+                        && selection.includes(origin)
+                        && !permitted.change(hash, false, deadline)?
+                    {
                         dropped = true;
                     }
                     let kept = bytes.len().min(budget - preview.len());
@@ -131,6 +167,7 @@ enum Record {
     Start,
     Effect {
         hash: [u8; 32],
+        origin: u8,
         length: u64,
         bytes: Vec<u8>,
     },
@@ -148,6 +185,8 @@ fn record(reader: &mut impl Read) -> Result<Option<Record>, GitPushFailure> {
     }
     let mut hash = [0; 32];
     reader.read_exact(&mut hash).map_err(failed)?;
+    let mut origin = [0];
+    reader.read_exact(&mut origin).map_err(failed)?;
     let mut length = [0; 8];
     reader.read_exact(&mut length).map_err(failed)?;
     let mut size = [0; 4];
@@ -160,6 +199,7 @@ fn record(reader: &mut impl Read) -> Result<Option<Record>, GitPushFailure> {
     reader.read_exact(&mut bytes).map_err(failed)?;
     Ok(Some(Record::Effect {
         hash,
+        origin: origin[0],
         length: u64::from_le_bytes(length),
         bytes,
     }))
@@ -302,7 +342,7 @@ impl Lines {
             preview.extend_from_slice(&buffer[..kept]);
             offset += count as u64;
         }
-        hunks.effect(hash.finalize().into(), line.length + 1, &preview)?;
+        hunks.effect(hash.finalize().into(), origin, line.length + 1, &preview)?;
         let mut last = [0];
         self.content
             .read_exact_at(&mut last, line.offset + line.length - 1)
@@ -597,6 +637,62 @@ mod tests {
         .expect("fixture content")
     }
     #[test]
+    fn disk_merge_check_protects_main_lines_beyond_the_preview() {
+        // The distinction follows the complete line, past the retained preview.
+        let main_line = format!("{}\n", "a".repeat(MAX_MERGE_DETAIL_BYTES + 1));
+        struct Case {
+            name: &'static str,
+            resolution: String,
+            expected_dropped: Option<()>,
+        }
+        let cases = [
+            Case {
+                name: "regrouped branch",
+                resolution: format!("{main_line}branch regrouped\n"),
+                expected_dropped: None,
+            },
+            Case {
+                name: "altered main line suffix",
+                resolution: format!("{}!\nbranch regrouped\n", main_line.trim_end()),
+                expected_dropped: Some(()),
+            },
+            Case {
+                name: "restored main removal",
+                resolution: format!("{main_line}old\n"),
+                expected_dropped: Some(()),
+            },
+        ];
+        for case in cases {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut base = Hunks::new().expect("base hunks");
+            text_hunks(content("old\n"), content(&main_line), &mut base, deadline)
+                .expect("main diff");
+            let mut result = Hunks::new().expect("result hunks");
+            text_hunks(
+                content("old\n"),
+                content(&case.resolution),
+                &mut result,
+                deadline,
+            )
+            .expect("merged diff");
+            let mut retained = result
+                .permitted(EffectsToMatch::Text, deadline)
+                .expect("result effects");
+
+            let dropped = base
+                .first_dropped(
+                    &mut retained,
+                    EffectsToMatch::Text,
+                    MAX_MERGE_DETAIL_BYTES,
+                    deadline,
+                )
+                .expect("main-side check");
+
+            assert_eq!(dropped.map(|_| ()), case.expected_dropped, "{}", case.name);
+        }
+    }
+
+    #[test]
     fn disk_diff_preserves_separate_hunks_and_effect_multiplicity() {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut actual = Hunks::new().expect("hunks");
@@ -611,10 +707,17 @@ mod tests {
         allowed.start().expect("hunk");
         allowed.bytes(b"-old\n").expect("removal");
         allowed.bytes(b"+new\n").expect("addition");
-        let mut allowed = allowed.permitted(deadline).expect("effect counts");
+        let mut allowed = allowed
+            .permitted(EffectsToMatch::All, deadline)
+            .expect("effect counts");
         assert_eq!(
             actual
-                .first_dropped(&mut allowed, MAX_MERGE_DETAIL_BYTES, deadline)
+                .first_dropped(
+                    &mut allowed,
+                    EffectsToMatch::All,
+                    MAX_MERGE_DETAIL_BYTES,
+                    deadline
+                )
                 .expect("comparison"),
             Some(("-old tail\n+new tail\n".to_owned(), false))
         );
@@ -645,17 +748,29 @@ mod tests {
             for effect in *effects {
                 allowed.bytes(effect).expect("expected line");
             }
-            let mut allowed = allowed.permitted(deadline).expect("effect counts");
+            let mut allowed = allowed
+                .permitted(EffectsToMatch::All, deadline)
+                .expect("effect counts");
             assert_eq!(
                 actual
-                    .first_dropped(&mut allowed, MAX_MERGE_DETAIL_BYTES, deadline)
+                    .first_dropped(
+                        &mut allowed,
+                        EffectsToMatch::All,
+                        MAX_MERGE_DETAIL_BYTES,
+                        deadline
+                    )
                     .expect("comparison"),
                 None,
                 "{old:?} -> {new:?}"
             );
             assert!(
                 actual
-                    .first_dropped(&mut allowed, MAX_MERGE_DETAIL_BYTES, deadline)
+                    .first_dropped(
+                        &mut allowed,
+                        EffectsToMatch::All,
+                        MAX_MERGE_DETAIL_BYTES,
+                        deadline
+                    )
                     .expect("consumed counts")
                     .is_some()
             );
@@ -733,10 +848,15 @@ mod tests {
         assert_eq!(hunks.effects, 100_000);
         let mut empty = Hunks::new()
             .expect("empty")
-            .permitted(deadline)
+            .permitted(EffectsToMatch::All, deadline)
             .expect("counts");
         let (preview, truncated) = hunks
-            .first_dropped(&mut empty, MAX_MERGE_DETAIL_BYTES, deadline)
+            .first_dropped(
+                &mut empty,
+                EffectsToMatch::All,
+                MAX_MERGE_DETAIL_BYTES,
+                deadline,
+            )
             .expect("comparison")
             .expect("dropped changes");
         assert!(preview.starts_with("-old-0\n"));
@@ -764,6 +884,6 @@ mod tests {
         let mut hunks = Hunks::new().expect("hunks");
         assert!(text_hunks(content("old\n"), content("new\n"), &mut hunks, expired).is_err());
         hunks.single(b"+new\n").expect("effect");
-        assert!(hunks.permitted(expired).is_err());
+        assert!(hunks.permitted(EffectsToMatch::All, expired).is_err());
     }
 }

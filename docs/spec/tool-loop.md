@@ -165,14 +165,16 @@ regardless of parent order. A missing or ambiguous fence binding refuses the
 push with `UnprovenMergeParents`. Multiple merge bases refuse it with
 `AmbiguousMergeBases`, listing base object IDs and an omitted count when the
 detail cannot fit them all; verification does not construct a virtual merge
-base. Before pushing a merge, the executor compares additions and removals
-relative to its base parent against the branch's effects relative to the merge
-base, ignoring line offsets and consuming each matching effect once. A carried
-addition does not require the branch patch's obsolete preimage to remain;
-carried removals must also occur in the branch diff. Rename detection correlates
-parent renames through their common source paths, permitting either parent's
-destination while retaining exact carried destinations. An effect absent from
-the branch diff refuses the push with `MergeDroppedBaseChanges`. Collected
+base. Before pushing a merge, the executor compares the base parent's additions
+and removals relative to the merge base with the merge result's additions and
+removals relative to that same ancestor, ignoring line offsets and consuming
+each matching effect once. The merge result must keep every line the base added
+verbatim and must not restore a line the base removed; the branch's own lines
+may be re-expressed inside conflict regions. A missing base effect refuses the
+push with `MergeDroppedBaseChanges` and names its base hunk. Rename detection
+correlates parent renames through their common source paths, permitting either
+parent's destination while retaining exact carried destinations. Non-text
+changes relative to the base parent must occur in the branch diff. Collected
 dropped-hunk previews share a 4 KiB budget, and collection truncation remains
 explicit in the detail. Its bounded JSON detail lists filenames before hunk
 previews, marks each shortened preview with `truncated`, and counts omitted
