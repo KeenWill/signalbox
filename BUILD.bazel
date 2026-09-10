@@ -15,6 +15,8 @@ exports_files([
     "Cargo.toml",
     "rust-toolchain.toml",
     "__subpackages__",
+    "config/approval-judge-eval-codex.example.toml",
+    "config/repository-watch-rules.example.toml",
     "config/session-templates.example.toml",
     "config/signalbox-runner.example.toml",
     "tooling/codex-cli/release.json",
