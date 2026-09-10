@@ -802,7 +802,8 @@ mod tests {
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut input = [0; 1024];
-                socket.read(&mut input).await.unwrap();
+                let received = socket.read(&mut input).await.unwrap();
+                assert!(received > 0, "the client started its request");
                 if let Some(bytes) = body_bytes {
                     socket
                         .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
