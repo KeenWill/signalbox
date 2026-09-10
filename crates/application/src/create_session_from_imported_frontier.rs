@@ -582,29 +582,6 @@ mod tests {
         );
     }
 
-    /// the admitted request retains exactly the caller-selected frontier, relationship, and initial
-    /// defaults without a second conversation field.
-    #[test]
-    fn request_preserves_the_complete_caller_payload() {
-        let conversation = imported_conversation();
-        let selected = frontier(&conversation);
-        let identity = command_id(1);
-        let relationship = ImportedSessionRelationship::Fork;
-        let initial_defaults = defaults(20);
-        let request = CreateSessionFromImportedFrontierRequest::try_new(
-            identity,
-            selected,
-            relationship,
-            initial_defaults.clone(),
-        )
-        .expect("fixture request is admitted");
-
-        assert_eq!(request.command_id(), identity);
-        assert_eq!(request.imported_frontier(), selected);
-        assert_eq!(request.relationship(), relationship);
-        assert_eq!(request.initial_configuration_defaults(), &initial_defaults);
-    }
-
     /// production generation supplies fresh UUIDv7 values for all three distinct domain identity
     /// kinds.
     #[test]

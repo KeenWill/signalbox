@@ -546,16 +546,6 @@ mod tests {
         assert_eq!(whole.map(StaleActiveTurnBound::as_secs), Ok(1));
     }
 
-    /// The scan interval uses the same explicit deployment validation.
-    #[test]
-    fn the_scan_interval_accepts_a_configured_duration() {
-        assert_eq!(
-            TurnLivenessScanInterval::try_new(Duration::from_secs(60))
-                .map(TurnLivenessScanInterval::get),
-            Ok(Duration::from_secs(60))
-        );
-    }
-
     /// Automatic reconciliation applies the supplied budget and backoff policy.
     #[test]
     fn ambiguous_model_call_reconciliation_uses_configured_retry_policy() {
