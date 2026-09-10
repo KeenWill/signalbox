@@ -322,7 +322,7 @@ pub(super) async fn load_live_turn_calls(
                 manifest.manifest_hash_algorithm
                     AS instruction_manifest_hash_algorithm,
                 manifest.manifest_hash AS instruction_manifest_hash,
-                discovery.scan_complete AS instruction_discovery_complete
+                discovery.instruction_discovery_id
            FROM model_call AS call
       LEFT JOIN turn_instruction_manifest AS manifest
              ON manifest.turn_instruction_manifest_id = call.turn_instruction_manifest_id
@@ -401,14 +401,12 @@ pub(crate) fn authenticate_model_call_instruction_manifest(
     session: SessionId,
     turn: TurnId,
 ) -> Result<(), ModelCallRepositoryError> {
+    let _: Uuid = required(row, "instruction_discovery_id")?;
     let manifest_id =
         TurnInstructionManifestId::from_uuid(required(row, "turn_instruction_manifest_id")?);
     let boundary_kind: String = required(row, "instruction_manifest_boundary_kind")?;
     if boundary_kind != "turn_start" {
         return Err(ModelCallCorruption::Inconsistent("turn instruction manifest boundary").into());
-    }
-    if !required::<bool>(row, "instruction_discovery_complete")? {
-        return Err(ModelCallCorruption::Inconsistent("instruction discovery completeness").into());
     }
     if required::<String>(row, "instruction_eligibility_hash_algorithm")? != "sha256_v1"
         || required::<String>(row, "instruction_admitted_set_hash_algorithm")? != "sha256_v1"

@@ -1287,29 +1287,32 @@ async fn changed_source_creates_a_distinct_registered_bundle() -> Result<(), Box
     Ok(())
 }
 
-/// an incomplete discovery remains durable diagnostic evidence but
-/// binds no manifest, so retry can record a later complete snapshot.
+/// Incomplete scan evidence remains bound to its original turn manifest.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn incomplete_discovery_remains_unbound_for_retry() -> Result<(), Box<dyn Error>> {
+async fn incomplete_discovery_binds_a_stable_partial_manifest() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = active_instruction_turn(&pool, 0x6200).await?;
     let directory = tempfile::tempdir()?;
     let root_path = directory.path().canonicalize()?;
     let source_path = root_path.join("AGENTS.md");
-    std::fs::File::create(&source_path)?.set_len(64 * 1024 * 1024 + 1)?;
+    std::fs::write(&source_path, "oversized instruction source")?;
     let root = signalbox_domain::InstructionPath::try_new(
         root_path
             .to_str()
             .expect("temporary path is UTF-8")
             .to_owned(),
     )?;
-    let incomplete = signalbox_application::discover_workspace_instructions(vec![
-        signalbox_application::InstructionDiscoveryRoot::new(
+    let incomplete = signalbox_application::discover_workspace_instructions_with_limits(
+        vec![signalbox_application::InstructionDiscoveryRoot::new(
             signalbox_domain::InstructionDiscoveryRootKind::Workspace,
             root.clone(),
-        ),
-    ]);
+        )],
+        signalbox_application::InstructionDiscoveryLimits {
+            candidate_source_bytes: Some(1),
+            ..Default::default()
+        },
+    );
     assert!(!incomplete.is_complete());
     let repository =
         signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
@@ -1331,11 +1334,13 @@ async fn incomplete_discovery_remains_unbound_for_retry() -> Result<(), Box<dyn 
         .await?;
     assert_eq!(
         incomplete_outcome,
-        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::Recorded(first_manifest_id)
     );
     assert_eq!(
         repository.preflight_turn_start(session, turn).await?,
-        signalbox_persistence::workspace_instructions::TurnInstructionManifestPreflight::Absent
+        signalbox_persistence::workspace_instructions::TurnInstructionManifestPreflight::Available(
+            first_manifest_id
+        )
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -1345,7 +1350,7 @@ async fn incomplete_discovery_remains_unbound_for_retry() -> Result<(), Box<dyn 
         .bind(turn.into_uuid())
         .fetch_one(&pool)
         .await?,
-        0
+        1
     );
     let persisted_usage = sqlx::query_as::<_, PersistedDiscoveryUsage>(
         "SELECT limit_set_version, classified_entry_count, finding_count,
@@ -1454,14 +1459,14 @@ async fn incomplete_discovery_remains_unbound_for_retry() -> Result<(), Box<dyn 
         .await?;
     assert_eq!(
         retry_outcome,
-        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::Recorded(
-            retry_manifest_id,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(
+            first_manifest_id,
         )
     );
     assert_eq!(
         repository.preflight_turn_start(session, turn).await?,
         signalbox_persistence::workspace_instructions::TurnInstructionManifestPreflight::Available(
-            retry_manifest_id,
+            first_manifest_id,
         )
     );
     assert_eq!(
@@ -1472,7 +1477,7 @@ async fn incomplete_discovery_remains_unbound_for_retry() -> Result<(), Box<dyn 
         .bind(turn.into_uuid())
         .fetch_one(&pool)
         .await?,
-        2
+        1
     );
 
     pool.close().await;

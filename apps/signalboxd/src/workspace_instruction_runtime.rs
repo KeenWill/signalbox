@@ -3,8 +3,9 @@
 use std::{error::Error, fmt, path::Path};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, InstructionDiscoveryFindingKind, InstructionDiscoveryRoot,
-    InstructionDiscoverySnapshot, OperatorFailureClass, discover_workspace_instructions,
+    ClassifyOperatorFailure, InstructionDiscoveryFindingKind, InstructionDiscoveryLimits,
+    InstructionDiscoveryRoot, InstructionDiscoverySnapshot, OperatorFailureClass,
+    discover_workspace_instructions_with_limits,
 };
 use signalbox_domain::{
     InstructionBundleId, InstructionDiscoveryId, InstructionDiscoveryRootKind, InstructionPath,
@@ -29,8 +30,6 @@ pub enum WorkspaceInstructionRuntimeError {
     UnresolvableWorkspace,
     /// The blocking filesystem scan task failed to join.
     DiscoveryTask(tokio::task::JoinError),
-    /// A fixed scan safety limit prevented a complete inventory.
-    DiscoveryIncomplete,
     /// Durable snapshot recording or authentication failed.
     Persistence(WorkspaceInstructionRepositoryError),
 }
@@ -44,9 +43,6 @@ impl fmt::Display for WorkspaceInstructionRuntimeError {
             Self::UnresolvableWorkspace => formatter
                 .write_str("session workspace could not be resolved for instruction discovery"),
             Self::DiscoveryTask(error) => error.fmt(formatter),
-            Self::DiscoveryIncomplete => {
-                formatter.write_str("workspace instruction discovery limit was reached")
-            }
             Self::Persistence(error) => error.fmt(formatter),
         }
     }
@@ -58,7 +54,6 @@ impl Error for WorkspaceInstructionRuntimeError {
             Self::InvalidWorkspacePath => None,
             Self::UnresolvableWorkspace => None,
             Self::DiscoveryTask(error) => Some(error),
-            Self::DiscoveryIncomplete => None,
             Self::Persistence(error) => Some(error),
         }
     }
@@ -74,9 +69,6 @@ impl ClassifyOperatorFailure for WorkspaceInstructionRuntimeError {
             Self::DiscoveryTask(_) => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
-            Self::DiscoveryIncomplete => OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false,
-            },
             Self::Persistence(error) => error.operator_failure_class(),
         }
     }
@@ -86,7 +78,6 @@ impl ClassifyOperatorFailure for WorkspaceInstructionRuntimeError {
             Self::InvalidWorkspacePath => "workspace_instruction_path",
             Self::UnresolvableWorkspace => "workspace_instruction_workspace_unresolvable",
             Self::DiscoveryTask(_) => "workspace_instruction_discovery_task",
-            Self::DiscoveryIncomplete => "workspace_instruction_discovery_limit",
             Self::Persistence(error) => error.operator_failure_cause_code(),
         }
     }
@@ -98,9 +89,10 @@ pub struct WorkspaceInstructionRuntime {
     repository: WorkspaceInstructionRepository,
     workspace_root: Option<WorkspaceInstructionRootResolver>,
     configured_roots: Box<[InstructionPath]>,
+    limits: InstructionDiscoveryLimits,
 }
 
-/// Complete filesystem evidence retained only until a counted activation
+/// Filesystem evidence retained only until a counted activation
 /// transaction either commits it or rejects the stale preview.
 #[derive(Debug)]
 pub(crate) struct PreparedCountedActivationInstructions {
@@ -134,7 +126,14 @@ impl WorkspaceInstructionRuntime {
             repository: WorkspaceInstructionRepository::new(pool),
             workspace_root,
             configured_roots: configured_roots.into_boxed_slice(),
+            limits: InstructionDiscoveryLimits::default(),
         }
+    }
+
+    /// Applies deployment scan limits, preserving explicit unbounded dimensions.
+    pub fn with_discovery_limits(mut self, limits: InstructionDiscoveryLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     pub(crate) async fn session_is_parked(
@@ -184,14 +183,17 @@ impl WorkspaceInstructionRuntime {
             )
             .await
             .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
-        outcome_is_available(session, turn, &snapshot, outcome)
+        if !snapshot.is_complete() {
+            record_incomplete_discovery(session, turn, &snapshot);
+        }
+        Ok(matches!(
+            outcome,
+            RecordTurnInstructionSnapshotOutcome::Recorded(_)
+                | RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_)
+        ))
     }
 
-    /// Prepares complete evidence for the counted activation transaction.
-    ///
-    /// An incomplete scan remains durable diagnostic evidence without binding
-    /// a manifest. Complete evidence is returned without persistence so a
-    /// stale preview cannot leave an authoritative snapshot behind.
+    /// Prepares scan evidence without persistence for the counted activation transaction.
     pub(crate) async fn prepare_counted_activation(
         &self,
         session: SessionId,
@@ -222,32 +224,7 @@ impl WorkspaceInstructionRuntime {
             turn,
         );
         if !snapshot.is_complete() {
-            let outcome = self
-                .repository
-                .record_counted_activation_for_observed_placement(
-                    discovery,
-                    manifest,
-                    &snapshot,
-                    &placement,
-                    || InstructionBundleId::from_uuid(Uuid::now_v7()),
-                )
-                .await
-                .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
-            return match outcome {
-                RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => {
-                    record_incomplete_discovery(session, turn, &snapshot);
-                    Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete)
-                }
-                RecordTurnInstructionSnapshotOutcome::TurnUnavailable => Ok(None),
-                RecordTurnInstructionSnapshotOutcome::Recorded(_)
-                | RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_) => {
-                    Err(WorkspaceInstructionRuntimeError::Persistence(
-                        WorkspaceInstructionRepositoryError::Corruption(
-                            "incomplete counted activation bound a manifest",
-                        ),
-                    ))
-                }
-            };
+            record_incomplete_discovery(session, turn, &snapshot);
         }
         let bundle_ids = snapshot
             .bundles()
@@ -299,9 +276,12 @@ impl WorkspaceInstructionRuntime {
         roots.extend(self.configured_roots.iter().cloned().map(|path| {
             InstructionDiscoveryRoot::new(InstructionDiscoveryRootKind::Configured, path)
         }));
-        let snapshot = tokio::task::spawn_blocking(move || discover_workspace_instructions(roots))
-            .await
-            .map_err(WorkspaceInstructionRuntimeError::DiscoveryTask)?;
+        let limits = self.limits;
+        let snapshot = tokio::task::spawn_blocking(move || {
+            discover_workspace_instructions_with_limits(roots, limits)
+        })
+        .await
+        .map_err(WorkspaceInstructionRuntimeError::DiscoveryTask)?;
         if let Some((workspace_root, expected_path)) = workspace_binding {
             let revalidated_path = workspace_root
                 .resolve(session)
@@ -315,24 +295,6 @@ impl WorkspaceInstructionRuntime {
     }
 }
 
-fn outcome_is_available(
-    session: SessionId,
-    turn: TurnId,
-    snapshot: &InstructionDiscoverySnapshot,
-    outcome: RecordTurnInstructionSnapshotOutcome,
-) -> Result<bool, WorkspaceInstructionRuntimeError> {
-    match outcome {
-        RecordTurnInstructionSnapshotOutcome::Recorded(_)
-        | RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_) => Ok(true),
-        RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => {
-            record_incomplete_discovery(session, turn, snapshot);
-            Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete)
-        }
-        RecordTurnInstructionSnapshotOutcome::TurnUnavailable => Ok(false),
-    }
-}
-
-/// Records the scan evidence the sanitized cause code cannot carry.
 fn record_incomplete_discovery(
     session: SessionId,
     turn: TurnId,
@@ -349,11 +311,10 @@ fn record_incomplete_discovery(
             | InstructionDiscoveryFindingKind::NonUtf8Source
             | InstructionDiscoveryFindingKind::InvalidSkill => None,
         });
-    tracing::error!(
+    tracing::warn!(
         session_id = %session.as_uuid(),
         turn_id = %turn.as_uuid(),
-        cause_code = WorkspaceInstructionRuntimeError::DiscoveryIncomplete
-            .operator_failure_cause_code(),
+        incomplete = true,
         limit_kind = ?limit,
         limit_set_version = snapshot.limit_set_version(),
         classified_entries = snapshot.classified_entries(),
@@ -361,7 +322,7 @@ fn record_incomplete_discovery(
         candidate_source_bytes = snapshot.candidate_source_bytes(),
         elapsed_millis = snapshot.elapsed_millis(),
         root_count = snapshot.roots().len(),
-        "workspace instruction discovery stopped at a fixed limit"
+        "workspace instruction discovery stopped at a configured limit"
     );
 }
 
@@ -381,10 +342,12 @@ mod tests {
     fn discovery_telemetry_records_root_count_without_host_paths() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("private-instruction-root");
-        let snapshot = discover_workspace_instructions(vec![InstructionDiscoveryRoot::new(
-            InstructionDiscoveryRootKind::Configured,
-            InstructionPath::try_new(root.to_str().unwrap().to_owned()).unwrap(),
-        )]);
+        let snapshot = signalbox_application::discover_workspace_instructions(vec![
+            InstructionDiscoveryRoot::new(
+                InstructionDiscoveryRootKind::Configured,
+                InstructionPath::try_new(root.to_str().unwrap().to_owned()).unwrap(),
+            ),
+        ]);
         let captured = crate::process_runtime::tests::capture_telemetry(|| {
             record_incomplete_discovery(
                 SessionId::from_uuid(Uuid::now_v7()),

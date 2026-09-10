@@ -8,7 +8,6 @@
 pub enum RecordTurnInstructionSnapshotOutcome {
     Recorded(signalbox_domain::TurnInstructionManifestId),
     AlreadyRecorded(signalbox_domain::TurnInstructionManifestId),
-    DiscoveryIncomplete,
     TurnUnavailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq

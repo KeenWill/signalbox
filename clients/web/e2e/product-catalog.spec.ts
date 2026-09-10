@@ -566,11 +566,11 @@ test('exposes the server-owned blocked-goal need on its row', async ({ page }) =
   await useCatalogFixture(page)
   await page.goto('/sessions')
   await expect(
-    page.getByText('Blocked: Needs input — Select the authoritative deployment target.', {
+    page.getByText('Blocked: Input required — Select the authoritative deployment target.', {
       exact: true,
     }),
   ).toBeVisible()
-  await expect(page.getByText('Needs input', { exact: true })).toBeVisible()
+  await expect(page.getByText('Input required', { exact: true })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
