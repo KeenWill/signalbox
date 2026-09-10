@@ -41,6 +41,15 @@ pub enum ClientRequest {
     ReadProgramRun {
         run_id: CanonicalUuid,
     },
+    LaunchEvaluation {
+        run_id: CanonicalUuid,
+        registration_id: CanonicalUuid,
+        input: EvaluationInput,
+    },
+    ReadEvaluationScorecard {
+        run_id: CanonicalUuid,
+        offset: u64,
+    },
     CancelProgramRun {
         command_id: CommandId,
         run_id: CanonicalUuid,

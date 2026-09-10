@@ -67,6 +67,9 @@ async fn evaluation_commands_print_sealed_scorecards_without_provider_access()
         String::from_utf8_lossy(&output.stderr)
     );
     let live_scorecard: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(live_scorecard["total_cases"], 1);
+    assert_eq!(live_scorecard["correct_majorities"], 1);
+    assert_eq!(live_scorecard["failed_calls"], 0);
     let sealed: Vec<sqlx::types::Json<serde_json::Value>> =
         sqlx::query_scalar("SELECT scorecard FROM evaluation_run")
             .fetch_all(&runtime.pool)

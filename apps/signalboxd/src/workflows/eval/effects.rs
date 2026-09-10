@@ -491,13 +491,13 @@ pub(super) fn decode_selected(
     bytes: &[u8],
 ) -> Result<CorpusAnswer, EvalFailure> {
     let cases: Vec<Case> = match manifest.format {
-        CorpusFormat::Offline => signalbox_approval_judge_eval::decode_corpus(&bytes)
+        CorpusFormat::Offline => signalbox_approval_judge_eval::decode_corpus(bytes)
             .map_err(failure)?
             .cases
             .into_iter()
             .map(Case::Offline)
             .collect(),
-        CorpusFormat::Live => std::str::from_utf8(&bytes)
+        CorpusFormat::Live => std::str::from_utf8(bytes)
             .map_err(failure)?
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -535,7 +535,7 @@ pub(super) fn decode_selected(
         .collect::<String>();
     Ok(CorpusAnswer {
         cases: selected,
-        corpus_digest: stable_digest(&bytes),
+        corpus_digest: stable_digest(bytes),
         rendered_digest: stable_digest(rendered.as_bytes()),
     })
 }
