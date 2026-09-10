@@ -385,6 +385,8 @@ impl std::error::Error for ToolApprovalResolutionReconstitutionError {}
 /// One initial policy outcome for a newly proposed request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum InitialToolApproval {
+    /// The proposal is already resolved by a request-level admission error.
+    Inadmissible,
     /// Leave the request undecided and fail closed.
     Confirm,
     /// Leave an `AlwaysConfirm` request undecided despite blanket posture.
@@ -413,7 +415,11 @@ pub enum InitialToolApproval {
 impl InitialToolApproval {
     pub(crate) fn resolution(self, request: ToolRequestId) -> Option<ToolApprovalResolution> {
         match self {
-            Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated => None,
+            Self::Confirm
+            | Self::AlwaysConfirm
+            | Self::Human
+            | Self::Delegated
+            | Self::Inadmissible => None,
             Self::PolicyAuto => Some(ToolApprovalResolution::policy_auto(request)),
             Self::SessionBlanket => Some(ToolApprovalResolution::session_blanket(request)),
             Self::RuntimeSafetyDeny => Some(ToolApprovalResolution::runtime_safety(request)),
@@ -430,7 +436,9 @@ impl InitialToolApproval {
 
     pub(crate) const fn posture(self) -> ToolApprovalPosture {
         match self {
-            Self::Confirm | Self::AlwaysConfirm | Self::Human => ToolApprovalPosture::Human,
+            Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Inadmissible => {
+                ToolApprovalPosture::Human
+            }
             Self::Delegated | Self::UserOverride { .. } => ToolApprovalPosture::Delegated,
             Self::PolicyAuto | Self::SessionBlanket | Self::RuntimeSafetyDeny => {
                 ToolApprovalPosture::Auto
@@ -442,7 +450,8 @@ impl InitialToolApproval {
     pub const fn requires_decision(self) -> bool {
         match self {
             Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated => true,
-            Self::PolicyAuto
+            Self::Inadmissible
+            | Self::PolicyAuto
             | Self::SessionBlanket
             | Self::RuntimeSafetyDeny
             | Self::UserOverride { .. } => false,

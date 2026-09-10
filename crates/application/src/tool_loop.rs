@@ -4,6 +4,31 @@
 //! catalog policy, mints every durable identity candidate, keeps executor work
 //! outside transactions, and submits only correlated evidence to persistence.
 
+/// Admission limits for proposals in one provider response; `None` disables a cap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolProposalLimits {
+    /// Maximum requests admitted from the start of the response.
+    pub max_requests: Option<u64>,
+    /// Maximum provider or canonical argument payload bytes.
+    pub max_argument_bytes: Option<u64>,
+}
+
+impl ToolProposalLimits {
+    /// Default number of requests admitted from one response.
+    pub const DEFAULT_MAX_REQUESTS: u64 = 32;
+    /// Default maximum bytes in one argument payload.
+    pub const DEFAULT_MAX_ARGUMENT_BYTES: u64 = 1024 * 1024;
+}
+
+impl Default for ToolProposalLimits {
+    fn default() -> Self {
+        Self {
+            max_requests: Some(Self::DEFAULT_MAX_REQUESTS),
+            max_argument_bytes: Some(Self::DEFAULT_MAX_ARGUMENT_BYTES),
+        }
+    }
+}
+
 use std::{collections::BTreeMap, fmt, future::Future, num::NonZeroU64, sync::Arc};
 
 use crate::{
@@ -39,7 +64,7 @@ impl ToolInputSchema {
             NormalizedToolArguments::try_from_provider_text(value.clone()).map_err(|error| {
                 ToolInputSchemaError {
                     value: value.clone(),
-                    failure: ToolInputSchemaFailure::OutsideArgumentBound(error.failure()),
+                    failure: ToolInputSchemaFailure::NormalizationFailed(error.failure()),
                 }
             })?;
         if normalized.kind() != ToolArgumentsKind::Json {
@@ -70,8 +95,8 @@ pub enum ToolInputSchemaFailure {
     NotJson,
     /// Tool arguments require an object-shaped schema.
     NotObject,
-    /// The schema exceeded the domain argument bound or could not normalize.
-    OutsideArgumentBound(signalbox_domain::ToolArgumentsFailure),
+    /// The schema text could not be normalized.
+    NormalizationFailed(signalbox_domain::ToolArgumentsFailure),
 }
 
 /// Failed schema construction retaining the exact rejected text.
@@ -2959,6 +2984,18 @@ mod tests {
         let error = CompiledToolCatalog::try_new([first, second])
             .expect_err("duplicate dispatch names are ambiguous");
         assert_eq!(error.name(), &tool_name("same"));
+    }
+
+    #[test]
+    fn schema_normalization_reports_unrepresentable_text() {
+        assert_eq!(
+            ToolInputSchema::try_new("\0".to_owned())
+                .expect_err("NUL cannot enter durable schema text")
+                .failure(),
+            ToolInputSchemaFailure::NormalizationFailed(
+                signalbox_domain::ToolArgumentsFailure::ContainsNull
+            ),
+        );
     }
 
     #[test]

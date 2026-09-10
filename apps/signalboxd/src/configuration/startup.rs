@@ -18,6 +18,7 @@ pub(super) struct ParsedStartup {
     pub(super) approval_judge_selection: Option<DirectModelSelection>,
     pub(super) convergence: Option<signalbox_convergence::ConvergencePolicy>,
     pub(super) workspace_instructions: WorkspaceInstructionConfiguration,
+    pub(super) tool_proposal_limits: signalbox_application::ToolProposalLimits,
     pub(super) mappings: HashMap<Arc<str>, AdapterMapping>,
     pub(super) session_credential_pin: SessionCredentialPin,
     pub(super) fallback_credential_profile: Arc<str>,
@@ -59,6 +60,7 @@ pub(super) fn parse_startup(
             "blob_storage",
             "file_media",
             "workspace_instructions",
+            "tool_proposals",
         ],
     )?;
     if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
@@ -159,6 +161,7 @@ pub(super) fn parse_startup(
             .validate()
             .map_err(|_| HubModelConfigurationError::InvalidDocument)?;
     }
+    let tool_proposal_limits = parse_tool_proposal_limits(document.get("tool_proposals"))?;
     let workspace_instructions =
         parse_workspace_instruction_configuration(document.get("workspace_instructions"))?;
     let mapping_tables = document
@@ -364,6 +367,7 @@ pub(super) fn parse_startup(
         approval_judge_selection,
         convergence,
         workspace_instructions,
+        tool_proposal_limits,
         mappings,
         session_credential_pin,
         fallback_credential_profile,

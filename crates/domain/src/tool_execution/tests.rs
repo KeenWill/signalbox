@@ -217,11 +217,9 @@ fn reconstitution_rejects_delegate_resolution_for_human_request() {
     );
 }
 
-/// reconstitution enforces the same 32-request bound as provider-response admission instead of
-/// granting authority to oversized stored batches.
 #[test]
-fn reconstitution_rejects_oversized_request_batch() {
-    let requests = (0..33)
+fn reconstitution_preserves_large_request_batches() {
+    let requests = (0..40)
         .map(|ordinal| request(u128::from(ordinal) + 10, ordinal))
         .collect();
     let input = ToolBatchReconstitutionInput::new(
@@ -237,13 +235,10 @@ fn reconstitution_rejects_oversized_request_batch() {
         },
     );
 
-    let error = input
+    let batch = input
         .reconstitute()
-        .expect_err("stored batches above the response bound are rejected");
-    assert_eq!(
-        error.failure(),
-        ToolBatchReconstitutionFailure::TooManyRequests
-    );
+        .expect("stored batches retain every logical request");
+    assert_eq!(batch.requests().len(), 40);
 }
 
 /// model-call completion may freeze automatic approval for a later request while an earlier

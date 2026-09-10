@@ -2587,6 +2587,7 @@ async fn run_hub_incarnation(
             runtime_models.clone(),
             diagnostic_model_identity_limit,
         )
+        .with_tool_proposal_limits(model_configuration.tool_proposal_limits())
         .with_text_delta_sink(text_deltas.clone())
         .with_invocation_process_observer(pass_invocation_processes.clone());
         let counter = AttachmentPreparingModelCallProvider::for_counting(

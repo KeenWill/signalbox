@@ -1032,6 +1032,116 @@ async fn completed_continuation_fixture(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn stop_credential_wait_after_tool_result_preserves_the_result_and_pending_steer()
+-> Result<(), Box<dyn Error>> {
+    use super::model_call_execution_and_recovery::credential_wait::park_policy;
+    // Synthetic identities separate the completed tool round from its parked continuation.
+    const SEED: u128 = 0x1380_0000;
+    const MEMBER: &str = "stopped-continuation-member";
+    let (_container, pool, _) = migrated_postgres().await?;
+    let (fixture, repository) = completed_continuation_fixture(&pool, SEED).await?;
+    let target: Uuid = sqlx::query_scalar(
+        "SELECT pinned_provider_model_identity_id FROM turn_lifecycle WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query("INSERT INTO credential_pool_transient_exclusion (observation_model_call_id, credential_reference, cause_kind, reset_at) VALUES ($1,$2,'overloaded',transaction_timestamp() + interval '1 hour')")
+        .bind(fixture.call.into_uuid()).bind(MEMBER).execute(&pool).await?;
+    let repository = repository.with_credential_pools(std::collections::HashMap::from([(
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(target)),
+        park_policy("stopped-continuation-pool", &[MEMBER]),
+    )]));
+    let result_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 0x26));
+    let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(SEED + 0x31));
+    let result = repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![result_entry],
+                ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0x27)),
+                ModelCallId::from_uuid(Uuid::from_u128(SEED + 0x28)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 0x2b)),
+            ),
+            |_| panic!("no steering before the wait"),
+        )
+        .await?;
+    let signalbox_application::PrepareToolContinuationOutcome::CredentialWait(wait) = result else {
+        panic!("the tool continuation must park: {result:?}");
+    };
+    let inputs = SubmitInputRepository::new(pool.clone());
+    inputs
+        .handle(
+            input_with_delivery(
+                SEED + 0x30,
+                SEED + 1,
+                "retain this scope clarification",
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.turn,
+                },
+            ),
+            steering_input,
+            None,
+        )
+        .await?;
+    let stopped = inputs
+        .handle(
+            input_with_delivery(
+                SEED + 0x32,
+                SEED + 1,
+                "stop the parked continuation",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(SEED + 0x33)),
+            Some(TurnId::from_uuid(Uuid::from_u128(SEED + 0x34))),
+        )
+        .await?;
+    assert!(matches!(
+        stopped,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let ended: (String, Uuid) = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind, waiting.consumed_by_attempt_id FROM turn_lifecycle lifecycle JOIN credential_availability_wait waiting USING (turn_id) WHERE waiting.wait_attempt_id = $1",
+    ).bind(wait.attempt().into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(ended.0, "cancelled");
+    assert_ne!(ended.1, wait.attempt().into_uuid());
+    let result_entries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resolve_context_frontier_members($1, (SELECT terminal_frontier_id FROM turn_lifecycle WHERE turn_id = $2)) WHERE semantic_entry_id = $3",
+    ).bind(fixture.session.into_uuid()).bind(fixture.turn.into_uuid())
+        .bind(result_entry.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(
+        result_entries, 1,
+        "cancellation retains the completed tool result"
+    );
+    let steering: (String, String) = sqlx::query_as(
+        "SELECT accepted.disposition_kind, turn.state_kind FROM accepted_input accepted JOIN turn_lifecycle turn ON turn.turn_id = accepted.origin_turn_id WHERE accepted.accepted_input_id = $1",
+    )
+    .bind(steering_input.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        steering,
+        (
+            "reclassified_as_turn_origin".to_owned(),
+            "queued".to_owned()
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn frontier_writer_reservations_cover_counted_pool_failure() -> Result<(), Box<dyn Error>> {
     assert_preview_failure_reservation(PreviewFailureWriter::Counted).await
 }
@@ -5545,18 +5655,47 @@ async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
 -> Result<(), Box<dyn Error>> {
+    assert_next_batch_reservation(Some(32), 32, false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unbounded_proposals_reserve_headroom_for_a_subsequent_tool_response()
+-> Result<(), Box<dyn Error>> {
+    assert_next_batch_reservation(None, 32, false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn rejected_proposals_continue_when_their_result_envelopes_fit() -> Result<(), Box<dyn Error>>
+{
+    assert_next_batch_reservation(Some(32), 40, false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn rejected_proposals_exceeding_the_finite_allowance_require_compaction()
+-> Result<(), Box<dyn Error>> {
+    assert_next_batch_reservation(Some(1), 40, true).await
+}
+
+async fn assert_next_batch_reservation(
+    max_requests: Option<u64>,
+    next_tool_count: usize,
+    expect_compaction: bool,
+) -> Result<(), Box<dyn Error>> {
     // Only supplies distinct identities for the two model responses.
     const FIXTURE_SEED: u128 = 0x269_1000;
     const INPUT_TOKENS: u64 = 141_000;
     const FIRST_OUTPUT_TOKENS: u64 = 117;
     const OUTPUT_CEILING: u64 = 8_192;
-    let next_tool_count = signalbox_domain::ToolUsingAssistantResponse::MAX_TOOL_COUNT;
     let (container, pool, _) = migrated_postgres().await?;
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
         FIXTURE_SEED + 6,
     )));
     let limits =
-        ToolContinuationUsageLimit::new(target, FastMode::Disabled, OUTPUT_CEILING, 200_000);
+        ToolContinuationUsageLimit::new(target, FastMode::Disabled, OUTPUT_CEILING, 200_000)
+            .with_max_tool_requests(max_requests);
     let fixture = checkpoint_restart_model_call_with_limits(
         &pool,
         FIXTURE_SEED,
@@ -5675,7 +5814,22 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     });
     let followup_input =
         INPUT_TOKENS + FIRST_OUTPUT_TOKENS + serde_json::to_vec(&result_envelope)?.len() as u64;
-    let (fixture, repository, _, _) = commit_authorized_tool_batch(
+    let proposals = (0..next_tool_count)
+        .map(|index| {
+            let name = ToolName::try_new("current_time".to_owned()).expect("fixture name");
+            let arguments = NormalizedToolArguments::try_from_provider_text("{}".to_owned())
+                .expect("fixture arguments");
+            match max_requests.filter(|limit| index as u64 >= *limit) {
+                Some(limit) => ToolCallProposal::inadmissible(
+                    name,
+                    arguments,
+                    signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded { limit },
+                ),
+                None => ToolCallProposal::new(name, arguments),
+            }
+        })
+        .collect::<Vec<_>>();
+    let (fixture, repository, _, _) = commit_authorized_tool_proposals(
         FIXTURE_SEED + 0x100,
         (
             RestartModelCallFixture {
@@ -5685,7 +5839,7 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
             repository,
             *authorized,
         ),
-        &vec![("current_time", "{}"); next_tool_count],
+        &proposals,
         InitialToolApproval::PolicyAuto,
         ProviderReportedTokenUsage::unreported()
             .with_input_tokens(Some(followup_input))
@@ -5719,7 +5873,10 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
             ),
         )
         .await?;
-    for _ in 1..next_tool_count {
+    let admitted_count = max_requests.map_or(next_tool_count, |limit| {
+        next_tool_count.min(usize::try_from(limit).unwrap_or(usize::MAX))
+    });
+    for _ in 1..admitted_count {
         let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
         tools
             .prepare_next_attempt(
@@ -5758,7 +5915,7 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     .bind(continuation.into_uuid())
     .fetch_all(&pool)
     .await?;
-    assert_eq!(details.len(), next_tool_count);
+    assert_eq!(details.len(), admitted_count);
     for (exact, admitted) in details {
         let detail = "\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES);
         assert_eq!(exact, detail);
@@ -5800,9 +5957,44 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
         .await?;
     assert_eq!(
         checkpointed,
-        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(following_call),
-        "a bounded result must leave room to report the following tool's typed failure"
+        if expect_compaction {
+            signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(
+                fixture.turn,
+            )
+        } else {
+            signalbox_application::PrepareToolContinuationOutcome::Checkpointed(following_call)
+        },
+        "the finite allowance admits fitting results and compacts larger batches"
     );
+    let rejected_results: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM semantic_transcript_entry entry
+           JOIN tool_request request ON request.request_id = entry.tool_result_request_id
+          WHERE request.producing_model_call_id = $1 AND entry.payload_kind = 'tool_inadmissible'",
+    )
+    .bind(continuation.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        rejected_results,
+        i64::try_from(next_tool_count - admitted_count)?
+    );
+    if rejected_results > 0 && !expect_compaction {
+        assert_rejected_process_reads(
+            &pool,
+            fixture.session,
+            &vec![
+                serde_json::json!({"error": {
+                    "kind": "execution_failed",
+                    "detail": format!(
+                        "proposal_limit_exceeded: maximum {} proposals per response",
+                        max_requests.expect("count-rejected proposals have a finite cap"),
+                    ),
+                }});
+                usize::try_from(rejected_results)?
+            ],
+        )
+        .await?;
+    }
     pool.close().await;
     drop(container);
     Ok(())
@@ -6256,5 +6448,119 @@ async fn repository_watch_push_evidence_requires_a_completed_configured_push()
             "{tool}, fixture {seed}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn process_reads_render_both_proposal_rejection_reasons() -> Result<(), Box<dyn Error>> {
+    // Supplies distinct identities for this two-request round.
+    const SEED: u128 = 0x269_2000;
+    let (container, pool, _) = migrated_postgres().await?;
+    let authorized = authorize_checkpointed_model_call_with_attachment(&pool, SEED, None).await?;
+    let proposals = [
+        signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded { limit: 0 },
+        signalbox_domain::ToolInadmissibleReason::ArgumentBytesExceeded { limit: 1, bytes: 2 },
+    ]
+    .into_iter()
+    .map(|reason| {
+        ToolCallProposal::inadmissible(
+            ToolName::try_new("current_time".to_owned()).expect("fixture name"),
+            NormalizedToolArguments::try_from_provider_text("{}".to_owned())
+                .expect("fixture arguments"),
+            reason,
+        )
+    })
+    .collect::<Vec<_>>();
+    let (fixture, repository, _, _) = commit_authorized_tool_proposals(
+        SEED,
+        authorized,
+        &proposals,
+        InitialToolApproval::PolicyAuto,
+        ProviderReportedTokenUsage::unreported(),
+        None,
+    )
+    .await?;
+    let continuation = ModelCallId::from_uuid(Uuid::now_v7());
+    let outcome = repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                proposals
+                    .iter()
+                    .map(|_| SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()))
+                    .collect(),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                continuation,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("fixture has no steering"),
+        )
+        .await?;
+    assert_eq!(
+        outcome,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation)
+    );
+    assert_rejected_process_reads(&pool, fixture.session, &[
+        serde_json::json!({"error": {"kind":"execution_failed", "detail":"proposal_limit_exceeded: maximum 0 proposals per response"}}),
+        serde_json::json!({"error": {"kind":"invalid_arguments", "detail":"argument payload has 2 bytes; maximum 1 bytes"}}),
+    ]).await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn assert_rejected_process_reads(
+    pool: &PgPool,
+    session: SessionId,
+    expected: &[serde_json::Value],
+) -> Result<(), Box<dyn Error>> {
+    let reads = ProcessReadRepository::new(pool.clone());
+    // read_transcript consumes the streamed transcript cursor.
+    let snapshot = reads
+        .read_transcript(session)
+        .await?
+        .expect("session remains readable");
+    let mut results = Vec::new();
+    let mut positions = Vec::new();
+    let mut references = Vec::new();
+    for entry in snapshot.entries() {
+        if let ProcessTranscriptEntry::ToolInadmissible {
+            entry_index,
+            source_session,
+            entry: identity,
+            content,
+            ..
+        } = entry
+        {
+            results.push(serde_json::from_str::<serde_json::Value>(content)?);
+            positions.push(*entry_index);
+            references.push(SemanticTranscriptEntryRef::from_source(
+                *source_session,
+                *identity,
+            ));
+        }
+    }
+    assert_eq!(results, expected);
+    let selected = reads
+        .read_selected_transcript_entries(&positions, &references)
+        .await?;
+    let selected_results = selected
+        .iter()
+        .map(|entry| {
+            let ProcessTranscriptEntry::ToolInadmissible { content, .. } = entry else {
+                panic!("selected rejection entries retain their kind");
+            };
+            serde_json::from_str::<serde_json::Value>(content)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(selected_results, expected);
     Ok(())
 }
