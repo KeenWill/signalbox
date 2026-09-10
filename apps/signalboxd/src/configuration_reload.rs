@@ -163,17 +163,20 @@ impl ConfigurationReload {
                 self.github_tool_credential.clone().ok_or(())?,
                 reference.clone(),
             ),
+        };
+        if let Some(app) = credentials.github_app() {
+            return crate::repo_watch_credentials::app_observation_client(
+                "signalbox-goal-verification",
+                app,
+            )
+            .map_err(|_| ());
         }
-        .with_request_timeout(Some(crate::repo_watch_credentials::OBSERVATION_TIMEOUT));
         let credential = credentials.resolve(&reference).await.map_err(|_| ())?;
         let token = std::str::from_utf8(credential.expose_bytes()).map_err(|_| ())?;
         signalbox_module_repo_watch_v2::github::GitHubClient::try_new(
             "signalbox-goal-verification",
             token,
         )
-        .map(|client| {
-            crate::repo_watch_credentials::with_app_authentication(client, credentials.github_app())
-        })
         .map_err(|_| ())
     }
 

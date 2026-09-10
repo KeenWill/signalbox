@@ -16,7 +16,7 @@ use crate::{FileCredentialAccess, WatchedRepositoryConfiguration};
 pub(crate) const GIT_PUSH_CREDENTIAL_REFERENCE: &str = "repository-watch-git-push";
 
 /// Bounds observation credential lookups and requests, matching the push timeout.
-pub(crate) const OBSERVATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const OBSERVATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Resolves only the credential assigned to one configured repository.
 #[derive(Clone, Debug)]
@@ -109,8 +109,12 @@ impl RepositoryWatchClientLoader {
         }
     }
 
-    /// Resolves the credential and returns only an authenticated client handle.
+    /// Reads file credentials or defers App authentication to request dispatch.
     pub async fn load(&self) -> Result<GitHubClient, RepositoryWatchClientLoadError> {
+        if let Some(app) = self.credentials.github_app() {
+            return app_observation_client("signalbox-repository-watch", app)
+                .map_err(RepositoryWatchClientLoadError::from_construction);
+        }
         let credential = self
             .credentials
             .resolve(&self.reference)
@@ -122,7 +126,6 @@ impl RepositoryWatchClientLoader {
             return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
         }
         GitHubClient::try_new("signalbox-repository-watch", token)
-            .map(|client| with_app_authentication(client, self.credentials.github_app()))
             .map_err(RepositoryWatchClientLoadError::from_construction)
     }
 }
@@ -169,39 +172,37 @@ fn authenticated_push_url(
     Ok(url.into())
 }
 
-pub(crate) fn with_app_authentication(
-    client: GitHubClient,
-    app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
-) -> GitHubClient {
-    let sender: Option<signalbox_module_repo_watch_v2::github::AuthenticatedRequestSender> = app
-        .map(|app| {
-            let send: signalbox_module_repo_watch_v2::github::AuthenticatedRequestSender =
-                std::sync::Arc::new(move |request, path| {
-                    let app = app.clone();
-                    Box::pin(async move {
-                        let response = app.send(request, Some(OBSERVATION_TIMEOUT)).await.map_err(
-                            |failure| match failure {
-                                signalbox_github_transport::AppRequestFailure::Credential(_) => {
-                                    GitHubClientError::InvalidCredential
+pub(crate) fn app_observation_client(
+    user_agent: &str,
+    app: std::sync::Arc<signalbox_github_transport::AppAuthentication>,
+) -> Result<GitHubClient, GitHubClientError> {
+    GitHubClient::try_with_request_sender(
+        user_agent,
+        std::sync::Arc::new(move |request, path| {
+            let app = app.clone();
+            Box::pin(async move {
+                let response =
+                    app.send(request, Some(OBSERVATION_TIMEOUT))
+                        .await
+                        .map_err(|failure| match failure {
+                            signalbox_github_transport::AppRequestFailure::Credential(_) => {
+                                GitHubClientError::InvalidCredential
+                            }
+                            signalbox_github_transport::AppRequestFailure::Request(source) => {
+                                GitHubClientError::Request {
+                                    path: path.clone(),
+                                    status: None,
+                                    source,
                                 }
-                                signalbox_github_transport::AppRequestFailure::Request(source) => {
-                                    GitHubClientError::Request {
-                                        path: path.clone(),
-                                        status: None,
-                                        source,
-                                    }
-                                }
-                            },
-                        )?;
-                        let credential = signalbox_github_transport::response_credential(&response)
-                            .ok_or(GitHubClientError::InvalidCredential)?
-                            .to_vec();
-                        scrub_app_response(response, &path, &credential).await
-                    })
-                });
-            send
-        });
-    client.with_request_sender(sender)
+                            }
+                        })?;
+                let credential = signalbox_github_transport::response_credential(&response)
+                    .ok_or(GitHubClientError::InvalidCredential)?
+                    .to_vec();
+                scrub_app_response(response, &path, &credential).await
+            })
+        }),
+    )
 }
 
 async fn scrub_app_response(
@@ -399,15 +400,14 @@ mod tests {
     };
     use signalbox_model_runtime::CredentialReference;
 
-    // Distinct generations exercise response-scoped redaction after a refresh.
-    const INITIAL_TOKEN: &str = "initial-installation-token";
+    // The response credential contains characters with a distinct JSON-escaped spelling.
     const RESPONSE_TOKEN: &str = "refreshed\"installation\\token";
     const OBSERVATION_PATH: &str = "/repos/fixture/project/pulls";
 
     fn observation_client(body: serde_json::Value) -> super::GitHubClient {
-        super::GitHubClient::try_new("repository-watch-fixture", INITIAL_TOKEN)
-            .expect("fixture client")
-            .with_request_sender(Some(std::sync::Arc::new(move |_request, path| {
+        super::GitHubClient::try_with_request_sender(
+            "repository-watch-fixture",
+            std::sync::Arc::new(move |_request, path| {
                 let body = body.to_string();
                 Box::pin(async move {
                     let response = http::Response::builder()
@@ -422,7 +422,9 @@ mod tests {
                     super::scrub_app_response(response.into(), &path, RESPONSE_TOKEN.as_bytes())
                         .await
                 })
-            })))
+            }),
+        )
+        .expect("fixture client")
     }
 
     #[tokio::test]
@@ -521,10 +523,9 @@ mod tests {
             73,
             std::sync::Arc::new(|| Box::pin(std::future::pending())),
         );
-        let client = super::with_app_authentication(
-            super::GitHubClient::try_new("observation-timeout-fixture", INITIAL_TOKEN).unwrap(),
-            Some(std::sync::Arc::new(app)),
-        );
+        let client =
+            super::app_observation_client("observation-timeout-fixture", std::sync::Arc::new(app))
+                .expect("construction does not wait for the App key");
         let started = tokio::time::Instant::now();
         let (rest, graphql) = tokio::time::timeout(std::time::Duration::from_secs(301), async {
             tokio::join!(
@@ -537,6 +538,40 @@ mod tests {
         assert!(matches!(rest, Err(GitHubClientError::InvalidCredential)));
         assert!(matches!(graphql, Err(GitHubClientError::InvalidCredential)));
         assert_eq!(started.elapsed(), std::time::Duration::from_secs(300));
+    }
+
+    #[tokio::test]
+    async fn app_client_loading_defers_credential_resolution_until_observation_dispatch() {
+        let directory = tempfile::tempdir().expect("isolated credential fixture");
+        let missing_key = directory.path().join("missing-app-key.pem");
+        // Arbitrary App identities; no fixture key exists, so no network request is possible.
+        let source = format!(
+            "[[credential_profiles]]\nname = \"fixture-app\"\nadapter = \"github\"\ndelivery = \"github_app\"\napp_id = 42\ninstallation_id = 73\nprivate_key_file = {}\n",
+            serde_json::to_string(missing_key.to_str().unwrap()).unwrap(),
+        );
+        let document = source
+            .parse::<toml_edit::DocumentMut>()
+            .expect("fixture profile");
+        let profiles = crate::credential_pools::parse_github_credential_profiles(
+            document.get("credential_profiles"),
+        )
+        .expect("profile parsing does not read the key");
+        let reference = CredentialReference::new("fixture-app");
+        let loader = RepositoryWatchClientLoader {
+            credentials: FileCredentialAccess::from_github(
+                &profiles["fixture-app"],
+                reference.clone(),
+            ),
+            reference,
+        };
+        let client = loader
+            .load()
+            .await
+            .expect("client loading does not resolve App credentials");
+        assert!(matches!(
+            client.get(OBSERVATION_PATH).await,
+            Err(GitHubClientError::InvalidCredential),
+        ));
     }
 
     #[tokio::test(start_paused = true)]

@@ -342,15 +342,15 @@ tables, or name another module schema.
 The module retains an authenticated, HTTPS-only GitHub client for API-relative
 GET requests and GraphQL observation queries. It receives no database handle.
 The daemon's repository-specific client loader rereads the configured credential
-file on each load, or resolves the selected App profile's shared installation
-token cache, and returns only an authenticated client handle. Credential and
-client-construction failures have distinct redacted error classes. App responses
-scrub the token used for that response, including its JSON-escaped form, from
-observation text and retained validators before poll-cache and PR-state
-persistence.
+file on each load, or installs a sender that resolves the selected App profile's
+shared installation-token cache at request dispatch. It returns only an
+authenticated client handle. Credential and client-construction failures have
+distinct redacted error classes. App responses scrub the token used for that
+response, including its JSON-escaped form, from observation text and retained
+validators before poll-cache and PR-state persistence.
 
-App-backed repository-watch and goal-verification credential lookups and
-observation requests have a 300-second timeout. Each request shares that budget
+App-backed repository-watch and goal-verification clients resolve no credential
+during construction. Each observation request shares one 300-second budget
 across cache waits, token exchanges, authentication retries, and HTTP transport.
 
 The module's dedicated PostgreSQL login role owns `mod_repo_watch`, has no

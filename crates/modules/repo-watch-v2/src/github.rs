@@ -36,12 +36,28 @@ pub struct GitHubClient {
 impl GitHubClient {
     /// Builds a client that retains its sensitive authorization header for its lifetime.
     pub fn try_new(user_agent: &str, token: &str) -> Result<Self, GitHubClientError> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut headers = HeaderMap::new();
         let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| GitHubClientError::InvalidCredential)?;
         authorization.set_sensitive(true);
         headers.insert(AUTHORIZATION, authorization);
+        Self::build(user_agent, headers, None)
+    }
+
+    /// Builds a client whose sender resolves authentication only at request dispatch.
+    pub fn try_with_request_sender(
+        user_agent: &str,
+        sender: AuthenticatedRequestSender,
+    ) -> Result<Self, GitHubClientError> {
+        Self::build(user_agent, HeaderMap::new(), Some(sender))
+    }
+
+    fn build(
+        user_agent: &str,
+        mut headers: HeaderMap,
+        request_sender: Option<AuthenticatedRequestSender>,
+    ) -> Result<Self, GitHubClientError> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         headers.insert(
             ACCEPT,
             HeaderValue::from_static("application/vnd.github+json"),
@@ -59,14 +75,8 @@ impl GitHubClient {
             .map_err(GitHubClientError::Build)?;
         Ok(Self {
             client,
-            request_sender: None,
+            request_sender,
         })
-    }
-
-    /// Installs deployment-owned authentication and refresh at request dispatch.
-    pub fn with_request_sender(mut self, sender: Option<AuthenticatedRequestSender>) -> Self {
-        self.request_sender = sender;
-        self
     }
 
     async fn send(
