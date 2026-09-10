@@ -11,6 +11,7 @@ pub trait CodeHostTransport: marker::Send {
         &mut self,
         operation: CodeHostOperation,
         credential: &signalbox_model_runtime::CredentialValue,
+        request_timeout: option::Option<time::Duration>,
     ) -> impl future::Future<Output = result::Result<CodeHostResult, CodeHostTransportFailure>>
            + marker::Send;
 }

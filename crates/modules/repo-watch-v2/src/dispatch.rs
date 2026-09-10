@@ -78,6 +78,7 @@ impl RepoWatchStore {
              JOIN gh_event AS event ON event.repository = active.repository
               AND event.repository_event_ordinal > GREATEST(revision.activated_after_event_ordinal, COALESCE(cursor.event_ordinal, 0))
              WHERE active.repository = $1 AND active.rule_id = $2 AND active.active_revision = $3
+               AND cursor.effect_id IS NULL
              ORDER BY event.repository_event_ordinal LIMIT 1")
             .bind(repository.as_str()).bind(rule.id().as_str()).bind(Decimal::from(rule.version().get()))
             .fetch_optional(&self.pool).await?;
@@ -305,11 +306,28 @@ impl RepoWatchStore {
         sink: &mut Sink,
         source: &LifecycleEventSource,
     ) -> Result<(), SubmissionError<Sink::Error>> {
+        self.submit_selected_pending(codec, sink, source, None)
+            .await
+    }
+
+    pub(crate) async fn submit_selected_pending<
+        Codec: SessionCommandCodec,
+        Sink: SessionCommandSink,
+    >(
+        &self,
+        codec: &mut Codec,
+        sink: &mut Sink,
+        source: &LifecycleEventSource,
+        dispatch: Option<signalbox_session_ownership::RepoWatchDispatchId>,
+    ) -> Result<(), SubmissionError<Sink::Error>> {
         for planned in self
             .recover_pending_commands(codec)
             .await
             .map_err(SubmissionError::Store)?
         {
+            if dispatch.is_some_and(|dispatch| planned.dispatch() != dispatch) {
+                continue;
+            }
             let id = planned.command().command_id();
             let retirement_session: Option<Uuid> = sqlx::query_scalar(
                 "SELECT origin.created_session_id FROM dispatch_ledger reaction
@@ -388,7 +406,7 @@ impl RepoWatchStore {
     }
 }
 
-fn singleton_key(
+pub(crate) fn singleton_key(
     scope: RepoWatchSingletonScope,
     event: &RepoWatchEvent,
     observation: Option<&RepoWatchObservation>,

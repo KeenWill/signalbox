@@ -132,6 +132,51 @@ impl ProgramJournalRepository {
         crate::program_registration::ProgramRegistrationRepository::new(self.pool.clone())
     }
 
+    /// Finds an exact effect answer in a checked journal, including terminal runs.
+    pub async fn has_effect_answer(
+        &self,
+        request: &EffectRequest,
+        answer: &InlineFramePayload,
+    ) -> Result<bool, ProgramJournalRepositoryError> {
+        let runs: Vec<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT request.run_id FROM program_run_journal_entry request
+             JOIN program_run_journal_entry answer ON answer.run_id = request.run_id
+               AND answer.resolves_request_ordinal = request.request_ordinal
+             WHERE request.frame_direction = 'request' AND request.frame_kind = 'effect'
+               AND request.effect_capability = $1 AND request.effect_method = $2
+               AND request.payload_inline = $3
+               AND answer.frame_direction = 'delivery' AND answer.frame_kind = 'answer'
+               AND answer.payload_inline = $4",
+        )
+        .bind(program_capability_to_str(request.capability()))
+        .bind(request.method())
+        .bind(request.payload().as_bytes())
+        .bind(answer.as_bytes())
+        .fetch_all(&self.pool)
+        .await?;
+        for run in runs {
+            let journal = self
+                .load(ProgramRunId::from_uuid(run))
+                .await?
+                .ok_or(ProgramJournalCorruption::MissingStream)?;
+            if journal.entries().iter().any(|entry| {
+                let JournalFrame::Request(frame) = entry.frame() else {
+                    return false;
+                };
+                frame.kind() == &RequestKind::Effect(request.clone())
+                    && journal.entries().iter().any(|entry| {
+                        matches!(entry.frame(),
+                        JournalFrame::Delivery(delivery) if matches!(delivery.kind(),
+                            DeliveryKind::Answer { resolves, payload }
+                                if *resolves == frame.ordinal() && payload == answer))
+                    })
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Listens for committed answers from the requested source runs; notifications are hints.
     pub async fn listen(
         &self,

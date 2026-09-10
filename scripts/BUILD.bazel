@@ -110,7 +110,10 @@ py_test(
     data = ["//:ci_comparison_workflows"],
     # The fixtures exercise shallow fetches with the host Git executable.
     tags = ["external"],
-    deps = [requirement("PyYAML")],
+    deps = [
+        ":check_migration_versions",
+        requirement("PyYAML"),
+    ],
 )
 
 py_library(
