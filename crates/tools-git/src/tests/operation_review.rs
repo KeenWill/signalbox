@@ -977,7 +977,7 @@ fn sha256_status_recognizes_an_unchanged_worktree_blob() {
 }
 
 #[test]
-fn real_git_sha256_pack_index_resolves_each_fixture_object() {
+fn sha256_pack_index_hits_require_valid_live_content() {
     use std::io::{Seek, SeekFrom, Write};
     let fixture = Sha256Fixture::new();
     let index = real_git_sha256_pack_index();
@@ -992,19 +992,22 @@ fn real_git_sha256_pack_index_resolves_each_fixture_object() {
         .expect("pack header writes");
     pack.write_all(&(expected.len() as u32).to_be_bytes())
         .expect("object count writes");
-    // Index lookups need the header and trailer, not decoded object content.
+    // The real index points at absent content inside this sparse pack.
     pack.seek(SeekFrom::Start(1024 * 1024))
         .expect("sparse pack seeks");
     pack.write_all(checksum.as_bytes())
         .expect("pack trailer writes");
     let executor = fixture.executor();
-    let source = crate::push_objects::ObjectSource::open(
+    let mut source = crate::push_objects::ObjectSource::open(
         &executor.repository_authority,
         Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
     )
     .expect("source opens");
     for oid in expected {
-        assert!(source.contains(oid).expect("index lookup succeeds"));
+        assert!(
+            source.contains(oid).is_err(),
+            "a pack index hit must not prove content availability"
+        );
     }
 }
 
@@ -1569,4 +1572,58 @@ fn branch_switch_rejects_changed_content_before_checkout_capture() {
         fs::read(fixture.root().join(TRACKED_PATH)).expect("edit remains"),
         b"concurrent content"
     );
+}
+
+#[test]
+fn staging_does_not_publish_an_index_over_corrupt_live_object_content() {
+    for wrong_hash in [false, true] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository");
+        let content = b"generated staging content";
+        let oid = repository.blob(content).expect("live loose object");
+        let hex = oid.to_string();
+        let object_path = fixture
+            .root()
+            .join(".git/objects")
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        fs::set_permissions(&object_path, fs::Permissions::from_mode(0o600))
+            .expect("writable object");
+        if wrong_hash {
+            let other = repository
+                .blob(b"different decoded content")
+                .expect("different valid object")
+                .to_string();
+            let other_path = fixture
+                .root()
+                .join(".git/objects")
+                .join(&other[..2])
+                .join(&other[2..]);
+            fs::copy(other_path, &object_path).expect("valid zlib with wrong object hash");
+        } else {
+            fs::write(&object_path, b"corrupt loose object").expect("corrupt compressed bytes");
+        }
+        let path = "new-staged.txt";
+        fs::write(fixture.root().join(path), content).expect("staging input");
+        let index_before =
+            fs::read(fixture.root().join(ADMINISTRATION_INDEX_PATH)).expect("index before");
+        let head_before = repository.head().expect("HEAD before").target();
+        let executor = fixture.executor();
+        assert!(
+            executor
+                .execute_operation(LocalOperation::Stage(GitStageArguments {
+                    paths: vec![path.to_owned()]
+                }))
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(fixture.root().join(ADMINISTRATION_INDEX_PATH)).expect("index after"),
+            index_before
+        );
+        assert_eq!(repository.head().expect("HEAD after").target(), head_before);
+        assert_eq!(
+            fs::read(fixture.root().join(path)).expect("staging input survives"),
+            content
+        );
+    }
 }
