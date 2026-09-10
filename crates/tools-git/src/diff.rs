@@ -159,6 +159,13 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
             None => None,
         };
         let new_buffer = if let Some((oid, mode)) = index_backed_worktree_files.get(&path) {
+            if *mode != GITLINK_MODE {
+                content_truncated |= repository
+                    .read_object_header(*oid)
+                    .map_err(|_| LocalGitFailure::Operation)?
+                    .0
+                    > MAX_DIFF_BYTES;
+            }
             Some((diff_object_buffer(repository, *oid, *mode)?, *mode))
         } else if index_files.contains_key(&path)
             || conflicted_paths.contains(&path)
