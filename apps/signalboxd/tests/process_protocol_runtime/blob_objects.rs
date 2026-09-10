@@ -439,7 +439,7 @@ async fn blob_ten_gib_preparation_and_two_hundred_reads_stay_bounded() -> Result
         configuration.target_catalog(),
         ModelCallCredentialReference::new("sparse-blob-fixture"),
     )
-    .with_continuation_usage_limits(configuration.tool_continuation_usage_limits());
+    .with_continuation_usage_limits(configuration.tool_continuation_usage_limits(&[])?);
     let call = ModelCallId::from_uuid(Uuid::now_v7());
     let mut prepared = None;
     for _ in 0..2 {
