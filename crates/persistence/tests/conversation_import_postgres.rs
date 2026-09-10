@@ -2686,7 +2686,7 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
 
 /// Stores the supplied text bytes in the version-two attested-text envelope;
 /// the temporary column lets PostgreSQL compress the value before validation.
-async fn store_compressible_import_text(
+async fn store_import_text_for_validation(
     connection: &mut sqlx::PgConnection,
     text: &[u8],
 ) -> Result<(), sqlx::Error> {
@@ -2711,7 +2711,7 @@ async fn compressed_import_text_preserves_nul_and_multibyte_utf8() -> Result<(),
     let (_database, pool, _) = migrated_postgres().await?;
     let mut connection = pool.acquire().await?;
     let text = "a\0é🦀".repeat(COMPRESSIBLE_REPETITIONS);
-    store_compressible_import_text(&mut connection, text.as_bytes()).await?;
+    store_import_text_for_validation(&mut connection, text.as_bytes()).await?;
     let compressed: bool = sqlx::query_scalar(
         "SELECT pg_column_size(content_encoding) < octet_length(content_encoding)
            FROM compressed_import_text",
@@ -2737,7 +2737,7 @@ async fn compressed_import_text_rejects_an_invalid_utf8_suffix() -> Result<(), B
     let mut connection = pool.acquire().await?;
     let mut text = "a\0é🦀".repeat(COMPRESSIBLE_REPETITIONS).into_bytes();
     text.push(0xff);
-    store_compressible_import_text(&mut connection, &text).await?;
+    store_import_text_for_validation(&mut connection, &text).await?;
     let error = sqlx::query_scalar::<_, i16>(
         "SELECT imported_content_encoding_kind(content_encoding) FROM compressed_import_text",
     )
@@ -2751,6 +2751,30 @@ async fn compressed_import_text_rejects_an_invalid_utf8_suffix() -> Result<(), B
             .as_deref(),
         Some("23514"),
         "the imported-content constraint rejects malformed UTF-8"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn import_content_validation_survives_an_empty_restore_search_path()
+-> Result<(), Box<dyn Error>> {
+    const ARBITRARY_VALID_TEXT: &[u8] = b"a";
+    let (_database, pool, _) = migrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    store_import_text_for_validation(&mut connection, ARBITRARY_VALID_TEXT).await?;
+    sqlx::query("SET search_path = ''")
+        .execute(&mut *connection)
+        .await?;
+    let kind: i16 = sqlx::query_scalar(
+        "SELECT public.imported_content_encoding_kind(content_encoding)
+           FROM pg_temp.compressed_import_text",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    assert_eq!(
+        kind, 1,
+        "restore resolves the attested-text validator's helpers"
     );
     Ok(())
 }
