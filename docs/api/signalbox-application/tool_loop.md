@@ -245,6 +245,10 @@ impl ToolExecutionInvocation {
 ```rust
 pub enum ToolExecutorEvidence {
     CompletedText(string::String),
+    CompletedMedia {
+        text: signalbox_domain::ToolResultText,
+        reference: signalbox_domain::ToolMediaReference,
+    },
     KnownFailed {
         detail: option::Option<signalbox_domain::ToolExecutionErrorDetail>,
     },

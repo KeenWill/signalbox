@@ -106,6 +106,8 @@ pub enum ToolChoice {
 /// is a new operation with a new caller identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelOperation<C> {
+    /// Configured image capability applied to this exact request before send authorization.
+    pub image_presentation: Option<crate::ImagePresentationCapability>,
     /// The caller's durable identity for this operation, threaded onto every
     /// observation and evidence record.
     pub correlation: C,
@@ -157,6 +159,7 @@ impl<C> ModelOperation<C> {
         settings: ModelSettings,
     ) -> Self {
         Self {
+            image_presentation: None,
             correlation,
             credential_reference,
             requested_target,

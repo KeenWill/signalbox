@@ -516,12 +516,13 @@ A `web_fetch` request's canonical origin must satisfy any optional deployment
 restriction in [configuration-and-credentials](configuration-and-credentials.md)
 before dispatch, and the transport that carries an admitted request is stated in
 [web-egress-threat-model](web-egress-threat-model.md). Failure before request
-dispatch returns a fixed sanitized known failure; timeout, transport, or body
-loss after dispatch begins is commit-ambiguous. Both web tools declare
-`ExternalEffect` and default to delegated approval under either session blanket.
-An explicit `human` tool posture parks for a person; `auto` still delegates web
-requests. The judge decides before either tool reaches its transport or
-credential boundary.
+dispatch returns a fixed sanitized known failure. A `web_fetch` timeout,
+including DNS deadline expiry, returns a typed timeout failure and the turn
+continues. Other transport or body loss after dispatch remains ambiguous.
+`web_fetch` and `web_search` declare `ExternalEffect` and default to delegated
+approval under either session blanket. An explicit `human` tool posture parks
+for a person; `auto` still delegates web requests. The judge decides before
+either tool reaches its transport or credential boundary.
 
 The blob tools authorize only digests present in attachment stubs in the
 rendered frontier for the issuing turn. A visibility or budget closure resolves
@@ -608,3 +609,9 @@ the hint until a full nudge buffer has capacity.
   [tool-loop design](../design/tool-loop.md).
 - Runner-locus execution rules: the lost-lease retry exception and the runner
   approval ladder; see [runner protocol design](../design/runner-protocol.md).
+
+A completed image read retains a typed media reference beside its bounded text
+summary. Its storage record carries independent presented and source validation
+identities; terminal evidence is immutable. Rendering preserves that reference
+only from the durable result, and model preparation authenticates it before send
+authorization. Text or JSON tool output cannot construct this authority.

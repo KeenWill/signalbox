@@ -9,6 +9,13 @@ pub(super) const MAX_TOOL_RESULT_TEXT_BYTES: usize = 1024 * 1024;
 pub enum ToolResultContent {
     /// Exact bounded UTF-8 text, including the empty value.
     Text(ToolResultText),
+    /// Bounded descriptive text and authenticated image evidence.
+    Media {
+        /// Model-visible summary subject to the ordinary context text bound.
+        text: ToolResultText,
+        /// Immutable image validation evidence retained with this attempt.
+        reference: crate::ToolMediaReference,
+    },
 }
 
 /// Exact bounded tool-result text.

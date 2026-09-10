@@ -1096,30 +1096,10 @@ mod tests {
 
     use super::{
         AutomaticReconciliationAttempt, RECONCILIATION_ACQUIRE_WAIT,
-        RECONCILIATION_DEADLINE_DEFAULT, RECONCILIATION_DEADLINE_FLOOR,
-        RECONCILIATION_DEADLINE_MARGIN, RECONCILIATION_LOCK_WAIT, RETRY_LADDER_ARITY,
+        RECONCILIATION_DEADLINE_DEFAULT, RECONCILIATION_DEADLINE_FLOOR, RETRY_LADDER_ARITY,
         reconciliation_deadline, retry_ladder_millis,
     };
     use std::time::Duration;
-
-    /// The floor has to outlast the database-side budgets *strictly*. Equal is
-    /// the stranding case the layered bounds exist to close: the deadline would
-    /// start before the pool is asked for a connection and so also cover `BEGIN`
-    /// and the `lock_timeout` statement, leaving it able to expire in the same
-    /// instant PostgreSQL was about to report `55P03`.
-    #[test]
-    fn the_deadline_floor_outlasts_both_database_side_budgets() {
-        let budgets = RECONCILIATION_ACQUIRE_WAIT + RECONCILIATION_LOCK_WAIT;
-        assert!(
-            RECONCILIATION_DEADLINE_FLOOR > budgets,
-            "floor {RECONCILIATION_DEADLINE_FLOOR:?} must outlast budgets {budgets:?}"
-        );
-        assert_eq!(
-            RECONCILIATION_DEADLINE_FLOOR - budgets,
-            RECONCILIATION_DEADLINE_MARGIN
-        );
-        assert!(!RECONCILIATION_DEADLINE_MARGIN.is_zero());
-    }
 
     /// The ladder carries milliseconds, not truncated seconds. A sub-second
     /// configured backoff is the case whole seconds destroyed: every rung

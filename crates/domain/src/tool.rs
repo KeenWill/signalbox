@@ -8,6 +8,7 @@
 mod approval;
 mod arguments;
 mod decide;
+mod media;
 mod name;
 mod override_denial;
 mod policy;
@@ -32,6 +33,7 @@ pub use decide::{
     DecideToolRequestPreparationError, DecideToolRequestRejectedResult, DecideToolRequestResult,
     PreparedDecideToolRequest,
 };
+pub use media::{MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference};
 pub use name::{ToolName, ToolNameError, ToolNameFailure};
 pub use override_denial::{
     OverrideDeniedToolRequest, OverrideDeniedToolRequestAppliedResult,

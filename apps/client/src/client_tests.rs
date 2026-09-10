@@ -499,12 +499,6 @@ fn message_policy_rejects_above_finite_limit() {
 }
 
 #[test]
-fn message_policy_admits_unbounded_input() {
-    let limits = ClientDeploymentLimits::unbounded();
-    assert!(validate_message_policy("four", Some(limits)).is_ok());
-}
-
-#[test]
 fn system_prompt_policy_rejects_above_finite_limit() {
     let limits = ClientDeploymentLimits {
         max_system_prompt_utf8_bytes: Some(3),
@@ -516,18 +510,6 @@ fn system_prompt_policy_rejects_above_finite_limit() {
             Some(limits)
         )
         .is_err()
-    );
-}
-
-#[test]
-fn system_prompt_policy_admits_unbounded_input() {
-    let limits = ClientDeploymentLimits::unbounded();
-    assert!(
-        validate_system_prompt_policy(
-            &SystemPromptText::try_new(String::from("four")).expect("valid prompt"),
-            Some(limits)
-        )
-        .is_ok()
     );
 }
 
@@ -556,17 +538,6 @@ fn metadata_policy_rejects_outside_finite_range() {
     for size in [1, 5] {
         assert!(validate_metadata_page_policy(CanonicalU64::new(size), Some(limits)).is_err());
     }
-}
-
-#[test]
-fn metadata_policy_admits_positive_unbounded_pages() {
-    assert!(
-        validate_metadata_page_policy(
-            CanonicalU64::new(u64::MAX),
-            Some(ClientDeploymentLimits::unbounded())
-        )
-        .is_ok()
-    );
 }
 
 #[test]

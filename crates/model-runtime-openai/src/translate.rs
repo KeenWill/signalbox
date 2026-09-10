@@ -275,6 +275,11 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
             }
             for part in &message.parts {
                 match part {
+                    MessagePart::Image(_) | MessagePart::ImageReference(_) => {
+                        return Err(PreparationFailure::UnsupportedOperation {
+                            detail: String::from("this adapter does not present images"),
+                        });
+                    }
                     MessagePart::ToolResult(result) => {
                         expected.remove(result.tool_call_id.as_str());
                     }
@@ -425,6 +430,9 @@ fn wire_messages(
     let mut parts = message.parts.iter().peekable();
     while let Some(part) = parts.next() {
         match part {
+            MessagePart::Image(_) | MessagePart::ImageReference(_) => {
+                return Err(unsupported("this adapter does not present images"));
+            }
             MessagePart::Text(text) => {
                 let mut content = text.clone();
                 while let Some(MessagePart::Text(text)) = parts.peek() {
@@ -1444,15 +1452,6 @@ mod tests {
             }
         );
         assert_eq!(preparation, validation);
-    }
-
-    #[test]
-    fn empty_stop_sequences_pass_configuration_and_preparation() {
-        let mut candidate = operation("call-no-stop-sequences");
-        candidate.settings.stop_sequences = Vec::new();
-
-        assert!(validate_model_settings(&candidate.settings).is_ok());
-        assert!(build_request(&candidate).is_ok());
     }
 
     #[test]

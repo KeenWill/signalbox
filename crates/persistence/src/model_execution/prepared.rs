@@ -611,6 +611,7 @@ async fn tool_evidence_fits_before_loading(
               ) AS retained_requests USING (request_id)
             UNION ALL
             SELECT COALESCE(octet_length(result_text), 0)::bigint
+                   + COALESCE(octet_length(result_media_reference::text), 0)
                    + COALESCE(octet_length(context_result_text), 0)
                    + COALESCE(octet_length(context_error_detail), 0)
                    + COALESCE(octet_length(error_detail), 0)
@@ -895,7 +896,7 @@ mod preflight_tests {
         let mut connection = pool.acquire().await?;
         sqlx::raw_sql(
             "CREATE TEMP TABLE tool_request (request_id uuid, tool_name text, arguments_text text, inadmissible_reason text);
-             CREATE TEMP TABLE tool_attempt (attempt_id uuid, request_id uuid, result_text text, error_detail text, context_result_text text, context_error_detail text);
+             CREATE TEMP TABLE tool_attempt (attempt_id uuid, request_id uuid, result_text text, error_detail text, context_result_text text, context_error_detail text, result_media_reference jsonb);
              CREATE TEMP TABLE tool_approval_decision (request_id uuid, denial_reason text, rationale text);",
         ).execute(&mut *connection).await?;
         let request = Uuid::from_u128(1);

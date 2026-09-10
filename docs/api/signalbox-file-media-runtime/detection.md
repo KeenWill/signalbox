@@ -181,6 +181,7 @@ pub enum ReadContinuation {
 
 ```rust
 pub enum FileReadResult {
+    Reference(FileMediaReference),
     Text {
         body: string::String,
         continuation: ReadContinuation,
@@ -236,6 +237,18 @@ pub enum ProcessorValidationOutput {
 
 ```rust
 pub enum ProcessorReadOutput {
+    ImageDescription,
+    GeneratedImage {
+        media_type: string::String,
+        provider: string::String,
+        reader: string::String,
+        revision: string::String,
+        byte_length: u64,
+        bytes: vec::Vec<u8>,
+    },
+    DirectReference {
+        media_type: string::String,
+    },
     Text {
         body: string::String,
         truncated: bool,
