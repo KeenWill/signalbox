@@ -36,7 +36,7 @@ impl ToolInputSchema {
 pub enum ToolInputSchemaFailure {
     NotJson,
     NotObject,
-    OutsideArgumentBound(signalbox_domain::ToolArgumentsFailure),
+    NormalizationFailed(signalbox_domain::ToolArgumentsFailure),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

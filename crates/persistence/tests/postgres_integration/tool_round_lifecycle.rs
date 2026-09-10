@@ -5868,6 +5868,23 @@ async fn assert_next_batch_reservation(
         rejected_results,
         i64::try_from(next_tool_count - admitted_count)?
     );
+    if rejected_results > 0 && !expect_compaction {
+        assert_rejected_process_reads(
+            &pool,
+            fixture.session,
+            &vec![
+                serde_json::json!({"error": {
+                    "kind": "execution_failed",
+                    "detail": format!(
+                        "proposal_limit_exceeded: maximum {} proposals per response",
+                        max_requests.expect("count-rejected proposals have a finite cap"),
+                    ),
+                }});
+                usize::try_from(rejected_results)?
+            ],
+        )
+        .await?;
+    }
     pool.close().await;
     drop(container);
     Ok(())
@@ -6251,5 +6268,119 @@ async fn image_result_commit_is_atomic_and_terminal_reference_is_immutable()
         signalbox_application::RetainedToolAttemptObservationStatus::AlreadyCommitted
     );
     assert!(sqlx::query("UPDATE tool_attempt SET result_media_reference = jsonb_set(result_media_reference, '{byte_length}', '65') WHERE attempt_id = $1").bind(attempt.into_uuid()).execute(&pool).await.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn process_reads_render_both_proposal_rejection_reasons() -> Result<(), Box<dyn Error>> {
+    // Supplies distinct identities for this two-request round.
+    const SEED: u128 = 0x269_2000;
+    let (container, pool, _) = migrated_postgres().await?;
+    let authorized = authorize_checkpointed_model_call_with_attachment(&pool, SEED, None).await?;
+    let proposals = [
+        signalbox_domain::ToolInadmissibleReason::ProposalLimitExceeded { limit: 0 },
+        signalbox_domain::ToolInadmissibleReason::ArgumentBytesExceeded { limit: 1, bytes: 2 },
+    ]
+    .into_iter()
+    .map(|reason| {
+        ToolCallProposal::inadmissible(
+            ToolName::try_new("current_time".to_owned()).expect("fixture name"),
+            NormalizedToolArguments::try_from_provider_text("{}".to_owned())
+                .expect("fixture arguments"),
+            reason,
+        )
+    })
+    .collect::<Vec<_>>();
+    let (fixture, repository, _, _) = commit_authorized_tool_proposals(
+        SEED,
+        authorized,
+        &proposals,
+        InitialToolApproval::PolicyAuto,
+        ProviderReportedTokenUsage::unreported(),
+        None,
+    )
+    .await?;
+    let continuation = ModelCallId::from_uuid(Uuid::now_v7());
+    let outcome = repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                proposals
+                    .iter()
+                    .map(|_| SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()))
+                    .collect(),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                continuation,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("fixture has no steering"),
+        )
+        .await?;
+    assert_eq!(
+        outcome,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation)
+    );
+    assert_rejected_process_reads(&pool, fixture.session, &[
+        serde_json::json!({"error": {"kind":"execution_failed", "detail":"proposal_limit_exceeded: maximum 0 proposals per response"}}),
+        serde_json::json!({"error": {"kind":"invalid_arguments", "detail":"argument payload has 2 bytes; maximum 1 bytes"}}),
+    ]).await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn assert_rejected_process_reads(
+    pool: &PgPool,
+    session: SessionId,
+    expected: &[serde_json::Value],
+) -> Result<(), Box<dyn Error>> {
+    let reads = ProcessReadRepository::new(pool.clone());
+    // read_transcript consumes the streamed transcript cursor.
+    let snapshot = reads
+        .read_transcript(session)
+        .await?
+        .expect("session remains readable");
+    let mut results = Vec::new();
+    let mut positions = Vec::new();
+    let mut references = Vec::new();
+    for entry in snapshot.entries() {
+        if let ProcessTranscriptEntry::ToolInadmissible {
+            entry_index,
+            source_session,
+            entry: identity,
+            content,
+            ..
+        } = entry
+        {
+            results.push(serde_json::from_str::<serde_json::Value>(content)?);
+            positions.push(*entry_index);
+            references.push(SemanticTranscriptEntryRef::from_source(
+                *source_session,
+                *identity,
+            ));
+        }
+    }
+    assert_eq!(results, expected);
+    let selected = reads
+        .read_selected_transcript_entries(&positions, &references)
+        .await?;
+    let selected_results = selected
+        .iter()
+        .map(|entry| {
+            let ProcessTranscriptEntry::ToolInadmissible { content, .. } = entry else {
+                panic!("selected rejection entries retain their kind");
+            };
+            serde_json::from_str::<serde_json::Value>(content)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(selected_results, expected);
     Ok(())
 }
