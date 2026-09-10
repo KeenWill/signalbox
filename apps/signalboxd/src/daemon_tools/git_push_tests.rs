@@ -453,10 +453,11 @@ while True:
         .execute(batch.session(), batch.turn())
         .await
         .expect("approved push executes");
-    assert!(matches!(
-        recorded.take(),
-        Some(ToolExecutorEvidence::CompletedText(_))
-    ));
+    let evidence = recorded.take();
+    assert!(
+        matches!(evidence, Some(ToolExecutorEvidence::CompletedText(_))),
+        "SSH push evidence: {evidence:?}"
+    );
     assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), target);
     server.join().expect("SSH fixture server completes");
     let observed = fs::read_to_string(log).expect("SSH invocation log");
