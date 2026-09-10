@@ -12,6 +12,8 @@ const CORPUS: &[u8] = br#"{"cases":[{"id":"approved","request":{"tool":"current_
 const SELECTION: &str = "3aa432ca-488e-4237-ac2b-7496a2ccc2b4";
 const TARGET: &str = "ba705029-f367-4da8-a0bf-dbc6bf798e17";
 const RATIONALE: &str = "Recorded synthetic decision.";
+const DUPLICATE_LIVE_CORPUS: &[u8] = br#"{"name":"shared-name","category":"workspace_benign","tool":"current_time","arguments":"{}","expected":"approve"}
+{"name":"shared-name","category":"workspace_benign","tool":"current_time","arguments":"{\"offset\":\"+01:00\"}","expected":"approve"}"#;
 
 struct MemoryBlobs(Vec<u8>);
 impl CorpusBlobs for MemoryBlobs {
@@ -125,6 +127,40 @@ async fn every_selected_case_is_preflighted_before_a_provider_call() {
     fixture.services.blobs = Arc::new(MemoryBlobs(bytes));
     assert!(fixture.judge(TrialRequest { trial: 0 }).await.is_err());
     assert!(fixture.provider.received_operations().is_empty());
+}
+
+fn duplicate_live_names(fixture: &mut Fixture) {
+    fixture.manifest.format = CorpusFormat::Live;
+    fixture.manifest.corpus = BlobDigest::digest(DUPLICATE_LIVE_CORPUS).to_string();
+    fixture.services.blobs = Arc::new(MemoryBlobs(DUPLICATE_LIVE_CORPUS.to_vec()));
+}
+
+#[tokio::test]
+async fn duplicate_selected_live_names_fail_before_provider_work() {
+    let mut fixture = Fixture::lazy();
+    duplicate_live_names(&mut fixture);
+    let EvalFailure::Rejected(error) = fixture.judge(TrialRequest { trial: 0 }).await.unwrap_err()
+    else {
+        panic!("duplicate case names must reject the effect");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate selected live case name")
+    );
+    assert!(fixture.provider.received_operations().is_empty());
+}
+
+#[tokio::test]
+async fn unselected_live_names_do_not_conflict_with_selected_cases() {
+    let mut fixture = Fixture::lazy();
+    duplicate_live_names(&mut fixture);
+    fixture.manifest.cases = vec![1];
+    assert!(matches!(
+        fixture.judge(TrialRequest { trial: 0 }).await.unwrap(),
+        JudgeAnswer::Verdict { .. }
+    ));
+    assert_eq!(fixture.provider.received_operations().len(), 1);
 }
 
 #[tokio::test]
@@ -683,17 +719,28 @@ mod postgres {
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn invalid_corpus_judge_requests_keep_their_rejection_after_recovery() {
-        for malformed_case in [false, true] {
-            let mut run = RunFixture::configured(|fixture| {
-                if malformed_case {
+        enum Defect {
+            MissingCase,
+            MalformedCase,
+            DuplicateLiveName,
+        }
+        for defect in [
+            Defect::MissingCase,
+            Defect::MalformedCase,
+            Defect::DuplicateLiveName,
+        ] {
+            let mut run = RunFixture::configured(|fixture| match defect {
+                Defect::MalformedCase => {
                     let mut corpus: serde_json::Value = serde_json::from_slice(CORPUS).unwrap();
                     corpus["cases"][0]["request"]["tool"] = "".into();
                     let bytes = serde_json::to_vec(&corpus).unwrap();
                     fixture.manifest.corpus = BlobDigest::digest(&bytes).to_string();
                     fixture.services.blobs = Arc::new(MemoryBlobs(bytes));
-                } else {
+                }
+                Defect::MissingCase => {
                     fixture.manifest.cases = vec![2];
                 }
+                Defect::DuplicateLiveName => duplicate_live_names(fixture),
             })
             .await;
             run.javascript(&format!(

@@ -107,6 +107,14 @@ impl EvalServices {
                     .ok_or_else(|| failure("selected corpus case missing"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut live_names = std::collections::BTreeSet::new();
+        for case in &selected {
+            if let Case::Live(case) = case
+                && !live_names.insert(&case.name)
+            {
+                return Err(failure("duplicate selected live case name"));
+            }
+        }
         // Preflight every selected case before the first provider operation.
         let rendered = selected
             .iter()
