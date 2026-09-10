@@ -633,7 +633,7 @@ export const commandRegistry = [
   {
     id: 'session.send',
     title: 'Send message',
-    description: '',
+    description: 'Submit input to this session.',
     category: 'Surface',
     bindings: [],
     available: (context) => context.submitSessionInput !== undefined,
