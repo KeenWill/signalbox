@@ -474,9 +474,10 @@ decoders reject a syntactically valid record that repeats an object member, at
 any nesting depth, as a stream protocol violation. A malformed or over-depth
 body attached to a definitive error status cannot erase that exchange: the
 adapter falls back to status classification with bounded sanitized native
-material. An Anthropic thinking block must close with exactly one nonempty
-integrity signature, and an empty signature on the opening block is a
-placeholder rather than a delivered one.
+material. Anthropic thinking blocks retain their text and any signature;
+streamed signature fragments concatenate, and missing or empty signatures do not
+prevent completion. Replay omits unsigned thinking and adapters drop thinking
+representations they cannot send.
 
 Each CLI adapter mechanically disables every native facility of the pinned CLI
 that could add a model-visible tool, an instruction source, an external

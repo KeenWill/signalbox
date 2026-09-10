@@ -219,11 +219,9 @@ fn unparsed_block_tool_calls(opened: ToolCallsOpened) -> ToolCallsAtLoss {
 
 /// The tool fact where the decode stopped on a block it had already classified.
 ///
-/// Rejecting a block the adapter understood — a fallback marker, an unsigned
-/// thinking block, an unrecognized block type — leaves that block examined and
-/// known not to be a tool call, so only the blocks the loop never reached can
-/// withhold the answer. When the rejected block is the last one, nothing is
-/// unexamined and the negative is a fact.
+/// Rejecting a classified non-tool block leaves only later unexamined blocks
+/// able to withhold the answer. Thinking signatures are optional; stream decoding
+/// concatenates their fragments.
 fn examined_block_tool_calls(opened: ToolCallsOpened, later: LaterBlocks) -> ToolCallsAtLoss {
     match (opened, later) {
         (ToolCallsOpened::Yes, LaterBlocks::Unexamined | LaterBlocks::AllClassified) => {
@@ -441,29 +439,6 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             opened_tool_calls = ToolCallsOpened::Yes;
         }
         match convert_block(block) {
-            Some(part)
-                if matches!(
-                    &part,
-                    AssistantPart::Thinking { signature, .. }
-                        if signature.as_deref().is_none_or(str::is_empty)
-                ) =>
-            {
-                // The provider requires the integrity signature for any
-                // replay; completion material without it is not usable.
-                return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
-                    response_content_observed: false,
-                    cause: LossCause::ResponseUnintelligible {
-                        detail: "success response carries a thinking block without its \
-                                 integrity signature"
-                            .to_string(),
-                    },
-                    exchange,
-                    reported_model,
-                    finish_reported: None,
-                    tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks),
-                    usage,
-                });
-            }
             Some(part) => {
                 if let AssistantPart::ToolCall(proposal) = &part {
                     if !tool_call_ids.insert(proposal.id.as_str().to_string()) {
@@ -709,6 +684,7 @@ mod tests {
                 "content": [
                     {"type": "text", "text": "Oslo has"},
                     {"type": "thinking", "thinking": "checking", "signature": "sig_1"},
+                    {"type": "redacted_thinking", "data": "opaque fixture reasoning"},
                     {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"city": "Oslo"}}
                 ],
                 "stop_reason": "tool_use",
@@ -735,6 +711,9 @@ mod tests {
                 AssistantPart::Thinking {
                     text: "checking".to_string(),
                     signature: Some("sig_1".to_string()),
+                },
+                AssistantPart::RedactedThinking {
+                    data: String::from("opaque fixture reasoning")
                 },
                 AssistantPart::ToolCall(ToolCallProposal {
                     id: ToolCallId::new("toolu_1"),
@@ -1205,12 +1184,24 @@ mod tests {
         );
     }
 
-    /// The same for a sole thinking block rejected for its missing signature.
     #[test]
-    fn a_sole_unsigned_thinking_block_states_the_negative() {
-        assert_sole_block_tool_fact(
-            r#"{"type": "thinking", "thinking": "hm", "signature": ""}"#,
-            ToolCallsAtLoss::NoneOpened,
+    fn a_sole_unsigned_thinking_block_completes() {
+        let (evidence, _) = decode(
+            r#"{"id":"msg_1","type":"message","role":"assistant",
+                "model":"model-exact-1",
+                "content":[{"type":"thinking","thinking":"hm"}],
+                "stop_reason":"end_turn","stop_sequence":null,
+                "usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+        let TerminalEvidence::Completed(completion) = evidence else {
+            panic!("unsigned thinking is completion material");
+        };
+        assert_eq!(
+            completion.content,
+            vec![AssistantPart::Thinking {
+                text: "hm".to_owned(),
+                signature: None,
+            }]
         );
     }
 
@@ -1358,7 +1349,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_thinking_signature_is_boundary_loss() {
+    fn empty_thinking_signature_preserves_completion() {
         let (evidence, _) = decode(
             r#"{"id":"msg_1","type":"message","role":"assistant",
                 "model":"model-exact-1",
@@ -1367,7 +1358,16 @@ mod tests {
                 "usage":{"input_tokens":1,"output_tokens":1}}"#,
         );
 
-        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+        let TerminalEvidence::Completed(completion) = evidence else {
+            panic!("an empty thinking signature does not fail completion");
+        };
+        assert_eq!(
+            completion.content,
+            vec![AssistantPart::Thinking {
+                text: "step".to_owned(),
+                signature: Some(String::new()),
+            }]
+        );
     }
 
     #[test]

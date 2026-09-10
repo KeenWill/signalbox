@@ -466,11 +466,7 @@ fn wire_messages(
                     output: result.content.clone(),
                 });
             }
-            MessagePart::Thinking { .. } | MessagePart::RedactedThinking { .. } => {
-                return Err(unsupported(
-                    "OpenAI cannot replay another provider's thinking",
-                ));
-            }
+            MessagePart::Thinking { .. } | MessagePart::RedactedThinking { .. } => {}
             MessagePart::ProviderReasoning { item_json, .. } => {
                 if message.role != ConversationRole::Assistant {
                     return Err(unsupported("provider reasoning requires assistant history"));
@@ -1486,22 +1482,29 @@ mod tests {
     }
 
     #[test]
-    fn replayed_reasoning_history_is_rejected_not_silently_dropped() {
+    fn replayed_thinking_is_dropped_while_text_is_preserved() {
         let mut operation = operation("call-7");
         operation.messages = vec![ConversationMessage {
             role: ConversationRole::Assistant,
-            parts: vec![MessagePart::Thinking {
-                text: "step one".to_string(),
-                signature: Some("sig_1".to_string()),
-            }],
+            parts: vec![
+                MessagePart::Thinking {
+                    text: "step one".to_owned(),
+                    signature: Some("sig_1".to_owned()),
+                },
+                MessagePart::RedactedThinking {
+                    data: "opaque".to_owned(),
+                },
+                MessagePart::Text("The answer.".to_owned()),
+            ],
         }];
-
-        let failure = build_request(&operation)
-            .expect_err("reasoning history this wire contract cannot represent must not vanish");
-
-        assert!(matches!(
-            failure,
-            PreparationFailure::UnsupportedOperation { .. }
-        ));
+        let request =
+            serde_json::to_value(build_request(&operation).expect("thinking can be dropped"))
+                .expect("request serializes");
+        assert_eq!(
+            request["input"],
+            serde_json::json!([
+                {"type":"message", "role":"assistant", "content":"The answer."}
+            ])
+        );
     }
 }
