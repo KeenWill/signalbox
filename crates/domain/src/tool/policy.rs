@@ -284,9 +284,9 @@ pub struct ToolDenialReason(pub(super) String);
 
 impl ToolDenialReason {
     /// Maximum admitted UTF-8 byte length.
-    pub const MAX_UTF8_BYTES: usize = 1024;
+    pub const MAX_UTF8_BYTES: usize = ToolDecisionRationale::MAX_UTF8_BYTES;
 
-    /// Checks length, surrounding POSIX whitespace, and control characters.
+    /// Checks length, surrounding POSIX whitespace, and control characters other than line feed.
     pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError> {
         let failure = if value.is_empty() {
             Some(ToolDenialReasonFailure::Empty)
@@ -297,7 +297,7 @@ impl ToolDenialReason {
         } else {
             value
                 .chars()
-                .any(char::is_control)
+                .any(|character| character != '\n' && character.is_control())
                 .then_some(ToolDenialReasonFailure::ContainsControl)
         };
         match failure {
@@ -318,35 +318,24 @@ impl ToolDenialReason {
 
     /// Derives the deterministic denial reason carried by a delegate denial.
     ///
-    /// A rationale admits control characters and up to
-    /// [`ToolDecisionRationale::MAX_UTF8_BYTES`] bytes, so this conversion is
-    /// lossy exactly where the two bounds disagree: control characters become
-    /// spaces, edge characters the reason validator forbids are trimmed, and
-    /// the text is cut to [`Self::MAX_UTF8_BYTES`] on a character boundary.
-    /// After control mapping the only forbidden edge character left is the
-    /// space itself, so admissible non-POSIX edge whitespace such as NBSP is
-    /// preserved verbatim. A rationale that is entirely control characters
-    /// and spaces derives no reason.
+    /// A rationale admits control characters, so this conversion maps every
+    /// forbidden control character to a space and trims forbidden edge
+    /// characters. Internal line feeds and admissible non-POSIX edge
+    /// whitespace such as NBSP are preserved verbatim. A rationale that is
+    /// entirely mapped controls, spaces, and line feeds derives no reason.
     pub fn from_rationale(rationale: &ToolDecisionRationale) -> Option<Self> {
         let sanitized = rationale
             .as_str()
             .chars()
             .map(|character| {
-                if character.is_control() {
+                if character != '\n' && character.is_control() {
                     ' '
                 } else {
                     character
                 }
             })
             .collect::<String>();
-        let mut trimmed = sanitized.trim_matches(' ');
-        while trimmed.len() > Self::MAX_UTF8_BYTES {
-            let mut cut = Self::MAX_UTF8_BYTES;
-            while !trimmed.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            trimmed = trimmed[..cut].trim_end_matches(' ');
-        }
+        let trimmed = sanitized.trim_matches([' ', '\n']);
         (!trimmed.is_empty()).then(|| Self(String::from(trimmed)))
     }
 }
@@ -363,7 +352,7 @@ pub enum ToolDenialReasonFailure {
     },
     /// Leading or trailing POSIX whitespace was present.
     SurroundingWhitespace,
-    /// At least one Unicode control scalar was present.
+    /// At least one Unicode control scalar other than U+000A was present.
     ContainsControl,
 }
 

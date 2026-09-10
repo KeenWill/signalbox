@@ -597,6 +597,15 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "tool_denial_already_overridden request={tool_request_id}"
             ),
+            RejectionDetail::ToolDenialReasonTooLong {
+                maximum_bytes,
+                actual_bytes,
+            } => write!(
+                formatter,
+                "tool_denial_reason_too_long maximum_bytes={} actual_bytes={}",
+                maximum_bytes.value(),
+                actual_bytes.value()
+            ),
             RejectionDetail::DelegationRequestNotInTurn {
                 session_id,
                 turn_id,

@@ -248,6 +248,13 @@ pub enum RejectionDetail {
         /// Already-overridden tool request.
         tool_request_id: CanonicalUuid,
     },
+    /// A tool-denial reason exceeded its UTF-8 byte bound.
+    ToolDenialReasonTooLong {
+        /// Maximum admitted UTF-8 byte count.
+        maximum_bytes: CanonicalU64,
+        /// Observed UTF-8 byte count.
+        actual_bytes: CanonicalU64,
+    },
     /// The named delegation request belongs to another turn.
     DelegationRequestNotInTurn {
         /// Session the caller named.
@@ -441,6 +448,10 @@ impl RejectionDetail {
         matches!(self, Self::BlobReadLengthOutOfRange { .. })
     }
 
+    pub(crate) const fn is_tool_denial_reason(self) -> bool {
+        matches!(self, Self::ToolDenialReasonTooLong { .. })
+    }
+
     pub(crate) const fn is_conversation_import(self) -> bool {
         match self {
             Self::ConversationImportAlreadyInProgress {}
@@ -482,6 +493,7 @@ impl RejectionDetail {
             | Self::ToolRequestNotDelegateDenied { .. }
             | Self::ToolRequestNotTerminallyDenied { .. }
             | Self::ToolDenialAlreadyOverridden { .. }
+            | Self::ToolDenialReasonTooLong { .. }
             | Self::DelegationRequestNotInTurn { .. }
             | Self::DelegationToolRequestNotExecutable { .. }
             | Self::DelegationSpawnConflict { .. }
@@ -582,6 +594,13 @@ pub(crate) fn validate_rejection_detail(
         RejectionDetail::DelegationEventOrdinalExhausted { last, .. } => last.value() == u64::MAX,
         RejectionDetail::DelegationDeliverySequenceExhausted { last, .. } => {
             last.value() == u64::MAX
+        }
+        RejectionDetail::ToolDenialReasonTooLong {
+            maximum_bytes,
+            actual_bytes,
+        } => {
+            maximum_bytes.value() == signalbox_domain::ToolDenialReason::MAX_UTF8_BYTES as u64
+                && actual_bytes.value() > maximum_bytes.value()
         }
         RejectionDetail::SessionNotFound { .. }
         | RejectionDetail::AttachmentBlobNotFound { .. }
@@ -707,6 +726,7 @@ pub(crate) fn validate_conversation_import_detail(
         | RejectionDetail::ToolRequestNotDelegateDenied { .. }
         | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
         | RejectionDetail::ToolDenialAlreadyOverridden { .. }
+        | RejectionDetail::ToolDenialReasonTooLong { .. }
         | RejectionDetail::DelegationRequestNotInTurn { .. }
         | RejectionDetail::DelegationToolRequestNotExecutable { .. }
         | RejectionDetail::DelegationSpawnConflict { .. }

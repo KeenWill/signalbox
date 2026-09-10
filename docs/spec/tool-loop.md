@@ -114,8 +114,9 @@ without presenting policy as human consent, and only an explicit user, delegate,
 or consumed-override decision emits an approval-decided event naming its
 decider, its decision, and, for a delegate, its rationale.
 
-A denial reason is bounded and free of control characters, so a client can
-render it directly.
+A denial reason is at most 4,096 UTF-8 bytes, admits internal U+000A, and is
+free of other control characters and surrounding POSIX whitespace. An oversized
+decision returns its observed and maximum byte counts.
 
 Delegation can narrow authority but never widen it.
 

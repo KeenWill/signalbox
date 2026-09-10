@@ -210,6 +210,11 @@ impl ServerFrame {
                             return Err(FrameValidationError::ErrorDetailShape);
                         }
                         validate_blob_read_detail(detail)?;
+                    } else if detail.is_tool_denial_reason() {
+                        if *code != ErrorCode::InvalidRequest {
+                            return Err(FrameValidationError::ErrorDetailShape);
+                        }
+                        validate_rejection_detail(detail)?;
                     } else if *code != ErrorCode::Rejected {
                         return Err(FrameValidationError::ErrorDetailShape);
                     } else {
