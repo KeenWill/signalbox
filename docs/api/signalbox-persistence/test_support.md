@@ -65,6 +65,24 @@ pub async fn seed_failed_goal_turn(
 ) -> result::Result<(), error::Error>;
 ```
 
+## record_supervision_failure_with_commit
+
+```rust
+#[cfg(feature = "test-support")]
+pub async fn record_supervision_failure_with_commit<Commit, Outcome>(
+    pool: &sqlx_postgres::PgPool,
+    session: signalbox_domain::SessionId,
+    failure: &(impl signalbox_application::ClassifyOperatorFailure + marker::Sync),
+    state: &mut session_lifecycle::SessionSupervisionWrite,
+    commit: Commit,
+) -> result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>
+where
+    Commit: function::FnOnce(transaction::Transaction<'static, database::Postgres>) -> Outcome,
+    Outcome: future::Future<
+        Output = result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>,
+    >;
+```
+
 ## restore_module_park
 
 ```rust

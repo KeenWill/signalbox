@@ -78,12 +78,26 @@ impl convert::From<goal::GoalRepositoryError>
 }
 ```
 
+## SessionSupervisionFailureRecord
+
+```rust
+pub struct SessionSupervisionFailureRecord {
+    pub class: signalbox_application::OperatorFailureClass,
+    pub cause_code: string::String,
+    pub pending: bool,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## SessionLifecycleRecord
 
 ```rust
 pub struct SessionLifecycleRecord {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl session_lifecycle::SessionLifecycleRecord {
+    pub const fn supervision_failure(
+        &self,
+    ) -> option::Option<&session_lifecycle::SessionSupervisionFailureRecord>;
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn state(&self) -> signalbox_domain::SessionLifecycleState;
     pub const fn ownership(&self) -> signalbox_domain::SessionOwnership;
@@ -121,6 +135,17 @@ impl session_lifecycle::SessionLifecycleRepository {
         signalbox_domain::SessionLifecycleState,
         session_lifecycle::SessionLifecycleRepositoryError,
     >;
+    pub async fn record_supervision_failure(
+        &self,
+        session: signalbox_domain::SessionId,
+        failure: &(impl signalbox_application::ClassifyOperatorFailure + marker::Sync),
+    ) -> result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>;
+    pub async fn record_supervision_failure_with_state(
+        &self,
+        session: signalbox_domain::SessionId,
+        failure: &(impl signalbox_application::ClassifyOperatorFailure + marker::Sync),
+        state: &mut session_lifecycle::SessionSupervisionWrite,
+    ) -> result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>;
     pub async fn resume(
         &self,
         session: signalbox_domain::SessionId,
@@ -161,4 +186,11 @@ impl session_lifecycle::SessionLifecycleRepository {
         actor: signalbox_domain::LifecycleActor,
     ) -> result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>;
 }
+```
+
+## SessionSupervisionWrite
+
+```rust
+pub struct SessionSupervisionWrite {/* private */}
+// derives: fmt::Debug, default::Default
 ```

@@ -406,7 +406,7 @@ effect-class crash-loss transition. A committed classification carrying an
 infrastructure or identity-collision failure fails or parks the affected turn
 without failing unrelated session execution. A fail-closed corruption or
 caller-or-hub bug remains an error after classification closes the attempt, so
-the fatal execution supervisor still stops scheduling;
+the execution supervisor parks that session with its cause;
 [runtime-substrate](runtime-substrate.md) owns the failure classes. If
 trustworthy evidence returns but its commit fails, the service retains that
 exact correlated observation as an opaque linear same-incarnation value and
@@ -596,8 +596,6 @@ the hint until a full nudge buffer has capacity.
 
 ## Planned
 
-- Session-scoped fatal execution parking; see
-  [daemon survival design](../design/daemon-survival.md).
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a `ToolInadmissible`
