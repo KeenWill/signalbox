@@ -114,20 +114,24 @@ sandbox a hostile same-UID process, stop writes through pre-existing hard links
 or open descriptors, or survive a compromised kernel or library.
 
 Scans and result text remain bounded; worktree, staging, and object-database
-content have no aggregate byte ceiling. Patches preview bounded content prefixes
-with truncation markers, and status identifies renames by exact object identity.
-Worktree streams pin one descriptor and revalidate its identity around each
-page; object publication streams each batch into one pack and index pair. Merge
-verification retains bounded previews and uses file-backed comparison scratch
-data with linear-space divide-and-conquer line matching; disjoint replacements
-use a linear scan. Private-pack writes and merge comparison check preparation
-deadlines between fixed-size pages; rename similarity streams fixed-size
-signatures. Unsupported layouts and formats, exhausted bounds, allocation
-failure, and host I/O failure are rejected, and the tool does not repair a
-corrupt repository. The configured `max_git_object_bytes` limit (`"none"` for
-unbounded) applies to the objects an operation reads, including packed delta
-bases, intermediate results, and delta instructions, not to unrelated objects
-retained in its history.
+content have no aggregate byte ceiling. Commits, trees, and tags retain a 1 MiB
+decoded metadata bound before libgit2 parsing; blob content streams without that
+structural bound. Patches preview bounded content prefixes with truncation
+markers, and status identifies renames by exact object identity. Worktree
+streams pin one descriptor and revalidate its identity around each page; object
+publication streams each batch into one pack and index pair. Checkout retains
+the clean path identity and revalidates the opened file and path before
+truncating or removing it; removal quarantines and revalidates the full file
+snapshot, and new files are created exclusively. Merge verification retains
+bounded previews and uses file-backed comparison scratch data with linear-space
+divide-and-conquer line matching; disjoint replacements use a linear scan.
+Private-pack writes and merge comparison check preparation deadlines between
+fixed-size pages; rename similarity streams fixed-size signatures. Unsupported
+layouts and formats, exhausted bounds, allocation failure, and host I/O failure
+are rejected, and the tool does not repair a corrupt repository. The configured
+`max_git_object_bytes` limit (`"none"` for unbounded) applies to the objects an
+operation reads, including packed delta bases, intermediate results, and delta
+instructions, not to unrelated objects retained in its history.
 
 Repository semantics outside the supported worktree layouts are unsupported, not
 partially trusted. Discovery, alternate object databases, replacement-object
@@ -148,12 +152,15 @@ residual.
 ## Boundary contracts
 
 The Git family resolves the configured root's `.git` directory or `gitdir:`
-file, including a linked worktree's common administration directory. Branch
-switching resolves symbolic reference chains and refuses a branch checked out in
-another worktree. The root is construction input and never a per-call argument,
-so a local operation cannot select another repository. Composing several suites
-does not weaken this: each suite is a separate construction, and no suite can
-reach another's root.
+file, including a linked worktree's common administration directory.
+Administration markers accept LF or CRLF endings. A linked checkout may use a
+bare common repository; the common repository's HEAD does not occupy a checkout.
+Branch switching resolves each sibling's symbolic reference chain in its own
+local namespace under one validated administration snapshot and refuses a branch
+checked out in another worktree. The root is construction input and never a
+per-call argument, so a local operation cannot select another repository.
+Composing several suites does not weaken this: each suite is a separate
+construction, and no suite can reach another's root.
 
 Every admitted Git action is a fixed typed operation with a compiled argument
 schema and a typed result or failure. Text fields such as a commit message are

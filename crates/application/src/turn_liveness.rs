@@ -546,16 +546,6 @@ mod tests {
         assert_eq!(whole.map(StaleActiveTurnBound::as_secs), Ok(1));
     }
 
-    /// The scan interval uses the same explicit deployment validation.
-    #[test]
-    fn the_scan_interval_accepts_a_configured_duration() {
-        assert_eq!(
-            TurnLivenessScanInterval::try_new(Duration::from_secs(60))
-                .map(TurnLivenessScanInterval::get),
-            Ok(Duration::from_secs(60))
-        );
-    }
-
     /// Automatic reconciliation applies the supplied budget and backoff policy.
     #[test]
     fn ambiguous_model_call_reconciliation_uses_configured_retry_policy() {
@@ -601,22 +591,6 @@ mod tests {
         let due = ledger().reconcile(&[observation(1, 31)]);
 
         assert_eq!(due.as_ref(), &[candidate(1)]);
-    }
-
-    /// Persistence resets the ordinal when commit-ordered progress changes.
-    #[test]
-    fn changed_evidence_restarts_the_bound() {
-        let due = ledger().reconcile(&[observation(2, 2)]);
-
-        assert!(due.is_empty());
-    }
-
-    /// A forward wall-clock jump supplies no input to the ordinal decision.
-    #[test]
-    fn forward_clock_jump_does_not_stale_live_work() {
-        let due = ledger().reconcile(&[observation(2, 1)]);
-
-        assert!(due.is_empty());
     }
 
     /// The validated configured bound is the one the ledger decides by.

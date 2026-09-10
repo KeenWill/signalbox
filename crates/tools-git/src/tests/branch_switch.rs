@@ -1428,3 +1428,100 @@ fn branch_switch_rejects_a_staged_path_changed_by_the_target() {
         Some(fixture.initial)
     );
 }
+
+#[test]
+fn branch_switch_preserves_a_tracked_edit_after_cleanliness_validation() {
+    for replace in [false, true] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository opens");
+        let blob = repository
+            .blob(TARGET_CONTENT.as_bytes())
+            .expect("target blob");
+        let mut builder = repository.treebuilder(None).expect("tree builder");
+        builder
+            .insert(TRACKED_PATH, blob, 0o100644)
+            .expect("target entry");
+        let tree = builder.write().expect("target tree");
+        let target = raw_commit_with_tree(&repository, tree, fixture.initial);
+        repository
+            .branch(
+                FIX_BRANCH,
+                &repository.find_commit(target).expect("target commit"),
+                false,
+            )
+            .expect("target branch");
+        let index_before = fs::read(fixture.root().join(".git/index")).expect("index before");
+        let failure = fixture.executor().branch_switch_with_quarantine_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                let path = fixture.root().join(TRACKED_PATH);
+                if replace {
+                    let replacement = fixture.root().join("replacement");
+                    fs::write(&replacement, CHANGED_CONTENT).expect("replacement writes");
+                    fs::rename(replacement, &path).expect("tracked file replaced");
+                } else {
+                    fs::write(&path, CHANGED_CONTENT).expect("tracked file edited");
+                }
+            },
+        );
+        assert!(failure.is_err());
+        assert_eq!(
+            fs::read(fixture.root().join(TRACKED_PATH)).expect("edit preserved"),
+            CHANGED_CONTENT.as_bytes()
+        );
+        assert_eq!(
+            repository.head().expect("HEAD preserved").target(),
+            Some(fixture.initial)
+        );
+        assert_eq!(
+            fs::read(fixture.root().join(".git/index")).expect("index preserved"),
+            index_before
+        );
+    }
+}
+
+#[test]
+fn branch_switch_preserves_a_replacement_at_a_deleted_path() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository opens");
+    let tree = repository
+        .treebuilder(None)
+        .expect("empty tree")
+        .write()
+        .expect("tree writes");
+    let target = raw_commit_with_tree(&repository, tree, fixture.initial);
+    repository
+        .branch(
+            FIX_BRANCH,
+            &repository.find_commit(target).expect("target commit"),
+            false,
+        )
+        .expect("target branch");
+    let index_before = fs::read(fixture.root().join(".git/index")).expect("index before");
+    let failure = fixture.executor().branch_switch_with_quarantine_hook(
+        GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        },
+        || {
+            let replacement = fixture.root().join("replacement");
+            fs::write(&replacement, CHANGED_CONTENT).expect("replacement writes");
+            fs::rename(replacement, fixture.root().join(TRACKED_PATH))
+                .expect("tracked file replaced");
+        },
+    );
+    assert!(failure.is_err());
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("replacement preserved"),
+        CHANGED_CONTENT.as_bytes()
+    );
+    assert_eq!(
+        repository.head().expect("HEAD preserved").target(),
+        Some(fixture.initial)
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(".git/index")).expect("index preserved"),
+        index_before
+    );
+}

@@ -155,35 +155,37 @@ not a per-tool cost.
 
 The daemon registers `git_push_configured` when mapped workspace tools are
 composed and a watched repository configures `push_credential_file` or an SSH
-`push_remote_url` with an available host agent; execution resolves that
-session's retained dispatch and current repository configuration on every call.
-The transport pushes without force to the configured repository URL and confirms
-the remote branch equals the resolved commit before acknowledging success. For a
-two-parent merge, exactly one parent must equal or descend from the
-retained-head fence; it is the branch parent, regardless of parent order. A
-missing or ambiguous fence binding refuses the push with `UnprovenMergeParents`.
-Multiple merge bases refuse it with `AmbiguousMergeBases`, listing base object
-IDs and an omitted count when the detail cannot fit them all; verification does
-not construct a virtual merge base. Before pushing a merge, the executor
-compares additions and removals relative to its base parent against the branch's
-effects relative to the merge base, ignoring line offsets and consuming each
-matching effect once. A carried addition does not require the branch patch's
-obsolete preimage to remain; carried removals must also occur in the branch
-diff. Rename detection correlates parent renames through their common source
-paths, permitting either parent's destination while retaining exact carried
-destinations. An effect absent from the branch diff refuses the push with
-`MergeDroppedBaseChanges`. Collected dropped-hunk previews share a 4 KiB budget,
-and collection truncation remains explicit in the detail. Its bounded JSON
-detail lists filenames before hunk previews, marks each shortened preview with
-`truncated`, and counts omitted filenames and previews explicitly when they
-cannot fit. Filenames use bytewise Git path quoting. Verification supports
-two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
-the parent count before capturing the push snapshot or traversing ancestry. It
-retains only the first dropped hunk per file. Merge comparison streams content
-into file-backed line indexes, diff scratch data, and effect counts; retained
-hunk previews remain bounded. Rename similarity uses fixed-size signatures of
-streamed content. Comparison checks the push-preparation deadline between I/O
-pages and matching steps. Non-merge pushes are unaffected.
+`push_remote_url` with an available host agent; execution resolves the session's
+retained commissioned or repository-dispatched branch and head fences and
+current repository configuration on every call; the judge or CLI approval
+authorizes execution. The transport pushes without force to the configured
+repository URL and confirms the remote branch equals the resolved commit before
+acknowledging success. For a two-parent merge, exactly one parent must equal or
+descend from the retained-head fence; it is the branch parent, regardless of
+parent order. A missing or ambiguous fence binding refuses the push with
+`UnprovenMergeParents`. Multiple merge bases refuse it with
+`AmbiguousMergeBases`, listing base object IDs and an omitted count when the
+detail cannot fit them all; verification does not construct a virtual merge
+base. Before pushing a merge, the executor compares additions and removals
+relative to its base parent against the branch's effects relative to the merge
+base, ignoring line offsets and consuming each matching effect once. A carried
+addition does not require the branch patch's obsolete preimage to remain;
+carried removals must also occur in the branch diff. Rename detection correlates
+parent renames through their common source paths, permitting either parent's
+destination while retaining exact carried destinations. An effect absent from
+the branch diff refuses the push with `MergeDroppedBaseChanges`. Collected
+dropped-hunk previews share a 4 KiB budget, and collection truncation remains
+explicit in the detail. Its bounded JSON detail lists filenames before hunk
+previews, marks each shortened preview with `truncated`, and counts omitted
+filenames and previews explicitly when they cannot fit. Filenames use bytewise
+Git path quoting. Verification supports two-parent merges and refuses larger
+merges with `UnsupportedMergeShape` naming the parent count before capturing the
+push snapshot or traversing ancestry. It retains only the first dropped hunk per
+file. Merge comparison streams content into file-backed line indexes, diff
+scratch data, and effect counts; retained hunk previews remain bounded. Rename
+similarity uses fixed-size signatures of streamed content. Comparison checks the
+push-preparation deadline between I/O pages and matching steps. Non-merge pushes
+are unaffected.
 
 A rename/delete resolution may retain the branch's rename destination with its
 exact branch blob and mode while leaving the base-deleted source absent.
@@ -374,7 +376,9 @@ retained set a request still holds is never released. Every declaration a
 workspace-root-bound family advertises is a property of the family's code, not
 of the repository it binds. Local Git is the exception: it compiles the pinned
 repository's object format into its argument validators, and session composition
-refuses an object-format disagreement.
+refuses an object-format disagreement when the configured root has Git. A plain
+configured root can bind a session whose derived root is a repository.
+Configured pushes use the same bound workspace.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
@@ -397,8 +401,8 @@ in-flight attempt acquires the gate and reloads the attempt before classifying
 prior-process crash loss. Interrupt handling acquires the same gate before its
 command transaction, and the durable attempt cannot remain in flight after the
 gate becomes available to an interrupt. An interrupt that waits behind executor
-work reloads the committed result before closing the batch, so it cannot strand
-an issued request or roll back its command.
+work reloads the complete committed result before closing the batch, so it
+cannot strand an issued request or roll back its command.
 
 If the executor returns an operator failure without trustworthy evidence after
 authorization, the service retains the gate and applies the attempt's

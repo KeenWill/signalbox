@@ -404,14 +404,55 @@ impl ObjectContent {
     }
 }
 
+pub(super) type CheckoutIdentities =
+    std::collections::BTreeMap<std::path::PathBuf, Option<crate::descriptor::FileSnapshotIdentity>>;
+
+pub(super) fn capture_checkout_identity(
+    root: &File,
+    path: &std::path::Path,
+) -> Result<Option<crate::descriptor::FileSnapshotIdentity>, LocalGitFailure> {
+    use rustix::fs::{Mode, OFlags, openat};
+    use std::path::{Component, Path};
+    let mut parent = rustix::io::dup(root).map_err(failed)?;
+    for component in path.parent().unwrap_or_else(|| Path::new("")).components() {
+        let Component::Normal(name) = component else {
+            return Err(LocalGitFailure::Path);
+        };
+        parent = match openat(
+            &parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(parent) => parent,
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return Ok(None),
+            Err(error) => return Err(failed(error)),
+        };
+    }
+    let leaf = path.file_name().ok_or(LocalGitFailure::Path)?;
+    let descriptor = match openat(
+        &parent,
+        leaf,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(failed(error)),
+    };
+    let metadata = File::from(descriptor).metadata().map_err(failed)?;
+    Ok(Some(crate::descriptor::file_snapshot_identity(&metadata)))
+}
+
 pub(super) fn checkout_paths(
     repository: &crate::pinning::RepositoryShell,
     tree: &git2::Tree<'_>,
     paths: &std::collections::BTreeSet<std::path::PathBuf>,
     destination: &std::path::Path,
+    expected: Option<&CheckoutIdentities>,
     mut updated: impl FnMut(&std::path::Path) -> Result<(), LocalGitFailure>,
 ) -> Result<(), LocalGitFailure> {
-    use rustix::fs::{AtFlags, Mode, OFlags, mkdirat, openat, unlinkat};
+    use rustix::fs::{Mode, OFlags, mkdirat, openat};
     use std::{
         ffi::OsStr,
         os::unix::fs::PermissionsExt,
@@ -430,17 +471,20 @@ pub(super) fn checkout_paths(
     }
     for path in paths {
         if !files.contains_key(path) {
-            match crate::rollback::open_worktree_parent(&root, path) {
-                Ok((parent, leaf)) => match unlinkat(&parent, &leaf, AtFlags::empty()) {
-                    Ok(()) => updated(path)?,
-                    Err(rustix::io::Errno::NOENT) => {}
-                    Err(_) => return Err(LocalGitFailure::Operation),
-                },
-                Err(_) if !destination.join(path).exists() => {}
-                Err(error) => return Err(error),
+            let identity = capture_checkout_identity(&root, path)?;
+            if let Some(expected) = expected
+                && identity != *expected.get(path).ok_or(LocalGitFailure::Operation)?
+            {
+                return Err(LocalGitFailure::Operation);
+            }
+            if let Some(identity) = identity {
+                let (parent, leaf) = crate::rollback::open_worktree_parent(&root, path)?;
+                crate::descriptor::remove_file_if_snapshot_identity(&parent, &leaf, identity)?;
+                updated(path)?;
             }
         }
     }
+
     for (path, (oid, mode)) in files {
         if !paths
             .iter()
@@ -448,6 +492,10 @@ pub(super) fn checkout_paths(
         {
             continue;
         }
+        let identity = match expected {
+            Some(expected) => *expected.get(&path).ok_or(LocalGitFailure::Operation)?,
+            None => capture_checkout_identity(&root, &path)?,
+        };
         let mut parent = rustix::io::dup(&root).map_err(failed)?;
         for component in path.parent().unwrap_or_else(|| Path::new("")).components() {
             let Component::Normal(name) = component else {
@@ -470,11 +518,29 @@ pub(super) fn checkout_paths(
         let descriptor = openat(
             &parent,
             leaf,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::WRONLY
+                | OFlags::NONBLOCK
+                | OFlags::NOFOLLOW
+                | OFlags::CLOEXEC
+                | if identity.is_none() {
+                    OFlags::CREATE | OFlags::EXCL
+                } else {
+                    OFlags::empty()
+                },
             crate::descriptor::mode_from_metadata_bits(mode & 0o777),
         )
         .map_err(failed)?;
         let mut target = File::from(descriptor);
+        if let Some(identity) = identity {
+            let metadata = target.metadata().map_err(failed)?;
+            if !metadata.is_file()
+                || crate::descriptor::file_snapshot_identity(&metadata) != identity
+                || capture_checkout_identity(&root, &path)? != Some(identity)
+            {
+                return Err(LocalGitFailure::Operation);
+            }
+            target.set_len(0).map_err(failed)?;
+        }
         // Record each touched path even when a later write fails, for rollback ownership.
         updated(&path)?;
         std::io::copy(&mut content.file, &mut target).map_err(failed)?;

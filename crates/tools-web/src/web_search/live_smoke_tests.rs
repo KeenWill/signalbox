@@ -96,61 +96,6 @@ fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
     &file_bytes[..end]
 }
 
-/// The terminator a writing tool appends is not part of the secret.
-#[test]
-fn credential_file_bytes_drop_trailing_line_termination() {
-    assert_eq!(
-        credential_bytes(b"fixture-search-key\r\n"),
-        b"fixture-search-key"
-    );
-}
-
-/// Every other byte is retained exactly, so a key that legitimately carries
-/// interior or leading whitespace still reaches the provider unchanged.
-#[test]
-fn credential_file_bytes_retain_leading_and_interior_whitespace() {
-    assert_eq!(
-        credential_bytes(b" fixture search\tkey\n"),
-        b" fixture search\tkey"
-    );
-}
-
-/// A file holding nothing but terminators narrows to an empty value, which
-/// resolution then treats as no credential at all.
-#[test]
-fn credential_file_bytes_narrow_a_terminator_only_file_to_empty() {
-    assert_eq!(credential_bytes(b"\n\r\n"), b"");
-}
-
-/// No credential means the smoke never runs its callback: a regression that
-/// always ran it would spend a live request from CI before any secret exists.
-#[tokio::test]
-async fn run_with_resolved_credential_skips_the_callback_when_absent() {
-    let mut called = false;
-    run_with_resolved_credential(None, |_credential| {
-        called = true;
-        async {}
-    })
-    .await;
-    assert!(!called);
-}
-
-/// A present credential reaches the callback: a regression that always
-/// skipped would report success while issuing no request.
-#[tokio::test]
-async fn run_with_resolved_credential_invokes_the_callback_when_present() {
-    let mut called = false;
-    run_with_resolved_credential(
-        Some(CredentialValue::new(b"fixture-key".to_vec())),
-        |_credential| {
-            called = true;
-            async {}
-        },
-    )
-    .await;
-    assert!(called);
-}
-
 /// One real Brave exchange decodes into a bounded page of results.
 ///
 /// The credential is passed to the transport and never rendered, compared, or

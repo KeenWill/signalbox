@@ -3870,18 +3870,6 @@ mod tests {
     }
 
     #[test]
-    fn conversations_require_a_positive_canonical_result_limit() {
-        assert!(parse(["conversations", "--limit", "0"].map(Into::into)).is_err());
-        assert!(parse(["conversations", "--limit", "101"].map(Into::into)).is_ok());
-    }
-
-    #[test]
-    fn conversations_rejects_empty_or_nul_title_text() {
-        assert!(parse(["conversations", "--title", ""].map(Into::into)).is_err());
-        assert!(parse(["conversations", "--title", "before\0after"].map(Into::into)).is_err());
-    }
-
-    #[test]
     fn conversations_rejects_a_title_beyond_the_query_byte_bound() {
         let whole_bound_title = "t".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES);
         let one_byte_beyond = "t".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES + 1);

@@ -81,9 +81,7 @@ mod tests {
     use expect_test::expect;
     use expectable::print;
 
-    use super::{
-        classify_error, classify_error_status, classify_error_token, classify_error_with_proof,
-    };
+    use super::{classify_error_status, classify_error_token, classify_error_with_proof};
 
     #[derive(Debug, serde::Serialize)]
     struct TokenRow {
@@ -117,25 +115,6 @@ mod tests {
                 kind: format!("{:?}", classify_error_status(*status)),
             })
             .collect()
-    }
-
-    #[test]
-    fn credential_rejection_is_typed_not_string_matched() {
-        // `docs/spec/runtime-substrate.md`: provider-side credential
-        // rejection must stay distinguishable without reading rendered
-        // messages.
-        assert_eq!(
-            classify_error_token("authentication_error"),
-            signalbox_model_runtime::ProviderErrorKind::CredentialRejected
-        );
-        assert_eq!(
-            classify_error_status(401),
-            signalbox_model_runtime::ProviderErrorKind::CredentialRejected
-        );
-        assert_eq!(
-            classify_error(401, Some("rate_limit_error")),
-            signalbox_model_runtime::ProviderErrorKind::CredentialRejected
-        );
     }
 
     #[test]

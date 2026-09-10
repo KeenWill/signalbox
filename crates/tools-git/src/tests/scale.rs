@@ -204,6 +204,15 @@ fn execute(
 
 #[tokio::test]
 async fn every_git_tool_operates_on_a_linked_worktree() {
+    exercise_linked_repository(false).await;
+}
+
+#[tokio::test]
+async fn every_git_tool_operates_on_a_linked_worktree_of_a_bare_repository() {
+    exercise_linked_repository(true).await;
+}
+
+async fn exercise_linked_repository(bare: bool) {
     let fixture = super::support::Fixture::new();
     let repository = git2::Repository::open(fixture.root()).expect("fixture opens");
     // Exceed the diff prefix budget so both diff modes exercise truncation.
@@ -219,9 +228,65 @@ async fn every_git_tool_operates_on_a_linked_worktree() {
         .expect("scale branch");
     let parent = tempfile::tempdir().expect("linked parent");
     let linked = parent.path().join("linked");
-    repository
-        .worktree("linked", &linked, None)
-        .expect("linked worktree creates");
+    if bare {
+        let bare_root = parent.path().join("bare.git");
+        assert!(
+            Command::new("git")
+                .args(["clone", "--bare", "--"])
+                .arg(fixture.root())
+                .arg(&bare_root)
+                .output()
+                .expect("bare clone")
+                .status
+                .success()
+        );
+        assert!(
+            git2::Repository::open_bare(&bare_root)
+                .expect("bare common repository")
+                .config()
+                .expect("common config")
+                .get_bool("core.bare")
+                .expect("bare flag")
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&bare_root)
+                .args(["worktree", "add", "-b", "linked"])
+                .arg(&linked)
+                .output()
+                .expect("native linked checkout")
+                .status
+                .success()
+        );
+        let native = Command::new("git")
+            .arg("-C")
+            .arg(&linked)
+            .args(["rev-parse", "--is-bare-repository"])
+            .output()
+            .expect("native checkout bareness");
+        assert!(native.status.success());
+        assert_eq!(native.stdout, b"false\n");
+        let (_, executor) = LocalGitTools::try_new(LocalWorkspaceFileSystem, &linked, identity())
+            .expect("bare common config admits checkout")
+            .into_parts();
+        // A bare common HEAD is not an occupied worktree branch.
+        execute(
+            &executor,
+            LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+                name: repository
+                    .head()
+                    .expect("source HEAD")
+                    .shorthand()
+                    .expect("source branch")
+                    .to_owned(),
+            }),
+        );
+    } else {
+        repository
+            .worktree("linked", &linked, None)
+            .expect("linked worktree creates");
+    }
     let main_head = fs::read(fixture.root().join(".git/HEAD")).expect("main HEAD");
     let main_index = fs::read(fixture.root().join(".git/index")).expect("main index");
     exercise_every_git_tool(linked).await;
@@ -241,15 +306,20 @@ async fn every_git_tool_operates_on_a_linked_worktree() {
 
 #[test]
 fn branch_switch_preserves_sibling_worktree_branch_occupancy() {
-    exercise_branch_occupancy(false);
+    exercise_branch_occupancy(false, false);
 }
 
 #[test]
 fn branch_switch_resolves_sibling_symbolic_head_chains() {
-    exercise_branch_occupancy(true);
+    exercise_branch_occupancy(true, false);
 }
 
-fn exercise_branch_occupancy(indirect: bool) {
+#[test]
+fn branch_switch_resolves_each_siblings_local_symbolic_refs() {
+    exercise_branch_occupancy(true, true);
+}
+
+fn exercise_branch_occupancy(indirect: bool, local: bool) {
     let fixture = super::support::Fixture::new();
     let repository = git2::Repository::open(fixture.root()).expect("main repository");
     let main_branch = repository
@@ -295,6 +365,17 @@ fn exercise_branch_occupancy(indirect: bool) {
                 format!("ref: refs/heads/indirect-{name}\n"),
             )
             .expect("indirect HEAD");
+            if local {
+                fs::create_dir_all(worktree.path().join("refs/worktree"))
+                    .expect("local refs directory");
+                fs::write(
+                    worktree.path().join("refs/worktree/alias"),
+                    format!("ref: refs/heads/indirect-{name}\n"),
+                )
+                .expect("sibling-local alias");
+                fs::write(worktree.path().join("HEAD"), b"ref: refs/worktree/alias\n")
+                    .expect("local symbolic HEAD");
+            }
         }
     }
     let snapshot = |root: &std::path::Path| {
@@ -461,5 +542,82 @@ fn branch_switch_rolls_back_when_a_sibling_claims_the_target_before_head_publica
             .shorthand()
             .expect("branch name"),
         "target"
+    );
+}
+
+fn measure_sibling_scan(count: usize) -> usize {
+    let fixture = super::support::Fixture::new();
+    for index in 0..count {
+        let administration = fixture
+            .root()
+            .join(".git/worktrees")
+            .join(format!("sibling-{index}"));
+        fs::create_dir_all(&administration).expect("generated sibling administration");
+        fs::write(
+            administration.join("HEAD"),
+            format!("ref: refs/heads/sibling-{index}\n"),
+        )
+        .expect("generated unborn sibling HEAD");
+    }
+    let executor = fixture.executor();
+    crate::layout::take_administration_inspections();
+    crate::repository_directories::require_branch_unoccupied(
+        &executor.repository_authority,
+        "refs/heads/unoccupied",
+    )
+    .expect("unoccupied branch");
+    crate::layout::take_administration_inspections()
+}
+
+#[test]
+fn sibling_occupancy_scan_visits_administration_entries_linearly() {
+    let small = measure_sibling_scan(32);
+    let large = measure_sibling_scan(512);
+    assert!(small > 0);
+    assert!(
+        large <= small * 20,
+        "32 siblings: {small} visits; 512 siblings: {large} visits"
+    );
+}
+
+#[test]
+#[ignore = "generated 5,000-sibling scale measurement"]
+fn sibling_occupancy_scan_handles_five_thousand_worktrees() {
+    let visits = measure_sibling_scan(5_000);
+    eprintln!("5,000 sibling worktrees: {visits} administration entry visits");
+}
+
+#[test]
+fn linked_worktree_accepts_crlf_administration_markers() {
+    let fixture = super::support::Fixture::new();
+    let repository = git2::Repository::open(fixture.root()).expect("main repository");
+    let parent = tempfile::tempdir().expect("linked parent");
+    let linked = parent.path().join("linked");
+    repository
+        .worktree("linked", &linked, None)
+        .expect("linked worktree");
+    let worktree = git2::Repository::open(&linked).expect("linked repository");
+    for marker in [linked.join(".git"), worktree.path().join("commondir")] {
+        let bytes = fs::read(&marker).expect("administration marker");
+        let mut crlf = bytes.strip_suffix(b"\n").expect("LF marker").to_vec();
+        crlf.extend_from_slice(b"\r\n");
+        fs::write(marker, crlf).expect("CRLF marker");
+    }
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&linked)
+            .args(["rev-parse", "--git-common-dir"])
+            .output()
+            .expect("native Git marker resolution")
+            .status
+            .success()
+    );
+    let (_, executor) = LocalGitTools::try_new(LocalWorkspaceFileSystem, &linked, identity())
+        .expect("CRLF markers admitted")
+        .into_parts();
+    assert_eq!(
+        execute(&executor, LocalOperation::Status)["entries"],
+        serde_json::json!([])
     );
 }

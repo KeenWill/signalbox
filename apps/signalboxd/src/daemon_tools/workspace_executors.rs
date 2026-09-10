@@ -425,7 +425,9 @@ where
         if self.roots.standing_parent() != Some(parent) {
             return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
         }
-        if families.executors.git_object_format != self.configured.git_object_format {
+        if self.configured.git_object_format.is_some()
+            && families.executors.git_object_format != self.configured.git_object_format
+        {
             return Err(SessionWorkspaceFailure::ObjectFormatDisagreement);
         }
         let composed = families.executors.workspace_identity;
@@ -526,9 +528,6 @@ where
                 .resolve_workspace_instruction_root(session)
                 .await
                 .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
-            if root != self.roots.derived_path(session) {
-                return Err(DaemonToolExecutorError::pre_dispatch());
-            }
             let filesystem = FileSystem::pin_further_root(&root)
                 .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
             let mut executor = WorkspaceBoundFamilies::git_push(

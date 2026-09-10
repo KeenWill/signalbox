@@ -158,21 +158,50 @@ impl RepositoryShell {
         )
     }
 
+    fn require_object_kind(
+        &self,
+        oid: git2::Oid,
+        expected: git2::ObjectType,
+    ) -> Result<(), git2::Error> {
+        if self.read_object_header(oid)?.1 != expected {
+            return Err(git2::Error::from_str("unexpected object kind"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn find_commit(&self, oid: git2::Oid) -> Result<git2::Commit<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Commit)?;
+        self.repository.find_commit(oid)
+    }
+
+    pub(super) fn find_tree(&self, oid: git2::Oid) -> Result<git2::Tree<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Tree)?;
+        self.repository.find_tree(oid)
+    }
+
+    pub(super) fn find_tag(&self, oid: git2::Oid) -> Result<git2::Tag<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Tag)?;
+        self.repository.find_tag(oid)
+    }
+
     pub(super) fn read_object_header(
         &self,
         oid: git2::Oid,
     ) -> Result<(usize, git2::ObjectType), git2::Error> {
+        let database = self.repository.odb()?;
         if let Some(source) = self.selected_objects.borrow().as_ref() {
             let mut source = source
                 .lock()
                 .map_err(|_| git2::Error::from_str("object source lock failed"))?;
-            let database = self.repository.odb()?;
             source.capture(&database, oid).map_err(|_| {
                 git2::Error::from_str("object read exceeds captured content bounds")
             })?;
-            return database.read_header(oid);
         }
-        self.repository.odb()?.read_header(oid)
+        let (size, kind) = database.read_header(oid)?;
+        if size > crate::limits::object_byte_limit(self.max_object_bytes, kind) {
+            return Err(git2::Error::from_str("object read exceeds content bounds"));
+        }
+        Ok((size, kind))
     }
 }
 
@@ -244,7 +273,10 @@ impl PinnedRepository {
         after_git_directory_open();
         unsupported_control_files_are_absent(git_directory.as_fd())
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-        let config = open_repository_config_at(&git_directory)?;
+        let config = open_repository_config_at(
+            &git_directory,
+            administration.worktree != administration.common,
+        )?;
         let head = open_repository_head_at(&worktree_directory, config.object_format)?;
         let refs = open_repository_refs_at(&git_directory)?;
         after_config_snapshot();
@@ -322,16 +354,21 @@ impl PinnedRepository {
         Ok(repository)
     }
 
+    pub(super) fn common_repository_is_bare(&self) -> Result<bool, LocalGitFailure> {
+        let config = Config::open(&descriptor_path(&self.config_snapshot))
+            .map_err(|_| LocalGitFailure::Repository)?;
+        match config.get_bool("core.bare") {
+            Ok(bare) => Ok(bare),
+            Err(error) if error.code() == ErrorCode::NotFound => Ok(false),
+            Err(_) => Err(LocalGitFailure::Repository),
+        }
+    }
+
     pub(super) fn administration_for(&self, path: &str) -> &fs::File {
-        let reference = path.strip_prefix("logs/").unwrap_or(path);
-        if reference.starts_with("refs/")
-            && !["refs/bisect/", "refs/worktree/", "refs/rewritten/"]
-                .iter()
-                .any(|prefix| reference.starts_with(prefix))
-        {
-            &self.git_directory
-        } else {
+        if crate::repository_directories::reference_is_worktree_local(path) {
             &self.worktree_directory
+        } else {
+            &self.git_directory
         }
     }
 
@@ -441,7 +478,12 @@ fn validate_supported_layout(
     validate_head_at(worktree_directory, object_format, head_identity, head_bytes)?;
     unsupported_control_files_are_absent(git_directory.as_fd())?;
     validate_live_shallow(git_directory, object_format)?;
-    validate_config_at(git_directory, config_snapshot, config_identity)?;
+    validate_config_at(
+        git_directory,
+        administration.worktree != administration.common,
+        config_snapshot,
+        config_identity,
+    )?;
     // Repeat the mutable-file checks to bracket config validation and catch a
     // concurrent change that occurs between either side of the sequence.
     validate_head_at(worktree_directory, object_format, head_identity, head_bytes)?;
@@ -495,11 +537,12 @@ fn validate_head_at(
 
 fn validate_config_at(
     git_directory: &fs::File,
+    linked_checkout: bool,
     config_snapshot: &fs::File,
     config_identity: FileSnapshotIdentity,
 ) -> Result<(), LocalGitFailure> {
-    let current =
-        open_repository_config_at(git_directory).map_err(|_| LocalGitFailure::Repository)?;
+    let current = open_repository_config_at(git_directory, linked_checkout)
+        .map_err(|_| LocalGitFailure::Repository)?;
     if current.identity != config_identity
         || config_snapshot_bytes(&current.snapshot)? != config_snapshot_bytes(config_snapshot)?
     {

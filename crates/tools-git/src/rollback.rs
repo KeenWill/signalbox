@@ -175,6 +175,7 @@ pub(super) fn checkout_snapshot(
         tree,
         checkout_paths,
         destination,
+        None,
         |_| Ok(()),
     )
 }
