@@ -116,12 +116,13 @@ snapshot, and new files are created exclusively. Merge verification retains
 bounded previews and uses file-backed comparison scratch data with linear-space
 divide-and-conquer line matching; disjoint replacements use a linear scan.
 Private-pack writes and merge comparison check preparation deadlines between
-fixed-size pages; rename similarity streams fixed-size signatures. Unsupported
-layouts and formats, exhausted bounds, allocation failure, and host I/O failure
-are rejected, and the tool does not repair a corrupt repository. The configured
-`max_git_object_bytes` limit (`"none"` for unbounded) applies to the objects an
-operation reads, including packed delta bases, intermediate results, and delta
-instructions, not to unrelated objects retained in its history.
+fixed-size pages; rename similarity streams fixed-size signatures cached by
+object ID for each comparison pass. Unsupported layouts and formats, exhausted
+bounds, allocation failure, and host I/O failure are rejected, and the tool does
+not repair a corrupt repository. The configured `max_git_object_bytes` limit
+(`"none"` for unbounded) applies to the objects an operation reads, including
+packed delta bases, intermediate results, and delta instructions, not to
+unrelated objects retained in its history.
 
 Repository semantics outside the direct main-worktree subset are unsupported,
 not partially trusted. Linked worktrees, discovery, alternate object databases,
