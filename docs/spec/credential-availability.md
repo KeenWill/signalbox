@@ -122,18 +122,23 @@ evidence naming what failed. The rotation test in
 `crates/persistence/tests/postgres_integration/model_call_execution_and_recovery.rs`
 pins this ending.
 
-Successor: a stop was not requested, and either a transient cause has
-same-credential attempts remaining with adapter proof that the provider never
-accepted the request, or the pinned action is `switch_now` and a member remains.
-`switch_now` also admits credential rejection without separate non-acceptance
-proof; rejection never admits same-credential retry. Every other availability
-successor requires the adapter's [non-acceptance proof](runtime-substrate.md);
-for Codex this requires the typed failed-turn gate, without assistant activity
-or an earlier retryable error. The turn stays active and keeps its slot; the
-predecessor attempt ends KnownFailure without terminalizing, and the same commit
-prepares a successor attempt. That commit appends no `TurnFailed`: one commit
-never both terminalizes the turn and authorizes a successor. The rotation and
-transient retry tests pin this ending.
+Successor: a stop was not requested, and either a classified transient cause has
+same-credential attempts remaining, or the pinned action is `switch_now` and a
+member remains. Classified quota, rate-limit, overload and credential rejection
+failures admit successors whether received before or during a stream;
+non-acceptance proof is not required. OAuth access-token recovery admits a
+same-profile retry after refresh, independent of the transient attempt bound; a
+failed refresh or rejection of the refreshed token rotates. Other credential
+rejections never admit same-credential retry. The turn stays active and keeps
+its slot; the predecessor attempt ends KnownFailure without terminalizing, and
+the same commit prepares a successor attempt. That commit appends no
+`TurnFailed`: one commit never both terminalizes the turn and authorizes a
+successor. The rotation and transient retry tests pin this ending.
+
+A timeout, connection loss, lost body or incomplete stream before observed
+response content follows the provider-internal transient retry path. The durable
+attempt records that transient category; runtime diagnostics retain the typed
+transport cause. Loss after content remains ambiguous.
 
 A same-credential retry additionally requires the failed member itself to remain
 admitted when the observation commits. If a durable action already excludes it,
@@ -154,24 +159,24 @@ A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially
 increasing jittered delay, each capped at five minutes
 (`MAX_AVAILABILITY_BACKOFF` in `crates/persistence/src/model_execution.rs`). A
-successor after a quota failure is immediate. Quota and authentication failures
-bypass same-credential retry and apply their pinned actions immediately. A
-same-credential retry derives local backoff from that credential's recorded
-attempt count; rotation starts the successor's backoff count at one. Wait
-release honors the parked successor's retry deadline before consuming the wait.
-An early wake stays pending, and scheduling eligibility begins only when that
-retry deadline expires.
+successor after a quota failure is immediate. Except for successful OAuth
+access-token recovery, quota and authentication failures bypass same-credential
+retry and apply their pinned actions immediately. A same-credential retry
+derives local backoff from that credential's recorded attempt count; rotation
+starts the successor's backoff count at one. Wait release honors the parked
+successor's retry deadline before consuming the wait. An early wake stays
+pending, and scheduling eligibility begins only when that retry deadline
+expires.
 
-The required finite positive
-`numeric_bounds.max_same_credential_attempts_per_turn` bounds recorded calls on
-one credential in one turn. At the bound a transient failure applies its pinned
-action instead of readmitting that credential.
+The required `numeric_bounds.max_same_credential_attempts_per_turn` is a
+positive integer bounding recorded calls on one credential in one turn, or
+`"none"` for unbounded attempts. At the bound a transient failure applies its
+pinned action instead of readmitting that credential.
 
 Terminal: a known failure no successor is authorized to follow terminalizes the
-turn Failed exactly as it would with no pool. A stop request, missing pre-stream
-proof except for credential-rejection rotation, non-transient cause without
-`switch_now`, or transient cause at its bound without `switch_now` authorizes no
-successor.
+turn Failed exactly as it would with no pool. A stop request, non-transient
+cause without `switch_now`, or transient cause at its bound without `switch_now`
+authorizes no successor.
 
 Exhausted-wait: no member is admissible and the frozen policy selects a wait.
 Exhaustion under `fail` never selects a wait; `park` selects one only when some

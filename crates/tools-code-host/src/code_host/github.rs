@@ -2385,7 +2385,9 @@ const fn classify_public_destination_error(
         PublicDestinationClientError::DestinationRejected => {
             CodeHostTransportFailure::InvalidResponse
         }
-        PublicDestinationClientError::Infrastructure => CodeHostTransportFailure::DispatchUnknown,
+        PublicDestinationClientError::Infrastructure | PublicDestinationClientError::Timeout => {
+            CodeHostTransportFailure::DispatchUnknown
+        }
     }
 }
 

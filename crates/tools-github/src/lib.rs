@@ -2450,7 +2450,7 @@ const fn classify_destination_failure(
         PublicDestinationClientError::DestinationRejected => {
             GitHubTransportFailure::PreDispatchInfrastructure
         }
-        PublicDestinationClientError::Infrastructure => {
+        PublicDestinationClientError::Infrastructure | PublicDestinationClientError::Timeout => {
             GitHubTransportFailure::PreDispatchInfrastructure
         }
     }

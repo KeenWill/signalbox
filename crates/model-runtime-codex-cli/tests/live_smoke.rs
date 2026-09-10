@@ -1573,6 +1573,7 @@ fn decoded_response_accepts_refusal_without_completion_material() {
 #[should_panic(expected = "the pinned Codex CLI returned no decoded response")]
 fn decoded_response_rejects_an_unexpected_terminal_variant() {
     let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+        response_content_observed: true,
         cause: LossCause::ResponseUnintelligible {
             detail: "fixture terminal variant".to_string(),
         },

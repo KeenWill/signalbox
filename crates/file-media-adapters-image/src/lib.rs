@@ -2,6 +2,7 @@
 
 mod adapter;
 mod source;
+mod transform;
 
 use std::{error::Error, str::FromStr};
 
@@ -20,15 +21,15 @@ pub use signalbox_file_media_runtime::{
 };
 
 const PROVIDER_NAME: &str = "signalbox_image";
-const READER_REVISION: &str = "v1";
+const READER_REVISION: &str = "v2";
+pub(crate) const IMAGE_VIEW_NAME: &str = "image";
 pub(crate) const METADATA_VIEW_NAME: &str = "metadata";
 pub(crate) const MALFORMED_IMAGE_REASON: &str = "malformed_image";
-pub(crate) const SOURCE_TOO_LARGE_REASON: &str = "source_too_large";
 pub(crate) const DIMENSION_LIMIT_EXCEEDED_REASON: &str = "dimension_limit_exceeded";
 pub(crate) const PIXEL_LIMIT_EXCEEDED_REASON: &str = "pixel_limit_exceeded";
 
-/// Maximum encoded bytes one image adapter accepts.
-pub const MAX_IMAGE_SOURCE_BYTES: u64 = 262_144;
+/// Maximum image prefix inspected without decoding a source raster.
+pub const MAX_IMAGE_SOURCE_BYTES: u64 = signalbox_file_media_runtime::MAX_PROBE_PREFIX_BYTES;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AdapterFormat {
@@ -148,7 +149,6 @@ fn reader(
 ) -> Result<ReaderDeclaration, Box<dyn Error + Send + Sync>> {
     let reasons = [
         MALFORMED_IMAGE_REASON,
-        SOURCE_TOO_LARGE_REASON,
         DIMENSION_LIMIT_EXCEEDED_REASON,
         PIXEL_LIMIT_EXCEEDED_REASON,
     ]
@@ -167,7 +167,16 @@ fn reader(
             cumulative_bytes: 16,
         }),
         validation: ValidationDeclaration::new(MAX_IMAGE_SOURCE_BYTES, 1),
-        views: vec![metadata_view()?],
+        views: if format.image_format() == ImageFormat::Gif {
+            vec![metadata_view()?]
+        } else {
+            vec![
+                metadata_view()?,
+                image_view(format)?,
+                derived_view("downscale", transform::DOWNSCALE_SCHEMA)?,
+                derived_view("crop", transform::CROP_SCHEMA)?,
+            ]
+        },
         reason_codes: reasons,
         streaming_text_fallback: StreamingTextFallback::Disabled,
     })?)
@@ -176,7 +185,7 @@ fn reader(
 fn metadata_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> {
     Ok(ReadViewDeclaration::try_new(
         ReadViewName::try_new(METADATA_VIEW_NAME)?,
-        String::from("Decodes the primary raster and returns dimensions and channel count."),
+        String::from("Inspects a bounded image prefix and returns dimensions and channel count."),
         CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
         ReadAccessPattern::Streaming { maximum_ranges: 1 },
         ReadViewBounds::Structured {
@@ -187,6 +196,43 @@ fn metadata_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> 
             string_bytes: 64,
         },
     )?)
+}
+
+fn image_view(format: AdapterFormat) -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> {
+    Ok(ReadViewDeclaration::try_new(
+        ReadViewName::try_new(IMAGE_VIEW_NAME)?,
+        String::from(
+            "Presents the validated image directly within source, view, and model bounds.",
+        ),
+        CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
+        ReadAccessPattern::RandomAccess {
+            maximum_ranges: signalbox_file_media_runtime::MAX_READ_RANGES,
+        },
+        ReadViewBounds::Image {
+            source_bytes: signalbox_file_media_runtime::MAX_READ_SOURCE_BYTES,
+            width: MAX_IMAGE_AXIS,
+            height: MAX_IMAGE_AXIS,
+            pixels: MAX_IMAGE_DECODED_PIXELS,
+            output_bytes: signalbox_file_media_runtime::MAX_PRESENTED_IMAGE_BYTES,
+        },
+    )?
+    .with_image_output(
+        signalbox_file_media_runtime::ImageViewKind::Direct,
+        vec![CanonicalMediaType::from_str(format.media_type())?],
+    ))
+}
+
+fn derived_view(
+    name: &str,
+    schema: &str,
+) -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> {
+    Ok(ReadViewDeclaration::try_new(
+        ReadViewName::try_new(name)?,
+        String::from("Produces one deterministic bounded PNG view; crop coordinates address the full-resolution source."),
+        CanonicalJsonObjectSchema::try_new(schema)?,
+        ReadAccessPattern::RandomAccess { maximum_ranges: signalbox_file_media_runtime::MAX_READ_RANGES },
+        ReadViewBounds::Image { source_bytes: signalbox_file_media_runtime::MAX_READ_SOURCE_BYTES, width:MAX_IMAGE_AXIS, height:MAX_IMAGE_AXIS, pixels:MAX_IMAGE_DECODED_PIXELS, output_bytes:signalbox_file_media_runtime::MAX_PRESENTED_IMAGE_BYTES },
+    )?.with_image_output(signalbox_file_media_runtime::ImageViewKind::Generated, vec![CanonicalMediaType::from_str("image/png")?]))
 }
 
 fn format_for_reader(reader: &ReaderIdentity) -> Result<AdapterFormat, FileMediaProviderFailure> {

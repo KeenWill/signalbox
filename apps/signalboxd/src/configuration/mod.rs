@@ -31,10 +31,10 @@ use credential_files::{absolute_search_entries, credential_bytes};
 pub use error::{HubModelConfigurationError, UnknownSessionModel};
 pub(crate) use model_routing::ModelCallInputUsage;
 pub use model_routing::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, AvailabilityCause, BillingKind,
-    CLAUDE_CLI_CREDENTIAL_REFERENCE, CODEX_CLI_CREDENTIAL_REFERENCE, ClaudeCliConfiguration,
-    CodexCliConfiguration, DerivedModelCallCost, ModelAdapter, ModelBillingRates,
-    OPENAI_CREDENTIAL_REFERENCE, ResolvedModelRoute,
+    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, CLAUDE_CLI_CREDENTIAL_REFERENCE,
+    CODEX_CLI_CREDENTIAL_REFERENCE, ClaudeCliConfiguration, CodexCliConfiguration,
+    DerivedModelCallCost, ModelAdapter, ModelBillingRates, OPENAI_CREDENTIAL_REFERENCE,
+    ResolvedModelRoute,
 };
 use model_routing::{
     AdapterMapping, MIGRATED_ANTHROPIC_MODEL_FAMILY, runtime_pool_action, runtime_pool_exhaustion,
@@ -559,6 +559,48 @@ impl HubModelConfiguration {
             &target_adapters,
             &selectable_targets,
         )?;
+        let runtime_model_capabilities = RuntimeModelCapabilityCatalog::try_from_definitions(
+            runtime_model_capabilities.iter().map(|definition| {
+                let adapter = target_provider_models
+                    .iter()
+                    .find_map(|(target, provider)| {
+                        (provider == definition.target().as_str())
+                            .then(|| target_adapters.get(target))
+                            .flatten()
+                    });
+                let image = adapter
+                    .and_then(|adapter| match adapter {
+                        ModelAdapter::CodexCli => {
+                            Some(signalbox_model_runtime_codex_cli::image_presentation_capability())
+                        }
+                        ModelAdapter::ClaudeCli => Some(
+                            signalbox_model_runtime_claude_cli::image_presentation_capability(),
+                        ),
+                        _ => None,
+                    })
+                    .map(|capability| {
+                        capability.limited_by(
+                            numeric_bounds
+                                .integer("max_image_presentation_bytes")
+                                .flatten()
+                                .unwrap_or(u64::MAX),
+                            numeric_bounds
+                                .integer("max_image_request_bytes")
+                                .flatten()
+                                .and_then(|bound| usize::try_from(bound).ok())
+                                .unwrap_or(usize::MAX),
+                        )
+                    });
+                signalbox_model_runtime::ModelCapabilityDefinition::new(
+                    definition.target().clone(),
+                    definition
+                        .capabilities()
+                        .clone()
+                        .with_image_presentation(image),
+                )
+            }),
+        )
+        .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         let mut tool_continuation_usage_limits = Vec::with_capacity(routes.len().saturating_mul(2));
