@@ -351,6 +351,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::ProgramRegistered { .. }
         | ServerMessage::ProgramRunStarted { .. }
         | ServerMessage::ProgramRunRead { .. }
+        | ServerMessage::EvaluationScorecardRead { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }

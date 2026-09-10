@@ -617,7 +617,9 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::ReadRunnerStatus { .. }
         | ClientRequest::RegisterProgram { .. }
         | ClientRequest::StartProgramRun { .. }
+        | ClientRequest::LaunchEvaluation { .. }
         | ClientRequest::ReadProgramRun { .. }
+        | ClientRequest::ReadEvaluationScorecard { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}
@@ -821,6 +823,7 @@ impl SnapshotReaderAdmission {
             ClientRequest::ListSessions {}
             | ClientRequest::ReadOperatorStatus {}
             | ClientRequest::ReadProgramRun { .. }
+        | ClientRequest::ReadEvaluationScorecard { .. }
             | ClientRequest::ReadRunnerStatus { .. }
             | ClientRequest::ReadGoal { .. }
             | ClientRequest::ReadTranscript { .. }
@@ -848,6 +851,7 @@ impl SnapshotReaderAdmission {
             | ClientRequest::ReadCredentialPoolPolicy { .. }
         | ClientRequest::RegisterProgram { .. }
         | ClientRequest::StartProgramRun { .. }
+        | ClientRequest::LaunchEvaluation { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReloadConfiguration { .. }

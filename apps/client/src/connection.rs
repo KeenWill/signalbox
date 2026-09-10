@@ -261,6 +261,8 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::RegisterProgram { .. }
         | ClientRequest::StartProgramRun { .. }
         | ClientRequest::ReadProgramRun { .. }
+        | ClientRequest::LaunchEvaluation { .. }
+        | ClientRequest::ReadEvaluationScorecard { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}

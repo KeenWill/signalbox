@@ -371,6 +371,17 @@ impl RunningRuntime {
         .await
     }
 
+    pub(crate) async fn start_evaluation() -> Result<Self, Box<dyn Error>> {
+        Self::start_with_workflow_options(
+            None,
+            BlobStorageFixtureMode::Enabled,
+            None,
+            None,
+            WorkflowFixtureMode::Running,
+        )
+        .await
+    }
+
     pub(crate) async fn start_stopped_programs() -> Result<Self, Box<dyn Error>> {
         Self::start_with_workflow_options(
             None,
@@ -442,7 +453,7 @@ impl RunningRuntime {
             pool.clone(),
             eligibility_nudge.clone(),
             InProcessToolDispatchGate::default(),
-            model_configuration,
+            model_configuration.clone(),
             template_configuration,
         );
         if let Some(compaction_model) = compaction_model {
@@ -461,6 +472,24 @@ impl RunningRuntime {
             WorkflowFixtureMode::Running | WorkflowFixtureMode::Stopped => {
                 let (service, workflows) =
                     signalboxd::workflows::WorkflowRuntime::new(pool.clone())?;
+                let workflows = if let Some(stores) = &blob_store_registry {
+                    let services = signalboxd::workflows::eval::EvalServices::new(
+                        pool.clone(),
+                        stores.clone(),
+                        Arc::new(
+                            signalbox_model_provider_runtime::RuntimeApprovalJudgeModel::new(
+                                ScriptedModel::<ModelCallId>::following([]),
+                                model_configuration.runtime_model_catalog(),
+                            ),
+                        ),
+                        signalboxd::workflows::eval::configured_binding(&model_configuration)
+                            .unwrap_or_else(|_| signalboxd::workflows::eval::recorded_binding()),
+                        Arc::new(model_configuration.clone()),
+                    );
+                    workflows.with_eval(move || Ok(services.clone()))
+                } else {
+                    workflows
+                };
                 runtime = runtime.with_workflows(service);
                 match programs {
                     WorkflowFixtureMode::Running => {

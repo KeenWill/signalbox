@@ -556,6 +556,28 @@ where
         ClientRequest::ReadProgramRun { run_id } => {
             handle_read_program(writer, version, request_id, run_id, services).await
         }
+        ClientRequest::LaunchEvaluation {
+            run_id,
+            registration_id,
+            input,
+        } => {
+            Box::pin(super::evaluation::launch(
+                writer,
+                version,
+                request_id,
+                run_id,
+                registration_id,
+                input,
+                services,
+            ))
+            .await
+        }
+        ClientRequest::ReadEvaluationScorecard { run_id, offset } => {
+            Box::pin(super::evaluation::read(
+                writer, version, request_id, run_id, offset, services,
+            ))
+            .await
+        }
         ClientRequest::CancelProgramRun { command_id, run_id } => {
             Box::pin(async move {
                 handle_cancel_program_run(writer, version, request_id, command_id, run_id, services)
