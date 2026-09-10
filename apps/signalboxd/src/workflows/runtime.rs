@@ -150,9 +150,7 @@ impl WorkflowRuntime {
             )
         };
         #[cfg(not(target_os = "linux"))]
-        let clock_executable = None;
-        #[cfg(not(target_os = "linux"))]
-        let observation_executable = None;
+        let (clock_executable, observation_executable, eval_executable) = (None, None, None);
         let registrations = ProgramRegistrationRepository::new(pool.clone());
         let (wake, receiver) = mpsc::unbounded_channel();
         let eval_ready = Arc::new(AtomicBool::new(false));

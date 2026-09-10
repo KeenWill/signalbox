@@ -81,7 +81,8 @@ impl EffectExecutor for RuntimeEffects {
             if let Some(input) = ObserveInput::from_request(invocation.request)
                 && let Some(runtime) = &self.repository_watch
             {
-                return runtime.adopt_observation(&input).await;
+                let result = runtime.adopt_observation(&input).await;
+                return self.classify(result, invocation.request.capability());
             }
             if RepoWatchRequest::decode(invocation.request).is_some()
                 && let Some(runtime) = &self.repository_watch
@@ -107,7 +108,8 @@ impl EffectExecutor for RuntimeEffects {
             if let Some(input) = ObserveInput::from_request(invocation.request)
                 && let Some(runtime) = &self.repository_watch
             {
-                return runtime.execute_observation(&input).await;
+                let result = runtime.execute_observation(&input).await;
+                return self.classify(result, invocation.request.capability());
             }
             if RepoWatchRequest::decode(invocation.request).is_some()
                 && let Some(runtime) = &self.repository_watch

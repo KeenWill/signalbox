@@ -591,3 +591,21 @@ async fn unchanged_frontier_commits_retain_the_invocation_until_its_answer_is_ad
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn observation_leases_leave_connections_available_for_frontier_work()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new().await?;
+    let store = &fixture.effects.store;
+    let other = RepositorySlug::try_new("example/other".into())?;
+    let first = store.lock_observation(fixture.input().repository()).await?;
+    let second = store.lock_observation(&other).await?;
+    // Both module pool slots would be occupied if leases borrowed frontier connections.
+    let baseline =
+        tokio::time::timeout(Duration::from_secs(5), store.ingest_baseline(&other)).await??;
+    assert_eq!(baseline.generation, 0);
+    first.rollback().await?;
+    second.rollback().await?;
+    Ok(())
+}

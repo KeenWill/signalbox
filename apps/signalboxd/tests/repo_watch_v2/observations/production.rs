@@ -27,6 +27,8 @@ async fn configured_runtime(
             "[repository_watch]\nversion = 1",
             "[repository_watch]\nversion = 1\nworkflows_enabled = true",
         );
+    // Exercise a subsequent timer poll even when the startup wake wins admission.
+    let source = source.replace("poll_interval_seconds = 60", "poll_interval_seconds = 1");
     let models = signalboxd::HubModelConfiguration::parse(&source)?;
     let path = hook.secret.with_extension("templates.toml");
     std::fs::write(
@@ -80,6 +82,24 @@ async fn wait_for_requests(
     .await?
 }
 
+async fn wait_for_result(fixture: &Fixture, id: Uuid) -> Result<ObserveAnswer, Box<dyn Error>> {
+    tokio::time::timeout(WORKFLOW_TIMEOUT, async {
+        let mut changed = fixture.journal.listen_all().await?;
+        loop {
+            let loaded = fixture
+                .journal
+                .load(ProgramRunId::from_uuid(id))
+                .await?
+                .expect("observation run");
+            if let Some(result) = loaded.result() {
+                break Ok::<_, Box<dyn Error>>(ObserveAnswer::decode(result.as_bytes())?);
+            }
+            changed.changed().await?;
+        }
+    })
+    .await?
+}
+
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
 async fn a_webhook_wake_during_a_workflow_poll_waits_for_that_observation()
@@ -107,17 +127,29 @@ async fn a_webhook_wake_during_a_workflow_poll_waits_for_that_observation()
     let workflow_task = tokio::spawn(runner.run(async {
         let _ = workflow_stopped.await;
     }));
+    let (stop_repositories, repositories_stopped) = tokio::sync::watch::channel(false);
+    let repository_task = runtime.spawn(repositories_stopped).await;
+    // Startup queues both a timer and an existing wake; either may be admitted first.
+    wait_for_requests(&fixture, 2).await?;
+    let startup_ids: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT run_id FROM program_run_journal_entry WHERE effect_method='repo.observe' ORDER BY run_id").fetch_all(&fixture.core).await?;
+    for id in startup_ids {
+        wait_for_result(&fixture, id).await?;
+    }
     let mut lease = fixture.core.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('observation:example/project', 0))")
         .execute(&mut *lease)
         .await?;
-    let (stop_repositories, repositories_stopped) = tokio::sync::watch::channel(false);
-    let repository_task = runtime.spawn(repositories_stopped).await;
-    let first = wait_for_requests(&fixture, 1).await?;
-    assert_eq!(
-        ObserveInput::decode(&first[0])?.producer(),
-        EventProducer::Poll
-    );
+    tokio::time::timeout(WORKFLOW_TIMEOUT, async {
+        loop {
+            let pending: Vec<Vec<u8>> = sqlx::query_scalar("SELECT request.payload_inline FROM program_run_journal_entry request WHERE request.effect_method='repo.observe' AND NOT EXISTS (SELECT 1 FROM program_run_journal_entry answer WHERE answer.run_id=request.run_id AND answer.resolves_request_ordinal=request.request_ordinal)")
+                .fetch_all(&fixture.core).await?;
+            if pending.iter().any(|bytes| ObserveInput::decode(bytes).is_ok_and(|input| input.producer() == EventProducer::Poll)) {
+                break Ok::<_, Box<dyn Error>>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await??;
+    let before_wake = observation_requests(&fixture.core).await?.len();
     let status = webhook_delivery_status(&hook, HOOK_SECRET, &RuntimeWebhookDelivery {
         id: Uuid::now_v7(), event: "pull_request",
         body: r#"{"action":"opened","repository":{"full_name":"example/project"},"pull_request":{"number":1}}"#,
@@ -125,39 +157,38 @@ async fn a_webhook_wake_during_a_workflow_poll_waits_for_that_observation()
     assert_eq!(status, reqwest::StatusCode::ACCEPTED);
     assert_eq!(
         observation_requests(&fixture.core).await?.len(),
-        1,
+        before_wake,
         "webhook admission cannot launch a second observation while the poll is blocked"
     );
     lease.commit().await?;
-    let requests = wait_for_requests(&fixture, 2).await?;
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        ObserveInput::decode(&requests[1])?.producer(),
-        EventProducer::Webhook
-    );
-    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT run_id FROM program_run_journal_entry WHERE effect_method='repo.observe' ORDER BY run_id").fetch_all(&fixture.core).await?;
-    tokio::time::timeout(WORKFLOW_TIMEOUT, async {
-        let mut changed = fixture.journal.listen_all().await?;
+    let webhook_index = tokio::time::timeout(WORKFLOW_TIMEOUT, async {
         loop {
-            let last = fixture
-                .journal
-                .load(ProgramRunId::from_uuid(ids[1]))
-                .await?
-                .expect("webhook run");
-            if let Some(result) = last.result() {
-                assert!(matches!(
-                    ObserveAnswer::decode(result.as_bytes())?,
-                    ObserveAnswer::Observed(ObservationResult {
-                        outcome: ObservationOutcome::Failed,
-                        ..
+            let requests = observation_requests(&fixture.core).await?;
+            if let Some(index) =
+                requests
+                    .iter()
+                    .enumerate()
+                    .skip(before_wake)
+                    .find_map(|(index, bytes)| {
+                        ObserveInput::decode(bytes)
+                            .is_ok_and(|input| input.producer() == EventProducer::Webhook)
+                            .then_some(index)
                     })
-                ));
-                break Ok::<_, Box<dyn Error>>(());
+            {
+                break Ok::<_, Box<dyn Error>>(index);
             }
-            changed.changed().await?;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await??;
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT run_id FROM program_run_journal_entry WHERE effect_method='repo.observe' ORDER BY run_id").fetch_all(&fixture.core).await?;
+    assert!(matches!(
+        wait_for_result(&fixture, ids[webhook_index]).await?,
+        ObserveAnswer::Observed(ObservationResult {
+            outcome: ObservationOutcome::Failed,
+            ..
+        })
+    ));
     stop_repositories.send(true)?;
     tokio::time::timeout(WORKFLOW_TIMEOUT, repository_task)
         .await??

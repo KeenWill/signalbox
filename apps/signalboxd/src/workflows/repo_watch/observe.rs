@@ -1,6 +1,7 @@
 //! Finite repository observation program and checked provider-effect boundary.
 //! Governed by docs/spec/workflows.md and docs/spec/repo-watch.md.
 
+use super::effects::RepoWatchEffectFailure;
 use serde::{Deserialize, Serialize};
 use signalbox_domain::{EffectRequest, InlineFramePayload, ProgramCapability, RepositorySlug};
 use signalbox_module_repo_watch_v2::{
@@ -159,17 +160,21 @@ pub async fn adopt(
     store: &RepoWatchStore,
     input: &ObserveInput,
 ) -> Result<Option<InlineFramePayload>, LiveDeliveryFailure> {
-    let _lease = store
-        .lock_observation(&input.repository)
-        .await
-        .map_err(failure)?;
+    adopt_checked(store, input).await.map_err(Into::into)
+}
+
+pub(crate) async fn adopt_checked(
+    store: &RepoWatchStore,
+    input: &ObserveInput,
+) -> Result<Option<InlineFramePayload>, RepoWatchEffectFailure> {
+    let _lease = store.lock_observation(&input.repository).await?;
     adopt_locked(store, input).await
 }
 
 async fn adopt_locked(
     store: &RepoWatchStore,
     input: &ObserveInput,
-) -> Result<Option<InlineFramePayload>, LiveDeliveryFailure> {
+) -> Result<Option<InlineFramePayload>, RepoWatchEffectFailure> {
     let receipt = store
         .observation_receipt_by_effect(input.effect)
         .await
@@ -185,9 +190,9 @@ async fn adopt_locked(
         return Ok(None);
     };
     if receipt.effect != input.effect || receipt.input != input.bytes {
-        return Err(LiveDeliveryFailure::new(
+        return Err(RepoWatchEffectFailure::Rejected(LiveDeliveryFailure::new(
             "repository observation receipt conflicts or awaits adoption",
-        ));
+        )));
     }
     Ok(Some(InlineFramePayload::new(receipt.result)))
 }
@@ -197,6 +202,16 @@ pub async fn execute(
     input: &ObserveInput,
     observer: &mut impl RepositoryObserver,
 ) -> Result<InlineFramePayload, LiveDeliveryFailure> {
+    execute_checked(store, input, observer)
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn execute_checked(
+    store: &RepoWatchStore,
+    input: &ObserveInput,
+    observer: &mut impl RepositoryObserver,
+) -> Result<InlineFramePayload, RepoWatchEffectFailure> {
     let _lease = store
         .lock_observation(&input.repository)
         .await
@@ -205,9 +220,9 @@ pub async fn execute(
         return Ok(result);
     }
     if observer.repository() != &input.repository {
-        return Err(LiveDeliveryFailure::new(
+        return Err(RepoWatchEffectFailure::Rejected(LiveDeliveryFailure::new(
             "repository observation is unavailable",
-        ));
+        )));
     }
     let store = store.with_observation_invocation(ObservationInvocation {
         effect: input.effect,

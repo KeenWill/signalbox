@@ -2,6 +2,7 @@
 //! Governed by docs/spec/repo-watch.md and docs/spec/workflows.md.
 
 use super::*;
+use crate::workflows::repo_watch::effects::RepoWatchEffectFailure;
 use crate::workflows::{
     WorkflowService,
     repo_watch::observe::{self, ObserveAnswer, ObserveInput, RepositoryObserver},
@@ -61,14 +62,14 @@ impl RepositoryWatchRuntime {
     pub(crate) async fn adopt_observation(
         &self,
         input: &ObserveInput,
-    ) -> Result<Option<signalbox_domain::InlineFramePayload>, LiveDeliveryFailure> {
-        observe::adopt(&self.measurements_store, input).await
+    ) -> Result<Option<signalbox_domain::InlineFramePayload>, RepoWatchEffectFailure> {
+        observe::adopt_checked(&self.measurements_store, input).await
     }
 
     pub(crate) async fn execute_observation(
         &self,
         input: &ObserveInput,
-    ) -> Result<signalbox_domain::InlineFramePayload, LiveDeliveryFailure> {
+    ) -> Result<signalbox_domain::InlineFramePayload, RepoWatchEffectFailure> {
         if let Some(result) = self.adopt_observation(input).await? {
             return Ok(result);
         }
@@ -80,7 +81,7 @@ impl RepositoryWatchRuntime {
                     .map_err(observe::failure)?,
             ));
         };
-        observe::execute(&self.measurements_store, input, &mut *observer.lock().await).await
+        observe::execute_checked(&self.measurements_store, input, &mut *observer.lock().await).await
     }
 }
 
