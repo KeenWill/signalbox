@@ -52,6 +52,20 @@ impl FileMediaRegistry {
         cancellation: &dyn CancellationSignal,
         expected_reader: option::Option<&ReaderIdentity>,
     ) -> result::Result<(ReaderIdentity, FileReadResult), FileMediaFailure>;
+    pub async fn prepare_read_with_reader(
+        &self,
+        processor: &dyn FileMediaProcessor,
+        request: FileReadRequest,
+        source: &dyn VerifiedBlobSource,
+        cancellation: &dyn CancellationSignal,
+        expected_reader: option::Option<&ReaderIdentity>,
+    ) -> result::Result<(ReaderIdentity, PreparedFileRead), FileMediaFailure>;
+    pub async fn validate_generated(
+        &self,
+        processor: &dyn FileMediaProcessor,
+        generated: GeneratedMediaView,
+        cancellation: &dyn CancellationSignal,
+    ) -> result::Result<ValidatedMediaArtifact, FileMediaFailure>;
 }
 ```
 

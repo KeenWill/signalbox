@@ -4,9 +4,7 @@ use signalbox_model_runtime::ProviderErrorKind;
 use super::classify::{FailureClass, classify, input_too_large};
 use super::client::{Client, Event};
 use super::decode::parse;
-use super::frame::{
-    CodexErrorInfo, TextInput, TextInputKind, ThreadOptions, TurnInput, TurnStatus,
-};
+use super::frame::{CodexErrorInfo, ThreadOptions, TurnInput, TurnStatus, UserInput};
 
 #[path = "../../tests/support/protocol_peer.rs"]
 mod peer;
@@ -19,8 +17,7 @@ fn new_client() -> Client {
             service_tier: None,
         },
         TurnInput {
-            input: vec![TextInput {
-                kind: TextInputKind::Text,
+            input: vec![UserInput::Text {
                 text: "fixture prompt".into(),
             }],
             output_schema: json!({"type":"object"}),

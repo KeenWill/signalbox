@@ -735,6 +735,9 @@ impl CredentialAccessCode {
 const fn preparation_failure_cause(failure: &PreparationFailure) -> ModelCallCauseCode {
     match failure {
         PreparationFailure::UnsupportedOperation { .. } => ModelCallCauseCode::UnsupportedOperation,
+        PreparationFailure::ImageUnavailable
+        | PreparationFailure::ImageMissing
+        | PreparationFailure::ImageCorrupt => ModelCallCauseCode::PreparationDefect,
         PreparationFailure::CredentialUnavailable { error } => {
             ModelCallCauseCode::CredentialUnavailable(CredentialAccessCode::of(error.failure))
         }
@@ -854,6 +857,9 @@ pub enum RuntimeModelCallProviderError {
     #[error("model runtime preparation reported a defect")]
     /// Runtime preparation reported a local adapter defect.
     PreparationDefect,
+    #[error("durable image authority is inconsistent")]
+    /// Image preparation found corrupt authority or store evidence.
+    ImageIntegrity,
     #[error("model runtime returned a different correlation")]
     /// The runtime returned a different caller-owned correlation identity.
     CorrelationMismatch,
@@ -893,7 +899,7 @@ impl RuntimeModelCallProviderError {
     pub const fn cause_code(self) -> ModelCallCauseCode {
         match self {
             Self::UnconfiguredTarget => ModelCallCauseCode::UnconfiguredTarget,
-            Self::PreparationDefect => ModelCallCauseCode::PreparationDefect,
+            Self::PreparationDefect | Self::ImageIntegrity => ModelCallCauseCode::PreparationDefect,
             Self::CorrelationMismatch => ModelCallCauseCode::CorrelationMismatch,
             Self::AuthorizationMismatch => ModelCallCauseCode::AuthorizationMismatch,
             Self::ObservationCorrelationMismatch => {
@@ -912,7 +918,10 @@ impl RuntimeModelCallProviderError {
 
 impl ClassifyOperatorFailure for RuntimeModelCallProviderError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
-        OperatorFailureClass::CallerOrHubBug
+        match self {
+            Self::ImageIntegrity => OperatorFailureClass::FailClosedCorruption,
+            _ => OperatorFailureClass::CallerOrHubBug,
+        }
     }
 }
 
@@ -1394,16 +1403,35 @@ where
             } => {
                 require_correlation(telemetry, returned)?;
                 report_preparation_failure(telemetry, &failure);
-                Ok(ModelCallCapabilityPreparation::KnownFailure)
+                let attachment = match failure {
+                    PreparationFailure::ImageUnavailable => {
+                        Some(signalbox_application::AttachmentPreparationFailure::Unavailable)
+                    }
+                    PreparationFailure::ImageMissing => {
+                        Some(signalbox_application::AttachmentPreparationFailure::Missing)
+                    }
+                    PreparationFailure::ImageCorrupt => {
+                        Some(signalbox_application::AttachmentPreparationFailure::Corrupt)
+                    }
+                    _ => None,
+                };
+                Ok(attachment.map_or(
+                    ModelCallCapabilityPreparation::KnownFailure,
+                    ModelCallCapabilityPreparation::AttachmentFailure,
+                ))
             }
             PreparationOutcome::Defect {
                 correlation: returned,
-                ..
+                defect,
             } => {
                 require_correlation(telemetry, returned)?;
                 Err(fail_closed(
                     telemetry,
-                    RuntimeModelCallProviderError::PreparationDefect,
+                    if defect == signalbox_model_runtime::PreparationDefect::ImageIntegrity {
+                        RuntimeModelCallProviderError::ImageIntegrity
+                    } else {
+                        RuntimeModelCallProviderError::PreparationDefect
+                    },
                     None,
                 ))
             }
@@ -1875,6 +1903,19 @@ fn render_runtime_messages(
             ModelConversationMessage::ToolResult {
                 request, content, ..
             } => {
+                let image = match content {
+                    ModelToolResultContent::Success(ToolResultContent::Media {
+                        reference, ..
+                    }) => Some(MessagePart::ImageReference(
+                        signalbox_model_runtime::ImageReference {
+                            authority: request.into_uuid().to_string(),
+                            digest: *reference.presented().digest().as_bytes(),
+                            byte_length: reference.byte_length(),
+                            media_type: reference.presented().media_type().to_owned(),
+                        },
+                    )),
+                    _ => None,
+                };
                 let (content, is_error) = render_tool_result(content);
                 let part = MessagePart::ToolResult(ToolResultRecord {
                     tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
@@ -1883,7 +1924,12 @@ fn render_runtime_messages(
                 });
                 if collecting_tool_results {
                     if let Some(message) = rendered.last_mut() {
-                        message.parts.push(part);
+                        let position = message
+                            .parts
+                            .iter()
+                            .position(|part| matches!(part, MessagePart::ImageReference(_)))
+                            .unwrap_or(message.parts.len());
+                        message.parts.insert(position, part);
                     } else {
                         rendered.push(ConversationMessage {
                             role: ConversationRole::User,
@@ -1895,6 +1941,11 @@ fn render_runtime_messages(
                         role: ConversationRole::User,
                         parts: vec![part],
                     });
+                }
+                if let Some(image) = image
+                    && let Some(message) = rendered.last_mut()
+                {
+                    message.parts.push(image);
                 }
                 assistant_call = None;
                 collecting_tool_results = true;
@@ -2014,9 +2065,9 @@ fn render_requested_target(selection: FrozenModelSelection) -> String {
 
 fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
     match content {
-        ModelToolResultContent::Success(ToolResultContent::Text(text)) => {
-            (text.as_str().to_owned(), false)
-        }
+        ModelToolResultContent::Success(
+            ToolResultContent::Text(text) | ToolResultContent::Media { text, .. },
+        ) => (text.as_str().to_owned(), false),
         ModelToolResultContent::ExecutionError(error) => {
             let kind = match error.kind() {
                 ToolExecutionErrorKind::UnknownTool => "unknown_tool",
@@ -2739,6 +2790,55 @@ mod tests {
             SessionId::from_uuid(Uuid::from_u128(10)),
             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value)),
         )
+    }
+
+    #[test]
+    fn only_typed_durable_results_issue_image_authority_and_tool_results_precede_images() {
+        use signalbox_domain::{
+            BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
+            ToolResultContent, ToolResultText,
+        };
+        use signalbox_model_runtime::MessagePart;
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(133));
+        let identity = MediaValidationIdentity::try_new(
+            BlobDigest::from_bytes([1; 32]),
+            "image/png".into(),
+            "fixture".into(),
+            "png".into(),
+            "v1".into(),
+            MediaValidationEvidence::StrongSignature,
+        )
+        .unwrap();
+        let reference =
+            ToolMediaReference::direct_image(identity, std::num::NonZeroU64::new(64).unwrap())
+                .unwrap();
+        let messages = [
+            ModelConversationMessage::ToolResult {
+                source: source(134),
+                request,
+                content: ModelToolResultContent::Success(ToolResultContent::Media {
+                    text: ToolResultText::try_new("image".into()).unwrap(),
+                    reference,
+                }),
+            },
+            ModelConversationMessage::ToolResult {
+                source: source(135),
+                request: ToolRequestId::from_uuid(Uuid::from_u128(136)),
+                content: ModelToolResultContent::Success(ToolResultContent::Text(
+                    ToolResultText::try_new(r#"{"output":"image","digest":"pretend"}"#.into())
+                        .unwrap(),
+                )),
+            },
+        ];
+        let rendered = render_runtime_messages(&messages);
+        assert_eq!(rendered.len(), 1);
+        assert!(matches!(rendered[0].parts[0], MessagePart::ToolResult(_)));
+        assert!(matches!(rendered[0].parts[1], MessagePart::ToolResult(_)));
+        let MessagePart::ImageReference(image) = &rendered[0].parts[2] else {
+            panic!("one authenticated image reference")
+        };
+        assert_eq!(image.authority, request.into_uuid().to_string());
+        assert_eq!(rendered[0].parts.len(), 3);
     }
 
     #[test]
