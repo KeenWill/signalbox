@@ -543,18 +543,10 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
     let result_bytes = u64::try_from(
         r#"{"error": {"kind": "execution_failed", "detail": "placement_lost"}}"#.len(),
     )?;
-    if target_available {
-        assert_eq!(
-            after_result.projected_unreported_content_bytes(),
-            before_result.projected_unreported_content_bytes() + result_bytes
-        );
-    } else {
-        assert!(after_result.projected_unreported_content_bytes() >= result_bytes);
-        assert_eq!(
-            after_result.projected_unreported_content_bytes(),
-            before_result.projected_unreported_content_bytes()
-        );
-    }
+    assert_eq!(
+        after_result.projected_unreported_content_bytes(),
+        before_result.projected_unreported_content_bytes() + result_bytes
+    );
 
     let dispatcher = OutboxDispatcher::new(pool.clone());
     let mut projected = Vec::new();
@@ -642,12 +634,14 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
             .bind(next_request.into_uuid()).fetch_one(&pool).await?;
         assert_eq!(evidence, 0);
     } else {
-        let state: String =
-            sqlx::query_scalar("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
-                .bind(fixture.turn.into_uuid())
-                .fetch_one(&pool)
-                .await?;
-        assert_eq!(state, "terminal");
+        let (state, compaction_frontier): (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT state_kind, compaction_frontier_id FROM turn_lifecycle WHERE turn_id = $1",
+        )
+        .bind(fixture.turn.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(state, "active");
+        assert_eq!(compaction_frontier, Some(result_frontier.into_uuid()));
     }
     Ok(())
 }
@@ -661,7 +655,8 @@ async fn placement_loss_only_batch_commits_result_and_next_model_call() -> Resul
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn placement_loss_resolution_survives_failed_continuation() -> Result<(), Box<dyn Error>> {
+async fn placement_loss_resolution_survives_continuation_compaction() -> Result<(), Box<dyn Error>>
+{
     continue_inadmissible_batch(false).await
 }
 
