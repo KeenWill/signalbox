@@ -1078,6 +1078,7 @@ async fn failed_judge_trials_preserve_observed_model_identity_and_usage() {
                 exchange: ExchangeFacts::default(),
                 reported_model: model.clone(),
                 kind: ProviderErrorKind::CredentialRejected,
+                credential_recovery: None,
                 non_acceptance_proven: false,
                 native: NativeErrorFacts::default(),
                 usage,
@@ -1087,6 +1088,7 @@ async fn failed_judge_trials_preserve_observed_model_identity_and_usage() {
         (
             "boundary_loss",
             Script::delivering(TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: false,
                 cause: LossCause::TransportFailed(TransportFacts {
                     detail: "recorded loss".into(),
                 }),
