@@ -275,7 +275,11 @@ async fn production_fixture() -> Result<
         retention: "604800s",
     };
     let models = runtime_configuration(&hook)?;
-    let rule = models.repository_watch().unwrap().rules()[0].clone();
+    let rule = models
+        .repository_watch()
+        .expect("repository-watch fixture configuration")
+        .rules()[0]
+        .clone();
     let template_path = files.path().join("templates.toml");
     std::fs::write(
         &template_path,
