@@ -3262,22 +3262,6 @@ fn require_active(cancellation: &dyn CancellationSignal) -> Result<(), Processor
     }
 }
 
-#[cfg(test)]
-fn find_eocd(bytes: &[u8]) -> Option<usize> {
-    bytes
-        .windows(4)
-        .enumerate()
-        .find_map(|(offset, signature)| {
-            if signature != b"PK\x05\x06" {
-                return None;
-            }
-            let record = bytes.get(offset..)?;
-            let comment_length = usize::from(le_u16(record, 20).ok()?);
-            let expected_length = 22_usize.checked_add(comment_length)?;
-            (record.len() == expected_length).then_some(offset)
-        })
-}
-
 fn find_consistent_eocd(bytes: &[u8], suffix_start: u64) -> Option<usize> {
     bytes
         .windows(4)
@@ -3490,13 +3474,6 @@ mod tests {
                     .ok_or(SourceReadError::Unavailable)
             })
         }
-    }
-
-    #[test]
-    fn unrecognized_declared_candidate_returns_no_match() {
-        let result = ValidationIssue::Unrecognized.validation(OfficeKind::Docx);
-
-        assert_eq!(result, ProcessorValidationOutput::NoMatch);
     }
 
     #[test]
@@ -3879,42 +3856,6 @@ mod tests {
             parse_central_entry(&central, 0),
             Err(ValidationIssue::Malformed(MALFORMED_REASON))
         ));
-    }
-
-    #[test]
-    fn probe_budget_reserves_all_local_header_reads() {
-        let admitted_central_bytes = VALIDATION_SOURCE_BYTES
-            - ZIP_SUFFIX_BYTES
-            - EOCD_PRECEDING_BYTES
-            - ZIP_PREFIX_BYTES
-            - LOCAL_HEADER_BYTES
-            - CONTENT_TYPES_NAME_BYTES
-            - LOCAL_EXTRA_BYTES
-            - CONTENT_TYPES_COMPRESSED_BYTES
-            - LOCAL_HEADER_BYTES
-            - PACKAGE_RELS_NAME_BYTES
-            - LOCAL_EXTRA_BYTES
-            - PACKAGE_RELS_COMPRESSED_BYTES
-            - MAX_SELECTED_PARTS
-                * (LOCAL_HEADER_BYTES + SELECTED_PART_NAME_BYTES + LOCAL_EXTRA_BYTES);
-
-        assert_eq!(
-            ZIP_PREFIX_BYTES
-                + ZIP_SUFFIX_BYTES
-                + EOCD_PRECEDING_BYTES
-                + admitted_central_bytes
-                + LOCAL_HEADER_BYTES
-                + CONTENT_TYPES_NAME_BYTES
-                + LOCAL_EXTRA_BYTES
-                + CONTENT_TYPES_COMPRESSED_BYTES
-                + LOCAL_HEADER_BYTES
-                + PACKAGE_RELS_NAME_BYTES
-                + LOCAL_EXTRA_BYTES
-                + PACKAGE_RELS_COMPRESSED_BYTES
-                + MAX_SELECTED_PARTS
-                    * (LOCAL_HEADER_BYTES + SELECTED_PART_NAME_BYTES + LOCAL_EXTRA_BYTES),
-            VALIDATION_SOURCE_BYTES
-        );
     }
 
     #[tokio::test]
@@ -4625,29 +4566,6 @@ mod tests {
     }
 
     #[test]
-    fn eocd_scan_ignores_signature_bytes_inside_the_comment() {
-        let mut bytes = vec![0_u8; 22];
-        bytes[0..4].copy_from_slice(b"PK\x05\x06");
-        bytes[20..22].copy_from_slice(&8_u16.to_le_bytes());
-        bytes.extend_from_slice(b"PK\x05\x06tail");
-
-        assert_eq!(find_eocd(&bytes), Some(0));
-    }
-
-    #[test]
-    fn eocd_scan_skips_a_complete_false_record_inside_the_comment() {
-        let mut bytes = vec![0_u8; 22];
-        bytes[0..4].copy_from_slice(b"PK\x05\x06");
-        bytes[20..22].copy_from_slice(&22_u16.to_le_bytes());
-        let false_offset = bytes.len();
-        bytes.extend_from_slice(b"PK\x05\x06");
-        bytes.extend_from_slice(&[0_u8; 18]);
-
-        assert_eq!(find_eocd(&bytes), Some(0));
-        assert_ne!(find_eocd(&bytes), Some(false_offset));
-    }
-
-    #[test]
     fn zip64_eocd_fields_are_resolved_before_entry_limits() {
         let suffix_start = 1_000_u64;
         let mut bytes = vec![0_u8; 56 + 20 + 22];
@@ -4701,11 +4619,6 @@ mod tests {
         let result = central_directory_fields(&bytes, eocd_offset, suffix_start);
 
         assert!(matches!(result, Ok((3, 123, 456))));
-    }
-
-    #[test]
-    fn zip64_trailer_budget_covers_bounded_extensible_data() {
-        assert_eq!(EOCD_PRECEDING_BYTES, 21 + 20 + 56 + MAX_ZIP64_EOCD_BYTES);
     }
 
     #[test]

@@ -8,6 +8,16 @@ pub(crate) enum FailureClass {
 }
 
 pub(crate) fn classify(info: Option<&CodexErrorInfo>) -> FailureClass {
+    let status_kind = match info.and_then(CodexErrorInfo::http_status) {
+        Some(401) => Some(ProviderErrorKind::CredentialRejected),
+        Some(429) => Some(ProviderErrorKind::RateLimited),
+        Some(500) => Some(ProviderErrorKind::ProviderInternal),
+        Some(503 | 529) => Some(ProviderErrorKind::Overloaded),
+        _ => None,
+    };
+    if let Some(kind) = status_kind {
+        return FailureClass::Provider(kind);
+    }
     let Some(CodexErrorInfo::Known(info)) = info else {
         return FailureClass::Provider(ProviderErrorKind::Unrecognized);
     };
@@ -43,6 +53,7 @@ pub(crate) fn classify(info: Option<&CodexErrorInfo>) -> FailureClass {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct TurnActivity {
+    pub(crate) response_content_observed: bool,
     pub(crate) assistant_output_observed: bool,
     pub(crate) retry_observed: bool,
 }

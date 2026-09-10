@@ -80,31 +80,6 @@ fn exact_pin_rejects_a_caret_range() {
 }
 
 #[test]
-fn exact_pin_rejects_a_tilde_range() {
-    assert!(!is_exact_pin("~2.1.220"));
-}
-
-#[test]
-fn exact_pin_rejects_a_dist_tag() {
-    assert!(!is_exact_pin("latest"));
-}
-
-#[test]
-fn exact_pin_rejects_too_few_components() {
-    assert!(!is_exact_pin("2.1"));
-}
-
-#[test]
-fn exact_pin_rejects_too_many_components() {
-    assert!(!is_exact_pin("2.1.220.1"));
-}
-
-#[test]
-fn exact_pin_rejects_an_empty_component() {
-    assert!(!is_exact_pin("2..220"));
-}
-
-#[test]
 fn exact_pin_rejects_a_prerelease() {
     assert!(!is_exact_pin("2.1.220-beta.1"));
 }

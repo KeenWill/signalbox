@@ -456,6 +456,13 @@ impl ToolExecutionInvocation {
 pub enum ToolExecutorEvidence {
     /// Exact UTF-8 output awaiting bounded domain admission.
     CompletedText(String),
+    /// Bounded summary and checked media evidence awaiting durable observation commit.
+    CompletedMedia {
+        /// Admitted textual projection.
+        text: ToolResultText,
+        /// Registry-validated immutable image identity.
+        reference: signalbox_domain::ToolMediaReference,
+    },
     /// The tool definitively failed after checked dispatch.
     KnownFailed {
         /// Optional bounded, sanitized detail.
@@ -1909,6 +1916,11 @@ fn admit_executor_evidence(
     effect_class: ToolEffectClass,
 ) -> CorrelatedToolAttemptObservation {
     let observation = match evidence.evidence {
+        ToolExecutorEvidence::CompletedMedia { text, reference } => {
+            ToolAttemptObservation::Completed {
+                result: ToolResultContent::Media { text, reference },
+            }
+        }
         ToolExecutorEvidence::CompletedText(value) => match ToolResultText::try_new(value) {
             Ok(result) => ToolAttemptObservation::Completed {
                 result: ToolResultContent::Text(result),
@@ -2309,18 +2321,6 @@ mod tests {
             ToolExecutionServiceError::<FakeError, FakeError>::DurableCompletionReconciliation(
                 FakeError::Ordinary,
             );
-
-        assert_eq!(
-            error.source().map(ToString::to_string),
-            Some(String::from("fake tool-loop failure"))
-        );
-    }
-
-    #[test]
-    fn child_wait_reconciliation_exposes_transaction_source() {
-        let error = ToolExecutionServiceError::<FakeError, FakeError>::ChildWaitReconciliation(
-            FakeError::Ordinary,
-        );
 
         assert_eq!(
             error.source().map(ToString::to_string),

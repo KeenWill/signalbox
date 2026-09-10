@@ -4,17 +4,20 @@
 //! and the untrusted processor boundary. It deliberately has no dependency on
 //! domain, application, persistence, daemon, parser, or media crates.
 
+mod artifact;
+pub use artifact::{GeneratedMediaView, PreparedFileRead, ValidatedMediaArtifact};
 mod declaration;
 mod detection;
 mod limits;
+mod reference;
 mod registry;
 mod value;
 
 pub use declaration::{
     FileMediaProvider, FileMediaProviderDeclaration, FileMediaProviderFailure,
     FileMediaProviderFuture, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    ProbeDeclaration, ProbeDeclarationInput, ProbeStrength, ReadAccessPattern, ReadOutputKind,
-    ReadViewBounds, ReadViewDeclaration, ReaderDeclaration, ReaderDeclarationInput,
+    ImageViewKind, ProbeDeclaration, ProbeDeclarationInput, ProbeStrength, ReadAccessPattern,
+    ReadOutputKind, ReadViewBounds, ReadViewDeclaration, ReaderDeclaration, ReaderDeclarationInput,
     RegistryDeclarationError, StreamingTextFallback, ValidationDeclaration,
 };
 pub use detection::{
@@ -37,6 +40,7 @@ pub use limits::{
     MAX_WORKER_FILE_DESCRIPTORS, MAX_WORKER_MEMORY_BYTES, MAX_WORKER_STDERR_BYTES,
     MAX_WORKER_TASKS, MAX_WORKER_WALL_SECONDS, MIN_WORKER_FILE_DESCRIPTORS,
 };
+pub use reference::{FileMediaReference, MediaPresentationKind, MediaValidationIdentity};
 pub use registry::{
     FileMediaRegistry, FileMediaRegistryConstructionError, MAX_READERS_PER_PROVIDER,
     MAX_REGISTRY_READERS, ProcessorIsolation, provider_declaration_inventory_fits,

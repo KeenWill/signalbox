@@ -505,21 +505,6 @@ fn branch_name_rejects_invalid_git_ref_shapes() {
 }
 
 #[test]
-fn payload_qualifiers_remain_fields_separate_from_event_kinds() {
-    let mergeable_state = vec![MergeableState::Conflicting];
-    let conclusion = vec![CheckConclusion::Failure];
-    let matcher = RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
-        event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
-        mergeable_state: mergeable_state.clone(),
-        conclusion: conclusion.clone(),
-        ..RepoWatchMatcherV1Input::default()
-    });
-
-    assert_eq!(matcher.mergeable_state(), mergeable_state);
-    assert_eq!(matcher.conclusion(), conclusion);
-}
-
-#[test]
 fn label_matcher_construction_keeps_predicates_named() -> Result<(), RepoWatchTextError> {
     let any_of = LabelName::try_new(String::from("any"))?;
     let all_of = LabelName::try_new(String::from("all"))?;

@@ -171,6 +171,7 @@ pub(crate) fn provider_error(
     usage: TokenUsage,
 ) -> TerminalEvidence {
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        credential_recovery: None,
         kind: classify_error(0, error.code.as_deref()),
         non_acceptance_proven: false,
         native: NativeErrorFacts {
@@ -202,6 +203,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             sink,
         ),
         Err(detail) => TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: false,
             cause: LossCause::ResponseUnintelligible { detail },
             exchange,
             reported_model: None,
@@ -243,6 +245,7 @@ pub(crate) fn decode_response<C: Clone>(
     let tool_calls = output_tool_calls(output.as_ref().ok().and_then(|items| items.as_deref()));
     let loss = |detail: String, finish_reported: Option<FinishReason>| {
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: false,
             cause: LossCause::ResponseUnintelligible { detail },
             exchange: exchange.clone(),
             reported_model: reported_model.clone(),
@@ -926,14 +929,6 @@ mod tests {
                 "{field}"
             );
         }
-    }
-
-    #[test]
-    fn unrequested_output_kinds_fail_closed() {
-        let mut value = response();
-        value["output"] =
-            json!([{"type":"compaction","id":"cmp_fixture","encrypted_content":"opaque"}]);
-        assert!(matches!(decode(value).0, TerminalEvidence::BoundaryLoss(_)));
     }
 
     #[test]

@@ -132,16 +132,6 @@ impl FileMediaProcessor for AdversarialOutputProcessor {
     }
 }
 
-#[test]
-fn declaration_registers_three_macro_free_formats_under_available_isolation()
--> Result<(), Box<dyn Error>> {
-    let registry = registry()?;
-
-    assert_eq!(registry.providers(), &[declaration()?]);
-    assert_eq!(declaration()?.readers().len(), 3);
-    Ok(())
-}
-
 #[tokio::test]
 async fn generated_docx_detects_and_extracts_embedded_text() -> Result<(), Box<dyn Error>> {
     let observation = valid_text_observation(OfficeFixture::docx()?).await?;

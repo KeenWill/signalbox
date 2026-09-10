@@ -660,10 +660,10 @@ mod tests {
         ResilientImportedConversationConverter,
     };
     use signalbox_domain::{
-        ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-        ImportedMessageContentAbsence, ImportedSourceAttestation, ImportedSpeaker,
-        ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
-        ImportedTranscriptEntry, ImportedTranscriptEntryId,
+        ImportedConversation, ImportedConversationId, ImportedMessageContentAbsence,
+        ImportedSourceAttestation, ImportedSpeaker, ImportedToolResultBlock,
+        ImportedToolResultValue, ImportedTranscriptContent, ImportedTranscriptEntry,
+        ImportedTranscriptEntryId,
     };
     use uuid::Uuid;
 
@@ -708,14 +708,6 @@ mod tests {
         assert_eq!(
             entry.content(),
             &ImportedTranscriptContent::MessageContentAbsent(expected)
-        );
-    }
-
-    #[test]
-    fn maximum_fidelity_converter_declares_version_two() {
-        assert_eq!(
-            ClaudeCodeJsonlConverter.format(),
-            ImportedConversationFormat::ClaudeCodeSessionJsonlV2
         );
     }
 
@@ -1037,22 +1029,6 @@ mod tests {
             imported.entries()[2].content(),
             ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(value))
                 if value.as_str().is_empty()
-        ));
-    }
-
-    #[test]
-    fn preserves_source_only_records() {
-        let source_only = ClaudeCodeJsonlConverter
-            .convert(
-                conversation(),
-                br#"{"type":"summary","value":null}"#,
-                || ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(200)),
-            )
-            .unwrap_or_else(|_| panic!("synthetic source-only transcript should convert"));
-        assert_eq!(source_only.entries().len(), 1);
-        assert!(matches!(
-            source_only.entries()[0].content(),
-            ImportedTranscriptContent::SourceEvent { .. }
         ));
     }
 

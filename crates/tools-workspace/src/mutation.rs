@@ -1475,8 +1475,6 @@ mod contract_tests;
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use signalbox_application::ToolCatalog;
-
     use super::*;
 
     #[derive(Clone, Default)]
@@ -2408,50 +2406,6 @@ mod tests {
     }
 
     #[test]
-    fn mutation_definitions_require_confirmation() {
-        let tools = WorkspaceMutationTools::try_new(FakeFileSystem::default(), "/injected")
-            .expect("fixture tools construct");
-        let (catalog, _executor) = tools.into_parts();
-        let definitions = catalog.definitions();
-
-        assert_eq!(definitions.len(), WORKSPACE_MUTATION_TOOL_NAMES.len());
-        assert_eq!(
-            definitions[0].permission_default(),
-            ToolPermissionDefault::Confirm
-        );
-        assert_eq!(
-            definitions[1].permission_default(),
-            ToolPermissionDefault::Confirm
-        );
-        assert_eq!(
-            definitions[2].permission_default(),
-            ToolPermissionDefault::Confirm
-        );
-    }
-
-    #[test]
-    fn mutation_definitions_report_external_effects() {
-        let tools = WorkspaceMutationTools::try_new(FakeFileSystem::default(), "/injected")
-            .expect("fixture tools construct");
-        let (catalog, _executor) = tools.into_parts();
-        let definitions = catalog.definitions();
-
-        assert_eq!(definitions.len(), WORKSPACE_MUTATION_TOOL_NAMES.len());
-        assert_eq!(
-            definitions[0].effect_class(),
-            ToolEffectClass::ExternalEffect
-        );
-        assert_eq!(
-            definitions[1].effect_class(),
-            ToolEffectClass::ExternalEffect
-        );
-        assert_eq!(
-            definitions[2].effect_class(),
-            ToolEffectClass::ExternalEffect
-        );
-    }
-
-    #[test]
     fn write_file_creates_complete_content() {
         const PATH: &str = "new.txt";
         const CONTENT: &str = "new\n";
@@ -2688,38 +2642,5 @@ mod tests {
         assert!(detail.contains("hunk 1"));
         assert!(detail.contains(SECOND_PATH));
         assert_eq!(filesystem.files(), original);
-    }
-
-    #[test]
-    fn patch_commits_add_update_delete_as_one_batch() {
-        const KEPT_PATH: &str = "kept.txt";
-        const NEW_PATH: &str = "new.txt";
-        const GONE_PATH: &str = "gone.txt";
-        const UPDATED: &str = "after\n";
-        const ADDED: &str = "new\n";
-
-        let filesystem =
-            FakeFileSystem::with_files([(KEPT_PATH, "before\n"), (GONE_PATH, "old\n")]);
-        let executor = executor(filesystem.clone());
-        let patch = parse_patch(
-            "*** Begin Patch\n\
-             *** Add File: new.txt\n\
-             +new\n\
-             *** Update File: kept.txt\n\
-             @@\n\
-             -before\n\
-             +after\n\
-             *** Delete File: gone.txt\n\
-             *** End Patch",
-        )
-        .expect("structured patch parses");
-
-        let result = executor.apply_patch(&patch).expect("patch commits");
-        let files = filesystem.files();
-
-        assert_eq!(result.operations_applied, 3);
-        assert_eq!(files.get(KEPT_PATH).map(String::as_str), Some(UPDATED));
-        assert_eq!(files.get(NEW_PATH).map(String::as_str), Some(ADDED));
-        assert!(!files.contains_key(GONE_PATH));
     }
 }

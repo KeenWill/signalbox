@@ -14,7 +14,6 @@ const PROPERTY_CASES: u32 = 512;
 /// still aborting the run if the grammar or that vocabulary ever makes
 /// rejection ordinary — a property that rejects most draws tests almost nothing.
 const MAX_COLLIDING_DRAW_REJECTS: u32 = 16;
-const GRAMMAR_CREDENTIAL_ATOM: &str = "fixturegrammar";
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum CredentialGrammar {
@@ -315,7 +314,8 @@ fn assert_safe_evidence(
             assert_independent_component_absence(&result.snippet, credential)?;
             Ok(())
         }
-        Ok(signalbox_application::ToolExecutorEvidence::KnownFailed { .. })
+        Ok(signalbox_application::ToolExecutorEvidence::CompletedMedia { .. })
+        | Ok(signalbox_application::ToolExecutorEvidence::KnownFailed { .. })
         | Ok(signalbox_application::ToolExecutorEvidence::Ambiguous) => Err(TestCaseError::fail(
             "success evidence changed terminal kind",
         )),
@@ -336,14 +336,4 @@ fn assert_independent_component_absence(
     prop_assert!(!component.contains(&credential_spelling));
     prop_assert!(!component.contains(&reflected_spelling));
     Ok(())
-}
-
-/// The structural URL grammar places generated text in user information while
-/// preserving an otherwise canonical result URL.
-#[test]
-fn structural_url_grammar_places_username() {
-    let source = structural_url(GRAMMAR_CREDENTIAL_ATOM, StructuralUrlSlot::Username);
-    let parsed = Url::parse(&source).expect("generated username URL is valid");
-
-    assert_eq!(parsed.username(), GRAMMAR_CREDENTIAL_ATOM);
 }

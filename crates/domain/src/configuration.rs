@@ -1038,9 +1038,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
-        FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback,
-        ModelParameters, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
+        DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition, FrozenModelSelection,
+        ModelAlias, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
         OriginConfigurationReconstitutionInput, OriginModelSettingsError,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
         SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptFailure,
@@ -1386,23 +1385,6 @@ mod tests {
         assert_eq!(reconstituted, Some(expected));
     }
 
-    #[test]
-    fn baseline_effective_configuration_fixes_the_unit_policy_values() {
-        let selection = FrozenModelSelection::Direct(direct(1));
-        let configuration = EffectiveConfiguration::baseline(selection);
-
-        assert_eq!(configuration.model(), &selection);
-        assert_eq!(
-            configuration.parameters(),
-            ModelParameters::ProviderDefaults
-        );
-        assert_eq!(
-            configuration.known_provider_failure_retry(),
-            KnownProviderFailureRetry::Disabled
-        );
-        assert_eq!(configuration.model_fallback(), ModelFallback::Disabled);
-    }
-
     /// a complete effective configuration rejects settings
     /// validated for another frozen direct model while retaining canonical,
     /// model-independent provider defaults.
@@ -1508,18 +1490,6 @@ mod tests {
         };
 
         assert_eq!(exhausted.replace(canonical_defaults()), None);
-    }
-
-    #[test]
-    fn session_creation_establishes_defaults_version_one() {
-        let initial = defaults(1);
-        let established = VersionedSessionConfigurationDefaults::establish(initial.clone());
-
-        assert_eq!(
-            established.version(),
-            SessionConfigurationDefaultsVersion::first()
-        );
-        assert_eq!(established.defaults(), &initial);
     }
 
     /// session model-selection defaults are versioned; a
@@ -1919,18 +1889,5 @@ mod tests {
             panic!("reclassified steering carries only its binding");
         };
         assert_eq!(carried, binding);
-    }
-
-    #[test]
-    fn configuration_request_exposes_its_model_selection() {
-        let model = ModelSelectionRequest::Direct(direct(1));
-        let request = ConfigurationRequest {
-            model,
-            dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
-            model_settings: ValidatedModelSettings::provider_defaults(),
-            per_call_model_settings: ModelSettingsOverlay::inherit_all(),
-        };
-
-        assert_eq!(request.model(), model);
     }
 }

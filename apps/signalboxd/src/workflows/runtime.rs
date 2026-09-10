@@ -4,6 +4,10 @@ use std::{
     collections::BTreeMap,
     future::Future,
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -31,9 +35,12 @@ use tokio::sync::{mpsc, oneshot, watch};
 mod effects;
 use effects::{AttemptEffects, RuntimeEffects};
 
-use super::WorkflowService;
 #[cfg(target_os = "linux")]
 use super::{CLOCK_ENTRY, CLOCK_REVISION, compiled_catalog};
+use super::{
+    WorkflowService,
+    eval::{EvalServices, EvaluationEffects},
+};
 
 #[derive(Debug, signalbox_derive::OperatorError)]
 pub enum WorkflowRuntimeError {
@@ -105,6 +112,8 @@ pub struct WorkflowRuntime {
     registrations: ProgramRegistrationRepository,
     wake: mpsc::UnboundedReceiver<WorkflowWake>,
     repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
+    eval: Option<EvalServices>,
+    eval_ready: Arc<AtomicBool>,
 }
 
 impl WorkflowRuntime {
@@ -120,22 +129,26 @@ impl WorkflowRuntime {
         let journal = ProgramJournalRepository::new(pool.clone());
         let host = WorkflowHost::new(journal.clone());
         #[cfg(target_os = "linux")]
-        let (host, clock_executable) = {
+        let (host, clock_executable, eval_executable) = {
             let catalog = compiled_catalog()?;
             let executable = catalog
                 .executable(CLOCK_ENTRY, CLOCK_REVISION)
                 .ok_or(WorkflowRuntimeError::NativeUnavailable)?;
-            (host.with_native_catalog(catalog), Some(executable))
+            let eval = catalog.executable(super::eval::EVAL_ENTRY, super::eval::EVAL_REVISION);
+            (host.with_native_catalog(catalog), Some(executable), eval)
         };
         #[cfg(not(target_os = "linux"))]
-        let clock_executable = None;
+        let (clock_executable, eval_executable) = (None, None);
         let registrations = ProgramRegistrationRepository::new(pool.clone());
         let (wake, receiver) = mpsc::unbounded_channel();
+        let eval_ready = Arc::new(AtomicBool::new(false));
         Ok((
             WorkflowService {
                 registrations: admission,
                 wake,
                 clock_executable,
+                eval_executable,
+                eval_ready: eval_ready.clone(),
             },
             Self {
                 pool,
@@ -144,6 +157,8 @@ impl WorkflowRuntime {
                 registrations,
                 wake: receiver,
                 repository_watch: None,
+                eval: None,
+                eval_ready,
             },
         ))
     }
@@ -154,6 +169,13 @@ impl WorkflowRuntime {
         runtime: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
     ) -> Self {
         self.repository_watch = runtime;
+        self
+    }
+
+    /// Supplies host-owned corpus, blob and judge services for evaluation runs.
+    pub fn with_eval(mut self, services: EvalServices) -> Self {
+        self.eval = Some(services);
+        self.eval_ready.store(true, Ordering::Release);
         self
     }
 
@@ -202,7 +224,7 @@ impl WorkflowRuntime {
         primitives: impl Fn(RuntimeEvents) -> P,
     ) -> Result<(), WorkflowRuntimeError> {
         let mut receipt_effects =
-            RuntimeEffects::new(self.repository_watch.clone(), self.journal.clone());
+            RuntimeEffects::new(self.repository_watch.clone(), self.journal.clone(), None);
         let execution = async {
             receipt_effects
                 .acknowledge()
@@ -229,6 +251,7 @@ impl WorkflowRuntime {
                     run,
                     primitives(events.clone()),
                     self.repository_watch.clone(),
+                    self.eval.clone(),
                     cancelled,
                 ));
             }
@@ -244,7 +267,7 @@ impl WorkflowRuntime {
                                 if let std::collections::btree_map::Entry::Vacant(entry) = active.entry(run) {
                                     let (cancel, cancelled) = oneshot::channel();
                                     entry.insert(Some(cancel));
-                                    attempts.push(cancellable_attempt(self.host.clone(), self.journal.clone(), run, primitives(events.clone()), self.repository_watch.clone(), cancelled));
+                                    attempts.push(cancellable_attempt(self.host.clone(), self.journal.clone(), run, primitives(events.clone()), self.repository_watch.clone(), self.eval.clone(), cancelled));
                                 }
                             }
                             WorkflowWake::Cancel(run) => {
@@ -290,12 +313,13 @@ fn cancellable_attempt<P: LiveDeliverySource + 'static>(
     run: ProgramRunId,
     primitives: P,
     repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
+    eval: Option<EvalServices>,
     cancelled: oneshot::Receiver<()>,
 ) -> Pin<Box<dyn Future<Output = Result<ProgramRunId, WorkflowRuntimeError>>>> {
     Box::pin(async move {
-        let mut receipts = RuntimeEffects::new(repository_watch.clone(), journal.clone());
+        let mut receipts = RuntimeEffects::new(repository_watch.clone(), journal.clone(), None);
         let result = interruptible(
-            attempt(host, journal, run, primitives, repository_watch),
+            attempt(host, journal, run, primitives, repository_watch, eval),
             cancelled,
         )
         .await
@@ -314,9 +338,10 @@ fn attempt<P: LiveDeliverySource + 'static>(
     run: ProgramRunId,
     mut primitives: P,
     repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
+    eval: Option<EvalServices>,
 ) -> Pin<Box<dyn Future<Output = Result<ProgramRunId, WorkflowRuntimeError>>>> {
     Box::pin(async move {
-        let mut effects = RuntimeEffects::new(repository_watch, journal.clone());
+        let mut effects = RuntimeEffects::new(repository_watch, journal.clone(), eval);
         let execution = drive_run(&host, &journal, run, &mut primitives, &mut effects).await;
         let Err(source) = execution else {
             return Ok(run);

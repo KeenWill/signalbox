@@ -1829,6 +1829,7 @@ fn timeout_cause(labels: CliProcessLabels) -> LossCause {
 /// [`crate::ToolCallsAtLoss::Unobserved`].
 fn pre_exchange_boundary_loss(cause: LossCause) -> TerminalEvidence {
     TerminalEvidence::BoundaryLoss(crate::BoundaryLossEvidence {
+        response_content_observed: false,
         cause,
         exchange: crate::ExchangeFacts::default(),
         reported_model: None,
@@ -1947,6 +1948,7 @@ mod tests {
     impl ExaminedSession {
         fn loss(self, cause: LossCause) -> TerminalEvidence {
             TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: true,
                 cause,
                 exchange: ExchangeFacts::default(),
                 reported_model: None,
@@ -3084,6 +3086,7 @@ mod tests {
         }
         fn boundary_loss(self, cause: LossCause) -> TerminalEvidence {
             TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                response_content_observed: true,
                 cause,
                 exchange: ExchangeFacts::default(),
                 reported_model: None,

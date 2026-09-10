@@ -383,6 +383,21 @@ impl tool_loop::PostgresToolLoopRepository {
         tool_loop::ToolLoopRepositoryError,
     >;
 }
+impl tool_loop::PostgresToolLoopRepository {
+    pub async fn load_media_reference(
+        &self,
+        request: signalbox_domain::ToolRequestId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::ToolMediaReference>,
+        tool_loop::ToolLoopRepositoryError,
+    >;
+}
+impl tool_loop::PostgresToolLoopRepository {
+    pub async fn file_use_target(
+        &self,
+        request: &signalbox_domain::ToolRequest,
+    ) -> result::Result<signalbox_domain::ResolvedProviderTarget, tool_loop::ToolLoopRepositoryError>;
+}
 ```
 
 ## VisibleToolAttachment

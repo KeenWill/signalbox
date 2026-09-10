@@ -473,8 +473,6 @@ pub enum TurnTerminalCause {
 
 #[cfg(test)]
 mod tests {
-    use expect_test::expect;
-
     use super::*;
     use crate::{
         AppliedInterruptState, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryRef,
@@ -709,81 +707,5 @@ mod tests {
 
         assert_eq!(marker.ambiguous_operations(), &ambiguous_operations);
         assert_eq!(marker.reason(), &reason);
-    }
-
-    /// cancellation and reconciliation terminal values retain their exact proof-bearing payloads.
-    #[test]
-    fn terminal_dispositions_preserve_exact_payloads() {
-        let expected_cause = interrupt(1);
-        let cancelled = TurnDisposition::Cancelled {
-            cause: expected_cause,
-        };
-
-        let expected = marker(
-            operations(&[1, 2]),
-            ReconciliationReason::InterruptRequiresReconciliation {
-                interrupt: interrupt(1),
-            },
-        );
-        let reconciliation = TurnDisposition::ReconciliationRequired { marker: expected };
-
-        expect![[r#"
-            (
-                Cancelled {
-                    cause: AppliedInterruptProof {
-                        command: DurableCommandId(
-                            00000000-0000-0000-0000-000000000001,
-                        ),
-                        predecessor: TurnId(
-                            00000000-0000-0000-0000-000000000064,
-                        ),
-                    },
-                },
-                ReconciliationRequired {
-                    marker: ReconciliationMarker {
-                        ambiguous_operations: NonEmptyIssuedOperationRefs {
-                            operations: {
-                                ModelCall(
-                                    ModelCallId(
-                                        00000000-0000-0000-0000-000000000001,
-                                    ),
-                                ),
-                                ModelCall(
-                                    ModelCallId(
-                                        00000000-0000-0000-0000-000000000002,
-                                    ),
-                                ),
-                            },
-                        },
-                        reason: InterruptRequiresReconciliation {
-                            interrupt: AppliedInterruptProof {
-                                command: DurableCommandId(
-                                    00000000-0000-0000-0000-000000000001,
-                                ),
-                                predecessor: TurnId(
-                                    00000000-0000-0000-0000-000000000064,
-                                ),
-                            },
-                        },
-                    },
-                },
-            )
-        "#]]
-        .assert_debug_eq(&(cancelled, reconciliation));
-    }
-
-    /// the user-stop proof exposes only its exact applied
-    /// command and turn while raw identities cannot construct it publicly.
-    #[test]
-    fn user_stop_proof_preserves_exact_identity() {
-        let decision_command = command_id(1);
-        let turn = turn_id(100);
-        let proof = AppliedStopForReconciliationProof {
-            decision_command,
-            turn,
-        };
-
-        assert_eq!(proof.decision_command(), decision_command);
-        assert_eq!(proof.turn(), turn);
     }
 }

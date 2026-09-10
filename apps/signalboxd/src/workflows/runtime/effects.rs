@@ -16,6 +16,7 @@ pub(super) trait AttemptEffects: EffectExecutor {
 pub(super) struct RuntimeEffects {
     repository_watch: Option<RepositoryWatchRuntime>,
     journal: ProgramJournalRepository,
+    eval: Option<EvaluationEffects>,
     pub(super) rejected: Option<ProgramCapability>,
 }
 
@@ -23,10 +24,12 @@ impl RuntimeEffects {
     pub(super) fn new(
         repository_watch: Option<RepositoryWatchRuntime>,
         journal: ProgramJournalRepository,
+        eval: Option<EvalServices>,
     ) -> Self {
         Self {
             repository_watch,
             journal,
+            eval: eval.map(EvaluationEffects::new),
             rejected: None,
         }
     }
@@ -57,6 +60,8 @@ impl EffectExecutor for RuntimeEffects {
     fn recovery(&self, request: &EffectRequest) -> EffectRecovery {
         if RepoWatchRequest::decode(request).is_some() && self.repository_watch.is_some() {
             effects::recovery(request)
+        } else if let Some(eval) = &self.eval {
+            eval.recovery(request)
         } else {
             EffectRecovery::Idempotent
         }
@@ -75,6 +80,11 @@ impl EffectExecutor for RuntimeEffects {
                 let result = runtime.adopt_workflow_effect(invocation).await;
                 return self.classify(result, invocation.request.capability());
             }
+            if let Some(eval) = &mut self.eval {
+                let result = eval.adopt(invocation).await;
+                self.rejected = eval.rejected().then_some(invocation.request.capability());
+                return result;
+            }
             Ok(None)
         })
     }
@@ -90,6 +100,11 @@ impl EffectExecutor for RuntimeEffects {
             {
                 let result = runtime.execute_workflow_effect(invocation).await;
                 return self.classify(result, invocation.request.capability());
+            }
+            if let Some(eval) = &mut self.eval {
+                let result = eval.execute(invocation).await;
+                self.rejected = eval.rejected().then_some(invocation.request.capability());
+                return result;
             }
             self.rejected = Some(invocation.request.capability());
             Err(LiveDeliveryFailure::new(
