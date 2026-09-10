@@ -1062,6 +1062,43 @@ async fn converged_import_relations_remain_append_only() -> Result<(), Box<dyn E
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn dropped_record_migration_preserves_existing_imports() -> Result<(), Box<dyn Error>> {
+    let fixture = import_round_trip_fixture().await?;
+    // Restore the column shape while retaining the installed append-only triggers.
+    sqlx::raw_sql(
+        "ALTER TABLE imported_conversation
+             DROP COLUMN dropped_record_count,
+             DROP COLUMN first_dropped_record_position",
+    )
+    .execute(&fixture.pool)
+    .await?;
+
+    let mut transaction = fixture.pool.begin().await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/202609091460_import_dropped_records.sql"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let restored = ImportedConversationRepository::new(fixture.pool.clone())
+        .load(fixture.winner)
+        .await?
+        .expect("the existing imported conversation remains readable");
+    assert_eq!(restored, fixture.stored);
+    assert!(
+        sqlx::query("UPDATE imported_conversation SET dropped_record_count = 0")
+            .execute(&fixture.pool)
+            .await
+            .is_err(),
+        "imported conversation updates remain forbidden"
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
 /// restart loading reconstructs the exact imported aggregate from catalogued raw blobs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
