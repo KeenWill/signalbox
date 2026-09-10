@@ -107,11 +107,6 @@ fn commit_revalidates_the_injected_root_before_reference_publication() {
         .expect("pinned original repository opens");
     let pinned_objects =
         PinnedObjectDatabase::capture(&executor.repository_authority).expect("fixture objects pin");
-    let persistent_object_database =
-        Odb::new().expect("fixture persistent object database constructs");
-    pinned_objects
-        .add_to(&persistent_object_database)
-        .expect("fixture persistent objects attach");
     let object_database = Odb::new().expect("fixture object database constructs");
     pinned_objects
         .add_to(&object_database)
@@ -131,11 +126,7 @@ fn commit_revalidates_the_injected_root_before_reference_publication() {
             message: MODEL_MESSAGE.to_owned(),
         },
         &executor.repository_authority,
-        (
-            &persistent_object_database,
-            &object_database,
-            &pinned_objects,
-        ),
+        &pinned_objects,
         || {
             fs::rename(&root, &retired).expect("original workspace retires");
             fs::create_dir(&root).expect("replacement workspace constructs");

@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 use crate::descriptor_identity::descriptor_identity;
 use crate::failure::LocalGitFailure;
-use crate::limits::{MAX_PACKED_REFS_BYTES, MAX_TREE_BLOB_BYTES, MAX_WORKTREE_INSPECTIONS};
+use crate::limits::{MAX_PACKED_REFS_BYTES, MAX_WORKTREE_INSPECTIONS};
 
 pub(super) const MAX_QUARANTINE_DEPTH: usize = 128;
 
@@ -105,13 +105,11 @@ impl QuarantineSnapshot {
     pub(super) fn capture(directory: &OwnedFd) -> Result<Self, LocalGitFailure> {
         let mut entries = BTreeMap::new();
         let mut inspections = 0_usize;
-        let mut content_bytes = 0_usize;
         snapshot_pinned_directory_bounded(
             directory,
             Path::new(""),
             0,
             &mut inspections,
-            &mut content_bytes,
             &mut entries,
         )?;
         Ok(Self { entries })
@@ -292,7 +290,6 @@ fn snapshot_pinned_directory_bounded(
     prefix: &Path,
     depth: usize,
     inspections: &mut usize,
-    content_bytes: &mut usize,
     entries: &mut BTreeMap<PathBuf, QuarantineSnapshotEntry>,
 ) -> Result<(), LocalGitFailure> {
     if depth > MAX_QUARANTINE_DEPTH {
@@ -326,14 +323,7 @@ fn snapshot_pinned_directory_bounded(
                 Mode::empty(),
             )
             .map_err(|_| LocalGitFailure::Operation)?;
-            snapshot_pinned_directory_bounded(
-                &child,
-                &path,
-                depth + 1,
-                inspections,
-                content_bytes,
-                entries,
-            )?;
+            snapshot_pinned_directory_bounded(&child, &path, depth + 1, inspections, entries)?;
         } else {
             #[allow(clippy::unnecessary_cast)]
             let identity = FileSnapshotIdentity {
@@ -360,20 +350,26 @@ fn snapshot_pinned_directory_bounded(
                 }
                 let length =
                     usize::try_from(metadata.len()).map_err(|_| LocalGitFailure::Operation)?;
-                *content_bytes = content_bytes
-                    .checked_add(length)
-                    .filter(|bytes| *bytes <= MAX_TREE_BLOB_BYTES)
-                    .ok_or(LocalGitFailure::Operation)?;
-                let mut bytes = Vec::with_capacity(length);
-                Read::by_ref(&mut file)
-                    .take((length + 1) as u64)
-                    .read_to_end(&mut bytes)
-                    .map_err(|_| LocalGitFailure::Operation)?;
+                let mut digest = Sha256::new();
+                let mut buffer = vec![0_u8; crate::streamed_object::IO_BYTES];
+                let mut read_length = 0usize;
+                loop {
+                    let count = file
+                        .read(&mut buffer)
+                        .map_err(|_| LocalGitFailure::Operation)?;
+                    if count == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..count]);
+                    read_length = read_length
+                        .checked_add(count)
+                        .ok_or(LocalGitFailure::Operation)?;
+                }
                 let final_metadata = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
-                if bytes.len() != length || file_snapshot_identity(&final_metadata) != identity {
+                if read_length != length || file_snapshot_identity(&final_metadata) != identity {
                     return Err(LocalGitFailure::Operation);
                 }
-                Some(Sha256::digest(&bytes).into())
+                Some(digest.finalize().into())
             } else {
                 None
             };
@@ -760,13 +756,49 @@ pub(super) fn remove_entry_if_identity(
     expected: FileIdentity,
     removal_flags: AtFlags,
 ) -> Result<(), LocalGitFailure> {
-    remove_entry_if_identity_with_hook(parent, name, expected, removal_flags, |_| {})
+    remove_entry_if_identity_with_hook(parent, name, expected, None, removal_flags, |_| {})
+}
+
+pub(super) fn remove_file_if_snapshot_identity(
+    parent: &OwnedFd,
+    name: &OsStr,
+    expected: FileSnapshotIdentity,
+) -> Result<(), LocalGitFailure> {
+    remove_entry_if_identity_with_hook(
+        parent,
+        name,
+        expected.file,
+        Some(expected),
+        AtFlags::empty(),
+        |_| {},
+    )
+}
+
+fn removal_snapshot(
+    parent: &OwnedFd,
+    name: &OsStr,
+) -> Result<FileSnapshotIdentity, LocalGitFailure> {
+    let file = fs::File::from(
+        openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Operation)?,
+    );
+    let metadata = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
+    if !metadata.is_file() {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(file_snapshot_identity(&metadata))
 }
 
 fn remove_entry_if_identity_with_hook<AfterQuarantine: FnOnce(&QuarantineDirectory)>(
     parent: &OwnedFd,
     name: &OsStr,
     expected: FileIdentity,
+    snapshot: Option<FileSnapshotIdentity>,
     removal_flags: AtFlags,
     after_quarantine: AfterQuarantine,
 ) -> Result<(), LocalGitFailure> {
@@ -775,12 +807,18 @@ fn remove_entry_if_identity_with_hook<AfterQuarantine: FnOnce(&QuarantineDirecto
         Err(error) if error == rustix::io::Errno::NOENT => None,
         Err(_) => return Err(LocalGitFailure::Operation),
     };
-    if current != Some(expected) {
+    if current != Some(expected)
+        || snapshot.is_some_and(|snapshot| removal_snapshot(parent, name).ok() != Some(snapshot))
+    {
         return Err(LocalGitFailure::Operation);
     }
     let mut quarantine = QuarantineDirectory::create(parent)?;
     quarantine.keep();
     after_quarantine(&quarantine);
+    if snapshot.is_some_and(|snapshot| removal_snapshot(parent, name).ok() != Some(snapshot)) {
+        quarantine.remove_if_empty_and_current()?;
+        return Err(LocalGitFailure::Operation);
+    }
     let quarantined_name = OsStr::new("owned");
     rustix::fs::renameat_with(
         parent,
@@ -797,7 +835,28 @@ fn remove_entry_if_identity_with_hook<AfterQuarantine: FnOnce(&QuarantineDirecto
     )
     .ok()
     .map(|status| stat_file_identity(&status));
-    if current != Some(expected) {
+    let moved_snapshot = snapshot
+        .map(|expected| {
+            let actual = removal_snapshot(quarantine.descriptor(), quarantined_name)?;
+            // Rename changes ctime. All other snapshot fields must remain equal;
+            // retain the new full snapshot for the final pre-unlink validation.
+            let mut before_rename = actual;
+            before_rename.changed_seconds = expected.changed_seconds;
+            before_rename.changed_nanoseconds = expected.changed_nanoseconds;
+            if before_rename != expected {
+                return Err(LocalGitFailure::Operation);
+            }
+            Ok(actual)
+        })
+        .transpose();
+    let snapshot_matches = match moved_snapshot {
+        Ok(Some(snapshot)) => {
+            removal_snapshot(quarantine.descriptor(), quarantined_name).ok() == Some(snapshot)
+        }
+        Ok(None) => true,
+        Err(_) => false,
+    };
+    if current != Some(expected) || !snapshot_matches {
         let restoration = rustix::fs::renameat_with(
             quarantine.descriptor(),
             quarantined_name,
@@ -838,5 +897,54 @@ pub(super) fn remove_entry_if_identity_with_test_hook<
     removal_flags: AtFlags,
     after_quarantine: AfterQuarantine,
 ) -> Result<(), LocalGitFailure> {
-    remove_entry_if_identity_with_hook(parent, name, expected, removal_flags, after_quarantine)
+    remove_entry_if_identity_with_hook(
+        parent,
+        name,
+        expected,
+        None,
+        removal_flags,
+        after_quarantine,
+    )
+}
+
+#[cfg(test)]
+mod removal_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_conditioned_removal_preserves_an_in_place_edit_during_quarantine() {
+        for edited in [b"other".as_slice(), b"concurrent edit".as_slice()] {
+            let root = tempfile::tempdir().expect("fixture directory");
+            let path = root.path().join("tracked");
+            fs::write(&path, b"clean").expect("clean file");
+            let expected = file_snapshot_identity(&fs::metadata(&path).expect("clean snapshot"));
+            let parent = openat(
+                rustix::fs::CWD,
+                root.path(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("parent descriptor");
+            let result = remove_entry_if_identity_with_hook(
+                &parent,
+                OsStr::new("tracked"),
+                expected.file,
+                Some(expected),
+                AtFlags::empty(),
+                |_| {
+                    fs::write(&path, edited).expect("in-place rewrite");
+                    fs::File::open(&path)
+                        .expect("edited file")
+                        .set_modified(std::time::SystemTime::UNIX_EPOCH)
+                        .expect("distinct modification timestamp");
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(fs::read(&path).expect("edit preserved"), edited);
+            assert_eq!(
+                file_identity(&fs::metadata(&path).expect("same inode")),
+                expected.file
+            );
+        }
+    }
 }

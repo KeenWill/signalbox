@@ -139,10 +139,34 @@ pub struct WorkspaceFileBytes {
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
+## WorkspaceFileReader
+
+```rust
+pub struct WorkspaceFileReader {/* private */}
+impl fmt::Debug for WorkspaceFileReader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl WorkspaceFileReader {
+    pub fn len(&self) -> u64;
+    pub fn is_empty(&self) -> bool;
+    pub fn mode(&self) -> u32;
+}
+impl read::Read for WorkspaceFileReader {
+    fn read(&mut self, bytes: &mut [u8]) -> error::Result<usize>;
+}
+```
+
 ## WorkspaceFileSystem
 
 ```rust
 pub trait WorkspaceFileSystem: clone::Clone + marker::Send + marker::Sync + 'static {
+    fn open_file_stream(
+        &self,
+        root: &WorkspaceRoot,
+        path: &path::Path,
+    ) -> result::Result<WorkspaceFileReader, WorkspaceResolveError> {
+        /* provided */
+    }
     fn open_root(&self, root: &path::Path) -> result::Result<WorkspaceRoot, WorkspaceRootError>;
     fn entry_kind(
         &self,

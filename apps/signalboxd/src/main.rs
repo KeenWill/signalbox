@@ -1657,6 +1657,11 @@ async fn run_hub(
             tool_configuration.exec_supervisor_executable(),
             tool_configuration.cargo_registry_cache(),
             tool_configuration.sandbox(),
+            model_configuration
+                .numeric_bounds()
+                .integer("max_git_object_bytes")
+                .flatten()
+                .map(|bytes| bytes as usize),
             tool_configuration.sandboxed_exec_timeout_bound(),
             model_configuration.web_fetch_egress_policy(),
         ),

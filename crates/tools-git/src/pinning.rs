@@ -1,49 +1,38 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     fmt, fs,
-    io::{Read, Seek},
     ops::{Deref, DerefMut},
     os::{
         fd::{AsFd, OwnedFd},
-        unix::ffi::OsStrExt,
         unix::fs::FileExt,
     },
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
-use flate2::read::ZlibDecoder;
 use git2::{Config, ErrorCode, ObjectFormat, Odb, Repository, RepositoryInitOptions};
 use rustix::{
     fs::{CWD, Mode, OFlags, openat},
     io::dup,
 };
-use sha1::Sha1;
-use sha2::{Digest, Sha256};
 
 use crate::construction::LocalGitToolsConstructionError;
 use crate::descriptor::{
-    FileIdentity, FileSnapshotIdentity, RepositoryIdentity, descriptor_path,
-    descriptor_path_from_fd, file_identity, file_snapshot_identity,
-    unsupported_control_files_are_absent,
+    FileSnapshotIdentity, RepositoryIdentity, descriptor_path, file_identity,
+    file_snapshot_identity, unsupported_control_files_are_absent,
 };
-use crate::descriptor_identity::{bind_still_holds, descriptor_identity};
+use crate::descriptor_identity::bind_still_holds;
 use crate::failure::LocalGitFailure;
 use crate::layout::{
-    object_id_bytes, open_repository_config_at, open_repository_head_at, open_repository_refs_at,
-    parse_full_object_id_bytes, reject_administrative_symlinks, validate_live_shallow,
+    open_repository_config_at, open_repository_head_at, open_repository_refs_at,
+    reject_administrative_symlinks, validate_live_shallow,
 };
-use crate::limits::{
-    MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
-    MAX_PACK_FILE_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REPOSITORY_INSPECTIONS,
-};
-use crate::pack_install::OBJECT_PUBLICATION_LOCK;
-use crate::pack_read_bounds::collect_unreadable_objects;
+use crate::limits::MAX_REPOSITORY_CONFIG_BYTES;
 use crate::push_objects::ObjectSource;
 
 pub(super) struct PinnedRepository {
+    pub(super) max_object_bytes: Option<usize>,
     root_path: PathBuf,
     pub(super) root: fs::File,
     pub(super) git_directory: fs::File,
@@ -70,31 +59,27 @@ pub(super) struct RepositoryOperationGuard {
 }
 
 pub(super) struct RepositoryShell {
+    pub(super) max_object_bytes: Option<usize>,
     repository: Repository,
     _directory: tempfile::TempDir,
-    unreadable_objects: RefCell<Option<Arc<BTreeSet<git2::Oid>>>>,
-    selected_objects: RefCell<Option<ObjectSource>>,
+    selected_objects: RefCell<Option<Arc<Mutex<ObjectSource>>>>,
 }
 
 pub(super) struct PinnedObjectDatabase {
-    pub(super) directory: tempfile::TempDir,
-    compressed_bytes: u64,
-    objects: OwnedFd,
+    source: Arc<Mutex<ObjectSource>>,
     pack: OwnedFd,
-    objects_identity: FileIdentity,
-    bindings: Vec<ObjectChildBinding>,
-    unreadable_objects: Arc<BTreeSet<git2::Oid>>,
 }
 
 impl RepositoryShell {
+    pub(super) fn object_byte_limit(&self) -> usize {
+        self.max_object_bytes.unwrap_or(usize::MAX)
+    }
     pub(super) fn capture_objects_on_read(
         &self,
         authority: &PinnedRepository,
     ) -> Result<(), LocalGitFailure> {
-        *self.selected_objects.borrow_mut() = Some(ObjectSource::open(
-            authority,
-            std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT,
-        )?);
+        *self.selected_objects.borrow_mut() =
+            Some(Arc::new(Mutex::new(ObjectSource::open(authority, None)?)));
         Ok(())
     }
 
@@ -106,6 +91,8 @@ impl RepositoryShell {
             .borrow()
             .as_ref()
             .ok_or(LocalGitFailure::Operation)?
+            .lock()
+            .map_err(|_| LocalGitFailure::Operation)?
             .validate(authority)
     }
 
@@ -115,90 +102,102 @@ impl RepositoryShell {
         snapshot: &PinnedObjectDatabase,
     ) -> Result<(), git2::Error> {
         self.repository.set_odb(database)?;
-        *self.unreadable_objects.borrow_mut() = Some(Arc::clone(&snapshot.unreadable_objects));
+        *self.selected_objects.borrow_mut() = Some(Arc::clone(&snapshot.source));
         Ok(())
+    }
+
+    pub(super) fn retain_selected_source(&self, source: ObjectSource) {
+        *self.selected_objects.borrow_mut() = Some(Arc::new(Mutex::new(source)));
+    }
+
+    pub(super) fn store_content(
+        &self,
+        content: &mut crate::streamed_object::ObjectContent,
+    ) -> Result<git2::Oid, LocalGitFailure> {
+        let database = self
+            .repository
+            .odb()
+            .map_err(|_| LocalGitFailure::Operation)?;
+        self.selected_objects
+            .borrow()
+            .as_ref()
+            .ok_or(LocalGitFailure::Operation)?
+            .lock()
+            .map_err(|_| LocalGitFailure::Operation)?
+            .store(&database, content)
+    }
+
+    pub(super) fn object_content(
+        &self,
+        oid: git2::Oid,
+    ) -> Result<crate::streamed_object::ObjectContent, LocalGitFailure> {
+        self.read_object_header(oid)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        if let Some(source) = self.selected_objects.borrow().as_ref()
+            && let Some(content) = source
+                .lock()
+                .map_err(|_| LocalGitFailure::Operation)?
+                .content(oid)?
+        {
+            return Ok(content);
+        }
+        let database = self
+            .repository
+            .odb()
+            .map_err(|_| LocalGitFailure::Operation)?;
+        let object = database.read(oid).map_err(|_| LocalGitFailure::Operation)?;
+        crate::streamed_object::ObjectContent::decode(
+            &mut object.data(),
+            object.len(),
+            object.kind(),
+            None,
+        )
+    }
+
+    fn require_object_kind(
+        &self,
+        oid: git2::Oid,
+        expected: git2::ObjectType,
+    ) -> Result<(), git2::Error> {
+        if self.read_object_header(oid)?.1 != expected {
+            return Err(git2::Error::from_str("unexpected object kind"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn find_commit(&self, oid: git2::Oid) -> Result<git2::Commit<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Commit)?;
+        self.repository.find_commit(oid)
+    }
+
+    pub(super) fn find_tree(&self, oid: git2::Oid) -> Result<git2::Tree<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Tree)?;
+        self.repository.find_tree(oid)
+    }
+
+    pub(super) fn find_tag(&self, oid: git2::Oid) -> Result<git2::Tag<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Tag)?;
+        self.repository.find_tag(oid)
     }
 
     pub(super) fn read_object_header(
         &self,
         oid: git2::Oid,
     ) -> Result<(usize, git2::ObjectType), git2::Error> {
-        if let Some(source) = self.selected_objects.borrow_mut().as_mut() {
-            let database = self.repository.odb()?;
+        let database = self.repository.odb()?;
+        if let Some(source) = self.selected_objects.borrow().as_ref() {
+            let mut source = source
+                .lock()
+                .map_err(|_| git2::Error::from_str("object source lock failed"))?;
             source.capture(&database, oid).map_err(|_| {
                 git2::Error::from_str("object read exceeds captured content bounds")
             })?;
-            return database.read_header(oid);
         }
-        if self
-            .unreadable_objects
-            .borrow()
-            .as_ref()
-            .is_none_or(|objects| objects.contains(&oid))
-        {
-            return Err(git2::Error::from_str(
-                "object read exceeds captured content bounds",
-            ));
+        let (size, kind) = database.read_header(oid)?;
+        if size > crate::limits::object_byte_limit(self.max_object_bytes, kind) {
+            return Err(git2::Error::from_str("object read exceeds content bounds"));
         }
-        self.repository.odb()?.read_header(oid)
-    }
-}
-
-struct ObjectChildBinding {
-    name: OsString,
-    identity: FileIdentity,
-    leaves: Vec<ObjectLeafBinding>,
-}
-
-struct ObjectLeafBinding {
-    name: OsString,
-    snapshot: FileSnapshotIdentity,
-    digest: [u8; 32],
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ObjectDirectoryKind {
-    Loose {
-        object_format: ObjectFormat,
-        directory_prefix: [u8; 2],
-        filename_bytes: usize,
-    },
-    Pack,
-}
-
-impl ObjectDirectoryKind {
-    fn validates_name(self, name: &OsStr) -> bool {
-        match self {
-            Self::Loose {
-                object_format,
-                directory_prefix,
-                filename_bytes,
-            } => {
-                let mut claimed_object_id = directory_prefix.to_vec();
-                claimed_object_id.extend_from_slice(name.as_bytes());
-                name.as_bytes().len() == filename_bytes
-                    && parse_full_object_id_bytes(&claimed_object_id, object_format).is_some()
-            }
-            Self::Pack => true,
-        }
-    }
-
-    fn compressed_file_limit(self) -> usize {
-        match self {
-            Self::Loose { .. } => MAX_OBJECT_BYTES.saturating_mul(2),
-            Self::Pack => MAX_PACK_FILE_BYTES,
-        }
-    }
-
-    fn validate_content(self, file: &mut fs::File, name: &OsStr) -> Result<(), LocalGitFailure> {
-        match self {
-            Self::Loose {
-                object_format,
-                directory_prefix,
-                ..
-            } => validate_loose_object(file, object_format, directory_prefix, name),
-            Self::Pack => Ok(()),
-        }
+        Ok((size, kind))
     }
 }
 
@@ -316,6 +315,7 @@ impl PinnedRepository {
         unsupported_control_files_are_absent(git_directory.as_fd())
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         let authority = Self {
+            max_object_bytes: None,
             root_path: root_path.to_owned(),
             root,
             git_directory,
@@ -336,25 +336,25 @@ impl PinnedRepository {
         &self,
     ) -> Result<std::sync::MutexGuard<'_, RepositoryShell>, LocalGitFailure> {
         self.validate_supported_layout()?;
-        self.repository
+        let mut repository = self
+            .repository
             .lock()
-            .map_err(|_| LocalGitFailure::Repository)
+            .map_err(|_| LocalGitFailure::Repository)?;
+        repository.max_object_bytes = self.max_object_bytes;
+        Ok(repository)
     }
 
     pub(super) fn open_repository_shell(&self) -> Result<RepositoryShell, LocalGitFailure> {
         self.validate_supported_layout()?;
-        let repository = open_pinned_repository(&self.config_snapshot, self.object_format)
+        let mut repository = open_pinned_repository(&self.config_snapshot, self.object_format)
             .map_err(|_| LocalGitFailure::Repository)?;
         self.validate_supported_layout()?;
+        repository.max_object_bytes = self.max_object_bytes;
         Ok(repository)
     }
 
     pub(super) fn git_path(&self, path: &str) -> PathBuf {
         descriptor_path(&self.git_directory).join(path)
-    }
-
-    pub(super) fn object_id_bytes(&self) -> usize {
-        object_id_bytes(self.object_format)
     }
 
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
@@ -545,814 +545,66 @@ fn config_snapshot_bytes(file: &fs::File) -> Result<Vec<u8>, LocalGitFailure> {
 
 impl PinnedObjectDatabase {
     pub(super) fn capture(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
-        Self::capture_with_hooks(authority, || {}, || {})
-    }
-
-    fn capture_with_hook<AfterScan: FnOnce()>(
-        authority: &PinnedRepository,
-        after_scan: AfterScan,
-    ) -> Result<Self, LocalGitFailure> {
-        Self::capture_with_hooks(authority, after_scan, || {})
-    }
-
-    fn capture_with_hooks<AfterScan: FnOnce(), AfterFinalBindings: FnOnce()>(
-        authority: &PinnedRepository,
-        after_scan: AfterScan,
-        after_final_bindings: AfterFinalBindings,
-    ) -> Result<Self, LocalGitFailure> {
-        authority.validate_object_layout()?;
-        let objects = openat(
+        let source = ObjectSource::open(authority, None)?;
+        let pack = openat(
             &authority.git_directory,
-            "objects",
+            "objects/pack",
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(|_| LocalGitFailure::Repository)?;
-        let objects_identity = owned_directory_identity(&objects)?;
-        let directory = tempfile::tempdir().map_err(|_| LocalGitFailure::Operation)?;
-        fs::create_dir(directory.path().join("pack")).map_err(|_| LocalGitFailure::Operation)?;
-        let loose_name_bytes = authority
-            .object_id_bytes()
-            .saturating_mul(2)
-            .saturating_sub(2);
-        let mut inspected = 0_usize;
-        let mut captured_bytes = 0_u64;
-        let mut pinned_children = Vec::new();
-        let mut pinned_pack = None;
-        for entry in fs::read_dir(descriptor_path_from_fd(&objects))
-            .map_err(|_| LocalGitFailure::Repository)?
-        {
-            let entry = entry.map_err(|_| LocalGitFailure::Repository)?;
-            inspected = inspected.saturating_add(1);
-            if inspected > MAX_REPOSITORY_INSPECTIONS {
-                return Err(LocalGitFailure::Repository);
-            }
-            let name = entry.file_name();
-            let bytes = name.as_bytes();
-            if name == OsStr::new("info") {
-                continue;
-            }
-            if name == OsStr::new("pack") {
-                let pack = openat(
-                    &objects,
-                    &name,
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(|_| LocalGitFailure::Repository)?;
-                let identity = owned_directory_identity(&pack)?;
-                let leaves = pin_object_directory(
-                    &pack,
-                    &directory.path().join("pack"),
-                    &mut inspected,
-                    &mut captured_bytes,
-                    ObjectDirectoryKind::Pack,
-                )?;
-                pinned_children.push(ObjectChildBinding {
-                    name,
-                    identity,
-                    leaves,
-                });
-                pinned_pack = Some(pack);
-                continue;
-            }
-            if bytes.len() != 2
-                || name
-                    .to_str()
-                    .is_none_or(|prefix| gix_hash::Prefix::from_hex_nonempty(prefix).is_err())
-            {
-                return Err(LocalGitFailure::Repository);
-            }
-            let directory_prefix = bytes.try_into().map_err(|_| LocalGitFailure::Repository)?;
-            let loose_kind = ObjectDirectoryKind::Loose {
-                object_format: authority.object_format,
-                directory_prefix,
-                filename_bytes: loose_name_bytes,
-            };
-            let loose = openat(
-                &objects,
-                &name,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| LocalGitFailure::Repository)?;
-            let identity = owned_directory_identity(&loose)?;
-            let destination = directory.path().join(&name);
-            fs::create_dir(&destination).map_err(|_| LocalGitFailure::Operation)?;
-            let leaves = pin_object_directory(
-                &loose,
-                &destination,
-                &mut inspected,
-                &mut captured_bytes,
-                loose_kind,
-            )?;
-            pinned_children.push(ObjectChildBinding {
-                name,
-                identity,
-                leaves,
-            });
-        }
-        after_scan();
-        let mut snapshot = Self {
-            directory,
-            compressed_bytes: captured_bytes,
-            objects: dup(&objects).map_err(|_| LocalGitFailure::Repository)?,
-            pack: pinned_pack.ok_or(LocalGitFailure::Repository)?,
-            objects_identity,
-            bindings: pinned_children,
-            unreadable_objects: Arc::default(),
-        };
-        snapshot.unreadable_objects =
-            Arc::new(snapshot.validate_object_inventory(authority.object_format)?);
-        validate_owned_directory_binding(
-            &authority.git_directory,
-            OsStr::new("objects"),
-            &objects,
-        )?;
-        validate_object_child_bindings(&objects, &snapshot.bindings)?;
-        authority.validate_object_layout()?;
-        validate_owned_directory_binding(
-            &authority.git_directory,
-            OsStr::new("objects"),
-            &objects,
-        )?;
-        validate_object_child_bindings(&objects, &snapshot.bindings)?;
-        after_final_bindings();
-        authority.validate_object_layout()?;
-        Ok(snapshot)
+        Ok(Self {
+            source: Arc::new(Mutex::new(source)),
+            pack,
+        })
     }
 
-    #[cfg(test)]
-    pub(super) fn capture_with_test_hook<AfterScan: FnOnce()>(
-        authority: &PinnedRepository,
-        after_scan: AfterScan,
-    ) -> Result<Self, LocalGitFailure> {
-        Self::capture_with_hook(authority, after_scan)
-    }
-
-    #[cfg(test)]
-    pub(super) fn capture_with_post_bindings_test_hook<AfterFinalBindings: FnOnce()>(
-        authority: &PinnedRepository,
-        after_final_bindings: AfterFinalBindings,
-    ) -> Result<Self, LocalGitFailure> {
-        Self::capture_with_hooks(authority, || {}, after_final_bindings)
-    }
-
-    pub(super) fn add_to(&self, object_database: &Odb<'_>) -> Result<(), LocalGitFailure> {
-        let path = self
-            .directory
-            .path()
-            .to_str()
-            .ok_or(LocalGitFailure::Operation)?;
-        object_database
-            .add_disk_alternate(path)
-            .map_err(|_| LocalGitFailure::Operation)
-    }
-
-    #[cfg(test)]
-    pub(super) fn compressed_bytes(&self) -> u64 {
-        self.compressed_bytes
+    pub(super) fn add_to(&self, database: &Odb<'_>) -> Result<(), LocalGitFailure> {
+        self.source
+            .lock()
+            .map_err(|_| LocalGitFailure::Operation)?
+            .attach(database)
     }
 
     pub(super) fn pack_directory(&self) -> &OwnedFd {
         &self.pack
     }
 
+    pub(super) fn contains(&self, oid: git2::Oid) -> Result<bool, LocalGitFailure> {
+        self.source
+            .lock()
+            .map_err(|_| LocalGitFailure::Operation)?
+            .contains(oid)
+    }
+
     pub(super) fn validate_live(
         &self,
         authority: &PinnedRepository,
     ) -> Result<(), LocalGitFailure> {
-        authority.validate_object_layout()?;
-        let objects = openat(
-            &authority.git_directory,
-            "objects",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| LocalGitFailure::Repository)?;
-        if owned_directory_identity(&objects)? != self.objects_identity {
-            return Err(LocalGitFailure::Repository);
-        }
-        if owned_directory_identity(&self.objects)? != self.objects_identity {
-            return Err(LocalGitFailure::Repository);
-        }
-        validate_retained_object_child_bindings(&objects, &self.bindings)?;
-        authority.validate_object_layout()?;
-        if owned_directory_identity(&objects)? != self.objects_identity {
-            return Err(LocalGitFailure::Repository);
-        }
-        validate_retained_object_child_bindings(&objects, &self.bindings)
+        self.source
+            .lock()
+            .map_err(|_| LocalGitFailure::Operation)?
+            .validate(authority)
     }
 
-    fn validate_object_inventory(
-        &self,
-        object_format: ObjectFormat,
-    ) -> Result<BTreeSet<git2::Oid>, LocalGitFailure> {
-        let mut object_ids = BTreeSet::new();
-        let mut unreadable_objects = BTreeSet::new();
-        for binding in &self.bindings {
-            if binding.name == OsStr::new("pack") {
-                collect_packed_object_ids(
-                    &self.directory.path().join("pack"),
-                    &binding.leaves,
-                    object_format,
-                    &mut object_ids,
-                    &mut unreadable_objects,
-                )?;
-            } else {
-                for leaf in &binding.leaves {
-                    let mut object_id = binding.name.as_bytes().to_vec();
-                    object_id.extend_from_slice(leaf.name.as_bytes());
-                    let object_id = parse_full_object_id_bytes(&object_id, object_format)
-                        .ok_or(LocalGitFailure::Repository)?;
-                    insert_bounded_object_id(&mut object_ids, object_id)?;
-                }
-            }
-        }
-        Ok(unreadable_objects)
+    #[cfg(test)]
+    pub(super) fn capture_with_test_hook<Hook: FnOnce()>(
+        authority: &PinnedRepository,
+        hook: Hook,
+    ) -> Result<Self, LocalGitFailure> {
+        let snapshot = Self::capture(authority)?;
+        hook();
+        snapshot.validate_live(authority)?;
+        Ok(snapshot)
     }
-}
 
-struct PackPair<'binding> {
-    pack: Option<&'binding ObjectLeafBinding>,
-    index: Option<&'binding ObjectLeafBinding>,
-    object_id: git2::Oid,
-}
-
-fn collect_packed_object_ids(
-    directory: &Path,
-    leaves: &[ObjectLeafBinding],
-    object_format: ObjectFormat,
-    object_ids: &mut BTreeSet<git2::Oid>,
-    unreadable_objects: &mut BTreeSet<git2::Oid>,
-) -> Result<(), LocalGitFailure> {
-    let mut pairs = BTreeMap::<Vec<u8>, PackPair<'_>>::new();
-    for leaf in leaves {
-        if leaf.name == OsStr::new(OBJECT_PUBLICATION_LOCK) {
-            continue;
-        }
-        let name = leaf.name.as_bytes();
-        let (stem, is_index) = if let Some(stem) = name.strip_suffix(b".pack") {
-            (stem, false)
-        } else if let Some(stem) = name.strip_suffix(b".idx") {
-            (stem, true)
-        } else {
-            return Err(LocalGitFailure::Repository);
-        };
-        let object_id = stem
-            .strip_prefix(b"pack-")
-            .and_then(|value| parse_full_object_id_bytes(value, object_format))
-            .ok_or(LocalGitFailure::Repository)?;
-        let pair = pairs.entry(stem.to_vec()).or_insert(PackPair {
-            pack: None,
-            index: None,
-            object_id,
-        });
-        if pair.object_id != object_id {
-            return Err(LocalGitFailure::Repository);
-        }
-        let slot = if is_index {
-            &mut pair.index
-        } else {
-            &mut pair.pack
-        };
-        if slot.replace(leaf).is_some() {
-            return Err(LocalGitFailure::Repository);
-        }
+    #[cfg(test)]
+    pub(super) fn capture_with_post_bindings_test_hook<Hook: FnOnce()>(
+        authority: &PinnedRepository,
+        hook: Hook,
+    ) -> Result<Self, LocalGitFailure> {
+        Self::capture_with_test_hook(authority, hook)
     }
-    for pair in pairs.values() {
-        let pack = pair.pack.ok_or(LocalGitFailure::Repository)?;
-        let index = pair.index.ok_or(LocalGitFailure::Repository)?;
-        let pack_bytes =
-            fs::read(directory.join(&pack.name)).map_err(|_| LocalGitFailure::Repository)?;
-        let packed_object_count = validate_pack_file(&pack_bytes, pair.object_id, object_format)?;
-        let index_bytes =
-            fs::read(directory.join(&index.name)).map_err(|_| LocalGitFailure::Repository)?;
-        let indexed = parse_pack_index(&index_bytes, pair.object_id, object_format)?;
-        if indexed.len() != packed_object_count {
-            return Err(LocalGitFailure::Repository);
-        }
-        let content_end = pack_bytes.len() - object_id_bytes(object_format);
-        collect_unreadable_objects(&pack_bytes[..content_end], &indexed, unreadable_objects);
-        for (object_id, _) in indexed {
-            insert_bounded_object_id(object_ids, object_id)?;
-        }
-    }
-    Ok(())
-}
-
-fn insert_bounded_object_id(
-    object_ids: &mut BTreeSet<git2::Oid>,
-    object_id: git2::Oid,
-) -> Result<(), LocalGitFailure> {
-    object_ids.insert(object_id);
-    if object_ids.len() > MAX_REPOSITORY_INSPECTIONS {
-        Err(LocalGitFailure::Repository)
-    } else {
-        Ok(())
-    }
-}
-
-pub(super) fn validate_pack_file(
-    bytes: &[u8],
-    expected_checksum: git2::Oid,
-    object_format: ObjectFormat,
-) -> Result<usize, LocalGitFailure> {
-    let object_id_bytes = object_id_bytes(object_format);
-    const PACK_HEADER_BYTES: usize = 12;
-    if bytes.len() < PACK_HEADER_BYTES + object_id_bytes {
-        return Err(LocalGitFailure::Repository);
-    }
-    let trailer_start = bytes
-        .len()
-        .checked_sub(object_id_bytes)
-        .ok_or(LocalGitFailure::Repository)?;
-    let trailer = bytes
-        .get(trailer_start..)
-        .ok_or(LocalGitFailure::Repository)?;
-    let version = bytes
-        .get(4..8)
-        .and_then(|value| value.try_into().ok())
-        .map(u32::from_be_bytes)
-        .ok_or(LocalGitFailure::Repository)?;
-    let object_count = bytes
-        .get(8..12)
-        .and_then(|value| value.try_into().ok())
-        .map(u32::from_be_bytes)
-        .and_then(|value| usize::try_from(value).ok())
-        .ok_or(LocalGitFailure::Repository)?;
-    if bytes.get(..4) != Some(b"PACK")
-        || !matches!(version, 2 | 3)
-        || trailer != expected_checksum.as_bytes()
-        || object_digest(object_format, &bytes[..trailer_start]) != trailer
-    {
-        return Err(LocalGitFailure::Repository);
-    }
-    Ok(object_count)
-}
-
-pub(super) fn parse_pack_index(
-    bytes: &[u8],
-    expected_pack_checksum: git2::Oid,
-    object_format: ObjectFormat,
-) -> Result<Vec<(git2::Oid, usize)>, LocalGitFailure> {
-    const HEADER_BYTES: usize = 8;
-    const FANOUT_BYTES: usize = 256 * 4;
-    let object_id_bytes = object_id_bytes(object_format);
-    if bytes.get(..4) != Some(&[0xff, b't', b'O', b'c'])
-        || bytes.get(4..8) != Some(&2_u32.to_be_bytes())
-    {
-        return Err(LocalGitFailure::Repository);
-    }
-    let fanout = bytes
-        .get(HEADER_BYTES..HEADER_BYTES + FANOUT_BYTES)
-        .ok_or(LocalGitFailure::Repository)?;
-    let count = read_be_u32(fanout, 255 * 4)? as usize;
-    if count > MAX_REPOSITORY_INSPECTIONS {
-        return Err(LocalGitFailure::Repository);
-    }
-    let object_table_start = HEADER_BYTES + FANOUT_BYTES;
-    let object_table_bytes = count
-        .checked_mul(object_id_bytes)
-        .ok_or(LocalGitFailure::Repository)?;
-    let object_table_end = object_table_start
-        .checked_add(object_table_bytes)
-        .ok_or(LocalGitFailure::Repository)?;
-    let object_table = bytes
-        .get(object_table_start..object_table_end)
-        .ok_or(LocalGitFailure::Repository)?;
-    let per_object_table_bytes = count.checked_mul(4).ok_or(LocalGitFailure::Repository)?;
-    let offset_start = object_table_end
-        .checked_add(per_object_table_bytes)
-        .ok_or(LocalGitFailure::Repository)?;
-    let offset_end = offset_start
-        .checked_add(per_object_table_bytes)
-        .ok_or(LocalGitFailure::Repository)?;
-    let offsets = bytes
-        .get(offset_start..offset_end)
-        .ok_or(LocalGitFailure::Repository)?;
-    let mut large_offsets = 0_usize;
-    for offset in offsets.as_chunks::<4>().0 {
-        if read_be_u32(offset, 0)? >> 31 == 1 {
-            large_offsets = large_offsets.saturating_add(1);
-        }
-    }
-    let large_offset_bytes = large_offsets
-        .checked_mul(8)
-        .ok_or(LocalGitFailure::Repository)?;
-    let checksum_start = offset_end
-        .checked_add(large_offset_bytes)
-        .ok_or(LocalGitFailure::Repository)?;
-    let expected_length = checksum_start
-        .checked_add(
-            object_id_bytes
-                .checked_mul(2)
-                .ok_or(LocalGitFailure::Repository)?,
-        )
-        .ok_or(LocalGitFailure::Repository)?;
-    if bytes.len() != expected_length {
-        return Err(LocalGitFailure::Repository);
-    }
-    let pack_checksum = bytes
-        .get(checksum_start..checksum_start + object_id_bytes)
-        .ok_or(LocalGitFailure::Repository)?;
-    let index_checksum = bytes
-        .get(checksum_start + object_id_bytes..)
-        .ok_or(LocalGitFailure::Repository)?;
-    if pack_checksum != expected_pack_checksum.as_bytes()
-        || object_digest(object_format, &bytes[..checksum_start + object_id_bytes])
-            != index_checksum
-    {
-        return Err(LocalGitFailure::Repository);
-    }
-    let mut object_ids = Vec::with_capacity(count);
-    let mut previous = None;
-    let mut observed_fanout = [0_u32; 256];
-    for (position, raw) in object_table.chunks_exact(object_id_bytes).enumerate() {
-        if previous.is_some_and(|previous: &[u8]| previous >= raw) {
-            return Err(LocalGitFailure::Repository);
-        }
-        observed_fanout[raw[0] as usize] = observed_fanout[raw[0] as usize].saturating_add(1);
-        let offset = read_be_u32(offsets, position * 4)?;
-        let offset = if offset & 0x8000_0000 == 0 {
-            u64::from(offset)
-        } else {
-            let position = (offset & 0x7fff_ffff) as usize;
-            if position >= large_offsets {
-                return Err(LocalGitFailure::Repository);
-            }
-            let start = offset_end + position * 8;
-            u64::from_be_bytes(
-                bytes[start..start + 8]
-                    .try_into()
-                    .map_err(|_| LocalGitFailure::Repository)?,
-            )
-        };
-        object_ids.push((
-            git2::Oid::from_bytes(raw).map_err(|_| LocalGitFailure::Repository)?,
-            usize::try_from(offset).map_err(|_| LocalGitFailure::Repository)?,
-        ));
-        previous = Some(raw);
-    }
-    let mut cumulative = 0_u32;
-    for (position, observed) in observed_fanout.into_iter().enumerate() {
-        cumulative = cumulative
-            .checked_add(observed)
-            .ok_or(LocalGitFailure::Repository)?;
-        if read_be_u32(fanout, position * 4)? != cumulative {
-            return Err(LocalGitFailure::Repository);
-        }
-    }
-    Ok(object_ids)
-}
-
-fn read_be_u32(bytes: &[u8], offset: usize) -> Result<u32, LocalGitFailure> {
-    bytes
-        .get(offset..offset + 4)
-        .and_then(|value| value.try_into().ok())
-        .map(u32::from_be_bytes)
-        .ok_or(LocalGitFailure::Repository)
-}
-
-fn object_digest(object_format: ObjectFormat, bytes: &[u8]) -> Vec<u8> {
-    match object_format {
-        ObjectFormat::Sha1 => Sha1::digest(bytes).to_vec(),
-        ObjectFormat::Sha256 => Sha256::digest(bytes).to_vec(),
-    }
-}
-
-fn pin_object_directory(
-    source: &OwnedFd,
-    destination: &Path,
-    inspected: &mut usize,
-    captured_bytes: &mut u64,
-    kind: ObjectDirectoryKind,
-) -> Result<Vec<ObjectLeafBinding>, LocalGitFailure> {
-    let mut bindings = Vec::new();
-    for entry in
-        fs::read_dir(descriptor_path_from_fd(source)).map_err(|_| LocalGitFailure::Repository)?
-    {
-        let entry = entry.map_err(|_| LocalGitFailure::Repository)?;
-        *inspected = inspected.saturating_add(1);
-        if *inspected > MAX_REPOSITORY_INSPECTIONS {
-            return Err(LocalGitFailure::Repository);
-        }
-        let name = entry.file_name();
-        if !kind.validates_name(&name) {
-            return Err(LocalGitFailure::Repository);
-        }
-        let descriptor = openat(
-            source,
-            &name,
-            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| LocalGitFailure::Repository)?;
-        let mut file = fs::File::from(descriptor);
-        let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
-        let per_file_limit = kind.compressed_file_limit() as u64;
-        if !metadata.is_file()
-            || metadata.len() > per_file_limit
-            || captured_bytes.saturating_add(metadata.len()) > MAX_OBJECT_DATABASE_BYTES as u64
-        {
-            return Err(LocalGitFailure::Repository);
-        }
-        let mut snapshot = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(destination.join(&name))
-            .map_err(|_| LocalGitFailure::Operation)?;
-        let copied = std::io::copy(
-            &mut Read::by_ref(&mut file).take(metadata.len().saturating_add(1)),
-            &mut snapshot,
-        )
-        .map_err(|_| LocalGitFailure::Operation)?;
-        let after_copy = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
-        if copied != metadata.len()
-            || file_snapshot_identity(&metadata) != file_snapshot_identity(&after_copy)
-        {
-            return Err(LocalGitFailure::Repository);
-        }
-        snapshot.rewind().map_err(|_| LocalGitFailure::Operation)?;
-        kind.validate_content(&mut snapshot, &name)?;
-        let digest = object_leaf_digest(&mut snapshot, copied)?;
-        bindings.push(ObjectLeafBinding {
-            name,
-            snapshot: file_snapshot_identity(&after_copy),
-            digest,
-        });
-        *captured_bytes = captured_bytes.saturating_add(copied);
-    }
-    Ok(bindings)
-}
-
-fn object_leaf_digest(
-    file: &mut fs::File,
-    expected_length: u64,
-) -> Result<[u8; 32], LocalGitFailure> {
-    file.rewind().map_err(|_| LocalGitFailure::Repository)?;
-    let mut remaining = expected_length;
-    let mut buffer = [0_u8; 8192];
-    let mut digest = Sha256::new();
-    while remaining > 0 {
-        let requested = usize::try_from(remaining.min(buffer.len() as u64))
-            .map_err(|_| LocalGitFailure::Repository)?;
-        let read = file
-            .read(&mut buffer[..requested])
-            .map_err(|_| LocalGitFailure::Repository)?;
-        if read == 0 {
-            return Err(LocalGitFailure::Repository);
-        }
-        digest.update(&buffer[..read]);
-        remaining = remaining.saturating_sub(read as u64);
-    }
-    let mut extra = [0_u8; 1];
-    if file
-        .read(&mut extra)
-        .map_err(|_| LocalGitFailure::Repository)?
-        != 0
-    {
-        return Err(LocalGitFailure::Repository);
-    }
-    Ok(digest.finalize().into())
-}
-
-pub(super) fn live_object_database_bytes(
-    authority: &PinnedRepository,
-) -> Result<u64, LocalGitFailure> {
-    live_object_database_bytes_with_hook(authority, || {})
-}
-
-fn live_object_database_bytes_with_hook<AfterScan: FnOnce()>(
-    authority: &PinnedRepository,
-    after_scan: AfterScan,
-) -> Result<u64, LocalGitFailure> {
-    PinnedObjectDatabase::capture_with_hook(authority, after_scan)
-        .map(|snapshot| snapshot.compressed_bytes)
-}
-
-#[cfg(test)]
-pub(super) fn live_object_database_bytes_with_test_hook<AfterScan: FnOnce()>(
-    authority: &PinnedRepository,
-    after_scan: AfterScan,
-) -> Result<u64, LocalGitFailure> {
-    live_object_database_bytes_with_hook(authority, after_scan)
-}
-
-fn validate_owned_directory_binding<Parent: AsFd>(
-    parent: &Parent,
-    name: &OsStr,
-    pinned: &OwnedFd,
-) -> Result<(), LocalGitFailure> {
-    let pinned_file = fs::File::from(dup(pinned).map_err(|_| LocalGitFailure::Repository)?);
-    bind_still_holds(parent.as_fd(), name, &pinned_file, || {
-        LocalGitFailure::Repository
-    })
-}
-
-fn owned_directory_identity(directory: &OwnedFd) -> Result<FileIdentity, LocalGitFailure> {
-    descriptor_identity(directory.as_fd()).ok_or(LocalGitFailure::Repository)
-}
-
-fn validate_object_child_bindings(
-    objects: &OwnedFd,
-    expected: &[ObjectChildBinding],
-) -> Result<(), LocalGitFailure> {
-    let mut expected_children = expected
-        .iter()
-        .map(|binding| binding.name.clone())
-        .collect::<Vec<_>>();
-    expected_children.sort();
-    let mut inspected = 0_usize;
-    let mut current_children = Vec::new();
-    for entry in
-        fs::read_dir(descriptor_path_from_fd(objects)).map_err(|_| LocalGitFailure::Repository)?
-    {
-        inspected = inspected.saturating_add(1);
-        if inspected > MAX_REPOSITORY_INSPECTIONS {
-            return Err(LocalGitFailure::Repository);
-        }
-        let name = entry.map_err(|_| LocalGitFailure::Repository)?.file_name();
-        if name != OsStr::new("info") {
-            current_children.push(name);
-        }
-    }
-    current_children.sort();
-    if current_children != expected_children {
-        return Err(LocalGitFailure::Repository);
-    }
-    for binding in expected {
-        let current = openat(
-            objects,
-            &binding.name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| LocalGitFailure::Repository)?;
-        if owned_directory_identity(&current)? != binding.identity {
-            return Err(LocalGitFailure::Repository);
-        }
-        let mut current_leaves = Vec::new();
-        for entry in fs::read_dir(descriptor_path_from_fd(&current))
-            .map_err(|_| LocalGitFailure::Repository)?
-        {
-            inspected = inspected.saturating_add(1);
-            if inspected > MAX_REPOSITORY_INSPECTIONS {
-                return Err(LocalGitFailure::Repository);
-            }
-            current_leaves.push(entry.map_err(|_| LocalGitFailure::Repository)?.file_name());
-        }
-        current_leaves.sort();
-        let mut expected_leaves = binding
-            .leaves
-            .iter()
-            .map(|leaf| leaf.name.clone())
-            .collect::<Vec<_>>();
-        expected_leaves.sort();
-        if current_leaves != expected_leaves {
-            return Err(LocalGitFailure::Repository);
-        }
-        for leaf in &binding.leaves {
-            let descriptor = openat(
-                &current,
-                &leaf.name,
-                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| LocalGitFailure::Repository)?;
-            let mut file = fs::File::from(descriptor);
-            let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
-            if !metadata.is_file() || file_snapshot_identity(&metadata) != leaf.snapshot {
-                return Err(LocalGitFailure::Repository);
-            }
-            let digest = object_leaf_digest(&mut file, leaf.snapshot.length)?;
-            let after_read = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
-            if file_snapshot_identity(&after_read) != leaf.snapshot || digest != leaf.digest {
-                return Err(LocalGitFailure::Repository);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_retained_object_child_bindings(
-    objects: &OwnedFd,
-    expected: &[ObjectChildBinding],
-) -> Result<(), LocalGitFailure> {
-    let mut inspected = 0_usize;
-    for binding in expected {
-        inspected = inspected.saturating_add(1);
-        if inspected > MAX_REPOSITORY_INSPECTIONS {
-            return Err(LocalGitFailure::Repository);
-        }
-        let current = openat(
-            objects,
-            &binding.name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| LocalGitFailure::Repository)?;
-        if owned_directory_identity(&current)? != binding.identity {
-            return Err(LocalGitFailure::Repository);
-        }
-        for leaf in &binding.leaves {
-            inspected = inspected.saturating_add(1);
-            if inspected > MAX_REPOSITORY_INSPECTIONS {
-                return Err(LocalGitFailure::Repository);
-            }
-            let descriptor = openat(
-                &current,
-                &leaf.name,
-                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| LocalGitFailure::Repository)?;
-            let mut file = fs::File::from(descriptor);
-            let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
-            if !metadata.is_file() || file_snapshot_identity(&metadata) != leaf.snapshot {
-                return Err(LocalGitFailure::Repository);
-            }
-            let digest = object_leaf_digest(&mut file, leaf.snapshot.length)?;
-            let after_read = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
-            if file_snapshot_identity(&after_read) != leaf.snapshot || digest != leaf.digest {
-                return Err(LocalGitFailure::Repository);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_loose_object(
-    file: &mut fs::File,
-    object_format: ObjectFormat,
-    directory_prefix: [u8; 2],
-    filename: &OsStr,
-) -> Result<(), LocalGitFailure> {
-    let compressed_length = file
-        .metadata()
-        .map_err(|_| LocalGitFailure::Repository)?
-        .len();
-    let mut decoded = Vec::with_capacity(MAX_LOOSE_OBJECT_HEADER_BYTES + 1);
-    let mut decoder = ZlibDecoder::new(&mut *file);
-    Read::by_ref(&mut decoder)
-        .take((MAX_LOOSE_OBJECT_HEADER_BYTES + 1) as u64)
-        .read_to_end(&mut decoded)
-        .map_err(|_| LocalGitFailure::Repository)?;
-    let header_end = decoded
-        .iter()
-        .position(|byte| *byte == 0)
-        .ok_or(LocalGitFailure::Repository)?;
-    if header_end > MAX_LOOSE_OBJECT_HEADER_BYTES {
-        return Err(LocalGitFailure::Repository);
-    }
-    let header =
-        std::str::from_utf8(&decoded[..header_end]).map_err(|_| LocalGitFailure::Repository)?;
-    let (kind, declared_text) = header.split_once(' ').ok_or(LocalGitFailure::Repository)?;
-    if !matches!(kind, "blob" | "tree" | "commit" | "tag") {
-        return Err(LocalGitFailure::Repository);
-    }
-    let declared_bytes = declared_text
-        .parse::<usize>()
-        .map_err(|_| LocalGitFailure::Repository)?;
-    if declared_bytes.to_string() != declared_text {
-        return Err(LocalGitFailure::Repository);
-    }
-    let object_type = match kind {
-        "blob" => git2::ObjectType::Blob,
-        "tree" => git2::ObjectType::Tree,
-        "commit" => git2::ObjectType::Commit,
-        "tag" => git2::ObjectType::Tag,
-        _ => return Err(LocalGitFailure::Repository),
-    };
-    // Content above the operation read bound can exist in the snapshot. The
-    // operation's object-header check rejects it only if that object is used.
-    if declared_bytes > MAX_OBJECT_BYTES {
-        return Ok(());
-    }
-    let expected_length = header_end + 1 + declared_bytes;
-    let remaining = expected_length
-        .saturating_add(1)
-        .saturating_sub(decoded.len());
-    Read::by_ref(&mut decoder)
-        .take(remaining as u64)
-        .read_to_end(&mut decoded)
-        .map_err(|_| LocalGitFailure::Repository)?;
-    let consumed = decoder.total_in();
-    drop(decoder);
-    file.rewind().map_err(|_| LocalGitFailure::Repository)?;
-    if decoded.len() != expected_length || consumed != compressed_length {
-        return Err(LocalGitFailure::Repository);
-    }
-    let object_id =
-        git2::Oid::hash_object_ext(object_type, &decoded[header_end + 1..], object_format)
-            .map_err(|_| LocalGitFailure::Repository)?;
-    let mut claimed_object_id = directory_prefix.to_vec();
-    claimed_object_id.extend_from_slice(filename.as_bytes());
-    if object_id.to_string().as_bytes() != claimed_object_id {
-        return Err(LocalGitFailure::Repository);
-    }
-    Ok(())
 }
 
 pub(super) fn open_pinned_repository(
@@ -1372,9 +624,9 @@ pub(super) fn open_pinned_repository(
     let config = Config::open(&descriptor_path(config))?;
     repository.set_config(&config)?;
     Ok(RepositoryShell {
+        max_object_bytes: None,
         repository,
         _directory: directory,
-        unreadable_objects: RefCell::new(None),
         selected_objects: RefCell::new(None),
     })
 }
@@ -1398,5 +650,53 @@ pub(super) fn repository_ignorecase(repository: &Repository) -> Result<bool, Loc
         Ok(ignorecase) => Ok(ignorecase),
         Err(error) if error.code() == ErrorCode::NotFound => Ok(false),
         Err(_) => Err(LocalGitFailure::Repository),
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::{ObjectSource, PinnedObjectDatabase};
+
+    #[test]
+    fn local_snapshots_outlive_the_push_preparation_deadline() {
+        let root = tempfile::tempdir().expect("repository root");
+        git2::Repository::init(root.path()).expect("repository");
+        let (_, executor) = crate::LocalGitTools::try_new(
+            signalbox_tools_workspace::LocalWorkspaceFileSystem,
+            root.path(),
+            crate::GitIdentity::try_new("Deadline fixture", "deadline@example.test")
+                .expect("identity"),
+        )
+        .expect("local tools")
+        .into_parts();
+        let authority = &executor.repository_authority;
+        let deadline = std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT;
+        let later = deadline + std::time::Duration::from_secs(1);
+        let snapshot = PinnedObjectDatabase::capture(authority).expect("local snapshot");
+        assert!(
+            snapshot
+                .source
+                .lock()
+                .expect("snapshot lock")
+                .check_deadline_at(later)
+                .is_ok()
+        );
+        let repository = authority.open_repository_shell().expect("repository shell");
+        repository
+            .capture_objects_on_read(authority)
+            .expect("local read snapshot");
+        assert!(
+            repository
+                .selected_objects
+                .borrow()
+                .as_ref()
+                .expect("selected snapshot")
+                .lock()
+                .expect("selected lock")
+                .check_deadline_at(later)
+                .is_ok()
+        );
+        let push = ObjectSource::open(authority, Some(deadline)).expect("push snapshot");
+        assert!(push.check_deadline_at(later).is_err());
     }
 }

@@ -180,7 +180,11 @@ filenames and previews explicitly when they cannot fit. Filenames use bytewise
 Git path quoting. Verification supports two-parent merges and refuses larger
 merges with `UnsupportedMergeShape` naming the parent count before capturing the
 push snapshot or traversing ancestry. It retains only the first dropped hunk per
-file. Non-merge pushes are unaffected.
+file. Merge comparison streams content into file-backed line indexes, diff
+scratch data, and effect counts; retained hunk previews remain bounded. Rename
+similarity uses fixed-size signatures of streamed content. Comparison checks the
+push-preparation deadline between I/O pages and matching steps. Non-merge pushes
+are unaffected.
 
 A rename/delete resolution may retain the branch's rename destination with its
 exact branch blob and mode while leaving the base-deleted source absent.

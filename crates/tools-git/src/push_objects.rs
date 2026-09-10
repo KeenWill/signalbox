@@ -1,26 +1,22 @@
 //! Descriptor-bound object capture for a push range; see git-authority-threat-model.md.
 
+use crate::streamed_object::ObjectContent;
 use crate::{
     descriptor::{
         FileIdentity, FileSnapshotIdentity, descriptor_path, file_identity, file_snapshot_identity,
     },
     failure::LocalGitFailure,
     layout::parse_full_object_id,
-    limits::{
-        MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
-        MAX_REPOSITORY_INSPECTIONS, MAX_SHALLOW_ENTRIES,
-    },
+    limits::{MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_REPOSITORY_INSPECTIONS, MAX_SHALLOW_ENTRIES},
     pinning::{PinnedRepository, RepositoryShell},
 };
-use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+use flate2::read::ZlibDecoder;
 use git2::{ObjectFormat, ObjectType, Odb, Oid};
 use rustix::fs::{Mode, OFlags, openat};
-use sha1::Sha1;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashSet},
     fs::{self, File},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom},
     os::fd::AsFd,
     path::{Path, PathBuf},
     time::Instant,
@@ -53,7 +49,7 @@ impl PushObjectSnapshot {
     ) -> Result<Self, LocalGitFailure> {
         let repository = authority.open_repository_shell()?;
         let database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
-        let mut source = ObjectSource::open(authority, deadline)?;
+        let mut source = ObjectSource::open(authority, Some(deadline))?;
         let mut excluded = BTreeSet::new();
         let mut boundaries = BTreeSet::new();
         if let Some(fence) = fence {
@@ -62,17 +58,18 @@ impl PushObjectSnapshot {
         }
         let mut commits = vec![target];
         let mut visited = BTreeSet::new();
-        let mut fence_ancestors: Option<BTreeSet<Oid>> = None;
+        let mut fence_ancestors: Option<(BTreeSet<Oid>, ObjectSource)> = None;
         let mut trees = Vec::new();
         while let Some(commit) = commits.pop() {
             source.check_deadline()?;
             if !visited.insert(commit) {
                 continue;
             }
-            if visited
-                .len()
-                .saturating_add(fence_ancestors.as_ref().map_or(0, BTreeSet::len))
-                > MAX_REPOSITORY_INSPECTIONS
+            if visited.len().saturating_add(
+                fence_ancestors
+                    .as_ref()
+                    .map_or(0, |(ancestors, _)| ancestors.len()),
+            ) > MAX_REPOSITORY_INSPECTIONS
             {
                 return Err(LocalGitFailure::Repository);
             }
@@ -81,7 +78,7 @@ impl PushObjectSnapshot {
             }
             if fence_ancestors
                 .as_ref()
-                .is_some_and(|ancestors| ancestors.contains(&commit))
+                .is_some_and(|(ancestors, _)| ancestors.contains(&commit))
             {
                 boundaries.insert(commit);
                 if boundaries.len() > MAX_SHALLOW_ENTRIES {
@@ -98,7 +95,7 @@ impl PushObjectSnapshot {
                 && fence_ancestors.is_none()
                 && let Some(fence) = fence
             {
-                fence_ancestors = Some(capture_fence_ancestors(authority, &mut source, fence)?);
+                fence_ancestors = Some(capture_fence_ancestors(authority, deadline, fence)?);
             }
             trees.push(commit.tree_id());
             commits.extend(commit.parent_ids());
@@ -139,17 +136,25 @@ impl PushObjectSnapshot {
                 return Err(LocalGitFailure::Repository);
             }
         }
+        if let Some((_, graph_source)) = &fence_ancestors {
+            graph_source.validate(authority)?;
+        }
         source.validate(authority)?;
+        source.publish_private_packs(&repository.path().join("objects/pack"))?;
         drop(database);
+        repository.retain_selected_source(source);
         Ok(Self { repository })
     }
 }
 
 fn capture_fence_ancestors(
     authority: &PinnedRepository,
-    source: &mut ObjectSource,
+    deadline: Instant,
     fence: Oid,
-) -> Result<BTreeSet<Oid>, LocalGitFailure> {
+) -> Result<(BTreeSet<Oid>, ObjectSource), LocalGitFailure> {
+    let graph = authority.open_repository_shell()?;
+    let database = graph.odb().map_err(|_| LocalGitFailure::Operation)?;
+    let mut source = ObjectSource::open(authority, Some(deadline))?;
     let mut pending = vec![fence];
     let mut ancestors = BTreeSet::new();
     while let Some(oid) = pending.pop() {
@@ -160,15 +165,13 @@ fn capture_fence_ancestors(
         if ancestors.len() > MAX_REPOSITORY_INSPECTIONS {
             return Err(LocalGitFailure::Repository);
         }
-        let graph = authority.open_repository_shell()?;
-        let database = graph.odb().map_err(|_| LocalGitFailure::Operation)?;
         source.capture(&database, oid)?;
         let commit = graph
             .find_commit(oid)
             .map_err(|_| LocalGitFailure::Operation)?;
         pending.extend(commit.parent_ids());
     }
-    Ok(ancestors)
+    Ok((ancestors, source))
 }
 
 fn retain_boundary(
@@ -239,42 +242,47 @@ pub(super) struct ObjectSource {
     files: Vec<SourceFile>,
     packs: Vec<Pack>,
     format: ObjectFormat,
-    captured_bytes: usize,
-    deadline: Instant,
+    max_object_bytes: Option<usize>,
+    pub(super) directory: tempfile::TempDir,
+    deadline: Option<Instant>,
 }
 
 fn rejected<T>(_: T) -> LocalGitFailure {
     LocalGitFailure::Repository
 }
 
-fn open_child(root: &File, path: &Path) -> Result<File, LocalGitFailure> {
+fn open_child(root: &File, path: &Path) -> Result<Option<File>, LocalGitFailure> {
     let parent = path.parent().ok_or(LocalGitFailure::Repository)?;
-    let directory = openat(
+    let directory = match openat(
         root,
         parent,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
-    )
-    .map_err(rejected)?;
-    let file = File::from(
-        openat(
-            directory.as_fd(),
-            path.file_name().ok_or(LocalGitFailure::Repository)?,
-            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(rejected)?,
-    );
+    ) {
+        Ok(directory) => directory,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(rejected(error)),
+    };
+    let file = match openat(
+        directory.as_fd(),
+        path.file_name().ok_or(LocalGitFailure::Repository)?,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(file) => File::from(file),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(rejected(error)),
+    };
     if !file.metadata().map_err(rejected)?.is_file() {
         return Err(LocalGitFailure::Repository);
     }
-    Ok(file)
+    Ok(Some(file))
 }
 
 impl ObjectSource {
     pub(super) fn open(
         authority: &PinnedRepository,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<Self, LocalGitFailure> {
         authority.validate_object_layout()?;
         let objects = File::from(
@@ -306,7 +314,8 @@ impl ObjectSource {
             files: Vec::new(),
             packs: Vec::new(),
             format: authority.object_format,
-            captured_bytes: 0,
+            max_object_bytes: authority.max_object_bytes,
+            directory: tempfile::tempdir().map_err(rejected)?,
             deadline,
         };
         let mut scanned = 0usize;
@@ -355,12 +364,8 @@ impl ObjectSource {
                 .checked_sub(width)
                 .ok_or(LocalGitFailure::Repository)?;
             let header = source.read(pack, 0, 12)?;
-            if end < 12
-                || &header[..4] != b"PACK"
-                || !matches!(&header[4..8], [0, 0, 0, 2] | [0, 0, 0, 3])
-                || u32::from_be_bytes(header[8..12].try_into().map_err(rejected)?) as usize != count
-                || source.read(pack, end, width)? != checksum.as_bytes()
-            {
+            crate::pack_read_bounds::validate_pack_header(&header, end, count)?;
+            if source.read(pack, end, width)? != checksum.as_bytes() {
                 return Err(LocalGitFailure::Repository);
             }
             source.packs.push(Pack {
@@ -379,7 +384,11 @@ impl ObjectSource {
 
     // Stop timed-out blocking work between bounded reads and decodes.
     fn check_deadline(&self) -> Result<(), LocalGitFailure> {
-        if Instant::now() >= self.deadline {
+        self.check_deadline_at(Instant::now())
+    }
+
+    pub(super) fn check_deadline_at(&self, now: Instant) -> Result<(), LocalGitFailure> {
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
             return Err(LocalGitFailure::Repository);
         }
         Ok(())
@@ -448,9 +457,6 @@ impl ObjectSource {
         length: usize,
     ) -> Result<Vec<u8>, LocalGitFailure> {
         self.check_deadline()?;
-        if length > MAX_OBJECT_DATABASE_BYTES {
-            return Err(LocalGitFailure::Repository);
-        }
         let entry = &self.files[source];
         let mut file = entry
             .file
@@ -468,77 +474,167 @@ impl ObjectSource {
         Ok(bytes)
     }
 
-    fn charge(&mut self, bytes: usize) -> Result<(), LocalGitFailure> {
-        self.captured_bytes = self
-            .captured_bytes
-            .checked_add(bytes)
-            .filter(|n| *n <= MAX_OBJECT_DATABASE_BYTES)
-            .ok_or(LocalGitFailure::Repository)?;
+    fn publish_private_packs(&self, destination: &Path) -> Result<(), LocalGitFailure> {
+        let mut objects = Vec::new();
+        for directory in fs::read_dir(self.directory.path()).map_err(rejected)? {
+            let directory = directory.map_err(rejected)?;
+            for entry in fs::read_dir(directory.path()).map_err(rejected)? {
+                self.check_deadline()?;
+                let entry = entry.map_err(rejected)?;
+                let hex = format!(
+                    "{}{}",
+                    directory.file_name().to_string_lossy(),
+                    entry.file_name().to_string_lossy()
+                );
+                let oid =
+                    parse_full_object_id(&hex, self.format).ok_or(LocalGitFailure::Repository)?;
+                objects.push(oid);
+                if objects.len() > MAX_REPOSITORY_INSPECTIONS {
+                    return Err(LocalGitFailure::Repository);
+                }
+            }
+        }
+        if !objects.is_empty() {
+            crate::streamed_object::write_pack(
+                &objects,
+                |oid| {
+                    self.check_deadline()?;
+                    let hex = oid.to_string();
+                    let path = self.directory.path().join(&hex[..2]).join(&hex[2..]);
+                    self.decode_loose(File::open(path).map_err(rejected)?)
+                },
+                self.format,
+                destination,
+                self.deadline,
+            )?;
+        }
         Ok(())
+    }
+
+    pub(super) fn contains(&mut self, oid: Oid) -> Result<bool, LocalGitFailure> {
+        self.check_deadline()?;
+        let hex = oid.to_string();
+        let mut present =
+            open_child(&self.objects, &PathBuf::from(&hex[..2]).join(&hex[2..]))?.is_some();
+        if !present {
+            for pack in &self.packs {
+                if self.packed_offset(pack, oid)?.is_some() {
+                    present = true;
+                    break;
+                }
+            }
+        }
+        if present {
+            let database = Odb::new_ext(self.format).map_err(rejected)?;
+            // A generated private copy does not establish that the live copy is valid.
+            self.capture_live(&database, oid)?;
+        }
+        Ok(present)
+    }
+
+    pub(super) fn attach(&self, database: &Odb<'_>) -> Result<(), LocalGitFailure> {
+        // libgit2 deduplicates disk backends by directory identity.
+        database
+            .add_disk_alternate(
+                self.directory
+                    .path()
+                    .to_str()
+                    .ok_or(LocalGitFailure::Repository)?,
+            )
+            .map_err(rejected)
+    }
+
+    pub(super) fn store(
+        &mut self,
+        database: &Odb<'_>,
+        content: &mut ObjectContent,
+    ) -> Result<Oid, LocalGitFailure> {
+        if content.size > crate::limits::object_byte_limit(self.max_object_bytes, content.kind) {
+            return Err(LocalGitFailure::Repository);
+        }
+        self.attach(database)?;
+        content.store(self.directory.path(), self.format, self.deadline)
+    }
+
+    pub(super) fn content(&self, oid: Oid) -> Result<Option<ObjectContent>, LocalGitFailure> {
+        let hex = oid.to_string();
+        let path = self.directory.path().join(&hex[..2]).join(&hex[2..]);
+        match File::open(path) {
+            Ok(file) => self.decode_loose(file).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(rejected(error)),
+        }
+    }
+
+    fn decode_loose(&self, file: File) -> Result<ObjectContent, LocalGitFailure> {
+        let compressed_size = file.metadata().map_err(rejected)?.len();
+        let mut decoder = ZlibDecoder::new(std::io::BufReader::new(file));
+        let mut header = Vec::new();
+        loop {
+            let byte = byte(&mut decoder)?;
+            if byte == 0 {
+                break;
+            }
+            if header.len() == MAX_LOOSE_OBJECT_HEADER_BYTES {
+                return Err(LocalGitFailure::Repository);
+            }
+            header.push(byte);
+        }
+        let (kind, size) = std::str::from_utf8(&header)
+            .map_err(rejected)?
+            .split_once(' ')
+            .ok_or(LocalGitFailure::Repository)?;
+        let kind = ObjectType::from_str(kind)
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    ObjectType::Blob | ObjectType::Tree | ObjectType::Commit | ObjectType::Tag
+                )
+            })
+            .ok_or(LocalGitFailure::Repository)?;
+        let declared = size;
+        let size = size.parse::<usize>().map_err(rejected)?;
+        if size.to_string() != declared
+            || size > crate::limits::object_byte_limit(self.max_object_bytes, kind)
+        {
+            return Err(LocalGitFailure::Repository);
+        }
+        let content = ObjectContent::decode(&mut decoder, size, kind, self.deadline)?;
+        if decoder.total_in() != compressed_size {
+            return Err(LocalGitFailure::Repository);
+        }
+        Ok(content)
     }
 
     pub(super) fn capture(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
         self.check_deadline()?;
+        self.attach(database)?;
         if database.exists(oid) {
             return Ok(());
         }
+        self.capture_live(database, oid)
+    }
+
+    fn capture_live(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
         let hex = oid.to_string();
         let path = PathBuf::from(&hex[..2]).join(&hex[2..]);
-        if open_child(&self.objects, &path).is_ok() {
-            let file = self.open_file(&path)?;
-            let length = usize::try_from(self.files[file].identity.length).map_err(rejected)?;
-            if length > MAX_OBJECT_BYTES * 2 {
-                return Err(LocalGitFailure::Repository);
-            }
-            self.charge(length)?;
-            let compressed = self.read(file, 0, length)?;
-            let mut decoder = ZlibDecoder::new(compressed.as_slice());
-            let mut content = Vec::new();
-            Read::by_ref(&mut decoder)
-                .take((MAX_OBJECT_BYTES + MAX_LOOSE_OBJECT_HEADER_BYTES + 1) as u64)
-                .read_to_end(&mut content)
+        if open_child(&self.objects, &path)?.is_some() {
+            let source = self.open_file(&path)?;
+            let file = self.files[source]
+                .file
+                .as_ref()
+                .ok_or(LocalGitFailure::Repository)?
+                .try_clone()
                 .map_err(rejected)?;
-            let header = content
-                .iter()
-                .position(|b| *b == 0)
-                .filter(|n| *n <= MAX_LOOSE_OBJECT_HEADER_BYTES)
-                .ok_or(LocalGitFailure::Repository)?;
-            let (kind, size) = std::str::from_utf8(&content[..header])
-                .map_err(rejected)?
-                .split_once(' ')
-                .ok_or(LocalGitFailure::Repository)?;
-            let kind = ObjectType::from_str(kind).ok_or(LocalGitFailure::Repository)?;
-            let declared_size = size;
-            let size = declared_size.parse::<usize>().map_err(rejected)?;
-            if size.to_string() != declared_size
-                || !matches!(
-                    kind,
-                    ObjectType::Blob | ObjectType::Tree | ObjectType::Commit | ObjectType::Tag
-                )
-            {
+            let mut content = self.decode_loose(file)?;
+            if self.store(database, &mut content)? != oid {
                 return Err(LocalGitFailure::Repository);
             }
-            if size > MAX_OBJECT_BYTES
-                || content.len() != header + 1 + size
-                || decoder.total_in() != length as u64
-            {
-                return Err(LocalGitFailure::Repository);
-            }
-            self.charge(size)?;
-            if database
-                .write(kind, &content[header + 1..])
-                .map_err(rejected)?
-                != oid
-            {
-                return Err(LocalGitFailure::Repository);
-            }
-            // Verified loose bytes are private now; retain their identity for final
-            // path validation without exhausting descriptors across long histories.
-            self.files[file].file = None;
-        } else {
-            self.capture_pack(database, oid)?;
+            // Keep the source identity while releasing verified loose-object descriptors.
+            self.files[source].file = None;
+            return Ok(());
         }
-        Ok(())
+        self.capture_pack(database, oid)
     }
 
     fn read_u32(&self, source: usize, offset: usize) -> Result<u32, LocalGitFailure> {
@@ -611,8 +707,7 @@ impl ObjectSource {
                 .map_err(rejected)?;
             file.seek(SeekFrom::Start(offset as u64))
                 .map_err(rejected)?;
-            let remaining_budget = MAX_OBJECT_DATABASE_BYTES - self.captured_bytes;
-            let mut remaining = file.take((pack.end - offset).min(remaining_budget) as u64);
+            let mut remaining = file.take((pack.end - offset) as u64);
             let first = byte(&mut remaining)?;
             let kind = (first >> 4) & 7;
             let size = if first & 0x80 == 0 {
@@ -623,7 +718,15 @@ impl ObjectSource {
                     .and_then(|n| n.checked_add(usize::from(first & 15)))
                     .ok_or(LocalGitFailure::Repository)?
             };
-            if size > MAX_OBJECT_BYTES {
+            crate::pack_read_bounds::validate_decoded_size(size, self.max_object_bytes)?;
+            let object_kind = match kind {
+                1 => ObjectType::Commit,
+                2 => ObjectType::Tree,
+                3 | 6 | 7 => ObjectType::Blob,
+                4 => ObjectType::Tag,
+                _ => return Err(LocalGitFailure::Repository),
+            };
+            if size > crate::limits::object_byte_limit(self.max_object_bytes, object_kind) {
                 return Err(LocalGitFailure::Repository);
             }
             let base = match kind {
@@ -657,104 +760,28 @@ impl ObjectSource {
                 }
                 _ => return Err(LocalGitFailure::Repository),
             };
-            let mut decoder = ZlibDecoder::new(remaining);
-            let mut content = Vec::new();
-            Read::by_ref(&mut decoder)
-                .take(size as u64 + 1)
-                .read_to_end(&mut content)
-                .map_err(rejected)?;
-            if content.len() != size {
-                return Err(LocalGitFailure::Repository);
-            }
-            self.charge(decoder.total_in() as usize)?;
-            self.charge(size)?;
-            if base.is_some() {
-                let mut header = content.as_slice();
-                let base_size = variable_size(&mut header)?;
-                let target_size = variable_size(&mut header)?;
-                if base_size > MAX_OBJECT_BYTES || target_size > MAX_OBJECT_BYTES {
-                    return Err(LocalGitFailure::Repository);
-                }
-                self.charge(target_size)?;
-            }
+            let mut decoder = ZlibDecoder::new(std::io::BufReader::new(remaining));
+            let content =
+                ObjectContent::decode(&mut decoder, size, ObjectType::Blob, self.deadline)?;
             entries.push((kind, content));
             match base {
                 Some(base) => offset = base,
                 None => break,
             }
         }
-        if let [(kind, content)] = entries.as_slice() {
-            let kind = match kind {
-                1 => ObjectType::Commit,
-                2 => ObjectType::Tree,
-                3 => ObjectType::Blob,
-                4 => ObjectType::Tag,
-                _ => return Err(LocalGitFailure::Repository),
-            };
-            if database.write(kind, content).map_err(rejected)? != oid {
-                return Err(LocalGitFailure::Repository);
-            }
-            return Ok(());
-        }
-        // Emit the selected dependency chain base-first with new OFS_DELTA offsets.
-        let mut pack = b"PACK\0\0\0\x02".to_vec();
-        pack.extend_from_slice(&(entries.len() as u32).to_be_bytes());
-        let mut previous_offset = 0;
-        for (kind, content) in entries.into_iter().rev() {
-            self.check_deadline()?;
-            let offset = pack.len();
-            let mut size = content.len();
-            let first = ((if kind >= 6 { 6 } else { kind }) << 4) | (size & 15) as u8;
-            size >>= 4;
-            pack.push(first | if size == 0 { 0 } else { 128 });
-            while size != 0 {
-                let part = (size & 127) as u8;
-                size >>= 7;
-                pack.push(part | if size == 0 { 0 } else { 128 });
-            }
-            if kind >= 6 {
-                let mut distance = offset - previous_offset;
-                let mut encoded = vec![(distance & 127) as u8];
-                while distance > 127 {
-                    distance = (distance >> 7) - 1;
-                    encoded.push(128 | (distance & 127) as u8);
-                }
-                pack.extend(encoded.into_iter().rev());
-            }
-            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(&content).map_err(rejected)?;
-            pack.extend(encoder.finish().map_err(rejected)?);
-            previous_offset = offset;
-        }
-        let checksum = match self.format {
-            ObjectFormat::Sha1 => Sha1::digest(&pack).to_vec(),
-            ObjectFormat::Sha256 => Sha256::digest(&pack).to_vec(),
+        let (kind, mut content) = entries.pop().ok_or(LocalGitFailure::Repository)?;
+        content.kind = match kind {
+            1 => ObjectType::Commit,
+            2 => ObjectType::Tree,
+            3 => ObjectType::Blob,
+            4 => ObjectType::Tag,
+            _ => return Err(LocalGitFailure::Repository),
         };
-        pack.extend_from_slice(&checksum);
-        // Decode the selected chain in a disposable database. Retaining one pack
-        // per captured object makes later object lookups scan an expanding pack set.
-        let directory = tempfile::tempdir().map_err(rejected)?;
-        let pack_directory = directory.path().join("pack");
-        fs::create_dir(&pack_directory).map_err(rejected)?;
-        let mut indexer = git2::Indexer::new_ext(None, &pack_directory, 0o600, false, self.format)
-            .map_err(rejected)?;
-        indexer.write_all(&pack).map_err(rejected)?;
-        indexer.commit().map_err(rejected)?;
-        let decoded = Odb::new_ext(self.format).map_err(rejected)?;
-        decoded
-            .add_disk_alternate(
-                directory
-                    .path()
-                    .to_str()
-                    .ok_or(LocalGitFailure::Repository)?,
-            )
-            .map_err(rejected)?;
-        let object = decoded.read(oid).map_err(rejected)?;
-        if database
-            .write(object.kind(), object.data())
-            .map_err(rejected)?
-            != oid
-        {
+        while let Some((_, delta)) = entries.pop() {
+            let limit = crate::limits::object_byte_limit(self.max_object_bytes, content.kind);
+            content = content.apply_delta(delta.file, Some(limit), self.deadline)?;
+        }
+        if self.store(database, &mut content)? != oid {
             return Err(LocalGitFailure::Repository);
         }
         Ok(())
