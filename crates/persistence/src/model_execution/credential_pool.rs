@@ -35,7 +35,7 @@ pub(super) fn serving_pool_target(
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct PreparedServingEvidence<'a> {
     pub(super) effective_target: ResolvedProviderTarget,
     pub(super) credential_model_family: Option<&'a str>,
@@ -52,7 +52,7 @@ pub(crate) fn prepared_serving_evidence<'a>(
     PreparedServingEvidence {
         effective_target,
         credential_model_family: families.and_then(|families| families.family(effective_target)),
-        limit: limits.get(&(selected_target, fast_mode)).copied(),
+        limit: limits.get(&(selected_target, fast_mode)).cloned(),
     }
 }
 
@@ -83,7 +83,7 @@ pub(super) fn prepared_serving_configuration_is_compatible(
 ) -> bool {
     let configuration_changed = prepared_target != current.effective_target
         || prepared_family != current.credential_model_family
-        || !prepared_limit_configuration_matches(prepared_limit, current.limit);
+        || !prepared_limit_configuration_matches(prepared_limit.clone(), current.limit.clone());
     !configuration_changed
         || (matches!(
             (prepared_family, current.credential_model_family),
@@ -539,7 +539,7 @@ pub(super) async fn select_runtime_pool_credential(
                 prepared_target,
                 prepared_family.as_deref(),
                 prepared_limit,
-                serving_evidence,
+                serving_evidence.clone(),
             ) {
                 return Err(ModelCallRepositoryError::InvalidTransition(
                     "availability successor serving configuration changed",

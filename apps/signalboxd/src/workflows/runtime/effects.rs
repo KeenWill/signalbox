@@ -2,6 +2,7 @@
 //! Governed by docs/spec/workflows.md and docs/spec/repo-watch.md.
 
 use super::*;
+use crate::workflows::repo_watch::observe::ObserveInput;
 use crate::{
     repo_watch_runtime::RepositoryWatchRuntime,
     workflows::repo_watch::effects::{self, RepoWatchEffectFailure, RepoWatchRequest},
@@ -58,6 +59,9 @@ impl AttemptEffects for RuntimeEffects {
 
 impl EffectExecutor for RuntimeEffects {
     fn recovery(&self, request: &EffectRequest) -> EffectRecovery {
+        if ObserveInput::from_request(request).is_some() {
+            return EffectRecovery::Ambiguous;
+        }
         if RepoWatchRequest::decode(request).is_some() && self.repository_watch.is_some() {
             effects::recovery(request)
         } else if self.eval.is_some() {
@@ -74,6 +78,12 @@ impl EffectExecutor for RuntimeEffects {
     {
         Box::pin(async move {
             self.acknowledge().await?;
+            if let Some(input) = ObserveInput::from_request(invocation.request)
+                && let Some(runtime) = &self.repository_watch
+            {
+                let result = runtime.adopt_observation(&input).await;
+                return self.classify(result, invocation.request.capability());
+            }
             if RepoWatchRequest::decode(invocation.request).is_some()
                 && let Some(runtime) = &self.repository_watch
             {
@@ -98,6 +108,12 @@ impl EffectExecutor for RuntimeEffects {
     ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
         Box::pin(async move {
             self.acknowledge().await?;
+            if let Some(input) = ObserveInput::from_request(invocation.request)
+                && let Some(runtime) = &self.repository_watch
+            {
+                let result = runtime.execute_observation(&input).await;
+                return self.classify(result, invocation.request.capability());
+            }
             if RepoWatchRequest::decode(invocation.request).is_some()
                 && let Some(runtime) = &self.repository_watch
             {

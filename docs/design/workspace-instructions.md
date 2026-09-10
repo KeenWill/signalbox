@@ -230,9 +230,11 @@ separators and the empty vectors of the eligibility, admitted-set, and manifest
 hashes. The nonempty forms append records after those prefixes and change
 nothing the trigger checks for a turn-start manifest.
 
-The turn-start manifest stays the first manifest of every turn that reaches
-instruction preparation. Successor manifests are appended, never substituted,
-and every manifest is immutable.
+The turn-start manifest binds the available discovery, including an incomplete
+scan and its terminal limit finding, and the turn starts with that partial
+manifest. It stays the first manifest of every turn that reaches instruction
+preparation. Successor manifests are appended, never substituted, and every
+manifest is immutable.
 
 An empty admitted set produces no region, so the present projection needs no
 workspace-capable target and no target check is required.

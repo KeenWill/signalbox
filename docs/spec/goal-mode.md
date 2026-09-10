@@ -82,11 +82,6 @@ choose a different safe approach; an unchargeable failure resumes without
 guidance and reuses the statement. Why: infrastructure recovery must not invent
 a model instruction.
 
-One execution-failure class requires an operator instead of automatic
-resumption: a failed turn carrying the durable cause that no context-compaction
-boundary fits the model window. Why: an unchanged successor would fail for the
-same cause.
-
 No goal-mode surface delegates work or creates child sessions, and the goal
 events and commands reserve no delegation variant.
 
@@ -102,11 +97,10 @@ A goal stop awaiting tool approval is rejected without changing the goal or
 deciding the request; the rejection names the pending request to deny first.
 
 When an execution failure blocks a session that has an owner, the daemon
-automatically resumes the session within a bound. The execution-failure class
-that requires an operator is excluded. The daemon derives the command identity
-of that resumption from the session and the blocked event it responds to; it
-never generates a new identity. A retry therefore cannot resume the session
-twice.
+automatically resumes the session within a bound. The daemon derives the command
+identity of that resumption from the session and the blocked event it responds
+to; it never generates a new identity. A retry therefore cannot resume the
+session twice.
 
 The current state is derived only by replaying the session's append-only goal
 event stream; no mutable goal-state column is authoritative.
