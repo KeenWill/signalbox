@@ -60,6 +60,7 @@ impl Fixture {
             binding: binding.clone(),
             postures: Default::default(),
             speculative_tools: Vec::new(),
+            recorded_responses: None,
         };
         Self {
             services: EvalServices {
@@ -190,6 +191,17 @@ async fn manifest_codec_rejects_empty_case_selections() {
         let bytes = serde_json::to_vec(&fixture.manifest).unwrap();
         assert!(EvalManifest::decode(&bytes).is_err(), "{format:?} decode");
     }
+}
+
+#[tokio::test]
+async fn manifest_rejects_recorded_responses_that_leave_a_trial_unanswered() {
+    let mut fixture = Fixture::lazy();
+    fixture.manifest.recorded_responses = Some(vec![RecordedResponse {
+        disposition: signalbox_approval_judge_eval::ApprovalDisposition::Approve,
+        rationale: RATIONALE.into(),
+    }]);
+    assert!(fixture.manifest.encode().is_err());
+    assert!(fixture.provider.received_operations().is_empty());
 }
 
 #[tokio::test]
@@ -413,6 +425,35 @@ mod postgres {
         assert_eq!(score["accuracy"]["numerator"], 2);
         assert_eq!(run.fixture.provider.received_operations().len(), 2);
         run.fixture.services.model = Arc::new(NoProvider);
+        run.fixture.services.blobs = Arc::new(MemoryBlobs(Vec::new()));
+        assert_eq!(run.execute().await, result);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn pinned_responses_execute_and_replay_without_a_provider() {
+        let mut run = RunFixture::configured(|fixture| {
+            fixture.manifest.binding = recorded_binding();
+            fixture.manifest.recorded_responses = Some(vec![
+                RecordedResponse {
+                    disposition: signalbox_approval_judge_eval::ApprovalDisposition::Approve,
+                    rationale: RATIONALE.into(),
+                },
+                RecordedResponse {
+                    disposition: signalbox_approval_judge_eval::ApprovalDisposition::Deny,
+                    rationale: RATIONALE.into(),
+                },
+            ]);
+            fixture.services.model = Arc::new(NoProvider);
+        })
+        .await;
+        let result = run.execute().await;
+        let ProgramExecutionOutcome::Completed(bytes) = &result else {
+            panic!("recorded responses produce a scorecard: {result:?}");
+        };
+        let score: serde_json::Value = decode(bytes.as_bytes()).unwrap();
+        assert_eq!(score["accuracy"]["numerator"], 2);
+        assert!(run.fixture.provider.received_operations().is_empty());
         run.fixture.services.blobs = Arc::new(MemoryBlobs(Vec::new()));
         assert_eq!(run.execute().await, result);
     }
@@ -943,7 +984,7 @@ mod postgres {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn committed_seal_replays_after_lost_delivery_without_provider_access() {
+    async fn committed_seal_replays_after_lost_delivery_without_provider_or_corpus_access() {
         let mut run = RunFixture::new().await;
         let error = run
             .host
@@ -974,6 +1015,7 @@ mod postgres {
             if matches!(frame.kind(), RequestKind::Effect(effect) if effect.capability() == ProgramCapability::EvalRecord))
         );
         run.fixture.services.model = Arc::new(NoProvider);
+        run.fixture.services.blobs = Arc::new(UnavailableBlobs);
         let ProgramExecutionOutcome::Completed(bytes) = run.execute().await else {
             panic!("recovered scorecard")
         };
@@ -1006,60 +1048,96 @@ mod postgres {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn seal_refuses_a_program_summary_that_disagrees_with_journal_evidence() {
-        let run = RunFixture::new().await;
-        run.record(
-            ProgramCapability::Corpus,
-            "load",
-            encode(&Empty {}).unwrap(),
-        )
-        .await;
-        run.record(
-            ProgramCapability::Judge,
-            "evaluate",
-            encode(&TrialRequest { trial: 0 }).unwrap(),
-        )
-        .await;
-        run.record(
-            ProgramCapability::Judge,
-            "evaluate",
-            encode(&TrialRequest { trial: 1 }).unwrap(),
-        )
-        .await;
-        let request = EffectRequest::new(
-            ProgramCapability::EvalRecord,
-            "seal".into(),
-            InlineFramePayload::new(
-                encode(&SealRequest {
-                    scorecard: serde_json::json!({"accuracy": "fabricated"}),
+    async fn seal_refuses_changed_summaries_before_and_after_commit() {
+        for committed in [false, true] {
+            let mut run = RunFixture::new().await;
+            run.record(
+                ProgramCapability::Corpus,
+                "load",
+                encode(&Empty {}).unwrap(),
+            )
+            .await;
+            run.record(
+                ProgramCapability::Judge,
+                "evaluate",
+                encode(&TrialRequest { trial: 0 }).unwrap(),
+            )
+            .await;
+            run.record(
+                ProgramCapability::Judge,
+                "evaluate",
+                encode(&TrialRequest { trial: 1 }).unwrap(),
+            )
+            .await;
+            if committed {
+                let corpus = run
+                    .fixture
+                    .services
+                    .corpus(&run.fixture.manifest)
+                    .await
+                    .unwrap();
+                let journal = run.journal.load(run.run).await.unwrap().unwrap();
+                let outcomes = journal
+                    .entries()
+                    .iter()
+                    .filter_map(|entry| match entry.frame() {
+                        signalbox_domain::JournalFrame::Delivery(delivery) => match delivery.kind()
+                        {
+                            DeliveryKind::Answer { payload, .. } => {
+                                decode::<JudgeAnswer>(payload.as_bytes()).ok()
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                run.record(
+                    ProgramCapability::EvalRecord,
+                    "seal",
+                    encode(&SealRequest {
+                        scorecard: score(&run.fixture.manifest, &corpus, &outcomes).unwrap(),
+                    })
+                    .unwrap(),
+                )
+                .await;
+                run.fixture.services.blobs = Arc::new(UnavailableBlobs);
+            }
+            let snapshot = run.fixture.services.recordings.load(run.run).await.unwrap();
+            let request = EffectRequest::new(
+                ProgramCapability::EvalRecord,
+                "seal".into(),
+                InlineFramePayload::new(
+                    encode(&SealRequest {
+                        scorecard: serde_json::json!({"accuracy": "fabricated"}),
+                    })
+                    .unwrap(),
+                ),
+            );
+            let frame = run
+                .journal
+                .append_request(run.run, None, RequestKind::Effect(request.clone()))
+                .await
+                .unwrap();
+            let mut effects = EvaluationEffects::new(run.fixture.services.clone());
+            let error = effects
+                .execute(EffectInvocation {
+                    run: run.run,
+                    ordinal: frame.ordinal(),
+                    request: &request,
                 })
-                .unwrap(),
-            ),
-        );
-        let frame = run
-            .journal
-            .append_request(run.run, None, RequestKind::Effect(request.clone()))
-            .await
-            .unwrap();
-        let mut effects = EvaluationEffects::new(run.fixture.services.clone());
-        let error = effects
-            .execute(EffectInvocation {
-                run: run.run,
-                ordinal: frame.ordinal(),
-                request: &request,
-            })
-            .await
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("seal scorecard differs from retained evidence")
-        );
-        assert!(effects.rejected());
-        assert_eq!(
-            run.fixture.services.recordings.load(run.run).await.unwrap(),
-            None
-        );
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("seal scorecard differs from retained evidence")
+            );
+            assert!(effects.rejected());
+            assert_eq!(
+                run.fixture.services.recordings.load(run.run).await.unwrap(),
+                snapshot
+            );
+        }
     }
 
     #[tokio::test]

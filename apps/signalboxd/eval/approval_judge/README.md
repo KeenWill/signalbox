@@ -9,21 +9,21 @@ values, and the corpus contains no real credentials.
 
 ```sh
 cargo run -p signalboxd --bin approval-judge-eval -- \
-    --config /path/to/daemon-config.toml \
+    --socket /path/to/hub.sock \
     --cases apps/signalboxd/eval/approval_judge/cases.jsonl \
     --repeats 3
 ```
 
-Every call spends real provider quota against the configuration's
-`[approval_judge]` model. The runner is user-invoked only: it is not wired into
-CI, and nothing in the daemon reaches it. Use `--filter` or `--limit` to bound a
-run while iterating.
+Live calls spend provider quota against the daemon's `[approval_judge]` model.
+The operator starts each run; the daemon owns its workflow execution. Use
+`--filter` or `--limit` to bound a run while iterating.
 
 The offline seed replays scripted responses through the judge adapter and scores
 them without provider calls:
 
 ```sh
 cargo run -p signalboxd --bin signalbox-approval-judge-eval -- \
+    --socket /path/to/hub.sock \
     crates/approval-judge-eval/corpora/seed-v1.json \
     crates/approval-judge-eval/corpora/seed-responses-v1.json
 ```
@@ -33,8 +33,8 @@ Its expected output is
 
 For Sol through the Codex CLI subscription adapter, copy
 [`config/approval-judge-eval-codex.example.toml`](../../../../config/approval-judge-eval-codex.example.toml),
-set its executable, working-directory, and login-home paths, and pass the copy
-to `--config`.
+set its executable, working-directory, and login-home paths, and use its model
+and credential sections in the daemon configuration with blob storage enabled.
 
 The scorecard (JSON on stdout) reports, per category and overall: majority
 accuracy against `expected`, verdict stability across repeats (a case is
@@ -42,41 +42,15 @@ unstable when its repeats disagree), and per-case rationales for reading why a
 verdict moved. Each successful repeat includes provider-reported token usage;
 unreported fields are null. Codex input tokens include cache-read tokens.
 
-## Recording runs (`--database-url`)
+## Recording runs
 
-Passing `--database-url <url>` additionally records the run in two eval-owned
-PostgreSQL tables after the scorecard prints; without the flag nothing is
-written and the stdout scorecard stays the only artifact either way. When the
-URL carries a password, pass `--database-url-env <variable>` instead to read it
-from the named environment variable, keeping the credential out of the process
-argument vector and shell history.
-
-- `approval_judge_eval_run` — one row per run: the minted run identity, the
-  judge selection, the resolved provider target identity and model, the frozen
-  non-secret credential reference, whether that adapter's reported input total
-  includes the cache axes, the scorecard's corpus, contract, and rendered
-  digests, the configured repeats, and the full scorecard as `jsonb`.
-- `approval_judge_eval_call` — one row per successful judge call: the run it
-  belongs to, the case name, the one-based attempt ordinal (a failed attempt
-  records no row and leaves a gap), the recommendation and rationale, and the
-  provider-reported token-usage fields.
-
-Eval calls deliberately never enter `tool_approval_judge_model_call`: its
-triggers demand the live-request linkage — an active delegated wait and a
-reserved global call identity — that replayed synthetic cases do not have. The
-connection takes the same URL-only posture as the daemon's, so ambient `PG*`
-variables are refused rather than silently shaping it.
-
-The tables come from the daemon's migration set, and the daemon is what applies
-it; a database missing them, a role lacking the privileges recording exercises
-(insert on both tables, and select on the run table, which the sealing trigger
-reads), and any corpus case recording cannot store (an empty name, or U+0000 in
-a name or notes) are all refused before the first paid call, and the minted run
-identity is announced before the commit is attempted so even an ambiguous commit
-leaves an exact key to query for. Recorded evidence is append-only and sealed:
-both tables refuse updates, deletions, and truncation, and call rows admit
-insertion only inside the transaction that records their run, so evidence cannot
-be extended after the scorecard is frozen.
+Every completed evaluation seals its scorecard and trial evidence in
+`evaluation_run` and `evaluation_trial`. The client prints the sealed scorecard;
+run and registration identities are printed on stderr before launch. Reads use
+the daemon process protocol. Both commands require the daemon and blob storage.
+The live command also accepts `--responses FILE` with one recorded disposition
+and rationale per trial, in selected case and repeat order, without provider
+access.
 
 ## Case schema
 

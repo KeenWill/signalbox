@@ -47,6 +47,7 @@ use tokio::{
 use tracing::Instrument;
 pub mod approval_judge_eval;
 mod approval_wait_wakeups;
+pub mod eval_client;
 pub use approval_wait_wakeups::ApprovalWaitWakeups;
 mod attachment_preparation_runtime;
 mod blob_read_runtime;

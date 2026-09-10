@@ -612,6 +612,15 @@ is `{ kind: "complete" }` or `{ kind: "truncated", total_bytes }`. Reads fit the
 frame byte budget by returning byte prefixes, input first and then result;
 truncation leaves stored data intact. Missing reads return `not_found`.
 
+`launch_evaluation { run_id, registration_id, input }` resolves an evaluation
+manifest from corpus and optional recorded-response blob digests, corpus format,
+selected positions and repeats. It returns `program_run_started` after native
+registration and workflow admission.
+`read_evaluation_scorecard { run_id, offset }` returns
+`evaluation_scorecard_read { run_id, offset, bytes, total_bytes }` from the
+sealed recording; each range fits one process frame. An unsealed run returns
+`not_found`.
+
 Program-run cancellation is the request
 `cancel_program_run { run_id, command_id }` and the receipt
 `program_run_cancellation_receipt { command_id, run_id, outcome }`. The outcome

@@ -7,26 +7,16 @@ reports a scorecard.
 
 The evaluation system defines, on top of the [workflows](workflows.md) layer,
 what an evaluation is and what its corpus and expectations are. Its recording
-schema lives in the migrations. Approval-judge evaluation runs through the
-workflow program and the standalone harness.
-
-The harness is the `signalbox-approval-judge-eval` workspace crate, a temporary
-standalone evaluation surface for the three-disposition approval judge that the
-[tool loop](tool-loop.md) owns. Its data is a JSON corpus of synthetic cases.
-Each case pairs a tool request and its frozen authority context with the
-expected disposition and free-text provenance for that label. The corpus is
-consumed directly as opaque evaluation input after JSON shape decoding.
-
-The daemon-independent library decodes both corpus shapes and computes their
-distinct scorecards. Both entry points live in the daemon package. The offline
-entry point replays recorded provider responses in corpus order through a
-scripted model adapter, requires one response per corpus case, and prints the
-scorecard as JSON.
-
-The live-provider runner in the daemon is not part of the harness. It reads its
-own JSONL case file in its own case shape, sends each case to a configured
-provider, prints its own scorecard, and can record the run in judge-specific
-tables.
+schema lives in the migrations. Both daemon-package operator binaries upload
+corpus input, launch the eval workflow through the daemon and print their
+distinct sealed scorecards.
+`signalbox-approval-judge-eval --socket PATH CORPUS.json RESPONSES.json` uses
+recorded responses. `approval-judge-eval --socket PATH --cases CASES.jsonl` uses
+the daemon's configured approval judge, with repeat, filter and limit selection;
+`--responses FILE` supplies recorded answers instead. Provider selection,
+credentials, execution and recording belong to the daemon. The
+daemon-independent library decodes both corpus shapes and computes their
+existing scorecards. Synthetic labels retain their free-text provenance.
 
 ## Workflow trials
 
@@ -53,23 +43,25 @@ computes the existing offline or live scorecard through the pure library and
 returns it as the workflow result. Live scoring counts failed and ambiguous
 repeats as unsuccessful; an offline trial without a verdict faults without a
 scorecard. Missing blobs and inadmissible cases fail before provider work. The
-program calls `eval-record.seal` before returning the scorecard. The host
-re-decodes the pinned corpus, verifies complete manifest trial membership and
-derives the scorecard from retained journal answers; a supplied scorecard must
-agree. `evaluation_run` and `evaluation_trial` commit as one immutable snapshot
-keyed by the workflow run and trial ordinal, preserving corpus labels and
-provenance, verdicts, classified failures, ambiguity and full journal evidence.
-Equal identity and content retries adopt the same receipt, including recovery
-after commit but before delivery; changed identity, evidence or summary
-conflicts. A partial snapshot cannot commit, and sealed rows reject update,
-delete, truncate and late trial insertion. Sealing does not determine workflow
-terminal status.
+program calls `eval-record.seal` before returning the scorecard. On first seal,
+the host re-decodes the pinned corpus, verifies complete manifest trial
+membership and derives the scorecard from retained journal answers; a supplied
+scorecard must agree. `evaluation_run` and `evaluation_trial` commit as one
+immutable snapshot keyed by the workflow run and trial ordinal, preserving
+corpus labels and provenance, verdicts, classified failures, ambiguity and full
+journal evidence. Equal identity and content retries adopt the same receipt,
+including recovery after commit but before delivery, without rereading the
+corpus; changed identity, evidence or summary conflicts. A partial snapshot
+cannot commit, and sealed rows reject update, delete, truncate and late trial
+insertion. Sealing does not determine workflow terminal status.
 
-`WorkflowRuntime::with_eval` supplies the runner's host services and enables
-native eval registration; the default daemon rejects that registration. Operator
-launch composition remains with the planned launch boundary. The typed
-TypeScript fixture calls the same Corpus, Judge and Blob methods; token counts
-and pull-request identities use decimal strings across the JavaScript boundary.
+The daemon composes Corpus, Judge, Blob and EvalRecord adapters when blob
+storage is available. Evaluation launch resolves the judge binding and encodes
+the exact immutable manifest before generic workflow start. Recorded responses
+are pinned in that manifest, one per trial, and execute through the same judge
+adapter without provider access. The process read command returns byte ranges of
+the sealed scorecard. The typed TypeScript fixture uses the same effect records;
+token counts and pull-request identities use decimal strings.
 
 ## Design decisions
 
@@ -82,15 +74,8 @@ Evaluation verdicts gate nothing; every evaluation surface is report-only.
 The checked-in seed corpus and response file contain synthetic strings only, so
 no real request data enters the repository.
 
-The live-provider runner is an operator-driven surface outside the offline
-harness, because it spends provider quota.
-
 ## Planned
 
 - Evaluation-created sessions whose provenance stays walkable through delegation
   lineage for as long as evaluation rows are read:
   [design](../design/eval-system.md).
-- Operator launch commands, after which the judge-specific tables are dropped
-  without data conversion: [design](../design/eval-system.md).
-- The judge-specific recording surface is temporary; nothing may build on it in
-  a way that outlives it: [design](../design/eval-system.md).

@@ -302,12 +302,19 @@
   };
   const evaluation = freeze({
     manifest: jsonCodec((value) => {
-      exact(value, ["corpus", "format", "cases", "repeats", "binding", "postures", "speculative_tools"]);
+      exact(value, ["corpus", "format", "cases", "repeats", "binding", "postures", "speculative_tools", "recorded_responses"]);
       digest(value.corpus); judgeBinding(value.binding); list(value.cases, u32); u32(value.repeats);
       if (!contains(["offline", "live"], value.format) || value.cases.length === 0 || value.repeats === 0 || (value.format === "offline" && value.repeats !== 1) || value.cases.length * value.repeats > 1000) throw new CodecTypeError("invalid evaluation trial plan");
       record(value.postures);
       each(objectKeys(value.postures), (key) => string(value.postures[key]));
       list(value.speculative_tools, string);
+      nullable(value.recorded_responses, (responses) => {
+        list(responses, (response) => {
+          exact(response, ["disposition", "rationale"]);
+          disposition(response.disposition); string(response.rationale);
+        });
+        if (responses.length !== value.cases.length * value.repeats) throw new CodecTypeError("recorded response count differs from trial count");
+      });
       return value;
     }),
     corpus() {

@@ -16,8 +16,6 @@ impl EvalServices {
         let request: SealRequest =
             decode(invocation.request.payload().as_bytes()).map_err(failure)?;
         let manifest = self.manifest(invocation.run).await?;
-        // Re-read by digest, independently of the program's corpus answer and scorecard.
-        let corpus = self.corpus(&manifest).await?;
         let journal = self
             .journal
             .load(invocation.run)
@@ -37,6 +35,21 @@ impl EvalServices {
                 _ => None,
             })
             .ok_or_else(|| failure("seal request is not retained by the calling run"))?;
+        if let Some(snapshot) = self
+            .recordings
+            .load(invocation.run)
+            .await
+            .map_err(infrastructure_failure)?
+        {
+            if snapshot.scorecard != request.scorecard {
+                return Err(failure("seal scorecard differs from retained evidence"));
+            }
+            return Ok(SealAnswer {
+                run: snapshot.run.into_uuid().to_string(),
+            });
+        }
+        // Re-read by digest, independently of the program's corpus answer and scorecard.
+        let corpus = self.corpus(&manifest).await?;
         let mut trials = Vec::new();
         let mut outcomes = Vec::new();
         for entry in journal

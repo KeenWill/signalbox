@@ -1,11 +1,16 @@
 //! Ordered approval-judge measurements through journaled effects; docs/spec/eval-system.md.
 
 mod effects;
+pub(crate) mod launch;
 mod records;
+mod replay;
 mod seal;
 
+pub(crate) use effects::EvalFailure;
 pub use effects::{EvalServices, EvaluationEffects};
+pub use launch::configured_binding;
 pub use records::*;
+pub use replay::recorded_binding;
 
 use signalbox_approval_judge_eval::{ApprovalJudgeCaseVerdict, ApprovalJudgeScorecard, live};
 use signalbox_domain::{EffectRequest, InlineFramePayload, ProgramCapability};

@@ -11,7 +11,6 @@ mod model_settings_resolution;
 mod user_content;
 
 pub mod approval_judge;
-pub mod approval_judge_eval;
 pub mod attention;
 pub mod automatic_reconciliation;
 pub mod blob;
