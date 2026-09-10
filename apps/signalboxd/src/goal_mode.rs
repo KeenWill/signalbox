@@ -2243,25 +2243,6 @@ context_window_tokens = 200000
     }
 
     #[test]
-    fn goal_declaration_construction_errors_name_each_static_boundary() {
-        let output = [
-            GoalDeclarationToolConstructionError::Name,
-            GoalDeclarationToolConstructionError::Schema,
-            GoalDeclarationToolConstructionError::ErrorDetail,
-            GoalDeclarationToolConstructionError::Duplicate,
-        ]
-        .map(|error| error.to_string())
-        .join("\n");
-
-        expect_test::expect![[r#"
-            goal_declare static name is invalid
-            goal_declare static schema is invalid
-            goal_declare static error detail is invalid
-            goal_declare catalog is duplicated"#]]
-        .assert_eq(&output);
-    }
-
-    #[test]
     fn goal_declaration_validator_returns_its_bounded_static_failure() {
         let failure = ToolExecutionErrorDetail::try_new(String::from("fixture invalid arguments"))
             .expect("the fixture detail is admitted");

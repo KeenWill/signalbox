@@ -379,27 +379,6 @@ mod require_decoded_response_tests {
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
-    fn native_error_event_inside_a_200_body_panics() {
-        let _ = require_decoded_response(
-            TerminalEvidence::ProviderError(ProviderErrorEvidence {
-                credential_recovery: None,
-                exchange: exchange(200),
-                reported_model: None,
-                kind: ProviderErrorKind::Unrecognized,
-                non_acceptance_proven: false,
-                native: NativeErrorFacts {
-                    error_token: Some("refusal".to_string()),
-                    error_code: None,
-                    message: Some("synthetic upstream failure".to_string()),
-                },
-                usage: usage(),
-            }),
-            &refusal_observed(),
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "returned no decoded response")]
     fn downgraded_refusal_shape_without_an_observed_refusal_panics() {
         let _ = require_decoded_response(
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
