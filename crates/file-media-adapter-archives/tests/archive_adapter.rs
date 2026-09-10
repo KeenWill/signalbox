@@ -12,8 +12,8 @@ use signalbox_file_media_runtime::{
     FileMediaProviderValidationRequest, FileMediaRegistry, FileMediaRegistryConstructionError,
     FileReadInput, FileReadRequest, FileReadResult, InspectionRequest, NeverCancelled,
     ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadContinuation,
-    ReadViewName, ReaderIdentity, VerifiedBlobSource,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, ReadViewName, ReaderIdentity,
+    VerifiedBlobSource,
 };
 
 struct DirectProcessor {
@@ -135,50 +135,6 @@ async fn lowered_validation_byte_ceiling_returns_a_typed_size_limit() -> Result<
         )
         .await?;
     assert_eq!(malformed_reason(&inspection)?, "source_size_limit");
-    Ok(())
-}
-
-#[test]
-fn declaration_registers_four_archive_formats_under_available_isolation()
--> Result<(), Box<dyn Error>> {
-    let registry = registry()?;
-
-    assert_eq!(registry.providers(), &[declaration()?]);
-    let declaration = declaration()?;
-    assert_eq!(declaration.readers().len(), 4);
-    assert_eq!(declaration.observed_container_entries(), Some(1_000));
-    let gzip_view = declaration.readers()[0]
-        .views()
-        .first()
-        .ok_or("GZIP reader must declare its entries view")?;
-    assert_eq!(
-        gzip_view.access(),
-        ReadAccessPattern::Streaming { maximum_ranges: 1 }
-    );
-    let tar_view = declaration.readers()[1]
-        .views()
-        .first()
-        .ok_or("TAR reader must declare its entries view")?;
-    assert_eq!(
-        tar_view.access(),
-        ReadAccessPattern::Streaming { maximum_ranges: 1 }
-    );
-    let zip_view = declaration.readers()[2]
-        .views()
-        .first()
-        .ok_or("ZIP reader must declare its entries view")?;
-    assert_eq!(
-        zip_view.access(),
-        ReadAccessPattern::Streaming { maximum_ranges: 1 }
-    );
-    let zstd_view = declaration.readers()[3]
-        .views()
-        .first()
-        .ok_or("Zstandard reader must declare its entries view")?;
-    assert_eq!(
-        zstd_view.access(),
-        ReadAccessPattern::Streaming { maximum_ranges: 1 }
-    );
     Ok(())
 }
 

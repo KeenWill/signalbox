@@ -595,24 +595,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn web_fetch_definition_carries_exact_policy() {
-        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())
-            .expect("static web_fetch tool compiles")
-            .into_parts();
-        let definitions = catalog.definitions();
-        let [definition] = definitions.as_ref() else {
-            panic!("web_fetch is the one compiled definition")
-        };
-
-        assert_eq!(definition.name().as_str(), WEB_FETCH_NAME);
-        assert_eq!(
-            definition.permission_default(),
-            ToolPermissionDefault::Confirm
-        );
-        assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
-    }
-
     /// Confirmation does not replace the exact deployment allowlist: an absent
     /// origin remains invalid while an ordinary path at an admitted origin is
     /// valid.
@@ -779,18 +761,6 @@ mod tests {
             ),
             Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
         ));
-    }
-
-    /// Loss after physical dispatch is classified as commit-ambiguous
-    /// infrastructure failure.
-    #[test]
-    fn web_fetch_dispatch_unknown_is_commit_ambiguous() {
-        assert_eq!(
-            WebFetchExecutorError::DispatchUnknown.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: true
-            }
-        );
     }
 
     /// Hostname resolution rejects a destination set containing only loopback

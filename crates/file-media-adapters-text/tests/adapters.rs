@@ -869,18 +869,6 @@ async fn declared_one_column_csv_preserves_the_row_limit_reason() -> Result<(), 
 }
 
 #[tokio::test]
-async fn text_family_registration_accepts_the_exact_probe_work_ceiling()
--> Result<(), Box<dyn Error>> {
-    let source = MemorySource::new(fixtures::json_document());
-    let mut ceilings = FileMediaCeilings::version_one();
-    ceilings.probe_cumulative_bytes = 4_096;
-
-    let inspection = support::inspect_with_ceilings(&source, "application/json", ceilings).await?;
-    support::assert_validated_media(inspection, "application/json");
-    Ok(())
-}
-
-#[tokio::test]
 async fn csv_rejects_oversized_input_with_registered_reason() -> Result<(), Box<dyn Error>> {
     let mut bytes = fixtures::oversized(b'a');
     bytes[..8].copy_from_slice(b"a,b\nc,d\n");

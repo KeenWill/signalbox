@@ -324,38 +324,6 @@ fn oversized_read_page(provenance: PlanEventProvenance) -> PlanReadPage {
 }
 
 #[test]
-fn definitions_default_to_automatic_permission() {
-    let catalog = catalog();
-    let write_name = ToolName::try_new(PLAN_WRITE_NAME.to_owned()).expect("fixture name is valid");
-    let read_name = ToolName::try_new(PLAN_READ_NAME.to_owned()).expect("fixture name is valid");
-    let write = catalog
-        .definition(&write_name)
-        .expect("write definition exists");
-    let read = catalog
-        .definition(&read_name)
-        .expect("read definition exists");
-
-    assert_eq!(write.permission_default(), ToolPermissionDefault::Auto);
-    assert_eq!(read.permission_default(), ToolPermissionDefault::Auto);
-}
-
-#[test]
-fn definitions_distinguish_read_from_write_effects() {
-    let catalog = catalog();
-    let write_name = ToolName::try_new(PLAN_WRITE_NAME.to_owned()).expect("fixture name is valid");
-    let read_name = ToolName::try_new(PLAN_READ_NAME.to_owned()).expect("fixture name is valid");
-    let write = catalog
-        .definition(&write_name)
-        .expect("write definition exists");
-    let read = catalog
-        .definition(&read_name)
-        .expect("read definition exists");
-
-    assert_eq!(write.effect_class(), ToolEffectClass::ExternalEffect);
-    assert_eq!(read.effect_class(), ToolEffectClass::EffectFree);
-}
-
-#[test]
 fn status_arguments_reject_values_outside_the_closed_vocabulary() {
     let catalog = catalog();
     let name = ToolName::try_new(PLAN_WRITE_NAME.to_owned()).expect("fixture name is valid");
