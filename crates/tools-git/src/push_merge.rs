@@ -174,6 +174,7 @@ pub(super) fn verify_merge(
         })
         .collect::<Result<_, GitPushFailure>>()?;
     let mut own_by_path = BTreeMap::new();
+    let mut own_sources = BTreeMap::new();
     for (index, delta) in own.deltas().enumerate() {
         let path = delta
             .new_file()
@@ -185,6 +186,9 @@ pub(super) fn verify_merge(
         } else {
             path
         };
+        if delta.status() == Delta::Renamed {
+            own_sources.insert(path, source_path);
+        }
         own_by_path.entry(source_path).or_insert(index);
     }
     for (index, delta) in carried.deltas().enumerate() {
@@ -198,10 +202,15 @@ pub(super) fn verify_merge(
         } else {
             path
         };
-        let source_path = base_sources
-            .get(source_path)
-            .copied()
-            .unwrap_or(source_path);
+        let source_path = if delta.status() == Delta::Added {
+            // A branch rename may appear as add/delete against a heavily edited base.
+            own_sources.get(path).copied().unwrap_or(source_path)
+        } else {
+            base_sources
+                .get(source_path)
+                .copied()
+                .unwrap_or(source_path)
+        };
         let own_index = own_by_path.get(source_path).copied();
         let base_index = base_by_path.get(source_path).copied();
         // Capture compared paths only, in addition to the rename candidates.

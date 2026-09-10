@@ -2420,6 +2420,52 @@ async fn push_refuses_a_renamed_branch_result_restoring_main_deleted_lines() {
 }
 
 #[tokio::test]
+async fn push_checks_main_removals_at_a_low_similarity_branch_rename() {
+    for (case, branch_content) in [
+        ("unchanged rename", "one\ntwo\nthree\nfour\nfive\nsix\n"),
+        (
+            "edited rename",
+            "one\ntwo\nthree\nfour\nfive\nsix\nbranch\n",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository");
+        let ancestor = merge_test_commit_files(
+            &repository,
+            &[(b"old.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")],
+            &[],
+        );
+        let branch =
+            merge_test_commit_files(&repository, &[(b"new.txt", branch_content)], &[ancestor]);
+        let base = merge_test_commit_files(&repository, &[(b"old.txt", "one\n")], &[ancestor]);
+        let merge = merge_test_commit_files(
+            &repository,
+            &[(b"new.txt", branch_content)],
+            &[branch, base],
+        );
+        let transport = RecordingPushTransport::default();
+        let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+        let result = executor
+            .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+            .await;
+
+        let Err(GitPushFailure::MergeDroppedBaseChanges(dropped)) = result else {
+            panic!("{case}: expected the main-side refusal, got {result:?}");
+        };
+        let destination = dropped
+            .iter()
+            .find(|dropped| dropped.file == "new.txt")
+            .expect("the renamed destination retains the source's main-side check");
+        assert_eq!(
+            destination.first_dropped_hunk, "-two\n-three\n-four\n-five\n-six\n",
+            "{case}: main removes these five fixture lines",
+        );
+        assert!(!transport.has_request(), "{case}");
+    }
+}
+
+#[tokio::test]
 async fn push_refuses_new_content_in_a_rename_delete_resolution() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
