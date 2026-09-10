@@ -540,8 +540,7 @@ absent header for a sequence the allocator has already allocated fails the
 dispatch instead of reporting an idle queue, and a delivery cursor or any
 committed header beyond the allocator fails it too. A consumer retry or exit
 before the commit request leaves the valid event pending for redelivery, and a
-lost commit response is resolved by the next locked cursor
-read.
+lost commit response is resolved by the next locked cursor read.
 
 Dispatch validates each record against durable state: an activation against the
 turn's attempt, a call transition against monotonic call state, and a terminal
