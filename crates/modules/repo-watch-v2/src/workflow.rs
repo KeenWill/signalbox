@@ -243,6 +243,7 @@ impl RepoWatchStore {
                             .ok_or(StoreError::InvalidDispatchBatch)?,
                         rule.cooldown(),
                     )),
+                    None,
                 )
                 .await?
             {

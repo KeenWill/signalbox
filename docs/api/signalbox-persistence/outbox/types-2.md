@@ -86,6 +86,10 @@ impl outbox::OutboxConsumerReader {
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<option::Option<offset_date_time::OffsetDateTime>, outbox::OutboxDispatchError>;
+    pub async fn session_pushed(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<bool, outbox::OutboxDispatchError>;
     pub async fn read_next(
         &self,
     ) -> result::Result<option::Option<outbox::DispatchedOutboxEvent>, outbox::OutboxDispatchError>;
