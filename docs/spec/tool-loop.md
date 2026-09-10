@@ -377,12 +377,12 @@ retained set a request still holds is never released. Every declaration a
 workspace-root-bound family advertises is a property of the family's code, not
 of the repository it binds. Local Git is the exception: it compiles the pinned
 repository's object format into its argument validators, and session composition
-refuses an object-format disagreement when the configured root has Git. A plain
-configured root registers local Git declarations admitting either supported
-object-ID width so it can bind a repository-backed derived session; its Git
-executor enforces the bound repository's format. Local Git requests for a plain
-bound root return a known tool failure. Configured pushes use the same bound
-workspace.
+refuses an object-format disagreement when both configured and derived roots
+have Git. A plain configured root registers local Git declarations admitting
+either supported object-ID width so it can bind a repository-backed derived
+session; its Git executor enforces the bound repository's format. Local Git
+requests for a plain bound root return a known tool failure. Configured pushes
+use the same bound workspace.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
