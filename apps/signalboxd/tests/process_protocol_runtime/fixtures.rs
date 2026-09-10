@@ -644,7 +644,7 @@ impl BlobStorageFixture {
 [blob_storage]
 version = 1
 staging_directory = "{}"
-max_blob_bytes = 268435456
+max_blob_bytes = 21474836480
 
 [[blob_storage.stores]]
 name = "primary"

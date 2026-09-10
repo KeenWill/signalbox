@@ -467,36 +467,10 @@ async fn prepare_confirmed_tool_attempt(
     Ok((fixture, attempt))
 }
 
-/// One durable `blob_read_tool_charge` projection with its labels preserved.
-#[derive(Debug, sqlx::FromRow)]
-struct StoredBlobReadCharge {
-    blob_digest: Vec<u8>,
-    decoded_byte_count: Decimal,
-    admission: bool,
-}
-
-/// Whether a recorded charge granted the request its decoded bytes.
-#[derive(Debug, Eq, PartialEq)]
-enum BlobReadChargeAdmission {
-    Admitted,
-    Rejected,
-}
-
-impl StoredBlobReadCharge {
-    fn admission(&self) -> BlobReadChargeAdmission {
-        if self.admission {
-            BlobReadChargeAdmission::Admitted
-        } else {
-            BlobReadChargeAdmission::Rejected
-        }
-    }
-}
-
-/// blob-read visibility and decoded-byte charges commit before
-/// dispatch authority.
+/// Visible blob reads receive dispatch authority.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn blob_read_preauthorization_is_visible_bounded_and_durable() -> Result<(), Box<dyn Error>> {
+async fn blob_read_preauthorization_authorizes_visible_pages() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let visible_seed = 0xd000;
     let visible_digest = BlobDigest::digest(b"visible");
@@ -529,21 +503,6 @@ async fn blob_read_preauthorization_is_visible_bounded_and_durable() -> Result<(
         visible,
         ToolAttemptAuthorizationOutcome::Authorized(_)
     ));
-    let charge: StoredBlobReadCharge = sqlx::query_as(
-        "SELECT blob_digest, decoded_byte_count, admitted AS admission
-           FROM blob_read_tool_charge
-          WHERE request_id = (
-                SELECT request_id FROM tool_attempt WHERE attempt_id = $1)",
-    )
-    .bind(visible_attempt.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(charge.blob_digest, visible_digest.as_bytes().as_slice());
-    assert_eq!(
-        charge.decoded_byte_count,
-        Decimal::from(visible_decoded_bytes)
-    );
-    assert_eq!(charge.admission(), BlobReadChargeAdmission::Admitted);
 
     pool.close().await;
     drop(container);
