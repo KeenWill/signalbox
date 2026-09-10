@@ -4870,14 +4870,14 @@ pub(crate) enum WorkspaceCommand {
         #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]
         command_id: Option<CommandId>,
     },
-    /// Mint an HTTPS destination under one registered workspace.
+    /// Mint an HTTPS or SSH destination under one registered workspace.
     MintRemote {
         /// Workspace that owns the destination.
         #[arg(value_parser = canonical_uuid)]
         workspace: CanonicalUuid,
         /// Remote name, at most 255 ASCII bytes.
         name: String,
-        /// HTTPS destination, at most 4096 ASCII bytes.
+        /// HTTPS or SSH destination, at most 4096 ASCII bytes.
         url: String,
         /// Durable identity; omission generates and prints one for retry.
         #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]

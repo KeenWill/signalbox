@@ -779,13 +779,14 @@ deployment-owned HTTPS token or SSH private key. Optional `push_remote_url`
 selects an exact HTTPS, `ssh://`, or `git@host:` destination; its default is the
 watched repository's GitHub HTTPS URL. HTTPS uses the push token, or the
 installation token for an App-backed repository targeting GitHub when no
-separate push file is configured. SSH uses the configured key when present, or
-the host SSH agent exposed through `SSH_AUTH_SOCK` in the sandbox. Agent-backed
-push authority is derived only when that socket accepts a connection. Each
-configured credential file is reread through `FileCredentialAccess` on every
-push; HTTPS passes an authenticated URL rewrite in the child environment, and
-SSH retains a private temporary key file through push and remote confirmation.
-GitHub HTTPS destination matching uses the parsed, normalized hostname.
+separate push file is configured. SSH uses the configured key when present, or,
+on Linux, the host SSH agent exposed through `SSH_AUTH_SOCK` in the sandbox.
+Agent-backed push authority is derived only when that socket accepts a
+connection. Each configured credential file is reread through
+`FileCredentialAccess` on every push; HTTPS passes an authenticated URL rewrite
+in the child environment, and SSH retains a private temporary key file through
+push and remote confirmation. GitHub HTTPS destination matching uses the parsed,
+normalized hostname.
 
 Push credential files participate in the repository-watch credential isolation
 checks, including symlink and hard-link aliases of polling, push, and webhook
