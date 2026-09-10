@@ -122,8 +122,10 @@ pub(crate) async fn prepare_tool_continuation_call(
         .effective()
         .fast_mode();
     let resolved_target = targets.resolve(*execution.configuration().effective().model());
-    // Active-turn compaction replaces the whole closed exchange prefix. Measure
-    // its current summary, then reserve pending steering and output separately.
+    let usage_limit = resolved_target
+        .as_ref()
+        .ok()
+        .and_then(|resolved| continuation_usage_limits.get(&(resolved.target(), fast_mode)));
     let compacted_input_bytes =
         projection
             .entries()
@@ -135,7 +137,9 @@ pub(crate) async fn prepare_tool_continuation_call(
                 } => Some(value.as_str()),
                 _ => None,
             });
-    let compacted_request_content_bytes = if let Some(summary) = compacted_input_bytes {
+    let compacted_request_content_bytes = if !compaction_failed
+        && let Some(summary) = compacted_input_bytes
+    {
         let system = super::prepared::load_frozen_epoch_system_prompt(
             connection,
             session,
@@ -151,13 +155,45 @@ pub(crate) async fn prepare_tool_continuation_call(
                 .map(|bytes| bytes.len().saturating_sub(2) as u64)
                 .map_err(|_| ModelCallCorruption::Inconsistent("continuation text encoding").into())
         };
-        Some(encoded_bytes(summary)?.saturating_add(encoded_bytes(
+        let mut bytes = encoded_bytes(summary)?.saturating_add(encoded_bytes(
             system.as_ref().map_or("", |prompt| prompt.as_str()),
-        )?))
+        )?);
+        if let Some(measurement) = usage_limit.and_then(|limit| limit.entry_measurement.as_ref()) {
+            let mut request = execution
+                .preview_initial_call_consuming_steering(
+                    call,
+                    steering_entries.clone(),
+                    steering_snapshot,
+                )
+                .map_err(|_| ModelCallCorruption::Inconsistent("compacted continuation preview"))?;
+            super::prepared::resolve_runner_placement_entries(connection, &mut request).await?;
+            let tool_entries =
+                super::prepared::load_tool_conversation_entries(connection, &request)
+                    .await?
+                    .ok_or(ModelCallCorruption::Missing(
+                        "compacted continuation tool entries",
+                    ))?;
+            let provenance =
+                super::prepared::load_provider_reasoning_provenance(connection, &request).await?;
+            let operation = signalbox_application::PreparedModelOperation::render(
+                request,
+                credential_reference.clone(),
+                system,
+                Box::new([]),
+                &tool_entries,
+                &provenance,
+            )
+            .map_err(|_| ModelCallCorruption::Inconsistent("compacted continuation rendering"))?;
+            bytes = bytes.saturating_add(measurement.additional_entry_bytes(&operation).ok_or(
+                ModelCallCorruption::Inconsistent("compacted continuation measurement"),
+            )?);
+        }
+        Some(bytes)
     } else {
         None
     };
-    let headroom_exhausted = if let Ok(resolved) = resolved_target
+    let headroom_exhausted = if !compaction_failed
+        && let Ok(resolved) = resolved_target
         && let Some(limit) = continuation_usage_limits.get(&(resolved.target(), fast_mode))
     {
         load_tool_continuation_headroom_evidence(
@@ -169,10 +205,14 @@ pub(crate) async fn prepare_tool_continuation_call(
                 .active_turn()
                 .pending_steering()
                 .iter()
+                // The rendered projection already includes pending steering when measured.
+                .filter(|_| {
+                    compacted_request_content_bytes.is_none() || limit.entry_measurement.is_none()
+                })
                 .map(|pending| pending.accepted_input().into_uuid())
                 .collect(),
             serving_pool_target(credential_families, resolved.target(), fast_mode),
-            *limit,
+            limit.clone(),
             compacted_request_content_bytes,
         )
         .await?

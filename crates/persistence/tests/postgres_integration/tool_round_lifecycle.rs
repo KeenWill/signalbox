@@ -5528,9 +5528,14 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     )));
     let limits =
         ToolContinuationUsageLimit::new(target, FastMode::Disabled, OUTPUT_CEILING, 200_000);
-    let fixture =
-        checkpoint_restart_model_call_with_limits(&pool, FIXTURE_SEED, false, None, &[limits])
-            .await?;
+    let fixture = checkpoint_restart_model_call_with_limits(
+        &pool,
+        FIXTURE_SEED,
+        false,
+        None,
+        std::slice::from_ref(&limits),
+    )
+    .await?;
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_SEED + 5)),
         target,
@@ -5798,9 +5803,14 @@ async fn assert_bounded_269_kib_batch(arguments: &str) -> Result<Vec<i64>, Box<d
     )));
     let limits = ToolContinuationUsageLimit::new(target, FastMode::Disabled, 8_192, 258_400)
         .with_compaction_prompt_bytes(COMPACTION_PROMPT.len() as u64);
-    let fixture =
-        checkpoint_restart_model_call_with_limits(&pool, FIXTURE_SEED, false, None, &[limits])
-            .await?;
+    let fixture = checkpoint_restart_model_call_with_limits(
+        &pool,
+        FIXTURE_SEED,
+        false,
+        None,
+        std::slice::from_ref(&limits),
+    )
+    .await?;
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_SEED + 5)),
         target,

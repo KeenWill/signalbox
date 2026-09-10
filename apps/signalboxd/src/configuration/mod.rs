@@ -3,6 +3,7 @@
 mod billing;
 #[cfg(test)]
 mod checked_in_example;
+mod compaction_measurement;
 mod credential_files;
 mod error;
 mod model_routing;
@@ -807,7 +808,14 @@ impl HubModelConfiguration {
                 .with_request_overhead(
                     fixed.saturating_sub(1) as u64,
                     framing.saturating_sub(1) as u64,
-                );
+                )
+                .with_entry_measurement(Arc::new(
+                    compaction_measurement::ContinuationEntryMeasurement {
+                        adapter,
+                        models: self.runtime_models.clone(),
+                        replays_provider_compaction: definition.provider_compaction_supported(),
+                    },
+                ));
                 limits.push(if definition.provider_compaction_supported() {
                     limit.with_provider_compaction_replay()
                 } else {

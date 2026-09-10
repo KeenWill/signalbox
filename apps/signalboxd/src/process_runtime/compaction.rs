@@ -599,11 +599,13 @@ pub(crate) async fn compact_automatically(
         let definition = runtime_models
             .resolve(target)
             .ok_or(AutomaticContextCompactionError::Configuration)?;
-        let prompt_bytes = u64::try_from(compaction_prompt.len())
-            .map_err(|_| AutomaticContextCompactionError::Configuration)?;
+        let request_framing_bytes = model_configuration
+            .compaction_request_bytes(selection, "x")
+            .and_then(|bytes| bytes.checked_sub(1))
+            .ok_or(AutomaticContextCompactionError::Configuration)?;
         let automatic_input_byte_budget = u64::from(definition.context_window_tokens())
             .checked_sub(u64::from(definition.max_output_tokens()))
-            .and_then(|available| available.checked_sub(prompt_bytes))
+            .and_then(|available| available.checked_sub(request_framing_bytes))
             .filter(|available| *available > 0)
             .ok_or(AutomaticContextCompactionError::Configuration)?;
         let credential_reference = model_calls
@@ -771,7 +773,12 @@ pub(crate) async fn compact_automatically(
             return Err(AutomaticContextCompactionError::Integrity);
         }
     };
-    let rendered_range = bounded_compaction_source(rendered_range, automatic_input_byte_budget);
+    let rendered_range = bounded_compaction_request_source(
+        model_configuration,
+        prepared.selection(),
+        rendered_range,
+        automatic_input_byte_budget,
+    )?;
     authorize_context_compaction_until_resolved(&repository, &prepared)
         .await
         .map_err(AutomaticContextCompactionError::Repository)?;
@@ -806,6 +813,36 @@ pub(crate) async fn compact_automatically(
     complete_context_compaction_until_resolved(&repository, &prepared, &summary, usage)
         .await
         .map_err(AutomaticContextCompactionError::Repository)
+}
+
+pub(super) fn bounded_compaction_request_source(
+    configuration: &HubModelConfiguration,
+    selection: DirectModelSelection,
+    material: String,
+    source_byte_budget: u64,
+) -> Result<String, AutomaticContextCompactionError> {
+    let fixed_bytes = configuration
+        .compaction_request_bytes(selection, "x")
+        .and_then(|bytes| bytes.checked_sub(1))
+        .ok_or(AutomaticContextCompactionError::Configuration)?;
+    let request_budget = fixed_bytes.saturating_add(source_byte_budget);
+    let mut lower = 1_u64;
+    let mut upper = source_byte_budget.min(material.len() as u64);
+    let mut retained = "[".to_owned();
+    while lower <= upper {
+        let candidate_budget = lower + (upper - lower).div_ceil(2);
+        let candidate = bounded_compaction_source(material.clone(), candidate_budget);
+        let bytes = configuration
+            .compaction_request_bytes(selection, &candidate)
+            .ok_or(AutomaticContextCompactionError::Configuration)?;
+        if bytes <= request_budget {
+            retained = candidate;
+            lower = candidate_budget.saturating_add(1);
+        } else {
+            upper = candidate_budget - 1;
+        }
+    }
+    Ok(retained)
 }
 
 pub(super) fn bounded_compaction_source(material: String, byte_budget: u64) -> String {

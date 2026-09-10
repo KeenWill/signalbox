@@ -750,8 +750,8 @@ impl GoalRepository {
     /// Reconciled ambiguity is infrastructure work whether it originated at
     /// startup or from the live watchdog. A definitive provider response is
     /// likewise external only for transient rate limiting, overload, or an
-    /// internal provider failure. A continuation closed for configured context
-    /// headroom is also daemon-owned. Session-actionable provider failures
+    /// internal provider failure. Automatic compaction failure is also
+    /// daemon-owned. Session-actionable provider failures
     /// remain chargeable.
     pub async fn unchargeable_automatic_resume_turns(
         &self,
@@ -782,6 +782,7 @@ impl GoalRepository {
               WHERE lifecycle.session_id = $1
                 AND lifecycle.turn_id = ANY($2::uuid[])
                 AND (recovery.state_kind = 'reconciled'
+                     OR lifecycle.terminal_cause_kind = 'context_compaction_failed'
                      OR headroom.terminal_attempt_id IS NOT NULL
                      OR terminal_call.terminal_provider_failure_cause IN
                         ('rate_limited', 'overloaded', 'provider_internal'))
