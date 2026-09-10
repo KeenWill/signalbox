@@ -119,4 +119,8 @@ jobs:
         env:
           BAZEL_POSTGRES_SUITE: ${{ matrix.suite }}
           BAZEL_POSTGRES_SHARD_INDEX: ${{ matrix.shard_index }}
-        run: python3 scripts/postgres_integration_suites.py --run-suite "$BAZEL_POSTGRES_SUITE" --shard-index "$BAZEL_POSTGRES_SHARD_INDEX"
+        run: python3 scripts/postgres_integration_suites.py --run-suite "$BAZEL_POSTGRES_SUITE" --shard-index "$BAZEL_POSTGRES_SHARD_INDEX" --build-event-json "$RUNNER_TEMP/postgres-events.jsonl"
+      - name: Report test-result reuse and retries
+        if: always()
+        continue-on-error: true
+        run: python3 scripts/summarize_bazel_test_cache.py "$RUNNER_TEMP/postgres-events.jsonl" >> "$GITHUB_STEP_SUMMARY"

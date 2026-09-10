@@ -125,3 +125,13 @@ fails matrix generation. Documentation prose, browser source and native client
 changes can bypass PostgreSQL through the coarse path gate; generated browser
 contracts keep the bar. API generation and API digest reports reuse the existing
 Rust scope, while documentation consistency checks still run.
+
+## PostgreSQL result reuse
+
+Cacheable PostgreSQL test selections use the shared Bazel action cache. Explicit
+`external` exceptions in `BUILD.bazel` retain fresh execution for host-dependent
+probes. Each shard writes a Bazel JSON event stream and publishes observed local
+and remote hits, actual executions, retries and execution seconds in its job
+summary. Cached historical test durations do not count as execution in this run.
+Missing results or an incomplete stream are labeled explicitly. Reporting is
+informational and cannot replace the suite command's exit status.
