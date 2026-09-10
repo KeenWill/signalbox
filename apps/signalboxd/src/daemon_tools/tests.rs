@@ -6962,6 +6962,62 @@ fn linked_worktrees_sharing_common_administration_cannot_bind_separate_sessions(
 }
 
 #[tokio::test]
+async fn a_repository_configured_root_serves_a_plain_bound_session() {
+    for format in [git2::ObjectFormat::Sha1, git2::ObjectFormat::Sha256] {
+        let parent = tempfile::tempdir().expect("fixture parent");
+        let configured = parent.path().join("repository");
+        let mut options = git2::RepositoryInitOptions::new();
+        options
+            .external_template(false)
+            .initial_head("main")
+            .object_format(format);
+        git2::Repository::init_opts(&configured, &options).expect("configured repository");
+        fs::write(configured.join(SESSION_MARKER_PATH), CONFIGURED_ROOT_MARKER)
+            .expect("configured marker");
+        let first = session(FIRST_SESSION_IDENTITY);
+        let derived = derivation(&configured).derived_path(first);
+        fs::create_dir_all(&derived).expect("plain derived workspace");
+        fs::write(derived.join(SESSION_MARKER_PATH), FIRST_SESSION_MARKER).expect("derived marker");
+        let (catalog, executor) = offline_daemon_composition(&configured);
+
+        let read = daemon_evidence(
+            catalog.clone(),
+            executor.clone(),
+            first,
+            read_marker_proposal(),
+        )
+        .await;
+        assert_eq!(read_content(read), FIRST_SESSION_MARKER);
+        let write = daemon_evidence(
+            catalog.clone(),
+            executor.clone(),
+            first,
+            write_marker_proposal(FIRST_SESSION_REPLACEMENT),
+        )
+        .await;
+        completed_text(write);
+        let git = PreparedAttemptProposal {
+            name: ToolName::try_new("git_status".to_owned()).expect("Git status name"),
+            arguments: arguments("{}"),
+            effect_class: ToolEffectClass::EffectFree,
+            approval: PreparedAttemptApproval::PolicyAuto,
+        };
+        let failure = daemon_evidence(catalog.clone(), executor.clone(), first, git).await;
+        assert_eq!(
+            known_failure_detail(failure),
+            "local Git is unavailable for this session"
+        );
+        let read = daemon_evidence(catalog, executor, first, read_marker_proposal()).await;
+        assert_eq!(read_content(read), FIRST_SESSION_REPLACEMENT);
+        assert_eq!(
+            fs::read_to_string(configured.join(SESSION_MARKER_PATH)).expect("configured marker"),
+            CONFIGURED_ROOT_MARKER
+        );
+        assert!(!derived.join(".git").exists());
+    }
+}
+
+#[tokio::test]
 async fn a_plain_configured_root_serves_a_repository_bound_session() {
     for format in [git2::ObjectFormat::Sha1, git2::ObjectFormat::Sha256] {
         let parent = tempfile::tempdir().expect("fixture parent");

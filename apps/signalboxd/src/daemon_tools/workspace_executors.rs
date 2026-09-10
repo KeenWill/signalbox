@@ -433,6 +433,7 @@ where
             return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
         }
         if self.configured.git_object_format.is_some()
+            && families.executors.git_object_format.is_some()
             && families.executors.git_object_format != self.configured.git_object_format
         {
             return Err(SessionWorkspaceFailure::ObjectFormatDisagreement);
