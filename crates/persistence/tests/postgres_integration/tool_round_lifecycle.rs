@@ -4,12 +4,12 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn completed_attempt_payload_loads_from_the_durable_row() -> Result<(), Box<dyn Error>> {
-    let (_container, pool, database_url) = migrated_postgres().await?;
+async fn completed_image_attempt_reloads_in_the_active_batch() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
     // Supplies distinct identities for the completed tool-round fixture.
     const FIXTURE_SEED: u128 = 0x473_0000;
     let (fixture, _, _, request) =
-        checkpoint_confirmed_tool_round(&pool, FIXTURE_SEED, "current_time", "{}").await?;
+        checkpoint_confirmed_tool_round(&pool, FIXTURE_SEED, "file_read", "{}").await?;
     let repository = PostgresToolLoopRepository::new(pool.clone());
     repository
         .decide(
@@ -27,15 +27,30 @@ async fn completed_attempt_payload_loads_from_the_durable_row() -> Result<(), Bo
             fixture.session,
             fixture.turn,
             attempt,
-            ToolEffectClass::EffectFree,
+            ToolEffectClass::ExternalEffect,
         )
         .await?;
     let authorized = repository
         .authorize_attempt(fixture.session, fixture.turn, attempt)
         .await?;
-    let result = ToolResultContent::Text(
-        ToolResultText::try_new("retained tool result".to_owned()).unwrap(),
-    );
+    let identity = signalbox_domain::MediaValidationIdentity::try_new(
+        signalbox_domain::BlobDigest::from_bytes([1; 32]),
+        "image/png".into(),
+        "fixture".into(),
+        "png".into(),
+        "v1".into(),
+        signalbox_domain::MediaValidationEvidence::StrongSignature,
+    )
+    .unwrap();
+    let result = ToolResultContent::Media {
+        text: ToolResultText::try_new("retained image result".to_owned()).unwrap(),
+        reference: signalbox_domain::ToolMediaReference::image(
+            identity.clone(),
+            identity,
+            std::num::NonZeroU64::new(64).unwrap(),
+        )
+        .unwrap(),
+    };
     repository
         .commit_observation(
             authorized
@@ -45,16 +60,6 @@ async fn completed_attempt_payload_loads_from_the_durable_row() -> Result<(), Bo
                 }),
         )
         .await?;
-    // The selection view does not expose the payload column under its current name.
-    sqlx::raw_sql("ALTER VIEW runner_current_tool_attempt RENAME COLUMN result_text TO view_text")
-        .execute(&pool)
-        .await?;
-    pool.close().await;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url)
-        .await?;
-    let repository = PostgresToolLoopRepository::new(pool);
     let batch = repository
         .load_active_batch(fixture.session, fixture.turn)
         .await?
