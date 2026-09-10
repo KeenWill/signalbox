@@ -845,6 +845,7 @@ pub struct SandboxConfiguration {
     /// Host paths mounted read-only at the same absolute paths.
     pub read_only_binds: Vec<PathBuf>,
     /// Host inputs mounted read-only at explicit sandbox destinations.
+    /// Applied after the workspace, worktree, and working-directory binds.
     pub read_only_mounts: Vec<SandboxReadOnlyMount>,
     /// Absolute executable directories placed before the runtime search path.
     pub path_prepend: Vec<PathBuf>,
@@ -2097,13 +2098,6 @@ fn bwrap_request(
             path.as_os_str().to_owned(),
         ]);
     }
-    for mount in &context.configuration.read_only_mounts {
-        bwrap_arguments.extend([
-            OsString::from("--ro-bind"),
-            mount.source.as_os_str().to_owned(),
-            mount.destination.as_os_str().to_owned(),
-        ]);
-    }
     #[cfg(target_os = "linux")]
     bwrap_arguments.extend([
         OsString::from("--bind"),
@@ -2157,6 +2151,13 @@ fn bwrap_request(
             OsString::from("--bind"),
             working_directory_bind_source.as_os_str().to_owned(),
             OsString::from(&sandbox_directory),
+        ]);
+    }
+    for mount in &context.configuration.read_only_mounts {
+        bwrap_arguments.extend([
+            OsString::from("--ro-bind"),
+            mount.source.as_os_str().to_owned(),
+            mount.destination.as_os_str().to_owned(),
         ]);
     }
     #[cfg(target_os = "linux")]

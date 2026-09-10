@@ -129,12 +129,13 @@ at least one second or `"none"` and bounds the timeout requested from
 `"none"`, or `"host"`), `sandbox_read_only_binds` (default `[]`), and
 `sandbox_path_prepend` (default `[]`) select networking, absolute host paths
 bound read-only at the same paths, and absolute directories prepended to `PATH`.
-Host networking shares the daemon's network namespace and DNS configuration
-without destination filtering, independently of web-egress and tool-mapping
-policies. Optional `sandbox_rustup_home` and `sandbox_rustup_toolchain` set
-`RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; automatic toolchain installation is
-disabled, `CARGO_HOME` stays private and writable, and `npm_config_cache` is
-`/workspace/.npm`.
+Programmatic read-only mounts at explicit destinations overlay the workspace,
+worktree, and working-directory binds. Host networking shares the daemon's
+network namespace and DNS configuration without destination filtering,
+independently of web-egress and tool-mapping policies. Optional
+`sandbox_rustup_home` and `sandbox_rustup_toolchain` set `RUSTUP_HOME` and
+`RUSTUP_TOOLCHAIN`; automatic toolchain installation is disabled, `CARGO_HOME`
+stays private and writable, and `npm_config_cache` is `/workspace/.npm`.
 
 The optional `[tool_approval_postures]` table decides, per exact composed tool
 name, whether a request is approved by policy, judged by the approval judge, or

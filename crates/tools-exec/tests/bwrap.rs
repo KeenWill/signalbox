@@ -12,7 +12,7 @@ use signalbox_test_bin::test_bin_path;
 use signalbox_tools_exec::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecutionConfinement, OutputEncoding,
     ProcessOutcome, ProcessSpawnFailure, SandboxConfiguration, SandboxNetwork,
-    SandboxProcessNamespace, SandboxedCommandRunner, TokioProcessRunner,
+    SandboxProcessNamespace, SandboxReadOnlyMount, SandboxedCommandRunner, TokioProcessRunner,
 };
 
 const BWRAP_PROCESS_NAMESPACE_ENVIRONMENT: &str = "SIGNALBOX_BWRAP_PROCESS_NAMESPACE";
@@ -129,6 +129,91 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
     let missing_result = runner.try_run(missing_arguments).await?;
 
     assert_real_bwrap_spawn_failure(missing_result)
+}
+
+#[tokio::test]
+async fn real_bwrap_explicit_mounts_override_workspace_binds()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ci = std::env::var_os("CI").is_some();
+    let opted_in = std::env::var_os("SIGNALBOX_RUN_BWRAP_INTEGRATION").is_some();
+    if !real_bwrap_gate(
+        procfs_children_available(),
+        std::path::Path::new("/usr/bin/bwrap").is_file(),
+        ci,
+        opted_in,
+    )
+    .map_err(std::io::Error::other)?
+    {
+        return Ok(());
+    }
+    let process_namespace = bwrap_process_namespace_from_environment()?;
+    let workspace = tempfile::tempdir()?;
+    let source = tempfile::tempdir()?;
+    const ORIGINAL: &str = "workspace content\n";
+    const MOUNTED: &str = "explicit mount content\n";
+    std::fs::create_dir(workspace.path().join("nested"))?;
+    std::fs::create_dir(source.path().join("nested"))?;
+    std::fs::write(workspace.path().join("marker"), ORIGINAL)?;
+    std::fs::write(workspace.path().join("nested/marker"), ORIGINAL)?;
+    std::fs::write(source.path().join("marker"), MOUNTED)?;
+    for destination in ["/workspace", "/workspace/nested"] {
+        for working_directory in [".", "nested"] {
+            let process_runner =
+                TokioProcessRunner::try_new(test_bin_path!("signalbox-exec-supervisor"))?;
+            let mut runner = SandboxedCommandRunner::try_new_with_process_namespace(
+                process_runner,
+                workspace.path(),
+                process_namespace,
+            )?
+            .with_sandbox_configuration(SandboxConfiguration {
+                read_only_mounts: vec![SandboxReadOnlyMount {
+                    source: source.path().to_owned(),
+                    destination: destination.into(),
+                }],
+                ..SandboxConfiguration::default()
+            });
+            let result = runner
+                .try_run(ExecArguments {
+                    program: "sh".into(),
+                    arguments: vec![
+                        "-c".into(),
+                        "cat \"$1\"; ! (printf changed > \"$1\") 2>/dev/null".into(),
+                        "mount-check".into(),
+                        format!("{destination}/marker"),
+                    ],
+                    working_directory: working_directory.into(),
+                    timeout_seconds: 5,
+                })
+                .await?;
+            assert_eq!(
+                result.confinement,
+                ExecutionConfinement::FilesystemConfined,
+                "destination={destination}, cwd={working_directory}: {result:?}"
+            );
+            assert_eq!(
+                result.outcome,
+                ProcessOutcome::Exited { code: Some(0) },
+                "destination={destination}, cwd={working_directory}: {result:?}"
+            );
+            assert_eq!(
+                result.stdout.text, MOUNTED,
+                "destination={destination}, cwd={working_directory}"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(source.path().join("marker"))?,
+        MOUNTED
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("marker"))?,
+        ORIGINAL
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("nested/marker"))?,
+        ORIGINAL
+    );
+    Ok(())
 }
 
 fn bwrap_process_namespace_from_environment()
