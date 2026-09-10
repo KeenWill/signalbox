@@ -16,6 +16,7 @@ pub fn serialized_request_bytes<C>(operation: &ModelOperation<C>) -> Option<usiz
 
 pub(crate) struct TranslatedOperation {
     pub(crate) prompt: Vec<u8>,
+    pub(crate) images: Vec<crate::app_server::frame::UserInput>,
     pub(crate) declared_tools: Vec<String>,
     pub(crate) output_contract_name: Option<String>,
     pub(crate) tool_requirement: ToolRequirement,
@@ -55,6 +56,9 @@ struct PromptMessage<'a> {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PromptPart<'a> {
+    Image {
+        media_type: &'a str,
+    },
     Text {
         text: &'a str,
     },
@@ -215,7 +219,32 @@ pub(crate) fn translate<C>(
     )
     .into_bytes();
 
+    let mut images = Vec::new();
+    use crate::app_server::frame::UserInput;
+    use base64::Engine as _;
+    for (message_index, message) in operation.messages.iter().enumerate() {
+        for (part_index, part) in message.parts.iter().enumerate() {
+            if let MessagePart::Image(image) = part {
+                if message.role != ConversationRole::User {
+                    return Err(TranslationError::Failure(
+                        PreparationFailure::UnsupportedOperation {
+                            detail: String::from("image inputs require the user wire role"),
+                        },
+                    ));
+                }
+                images.push(UserInput::Text { text: format!("Image for messages[{message_index}].parts[{part_index}] in the stateless request:") });
+                images.push(UserInput::Image {
+                    url: format!(
+                        "data:{};base64,{}",
+                        image.media_type,
+                        base64::engine::general_purpose::STANDARD.encode(&image.bytes)
+                    ),
+                });
+            }
+        }
+    }
     Ok(TranslatedOperation {
+        images,
         prompt,
         declared_tools: operation
             .tools
@@ -243,13 +272,15 @@ fn render_message(message: &ConversationMessage) -> Result<PromptMessage<'_>, Tr
         let valid = matches!(part, MessagePart::Text(_))
             || matches!(
                 (message.role, part),
-                (ConversationRole::User, MessagePart::ToolResult(_))
-                    | (
-                        ConversationRole::Assistant,
-                        MessagePart::ToolCall(_)
-                            | MessagePart::Thinking { .. }
-                            | MessagePart::RedactedThinking { .. }
-                    )
+                (
+                    ConversationRole::User,
+                    MessagePart::ToolResult(_) | MessagePart::Image(_)
+                ) | (
+                    ConversationRole::Assistant,
+                    MessagePart::ToolCall(_)
+                        | MessagePart::Thinking { .. }
+                        | MessagePart::RedactedThinking { .. }
+                )
             );
         if !valid {
             return Err(TranslationError::Failure(
@@ -271,6 +302,14 @@ fn render_message(message: &ConversationMessage) -> Result<PromptMessage<'_>, Tr
 
 fn render_part(part: &MessagePart) -> Result<PromptPart<'_>, TranslationError> {
     match part {
+        MessagePart::Image(image) => Ok(PromptPart::Image {
+            media_type: &image.media_type,
+        }),
+        MessagePart::ImageReference(_) => Err(TranslationError::Failure(
+            PreparationFailure::UnsupportedOperation {
+                detail: String::from("image reference was not authenticated"),
+            },
+        )),
         MessagePart::Text(text) => Ok(PromptPart::Text { text }),
         MessagePart::ToolCall(call) => Ok(PromptPart::ToolCall {
             id: call.id.as_str(),
@@ -385,10 +424,31 @@ pub(crate) enum TranslationError {
 /// Returns `None` for a message the adapter cannot render. Independent message
 /// envelopes conservatively retain framing that adjacent messages may share.
 pub fn serialized_message_bytes(message: &ConversationMessage) -> Option<usize> {
-    let rendered = render_message(message).ok()?;
+    let mut projected = message.clone();
+    let mut image_bytes = 0_usize;
+    for part in &mut projected.parts {
+        let (media_type, length) = match part {
+            MessagePart::ImageReference(reference) => (
+                reference.media_type.clone(),
+                usize::try_from(reference.byte_length.get()).ok()?,
+            ),
+            MessagePart::Image(image) => (image.media_type.clone(), image.bytes.len()),
+            _ => continue,
+        };
+        // Reserve base64, its wire envelope, and the image's prompt location label.
+        image_bytes = image_bytes
+            .checked_add(length.checked_add(2)?.checked_div(3)?.checked_mul(4)?)?
+            .checked_add(1024)?;
+        *part = MessagePart::Image(signalbox_model_runtime::ImageInput {
+            media_type,
+            bytes: std::sync::Arc::from([]),
+        });
+    }
+    let rendered = render_message(&projected).ok()?;
     serde_json::to_vec(&[rendered])
-        .ok()
-        .map(|bytes| bytes.len())
+        .ok()?
+        .len()
+        .checked_add(image_bytes)
 }
 
 #[cfg(test)]
@@ -400,7 +460,7 @@ mod tests {
         ToolDefinition, ToolName, ToolResultRecord,
     };
 
-    use super::translate;
+    use super::{serialized_message_bytes, translate};
 
     #[test]
     fn measured_growth_covers_appended_message_array_separators() {
@@ -435,6 +495,42 @@ mod tests {
             vec![message],
             ModelSettings::new(64),
         )
+    }
+
+    #[test]
+    fn image_input_uses_the_codex_rpc_image_shape_and_context_count_includes_base64() {
+        let image = signalbox_model_runtime::ImageInput {
+            media_type: "image/png".into(),
+            bytes: std::sync::Arc::from([1_u8, 2, 3]),
+        };
+        let message = ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::Image(image)],
+        };
+        let mut operation = operation_with_message(message.clone());
+        operation.image_presentation = Some(crate::image_presentation_capability());
+        let translated = translate(&operation).unwrap();
+        let wire = serde_json::to_value(&translated.images).unwrap();
+        assert_eq!(
+            wire[1],
+            serde_json::json!({"type":"image","url":"data:image/png;base64,AQID"})
+        );
+        let reference_message = ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::ImageReference(
+                signalbox_model_runtime::ImageReference {
+                    authority: "fixture".into(),
+                    digest: [0; 32],
+                    byte_length: std::num::NonZeroU64::new(3).unwrap(),
+                    media_type: "image/png".into(),
+                },
+            )],
+        };
+        assert_eq!(
+            serialized_message_bytes(&message),
+            serialized_message_bytes(&reference_message)
+        );
+        assert!(translate(&operation_with_message(reference_message)).is_err());
     }
 
     #[test]

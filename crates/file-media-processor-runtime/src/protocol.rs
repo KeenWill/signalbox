@@ -102,6 +102,18 @@ where
                     },
                 );
                 fingerprint_view_bounds(&mut fingerprint, view.bounds());
+                fingerprint_u64(
+                    &mut fingerprint,
+                    match view.image_kind() {
+                        None => 0,
+                        Some(signalbox_file_media_runtime::ImageViewKind::Direct) => 1,
+                        Some(signalbox_file_media_runtime::ImageViewKind::Generated) => 2,
+                    },
+                );
+                fingerprint_len(&mut fingerprint, view.output_media_types().len());
+                for media_type in view.output_media_types() {
+                    fingerprint_field(&mut fingerprint, media_type.as_str().as_bytes());
+                }
             }
             let mut reason_codes = reader.reason_codes().iter().collect::<Vec<_>>();
             reason_codes.sort();
@@ -463,7 +475,7 @@ pub(crate) struct WireReadRequest {
     validation: ValidationEvidence,
     metadata_json: String,
     maximum_source_bytes: u64,
-    view: String,
+    pub(crate) view: String,
     options: Option<serde_json::Value>,
     continuation: Option<String>,
     maximum_image_axis: u32,

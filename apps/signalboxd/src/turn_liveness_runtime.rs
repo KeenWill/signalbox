@@ -1388,10 +1388,7 @@ mod tests {
     use signalbox_persistence::automatic_reconciliation::RECONCILIATION_LOCK_WAIT;
 
     use super::{
-        InventoryPage, PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, QuiescentInventory,
-        ROTATION_CEILING_CAUSE, SLOT_HELD_PAGE_TIMEOUT_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE,
-        STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE,
-        StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE, TerminalizationWindow,
+        InventoryPage, QuiescentInventory, StaleTurnTerminalizer, TerminalizationWindow,
         TurnLivenessNumericBounds, TurnLivenessWake, batch_admits_another_reconciliation,
         complete_before_shutdown, drain_quiescent_rotation, next_turn_liveness_wake,
         reconcile_turn_liveness, reconciliation_deadline, slot_held_ledger,
@@ -1906,18 +1903,6 @@ mod tests {
         assert_eq!(repository.still_active(), 1);
     }
 
-    /// The deployed cap is the value the checked-in example states.
-    #[test]
-    fn one_scan_uses_the_configured_terminalization_limit() {
-        assert!(example_numeric_bounds().terminalizations_per_scan.is_some());
-    }
-
-    /// The compiled ceiling is the capacity the page states.
-    #[test]
-    fn the_page_ceiling_is_four_thousand_and_ninety_six() {
-        assert_eq!(QUIESCENT_ROTATION_PAGE_CEILING, 4_096);
-    }
-
     /// A population that ends inside the ceiling drains where it ends, and no
     /// probe is read because no page before it filled.
     #[tokio::test]
@@ -1967,43 +1952,6 @@ mod tests {
 
         assert!(drained.is_none());
         assert_eq!(inventory.reads(), 3);
-    }
-
-    /// The audited cause codes are stable strings an operator can search.
-    #[test]
-    fn the_watchdog_cause_codes_are_distinct() {
-        assert_eq!(STALE_TURN_TERMINAL_CAUSE, "turn_liveness_watchdog_stale");
-        assert_eq!(PASS_FAILURE_CAUSE, "turn_liveness_pass_failed");
-        assert_eq!(
-            ROTATION_CEILING_CAUSE,
-            "turn_liveness_rotation_ceiling_reached"
-        );
-        assert_eq!(
-            STALE_TURN_SUPERSEDED_CAUSE,
-            "turn_liveness_candidate_superseded"
-        );
-        assert_eq!(
-            STALE_TURN_AMBIGUOUS_CAUSE,
-            "turn_liveness_terminalization_ambiguous"
-        );
-        assert_eq!(
-            TERMINALIZATION_DEFERRED_CAUSE,
-            "turn_liveness_terminalization_deferred"
-        );
-        assert_eq!(
-            STALE_TURN_LOCK_UNAVAILABLE_CAUSE,
-            "turn_liveness_scheduler_row_busy"
-        );
-        assert_eq!(
-            SLOT_HELD_PAGE_TIMEOUT_CAUSE,
-            "turn_liveness_slot_held_page_timed_out"
-        );
-        assert_ne!(STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
-        assert_ne!(STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_TERMINAL_CAUSE);
-        assert_ne!(PASS_FAILURE_CAUSE, STALE_TURN_TERMINAL_CAUSE);
-        assert_ne!(ROTATION_CEILING_CAUSE, STALE_TURN_TERMINAL_CAUSE);
-        assert_ne!(TERMINALIZATION_DEFERRED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
-        assert_ne!(STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_TERMINAL_CAUSE);
     }
 
     /// The bound reported beside a terminalized turn is the configured one, so

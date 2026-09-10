@@ -530,6 +530,11 @@ fn wire_message(
         }
         if message.role == ConversationRole::User {
             match part {
+                MessagePart::Image(_) | MessagePart::ImageReference(_) => {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: String::from("this adapter does not present images"),
+                    });
+                }
                 MessagePart::Text(_) => user_text_seen = true,
                 MessagePart::ToolResult(_) if user_text_seen => {
                     return Err(PreparationFailure::UnsupportedOperation {
@@ -554,6 +559,7 @@ fn wire_message(
                 || !matches!(part, MessagePart::ProviderCompaction { .. })
         })
         .map(|part| match part {
+            MessagePart::Image(_) | MessagePart::ImageReference(_) => Err(PreparationFailure::UnsupportedOperation { detail:String::from("this adapter does not present images") }),
             MessagePart::Text(text) => Ok(WireRequestBlock::Known(WireKnownRequestBlock::Text {
                 text: text.clone(),
                 cache_control: None,

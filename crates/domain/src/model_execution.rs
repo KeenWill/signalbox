@@ -74,8 +74,9 @@ pub use prepared_call::{
 };
 mod provider_call;
 pub use provider_call::{
-    CorrelatedModelCallTerminalObservation, IssuedModelCallCorrelation,
-    ModelCallTerminalObservation, ProviderModelCallFailureCause, ProviderReportedTokenUsage,
+    CorrelatedModelCallTerminalObservation, CredentialRejectionRecovery,
+    IssuedModelCallCorrelation, ModelCallTerminalObservation, ProviderModelCallFailureCause,
+    ProviderReportedTokenUsage,
 };
 
 /// Complete domain facts for reconstituting one live model-call execution.
@@ -1874,7 +1875,8 @@ fn reconstitute(
         ),
         (CurrentTurnAttemptState::Prepared, None)
             if !running_tool_round
-                || (running_tool_continuation && uncommitted_tool_result_projection)
+                || (running_tool_continuation
+                    && (uncommitted_tool_result_projection || input.availability_successor))
     ) || matches!(
         (
             current_attempt.state(),

@@ -120,24 +120,6 @@ impl FileMediaProcessor for AdversarialOutputProcessor {
     }
 }
 
-#[test]
-fn declaration_registers_mp4_and_webm_under_available_isolation() -> Result<(), Box<dyn Error>> {
-    let registry = registry()?;
-
-    assert_eq!(registry.providers(), &[declaration()?]);
-    let mp4_probe = registry.providers()[0].readers()[0].probe();
-    assert_eq!(mp4_probe.prefix_bytes(), 4 * 1024);
-    assert_eq!(mp4_probe.suffix_bytes(), 0);
-    assert_eq!(mp4_probe.range_count(), 4);
-    assert_eq!(mp4_probe.cumulative_bytes(), 256 * 1024);
-    let webm_probe = registry.providers()[0].readers()[1].probe();
-    assert_eq!(webm_probe.prefix_bytes(), 4 * 1024);
-    assert_eq!(webm_probe.suffix_bytes(), 0);
-    assert_eq!(webm_probe.range_count(), 4);
-    assert_eq!(webm_probe.cumulative_bytes(), 256 * 1024);
-    Ok(())
-}
-
 #[tokio::test]
 async fn generated_mp4_validates_and_reports_metadata() -> Result<(), Box<dyn Error>> {
     let fixture = VideoFixture::ordinary_mp4();

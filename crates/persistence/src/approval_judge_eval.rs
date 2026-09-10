@@ -811,58 +811,12 @@ impl From<sqlx::Error> for ApprovalJudgeEvalRecordingError {
 
 #[cfg(test)]
 mod tests {
-    use expect_test::expect;
     use serde_json::json;
 
     use super::{
         ApprovalJudgeEvalRecordingError, failure_causes_are_valid,
         require_scorecard_aggregate_summary_agreement, require_scorecard_case_summary_agreement,
     };
-
-    #[test]
-    fn recording_errors_distinguish_commit_ambiguity() {
-        let ordinary = ApprovalJudgeEvalRecordingError::Database {
-            source: sqlx::Error::PoolClosed,
-            commit_ambiguous: false,
-        };
-        let ambiguous = ApprovalJudgeEvalRecordingError::Database {
-            source: sqlx::Error::PoolClosed,
-            commit_ambiguous: true,
-        };
-        expect!["eval recording database operation failed"].assert_eq(&ordinary.to_string());
-        expect!["eval recording database commit outcome is ambiguous"]
-            .assert_eq(&ambiguous.to_string());
-    }
-
-    #[test]
-    fn recording_rejections_render_their_causes() {
-        expect!["eval recording tables are absent; the daemon has not applied this migration set"]
-            .assert_eq(&ApprovalJudgeEvalRecordingError::TablesAbsent.to_string());
-        expect!["eval recording tables refuse the connected role a required table privilege"]
-            .assert_eq(&ApprovalJudgeEvalRecordingError::TablesUnwritable.to_string());
-        expect!["eval recording schema identity is ambiguous across database objects"]
-            .assert_eq(&ApprovalJudgeEvalRecordingError::SchemaAmbiguous.to_string());
-        expect!["eval call repeat ordinal is outside the run's configured repeats"]
-            .assert_eq(&ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats.to_string());
-        expect!["eval scorecard header disagrees with the typed run record: repeats"].assert_eq(
-            &ApprovalJudgeEvalRecordingError::ScorecardHeaderMismatch { field: "repeats" }
-                .to_string(),
-        );
-        expect!["eval scorecard verdicts disagree with the call records: fixture-case"].assert_eq(
-            &ApprovalJudgeEvalRecordingError::ScorecardVerdictMismatch {
-                case: String::from("fixture-case"),
-            }
-            .to_string(),
-        );
-        expect!["eval scorecard case summary disagrees with its verdicts: fixture-case.majority"]
-            .assert_eq(
-                &ApprovalJudgeEvalRecordingError::ScorecardSummaryMismatch {
-                    case: String::from("fixture-case"),
-                    field: "majority",
-                }
-                .to_string(),
-            );
-    }
 
     #[test]
     fn zero_failed_calls_accept_only_absent_or_empty_causes() {

@@ -226,12 +226,26 @@ impl StreamDecoder {
         }
     }
 
+    fn response_content_observed(&self) -> bool {
+        self.open_blocks.values().any(|block| match block {
+            BlockBuilder::Text(text) | BlockBuilder::Thinking { text, .. } => !text.is_empty(),
+            BlockBuilder::RedactedThinking { data } => !data.is_empty(),
+            BlockBuilder::Compaction { delta } => delta.is_some(),
+            BlockBuilder::ToolUse { .. } => true,
+        }) || self.closed.values().any(|part| match part {
+            AssistantPart::Text(text) | AssistantPart::Thinking { text, .. } => !text.is_empty(),
+            AssistantPart::RedactedThinking { data } => !data.is_empty(),
+            _ => true,
+        })
+    }
+
     /// Protocol-violation evidence for material that never decoded.
     pub(crate) fn undecoded_violation_evidence(
         &self,
         detail: impl Into<String>,
     ) -> TerminalEvidence {
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: self.response_content_observed(),
             cause: LossCause::StreamProtocolViolation {
                 detail: detail.into(),
             },
@@ -251,6 +265,7 @@ impl StreamDecoder {
     pub(crate) fn lost(self, interruption: StreamInterruption) -> TerminalEvidence {
         let tool_calls = self.tool_calls_at_loss();
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: self.response_content_observed(),
             cause: LossCause::StreamEndedWithoutTerminalMarker { interruption },
             exchange: self.exchange,
             reported_model: self.reported_model,
@@ -263,6 +278,7 @@ impl StreamDecoder {
     /// Evidence for a caller cancellation observed mid-stream.
     pub(crate) fn cancelled(&self) -> TerminalEvidence {
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: self.response_content_observed(),
             cause: LossCause::CancellationRequested,
             exchange: self.exchange.clone(),
             reported_model: self.reported_model.clone(),
@@ -275,6 +291,7 @@ impl StreamDecoder {
     /// Protocol-violation evidence retaining the facts observed so far.
     pub(crate) fn violation_evidence(&self, detail: impl Into<String>) -> TerminalEvidence {
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: self.response_content_observed(),
             cause: LossCause::StreamProtocolViolation {
                 detail: detail.into(),
             },
@@ -381,6 +398,7 @@ impl StreamDecoder {
         }
         StreamStep::Terminal(Box::new(TerminalEvidence::ProviderError(
             ProviderErrorEvidence {
+                credential_recovery: None,
                 exchange: self.exchange.clone(),
                 reported_model: self.reported_model.clone(),
                 kind,
@@ -1119,6 +1137,27 @@ mod tests {
             }
         }
         (decoder.lost(StreamInterruption::EndOfStream), observations)
+    }
+
+    #[test]
+    fn transport_loss_before_content_retains_absent_content_progress() {
+        let (evidence, _) = drive_to_eof(&[message_start()]);
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("incomplete stream reports loss");
+        };
+        assert!(!loss.response_content_observed);
+    }
+
+    #[test]
+    fn transport_loss_after_content_retains_content_progress() {
+        let (evidence, _) = drive_to_eof(&[
+            message_start(),
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"partial\"}}\n\n",
+        ]);
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("incomplete stream reports loss");
+        };
+        assert!(loss.response_content_observed);
     }
 
     fn message_start() -> &'static [u8] {

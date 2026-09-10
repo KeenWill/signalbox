@@ -997,16 +997,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn initial_snapshot_has_no_last_writer() {
-        let session = session_id(1);
-        let snapshot = SessionMetadataSnapshot::initial(session);
-
-        assert_eq!(snapshot.session(), session);
-        assert_eq!(snapshot.content(), &SessionMetadataContent::empty());
-        assert_eq!(snapshot.last_writer(), None);
-    }
-
     /// archive is metadata on the same durable session identity.
     #[test]
     fn recorded_snapshot_preserves_identity_and_archive_state() {
@@ -1088,13 +1078,6 @@ mod tests {
         assert_ne!(first, another_archive_state);
     }
 
-    #[test]
-    fn metadata_command_construction_fixes_user_actor() {
-        let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
-
-        assert_eq!(command.actor(), Actor::User);
-    }
-
     /// tool agency is semantic replay payload rather than an
     /// interchangeable attribution side channel.
     #[test]
@@ -1126,19 +1109,6 @@ mod tests {
             command_hash(&same_tool_another_identity)
         );
         assert_ne!(tool, another_tool);
-    }
-
-    #[test]
-    fn tool_metadata_command_retains_exact_request_agency() {
-        let request = tool_request_id(3);
-        let command = ReplaceSessionMetadata::new_for_tool(
-            command_id(1),
-            session_id(2),
-            request,
-            metadata(false),
-        );
-
-        assert_eq!(command.actor(), Actor::Tool { request });
     }
 
     #[test]

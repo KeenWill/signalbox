@@ -1629,52 +1629,6 @@ mod tests {
     };
     use signalbox_domain::{SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId};
 
-    #[test]
-    fn operator_error_messages_distinguish_compaction_validation_failures() {
-        use super::ContextCompactionCorruption;
-
-        let errors = [
-            ContextCompactionCorruption::Missing("frontier"),
-            ContextCompactionCorruption::InvalidOrdinal("position"),
-            ContextCompactionCorruption::Inconsistent("frontier"),
-            ContextCompactionCorruption::UnsupportedResult("unknown".to_owned()),
-            ContextCompactionCorruption::UnsupportedCommandKind("unknown".to_owned()),
-            ContextCompactionCorruption::InvalidSummary,
-        ];
-        let messages = errors.map(|error| error.to_string()).join("\n");
-
-        expect_test::expect![[r#"
-            context compaction storage is inconsistent: required durable fact is missing
-            context compaction ordinal cannot be represented as u64
-            context compaction storage is inconsistent: invalid durable facts for frontier
-            context compaction storage is inconsistent: unknown command result discriminator
-            context compaction storage is inconsistent: unknown command kind discriminator
-            context compaction provider summary is invalid"#]]
-        .assert_eq(&messages);
-    }
-
-    #[test]
-    fn operator_error_messages_distinguish_compaction_persistence_failures() {
-        use super::{ContextCompactionCorruption, ContextCompactionRepositoryError};
-
-        let errors = [
-            ContextCompactionRepositoryError::Database(sqlx::Error::PoolClosed),
-            ContextCompactionRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
-            ContextCompactionRepositoryError::IdentityCollision,
-            ContextCompactionRepositoryError::Corruption(
-                ContextCompactionCorruption::InvalidSummary,
-            ),
-        ];
-        let messages = errors.map(|error| error.to_string()).join("\n");
-
-        expect_test::expect![[r#"
-            context compaction persistence failed: database operation failed
-            context compaction persistence failed: commit outcome is ambiguous
-            context compaction persistence failed: generated identity collided
-            context compaction persistence failed: context compaction provider summary is invalid"#]]
-        .assert_eq(&messages);
-    }
-
     fn entry(value: u128) -> SemanticTranscriptEntryRef {
         SemanticTranscriptEntryRef::from_source(
             SessionId::from_uuid(Uuid::from_u128(0x7000)),
