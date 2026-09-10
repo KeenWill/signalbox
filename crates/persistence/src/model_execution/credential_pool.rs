@@ -495,7 +495,7 @@ pub(super) async fn select_runtime_pool_credential(
 ) -> Result<SelectedRuntimePoolCredential, ModelCallRepositoryError> {
     let predecessor: Option<(Uuid, bool)> = sqlx::query_as(
         "SELECT successor.predecessor_model_call_id,
-                EXISTS (
+                successor.cause_kind = 'quota_exhausted' OR EXISTS (
                     SELECT 1
                       FROM credential_pool_chain_exclusion AS exclusion
                      WHERE exclusion.predecessor_model_call_id =
@@ -503,7 +503,7 @@ pub(super) async fn select_runtime_pool_credential(
                 ) AS rotated
            FROM credential_pool_availability_successor AS successor
           WHERE successor.successor_turn_attempt_id = $1
-          UNION ALL SELECT waiting.predecessor_model_call_id, EXISTS (SELECT 1 FROM credential_pool_chain_exclusion exclusion WHERE exclusion.predecessor_model_call_id = waiting.predecessor_model_call_id) FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1 AND waiting.predecessor_model_call_id IS NOT NULL",
+          UNION ALL SELECT waiting.predecessor_model_call_id, EXISTS (SELECT 1 FROM model_call predecessor WHERE predecessor.model_call_id = waiting.predecessor_model_call_id AND predecessor.terminal_provider_failure_cause = 'quota_exhausted') OR EXISTS (SELECT 1 FROM credential_pool_chain_exclusion exclusion WHERE exclusion.predecessor_model_call_id = waiting.predecessor_model_call_id) FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1 AND waiting.predecessor_model_call_id IS NOT NULL",
     )
     .bind(attempt.into_uuid())
     .fetch_optional(&mut *connection)

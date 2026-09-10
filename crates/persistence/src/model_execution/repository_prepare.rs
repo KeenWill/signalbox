@@ -796,14 +796,35 @@ impl PostgresModelCallRepository {
                     // rotation; every other action follows the terminal path.
                     let rotating = !retrying_same_credential && rotation_candidate;
                     if retrying_same_credential || rotating {
-                        let Some(DurablePoolExclusions { mut excluded, .. }) =
-                            durable_exclusions.take()
+                        let Some(DurablePoolExclusions {
+                            mut excluded,
+                            headroom,
+                            ..
+                        }) = durable_exclusions.take()
                         else {
                             return Err(ModelCallRepositoryError::InvalidTransition(
                                 "availability successor omitted pool exclusions",
                             ));
                         };
-                        if rotating {
+                        let quota_excluded_by_capacity = cause
+                            == signalbox_domain::ProviderModelCallFailureCause::QuotaExhausted
+                            && policy
+                                .members()
+                                .iter()
+                                .find(|member| member.credential_reference() == current_reference)
+                                .and_then(|member| {
+                                    member
+                                        .headroom_reserve_percent
+                                        .or(policy.headroom_reserve_percent)
+                                })
+                                .is_some_and(|reserve| {
+                                    headroom
+                                        .get(&current_reference)
+                                        .copied()
+                                        .flatten()
+                                        .is_some_and(|remaining| remaining <= i64::from(reserve))
+                                });
+                        if rotating && !quota_excluded_by_capacity {
                             sqlx::query(
                                 "INSERT INTO credential_pool_chain_exclusion
                             (session_id, turn_id, credential_reference,
