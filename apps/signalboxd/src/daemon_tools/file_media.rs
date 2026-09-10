@@ -504,7 +504,9 @@ generated_artifact = "fixture"
             FileInspectionStatus, FileReadInput, FileReadRequest, FileReadResult,
             InspectionRequest, ReadContinuation, ReadViewName,
         };
-        let source = PdfSource;
+        let source = PdfSource {
+            byte_length: NonZeroU64::new(PDF_FIXTURE.len() as u64).unwrap(),
+        };
         let inspection_request = InspectionRequest {
             source: FileUse::new(
                 source.digest(),
@@ -550,7 +552,9 @@ generated_artifact = "fixture"
         pool.close().await;
         Ok(())
     }
-    struct PdfSource;
+    struct PdfSource {
+        byte_length: NonZeroU64,
+    }
 
     impl VerifiedBlobSource for PdfSource {
         fn digest(&self) -> FileDigest {
@@ -558,7 +562,7 @@ generated_artifact = "fixture"
             FileDigest::from_bytes(sha2::Sha256::digest(PDF_FIXTURE).into())
         }
         fn byte_length(&self) -> NonZeroU64 {
-            NonZeroU64::new(PDF_FIXTURE.len() as u64).unwrap()
+            self.byte_length
         }
         fn read_range(&self, offset: u64, length: NonZeroU64) -> SourceReadFuture<'_> {
             Box::pin(async move {
