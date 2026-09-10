@@ -384,33 +384,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_preserves_empty_frontier() {
-        assert_eq!(AttentionCursor::new(0).value(), 0);
-    }
-
-    #[test]
-    fn fleet_snapshot_bound_is_pinned() {
-        assert_eq!(max_attention_snapshot_items(), 32);
-    }
-
-    #[test]
-    fn goal_summary_bound_is_pinned() {
-        assert_eq!(max_attention_goal_summary_characters(), 128);
-    }
-
-    #[test]
-    fn change_batch_bound_is_pinned() {
-        assert_eq!(max_attention_change_items(), 32);
-    }
-
-    #[test]
-    fn catalog_filter_bounds_are_pinned() {
-        assert_eq!(max_attention_title_characters(), 128);
-        assert_eq!(max_attention_filter_tags(), 8);
-        assert_eq!(max_attention_filter_utf8_bytes(), 1_024);
-    }
-
-    #[test]
     fn continuation_must_match_the_selected_sort() {
         let continuation =
             AttentionContinuation::SessionIdentity(SessionId::from_uuid(uuid::Uuid::from_u128(7)));

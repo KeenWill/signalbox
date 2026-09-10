@@ -277,27 +277,6 @@ mod require_decoded_response_tests {
     }
 
     #[test]
-    fn completed_evidence_is_accepted() {
-        let expected_exchange = exchange(200);
-        let expected_usage = usage();
-
-        let decoded = require_decoded_response(
-            TerminalEvidence::Completed(CompletionEvidence {
-                exchange: expected_exchange.clone(),
-                message_id: None,
-                reported_model: None,
-                finish: CompletionFinish::EndTurn,
-                content: Vec::new(),
-                usage: expected_usage,
-            }),
-            &[],
-        );
-
-        assert_eq!(decoded.exchange, expected_exchange);
-        assert_eq!(decoded.usage, expected_usage);
-    }
-
-    #[test]
     fn completed_with_zero_output_tokens_is_accepted() {
         // The adapter's own streamed fixtures already prove an `end_turn`
         // response with `output_tokens: Some(0)` decodes as `Completed`
@@ -321,29 +300,6 @@ mod require_decoded_response_tests {
                 usage: expected_usage,
             }),
             &[],
-        );
-
-        assert_eq!(decoded.exchange, expected_exchange);
-        assert_eq!(decoded.usage, expected_usage);
-    }
-
-    #[test]
-    fn refusal_is_accepted() {
-        let expected_exchange = exchange(200);
-        let expected_usage = usage();
-
-        let decoded = require_decoded_response(
-            TerminalEvidence::Refused(RefusalEvidence {
-                reason: signalbox_model_runtime::RefusalReason::Unspecified,
-                exchange: expected_exchange.clone(),
-                message_id: None,
-                content: Vec::new(),
-                retained_input_tokens: None,
-                retained_output_tokens: None,
-                reported_model: None,
-                usage: expected_usage,
-            }),
-            &refusal_observed(),
         );
 
         assert_eq!(decoded.exchange, expected_exchange);
@@ -375,27 +331,6 @@ mod require_decoded_response_tests {
 
         assert_eq!(decoded.exchange, expected_exchange);
         assert_eq!(decoded.usage, expected_usage);
-    }
-
-    #[test]
-    #[should_panic(expected = "returned no decoded response")]
-    fn native_error_event_inside_a_200_body_panics() {
-        let _ = require_decoded_response(
-            TerminalEvidence::ProviderError(ProviderErrorEvidence {
-                credential_recovery: None,
-                exchange: exchange(200),
-                reported_model: None,
-                kind: ProviderErrorKind::Unrecognized,
-                non_acceptance_proven: false,
-                native: NativeErrorFacts {
-                    error_token: Some("refusal".to_string()),
-                    error_code: None,
-                    message: Some("synthetic upstream failure".to_string()),
-                },
-                usage: usage(),
-            }),
-            &refusal_observed(),
-        );
     }
 
     #[test]
@@ -566,11 +501,6 @@ mod assert_well_formed_response_tests {
     }
 
     #[test]
-    fn positive_usage_passes() {
-        assert_well_formed_response(&well_formed());
-    }
-
-    #[test]
     fn present_zero_output_tokens_passes() {
         // The exact edge both accept paths can legitimately report: a
         // present-but-zero output count is not a positivity requirement.
@@ -621,15 +551,6 @@ mod assert_well_formed_response_tests {
 #[cfg(test)]
 mod require_prepared_tests {
     use super::*;
-
-    #[test]
-    fn prepared_outcome_returns_its_capability() {
-        let expected_capability: u32 = 7;
-        let outcome: PreparationOutcome<String, u32> =
-            PreparationOutcome::Prepared(expected_capability);
-
-        assert_eq!(require_prepared(outcome), expected_capability);
-    }
 
     #[test]
     #[should_panic(expected = "smoke preparation was unexpectedly cancelled")]

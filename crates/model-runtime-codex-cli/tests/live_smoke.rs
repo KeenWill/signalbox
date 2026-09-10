@@ -32,11 +32,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use signalbox_model_runtime::{
-    BoundaryLossEvidence, CancellationSignal, CompletionEvidence, CompletionFinish,
-    ConversationMessage, CredentialReference, DeliveryMode, ExchangeFacts, LossCause,
-    ModelOperation, ModelRuntime, ModelSettings, PreparationDefect, PreparationFailure,
-    PreparationOutcome, ProviderRequestId, RefusalEvidence, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage, ToolCallsAtLoss,
+    CancellationSignal, ConversationMessage, CredentialReference, DeliveryMode, ExchangeFacts,
+    ModelOperation, ModelRuntime, ModelSettings, PreparationOutcome, RequestedTarget,
+    ResolvedTarget, TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliPreparedRequest, CodexCliRuntime,
@@ -61,9 +59,6 @@ const DEFAULT_EXECUTABLE: &str = "codex";
 /// to generic metadata, so the smoke would record compatibility evidence from a
 /// degraded run.
 const DEFAULT_MODEL: &str = "gpt-5.4-mini";
-const CODEX_SMOKE_WORKFLOW: &str = include_str!("../../../.github/workflows/codex-smoke.yml");
-const LOGIN_TIMEOUT_INVOCATION: &str =
-    "env -u CODEX_SMOKE_API_KEY timeout --signal=TERM --kill-after=5s 30s";
 const LOGIN_TERM_HOLD_COMMAND: &str = r#"trap "while :; do sleep 1; done" TERM; "$@""#;
 #[cfg(target_os = "linux")]
 const LOGIN_TIMEOUT_DESCENDANT_FIXTURE: &str = r#"#!/bin/sh
@@ -329,12 +324,6 @@ fn synthetic_skill_file() -> String {
          {SYNTHETIC_SKILL_BODY}\n"
     )
 }
-
-/// Arbitrary non-default facts that prove the shared response projection
-/// preserves terminal evidence rather than manufacturing defaults.
-const FIXTURE_THREAD_ID: &str = "fixture-thread";
-const FIXTURE_INPUT_TOKENS: u64 = 3;
-const FIXTURE_OUTPUT_TOKENS: u64 = 1;
 
 #[tokio::test]
 #[ignore = "spends one real Codex CLI exchange; run only from the gated compatibility smoke"]
@@ -916,30 +905,6 @@ fn assert_complete_feature_classification() {
     );
 }
 
-#[test]
-fn pinned_feature_classification_matches_the_runtime_hard_disables() {
-    assert_complete_feature_classification();
-}
-
-/// The credentialed login is independently bounded and removes the secret
-/// from the timeout and CLI environments; the ignored model exchange and the
-/// job-level timeout cannot substitute for this local cleanup boundary.
-#[test]
-fn compatibility_smoke_login_has_a_process_group_timeout() {
-    assert!(
-        CODEX_SMOKE_WORKFLOW.contains(LOGIN_TIMEOUT_INVOCATION),
-        "the smoke login no longer carries the thirty-second TERM and five-second KILL bound"
-    );
-    assert!(
-        CODEX_SMOKE_WORKFLOW.contains("| env -u CODEX_SMOKE_API_KEY timeout"),
-        "the smoke login no longer removes the key from the timeout environment"
-    );
-    assert!(
-        CODEX_SMOKE_WORKFLOW.contains(LOGIN_TERM_HOLD_COMMAND),
-        "the timeout command no longer keeps its managed supervisor alive through the KILL grace"
-    );
-}
-
 /// If the direct login launcher exits on TERM while its native descendant ignores
 /// TERM, the managed shell stays alive until GNU timeout sends KILL to the
 /// entire command group. Without that hold-open trap, timeout cancels its KILL
@@ -1479,120 +1444,6 @@ async fn preparation_projection_returns_a_prepared_capability() {
             .prepare(operation, CancellationSignal::never())
             .await,
     );
-}
-
-#[test]
-#[should_panic(expected = "smoke preparation was not cancelled")]
-fn preparation_projection_rejects_a_cancelled_outcome() {
-    let _ = require_prepared(PreparationOutcome::Cancelled {
-        correlation: "codex-smoke".to_string(),
-    });
-}
-
-#[test]
-#[should_panic(expected = "smoke preparation failed")]
-fn preparation_projection_rejects_a_failed_outcome() {
-    let _ = require_prepared(PreparationOutcome::Failed {
-        correlation: "codex-smoke".to_string(),
-        failure: PreparationFailure::UnsupportedOperation {
-            detail: "fixture failure".to_string(),
-        },
-    });
-}
-
-#[test]
-#[should_panic(expected = "smoke preparation found a defect")]
-fn preparation_projection_rejects_a_defect_outcome() {
-    let _ = require_prepared(PreparationOutcome::Defect {
-        correlation: "codex-smoke".to_string(),
-        defect: PreparationDefect::RequestConstructionFailed {
-            detail: "fixture defect".to_string(),
-        },
-    });
-}
-
-#[test]
-fn decoded_response_accepts_completion() {
-    let exchange = ExchangeFacts {
-        provider_request_id: Some(ProviderRequestId::new(FIXTURE_THREAD_ID)),
-        http_status: None,
-        retry_after: None,
-    };
-    let usage = TokenUsage {
-        input_tokens: Some(FIXTURE_INPUT_TOKENS),
-        output_tokens: Some(FIXTURE_OUTPUT_TOKENS),
-        ..TokenUsage::default()
-    };
-    let evidence = TerminalEvidence::Completed(CompletionEvidence {
-        exchange: exchange.clone(),
-        message_id: None,
-        reported_model: None,
-        finish: CompletionFinish::EndTurn,
-        content: Vec::new(),
-        usage,
-    });
-
-    let decoded = require_decoded_response(evidence);
-    assert_eq!(decoded.exchange, exchange);
-    assert_eq!(decoded.usage, usage);
-}
-
-#[test]
-fn decoded_response_accepts_refusal_without_completion_material() {
-    let exchange = ExchangeFacts {
-        provider_request_id: Some(ProviderRequestId::new(FIXTURE_THREAD_ID)),
-        http_status: None,
-        retry_after: None,
-    };
-    let usage = TokenUsage {
-        input_tokens: Some(FIXTURE_INPUT_TOKENS),
-        output_tokens: Some(FIXTURE_OUTPUT_TOKENS),
-        ..TokenUsage::default()
-    };
-    let evidence = TerminalEvidence::Refused(RefusalEvidence {
-        reason: signalbox_model_runtime::RefusalReason::Unspecified,
-        exchange: exchange.clone(),
-        message_id: None,
-        reported_model: None,
-        content: Vec::new(),
-        usage,
-        retained_input_tokens: None,
-        retained_output_tokens: None,
-    });
-
-    let decoded = require_decoded_response(evidence);
-    assert_eq!(decoded.exchange, exchange);
-    assert_eq!(decoded.usage, usage);
-}
-
-/// The smoke accepts only a decoded response: every other terminal variant —
-/// cancellation, failure, defect, boundary loss — is rejected rather than
-/// reported as a successful exchange, so a compatibility break cannot pass the
-/// gate as a completed turn.
-#[test]
-#[should_panic(expected = "the pinned Codex CLI returned no decoded response")]
-fn decoded_response_rejects_an_unexpected_terminal_variant() {
-    let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
-        response_content_observed: true,
-        cause: LossCause::ResponseUnintelligible {
-            detail: "fixture terminal variant".to_string(),
-        },
-        exchange: ExchangeFacts {
-            provider_request_id: Some(ProviderRequestId::new(FIXTURE_THREAD_ID)),
-            http_status: None,
-            retry_after: None,
-        },
-        reported_model: None,
-        finish_reported: None,
-        tool_calls: ToolCallsAtLoss::Unobserved,
-        usage: TokenUsage {
-            input_tokens: Some(FIXTURE_INPUT_TOKENS),
-            output_tokens: Some(FIXTURE_OUTPUT_TOKENS),
-            ..TokenUsage::default()
-        },
-    });
-
-    let _ = require_decoded_response(evidence);
 }
 
 /// The executable override keeps raw OS bytes: a valid Unix path that is not

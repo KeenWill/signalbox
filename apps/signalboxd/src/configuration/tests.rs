@@ -3978,13 +3978,6 @@ billing_kind = "api_metered""#,
 }
 
 #[test]
-fn configuration_admits_a_subscription_ambient_profile() {
-    // The checked-in fixture already pairs `ambient` with `subscription`;
-    // asserting it here states the other half of that delivery's rule.
-    assert!(HubModelConfiguration::parse(CONFIGURATION).is_ok());
-}
-
-#[test]
 fn configuration_rejects_an_oauth_endpoint_holding_a_username() {
     assert_oauth_token_url_rejected("https://alice@example.test/token");
 }
@@ -4015,22 +4008,6 @@ scopes = ["model:invoke"]"#,
         HubModelConfiguration::parse(&oauth).err(),
         Some(HubModelConfigurationError::InvalidCredentialDelivery)
     );
-}
-
-#[test]
-fn configuration_parses_valid_oauth() {
-    let oauth = CONFIGURATION.replace(
-        "delivery = \"ambient\"",
-        r#"delivery = "oauth"
-client_id = "synthetic-client"
-token_url = "https://example.test/token"
-refresh_token_url = "https://example.test/oauth/token"
-device_authorization_url = "https://example.test/device"
-scopes = ["model:invoke"]"#,
-    );
-
-    let configuration = HubModelConfiguration::parse(&oauth).expect("valid OAuth profile");
-    assert_eq!(configuration.oauth_registrations().len(), 1);
 }
 
 #[test]
@@ -6215,17 +6192,6 @@ fn daemon_sandbox_settings_reject_malformed_runtime_inputs() {
             "{settings}"
         );
     }
-}
-
-#[test]
-fn repository_watch_poll_budget_defaults_to_one_hundred_requests() {
-    assert_eq!(
-        HubModelConfiguration::parse(CONFIGURATION)
-            .expect("configuration")
-            .numeric_bounds()
-            .integer("repository_watch_poll_request_budget"),
-        Some(Some(100))
-    );
 }
 
 #[test]

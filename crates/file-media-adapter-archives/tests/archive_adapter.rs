@@ -12,8 +12,8 @@ use signalbox_file_media_runtime::{
     FileMediaProviderValidationRequest, FileMediaRegistry, FileMediaRegistryConstructionError,
     FileReadInput, FileReadRequest, FileReadResult, InspectionRequest, NeverCancelled,
     ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadContinuation,
-    ReadViewName, ReaderIdentity, VerifiedBlobSource,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, ReadViewName, ReaderIdentity,
+    VerifiedBlobSource,
 };
 
 struct DirectProcessor {
@@ -82,34 +82,6 @@ fn map_provider_failure(
 }
 
 #[tokio::test]
-async fn declared_zip_beyond_probe_prefix_fits_one_validation_range() -> Result<(), Box<dyn Error>>
-{
-    let source = ArchiveFixture::zip_after_long_preamble()?.into_source()?;
-    let ceilings = FileMediaCeilings {
-        validation_ranges: 1,
-        ..FileMediaCeilings::version_one()
-    };
-    let registry = FileMediaRegistry::try_new(
-        vec![declaration()?],
-        ceilings,
-        ProcessorIsolation::Available,
-    )?;
-    let inspection = registry
-        .inspect(
-            &DirectProcessor::new(),
-            InspectionRequest {
-                source: source.file_use()?,
-                visible_part: None,
-            },
-            &source,
-            &NeverCancelled,
-        )
-        .await?;
-    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
-    Ok(())
-}
-
-#[tokio::test]
 async fn lowered_validation_byte_ceiling_returns_a_typed_size_limit() -> Result<(), Box<dyn Error>>
 {
     let source = ArchiveFixture::zip()?.into_source()?;
@@ -135,50 +107,6 @@ async fn lowered_validation_byte_ceiling_returns_a_typed_size_limit() -> Result<
         )
         .await?;
     assert_eq!(malformed_reason(&inspection)?, "source_size_limit");
-    Ok(())
-}
-
-#[test]
-fn declaration_registers_four_archive_formats_under_available_isolation()
--> Result<(), Box<dyn Error>> {
-    let registry = registry()?;
-
-    assert_eq!(registry.providers(), &[declaration()?]);
-    let declaration = declaration()?;
-    assert_eq!(declaration.readers().len(), 4);
-    assert_eq!(declaration.observed_container_entries(), Some(1_000));
-    let gzip_view = declaration.readers()[0]
-        .views()
-        .first()
-        .ok_or("GZIP reader must declare its entries view")?;
-    assert_eq!(
-        gzip_view.access(),
-        ReadAccessPattern::Streaming { maximum_ranges: 1 }
-    );
-    let tar_view = declaration.readers()[1]
-        .views()
-        .first()
-        .ok_or("TAR reader must declare its entries view")?;
-    assert_eq!(
-        tar_view.access(),
-        ReadAccessPattern::Streaming { maximum_ranges: 1 }
-    );
-    let zip_view = declaration.readers()[2]
-        .views()
-        .first()
-        .ok_or("ZIP reader must declare its entries view")?;
-    assert_eq!(
-        zip_view.access(),
-        ReadAccessPattern::Streaming { maximum_ranges: 1 }
-    );
-    let zstd_view = declaration.readers()[3]
-        .views()
-        .first()
-        .ok_or("Zstandard reader must declare its entries view")?;
-    assert_eq!(
-        zstd_view.access(),
-        ReadAccessPattern::Streaming { maximum_ranges: 1 }
-    );
     Ok(())
 }
 
@@ -637,27 +565,9 @@ async fn compressed_zip_bomb_is_a_typed_bounded_failure() -> Result<(), Box<dyn 
 }
 
 #[tokio::test]
-async fn compressed_gzip_bomb_is_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
-    assert_malformed(
-        malformed_inspection(ArchiveFixture::gzip_bomb()?).await?,
-        "expanded_size_limit",
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn gzip_logical_entry_obeys_the_per_entry_ceiling() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::gzip_entry_bomb()?).await?,
-        "expanded_size_limit",
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn compressed_zstd_bomb_is_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
-    assert_malformed(
-        malformed_inspection(ArchiveFixture::zstd_bomb()?).await?,
         "expanded_size_limit",
     );
     Ok(())

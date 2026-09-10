@@ -16,7 +16,7 @@ pub enum CaseCategory {
     ContextAbsent,
     UndecodableArguments,
 }
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, ser::Serialize, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl live::CaseCategory {
     pub fn as_str(self) -> &'static str;
 }
@@ -30,7 +30,7 @@ pub enum ExpectedVerdict {
     Deny,
     EscalateToHuman,
 }
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, ser::Serialize, cmp::Eq, cmp::PartialEq
 impl live::ExpectedVerdict {
     pub const fn as_str(self) -> &'static str;
 }
@@ -51,7 +51,7 @@ pub struct CorpusCase {
     pub dispatch: option::Option<live::CorpusDispatchFence>,
     pub notes: option::Option<string::String>,
 }
-// derives: fmt::Debug, de::Deserialize<'de>
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, ser::Serialize, cmp::Eq, cmp::PartialEq
 ```
 
 ## CorpusDispatchFence
@@ -65,7 +65,7 @@ pub struct CorpusDispatchFence {
     pub head_branch: string::String,
     pub base_branch: string::String,
 }
-// derives: fmt::Debug, de::Deserialize<'de>
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, ser::Serialize, cmp::Eq, cmp::PartialEq
 ```
 
 ## CategoryScore
