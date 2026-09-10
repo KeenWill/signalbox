@@ -720,7 +720,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   failTimeline = true
   await page.getByRole('button', { name: /Latest/ }).click()
 
-  await expect(page.getByRole('alert')).toContainText("Session couldn't be loaded.")
+  await expect(page.getByRole('alert')).toContainText('Session failed to load.')
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toHaveCount(0)
   await expect(
     page
@@ -758,7 +758,7 @@ test('rejects conflicting retained Session evidence after a boundary refetch', a
   contradictRetainedEvent = true
   await page.getByRole('button', { name: /Latest/ }).click()
 
-  await expect(page.getByRole('alert')).toContainText("Session couldn't be loaded.")
+  await expect(page.getByRole('alert')).toContainText('Session failed to load.')
   expect(problems.pageErrors).toEqual([])
 })
 

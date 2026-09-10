@@ -302,7 +302,7 @@ export const commandRegistry = [
   {
     id: 'selection.next',
     title: 'Select next timeline item',
-    description: 'Move the timeline selection toward the latest item.',
+    description: 'Select the next item.',
     category: 'Navigate',
     bindings: [
       { label: 'j', registration: { kind: 'hotkey', hotkey: 'J' } },
@@ -320,7 +320,7 @@ export const commandRegistry = [
   {
     id: 'selection.previous',
     title: 'Select previous timeline item',
-    description: 'Move the timeline selection toward the first item.',
+    description: 'Select the previous item.',
     category: 'Navigate',
     bindings: [{ label: 'k', registration: { kind: 'hotkey', hotkey: 'K' } }, { label: 'ArrowUp' }],
     available: (context) => context.timelineIds.length > 0,
@@ -606,7 +606,7 @@ export const commandRegistry = [
   {
     id: 'detail.full',
     title: 'Show full transcript detail',
-    description: 'Show everything.',
+    description: 'Show all loaded events.',
     category: 'View',
     bindings: [],
     available: transcriptDetail,
@@ -633,7 +633,7 @@ export const commandRegistry = [
   {
     id: 'session.send',
     title: 'Send message',
-    description: 'Send your message.',
+    description: 'Submit input to this session.',
     category: 'Surface',
     bindings: [],
     available: (context) => context.submitSessionInput !== undefined,
