@@ -854,7 +854,6 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
             return Err(error("instruction preparation recorded another manifest"));
         }
         RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_)
-        | RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete
         | RecordTurnInstructionSnapshotOutcome::TurnUnavailable => {
             return Err(error("instruction preparation did not record the manifest"));
         }

@@ -1815,7 +1815,7 @@ async fn load_scheduling_projection_inner(
             manifest.manifest_hash_algorithm
                 AS instruction_manifest_hash_algorithm,
             manifest.manifest_hash AS instruction_manifest_hash,
-            discovery.scan_complete AS instruction_discovery_complete,
+            discovery.instruction_discovery_id,
             lifecycle.origin_kind AS turn_origin_kind,
             lifecycle.pinned_provider_model_identity_id,
             (attempt.continued_from_attempt_id IS NOT NULL)
