@@ -1752,7 +1752,7 @@ where
             .await;
         }
         Err(ImportedConversationSpoolError::Read(
-            ImportedConversationRepositoryError::Database(_),
+            ImportedConversationDiscoveryError::Database(_),
         )) => {
             return write_error(
                 writer,
@@ -1763,7 +1763,15 @@ where
             .await;
         }
         Err(ImportedConversationSpoolError::Read(error)) => {
-            let diagnostic = imported_conversation_internal_diagnostic(&error);
+            let diagnostic = match error {
+                ImportedConversationDiscoveryError::Database(_) => {
+                    InternalDiagnostic::ImportedConversationDatabase
+                }
+                ImportedConversationDiscoveryError::Request(_)
+                | ImportedConversationDiscoveryError::Corruption(_) => {
+                    InternalDiagnostic::ImportedConversationCorruption
+                }
+            };
             return write_error(
                 writer,
                 version,
@@ -1781,7 +1789,7 @@ where
 
 enum ImportedConversationSpoolError {
     Missing,
-    Read(ImportedConversationRepositoryError),
+    Read(ImportedConversationDiscoveryError),
     Spool(SnapshotSpoolError),
 }
 
@@ -1794,6 +1802,12 @@ async fn spool_imported_conversation(
     request_id: RequestId,
     max_text_preview_utf8_bytes: Option<usize>,
 ) -> Result<tokio::fs::File, ImportedConversationSpoolError> {
+    let repository = ImportedConversationDiscoveryRepository::new(pool.clone());
+    let inventory = repository
+        .entry_inventory(conversation_id)
+        .await
+        .map_err(ImportedConversationSpoolError::Read)?
+        .ok_or(ImportedConversationSpoolError::Missing)?;
     let standard_file = tempfile::tempfile()
         .map_err(SnapshotSpoolError::Io)
         .map_err(ImportedConversationSpoolError::Spool)?;
@@ -1814,30 +1828,40 @@ async fn spool_imported_conversation(
     .map_err(ImportedConversationSpoolError::Spool)?;
     let mut entry_count = 0_u64;
     let page_limit = NonZeroUsize::new(128).expect("inspection page size is positive");
+    let maximum_preview_bytes = max_text_preview_utf8_bytes
+        .unwrap_or(MAX_CONTENT_FRAGMENT_BYTES)
+        .min(MAX_CONTENT_FRAGMENT_BYTES);
+    let maximum_projected_text_bytes = if maximum_preview_bytes == 0 {
+        0
+    } else {
+        maximum_preview_bytes + 4
+    };
+    let maximum_page_text_bytes = maximum_projected_text_bytes * page_limit.get();
     loop {
-        let page = signalbox_persistence::conversation_import::load_normalized_entry_page(
-            pool,
-            conversation_id,
-            entry_count,
-            page_limit,
-        )
-        .await
-        .map_err(ImportedConversationSpoolError::Read)?
-        .ok_or(ImportedConversationSpoolError::Missing)?;
-        for entry in page.entries() {
+        let page = repository
+            .entry_page(
+                inventory,
+                entry_count,
+                page_limit,
+                maximum_projected_text_bytes,
+                maximum_page_text_bytes,
+            )
+            .await
+            .map_err(ImportedConversationSpoolError::Read)?;
+        for entry in page.items() {
             write_spool_message(
                 &mut file,
                 version,
                 request_id,
                 ServerMessage::ImportedConversationEntry {
-                    position: CanonicalU64::new(entry.position().as_u64()),
-                    imported_entry_id: wire_uuid(entry.identity().into_uuid()),
-                    source_speaker: wire_imported_speaker_attestation(entry.source_speaker()),
+                    position: CanonicalU64::new(entry.frontier.position),
+                    imported_entry_id: wire_uuid(entry.frontier.entry.into_uuid()),
+                    source_speaker: wire_imported_speaker_attestation(&entry.source_speaker),
                     content_kind: wire_imported_content_kind(process_imported_content_kind(
-                        entry.content(),
+                        &entry.content,
                     )),
                     text_preview: imported_text_preview(
-                        entry.content(),
+                        &entry.content,
                         max_text_preview_utf8_bytes,
                     ),
                 },
@@ -1878,22 +1902,22 @@ async fn spool_imported_conversation(
 /// Maps one entry's normalized content to the conservative wire kind through
 /// the same content-variant classification the transcript projection uses.
 pub(super) const fn process_imported_content_kind(
-    content: &ImportedTranscriptContent,
+    content: &ImportedEntryContentProjection,
 ) -> ProcessImportedContentKind {
     match content {
-        ImportedTranscriptContent::SourceEvent { .. } => ProcessImportedContentKind::SourceEvent,
-        ImportedTranscriptContent::SourceMessageBlock { .. } => {
+        ImportedEntryContentProjection::SourceEvent => ProcessImportedContentKind::SourceEvent,
+        ImportedEntryContentProjection::SourceMessageBlock => {
             ProcessImportedContentKind::SourceMessageBlock
         }
-        ImportedTranscriptContent::Text(_) => ProcessImportedContentKind::Text,
-        ImportedTranscriptContent::ToolCall { .. } => ProcessImportedContentKind::ToolCall,
-        ImportedTranscriptContent::ToolResult { .. } => ProcessImportedContentKind::ToolResult,
-        ImportedTranscriptContent::Thinking { .. } => ProcessImportedContentKind::Thinking,
-        ImportedTranscriptContent::RedactedThinking { .. } => {
+        ImportedEntryContentProjection::Text(_) => ProcessImportedContentKind::Text,
+        ImportedEntryContentProjection::ToolCall => ProcessImportedContentKind::ToolCall,
+        ImportedEntryContentProjection::ToolResult => ProcessImportedContentKind::ToolResult,
+        ImportedEntryContentProjection::Thinking => ProcessImportedContentKind::Thinking,
+        ImportedEntryContentProjection::RedactedThinking => {
             ProcessImportedContentKind::RedactedThinking
         }
-        ImportedTranscriptContent::Document { .. } => ProcessImportedContentKind::Document,
-        ImportedTranscriptContent::MessageContentAbsent(_) => {
+        ImportedEntryContentProjection::Document => ProcessImportedContentKind::Document,
+        ImportedEntryContentProjection::MessageContentAbsent => {
             ProcessImportedContentKind::MessageContentAbsent
         }
     }
@@ -1902,30 +1926,30 @@ pub(super) const fn process_imported_content_kind(
 /// Previews exactly the text the transcript projection already carries in
 /// full; every other imported content stays behind its kind alone.
 pub(super) fn imported_text_preview(
-    content: &ImportedTranscriptContent,
+    content: &ImportedEntryContentProjection,
     max_utf8_bytes: Option<usize>,
 ) -> Option<ImportedTextPreview> {
     match content {
-        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text))
+        ImportedEntryContentProjection::Text(ImportedSourceAttestation::Attested(text))
             if max_utf8_bytes != Some(0) =>
         {
             Some(ImportedTextPreview::of_exact_text_with_limit(
-                text.as_str(),
+                &text.leading_text,
                 max_utf8_bytes,
             ))
         }
-        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(_)) => None,
-        ImportedTranscriptContent::Text(
+        ImportedEntryContentProjection::Text(ImportedSourceAttestation::Attested(_)) => None,
+        ImportedEntryContentProjection::Text(
             ImportedSourceAttestation::AttestedAbsent | ImportedSourceAttestation::NotAttested,
         )
-        | ImportedTranscriptContent::SourceEvent { .. }
-        | ImportedTranscriptContent::SourceMessageBlock { .. }
-        | ImportedTranscriptContent::ToolCall { .. }
-        | ImportedTranscriptContent::ToolResult { .. }
-        | ImportedTranscriptContent::Thinking { .. }
-        | ImportedTranscriptContent::RedactedThinking { .. }
-        | ImportedTranscriptContent::Document { .. }
-        | ImportedTranscriptContent::MessageContentAbsent(_) => None,
+        | ImportedEntryContentProjection::SourceEvent
+        | ImportedEntryContentProjection::SourceMessageBlock
+        | ImportedEntryContentProjection::ToolCall
+        | ImportedEntryContentProjection::ToolResult
+        | ImportedEntryContentProjection::Thinking
+        | ImportedEntryContentProjection::RedactedThinking
+        | ImportedEntryContentProjection::Document
+        | ImportedEntryContentProjection::MessageContentAbsent => None,
     }
 }
 

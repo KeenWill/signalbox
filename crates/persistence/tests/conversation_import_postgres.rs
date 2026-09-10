@@ -42,11 +42,10 @@ use signalbox_persistence::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
         StreamingImportedConversationReport, corrupt_integration_imported_blob,
-        load_normalized_entry_page,
     },
     conversation_import_discovery::{
         ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
-        ImportedEntryWindowAnchor,
+        ImportedEntryContentProjection, ImportedEntryWindowAnchor,
     },
     local_test_connection_options,
 };
@@ -981,19 +980,20 @@ async fn normalized_entry_pages_bound_and_advance_the_imported_transcript()
 -> Result<(), Box<dyn Error>> {
     let fixture = import_round_trip_fixture().await?;
     let limit = NonZeroUsize::new(1).expect("the fixture page limit is positive");
-
-    let first = load_normalized_entry_page(&fixture.pool, fixture.winner, 0, limit)
+    let discovery = ImportedConversationDiscoveryRepository::new(fixture.pool.clone());
+    let inventory = discovery
+        .entry_inventory(fixture.winner)
         .await?
         .expect("the imported conversation exists");
-    assert_eq!(first.entries().len(), 1);
-    assert_eq!(first.entries()[0].position().as_u64(), 1);
+
+    let first = discovery.entry_page(inventory, 0, limit, 16, 16).await?;
+    assert_eq!(first.items().len(), 1);
+    assert_eq!(first.items()[0].frontier.position, 1);
     assert!(first.has_more());
 
-    let second = load_normalized_entry_page(&fixture.pool, fixture.winner, 1, limit)
-        .await?
-        .expect("the imported conversation exists");
-    assert_eq!(second.entries().len(), 1);
-    assert_eq!(second.entries()[0].position().as_u64(), 2);
+    let second = discovery.entry_page(inventory, 1, limit, 16, 16).await?;
+    assert_eq!(second.items().len(), 1);
+    assert_eq!(second.items()[0].frontier.position, 2);
     assert!(!second.has_more());
 
     fixture.finish().await;
@@ -2538,6 +2538,35 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
     assert_eq!(window.items[2].frontier, descriptor.latest);
     assert!(!window.has_before);
     assert!(!window.has_after);
+
+    let inventory = discovery
+        .entry_inventory(conversation)
+        .await?
+        .ok_or("entry inventory fixture import must exist")?;
+    let page = discovery
+        .entry_page(
+            inventory,
+            0,
+            NonZeroUsize::new(3).ok_or("entry-page fixture bound must be nonzero")?,
+            8,
+            12,
+        )
+        .await?;
+    assert_eq!(page.items().len(), 3);
+    let projected = page
+        .items()
+        .iter()
+        .map(|entry| match &entry.content {
+            ImportedEntryContentProjection::Text(ImportedSourceAttestation::Attested(text)) => {
+                (text.leading_text.clone(), text.complete)
+            }
+            other => panic!("expected a text projection, found {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(projected[0], (String::from("first im"), false));
+    assert_eq!(projected[1], (String::from("seco"), false));
+    assert_eq!(projected[2], (String::new(), false));
+    assert!(!page.has_more());
 
     pool.close().await;
     drop(container);

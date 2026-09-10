@@ -4,7 +4,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
-    num::NonZeroUsize,
     pin::Pin,
     sync::Arc,
 };
@@ -43,7 +42,7 @@ use crate::{
     mapping::PositiveOrdinalMappingError,
 };
 
-const STORAGE_VERSION: i16 = 1;
+pub(crate) const STORAGE_VERSION: i16 = 1;
 const CLAUDE_CODE_FORMAT: &str = "claude_code_session_jsonl";
 const CLAUDE_CODE_VERSION_ONE: i16 = 1;
 const CLAUDE_CODE_VERSION_TWO: i16 = 2;
@@ -1849,114 +1848,6 @@ pub(crate) async fn load_normalized_entry_from_connection(
     .await?;
     row.map(|row| decode_normalized_entry(row, conversation, position))
         .transpose()
-}
-
-/// One bounded page of normalized imported entries.
-#[derive(Debug)]
-pub struct ImportedConversationEntryPage {
-    entries: Box<[ImportedTranscriptEntryInput]>,
-    has_more: bool,
-}
-
-impl ImportedConversationEntryPage {
-    /// Returns the entries in ascending physical position.
-    pub const fn entries(&self) -> &[ImportedTranscriptEntryInput] {
-        &self.entries
-    }
-
-    /// Reports whether a later physical position exists.
-    pub const fn has_more(&self) -> bool {
-        self.has_more
-    }
-}
-
-/// Loads one bounded normalized-entry page without touching raw audit bytes.
-pub async fn load_normalized_entry_page(
-    pool: &PgPool,
-    conversation: ImportedConversationId,
-    after_position: u64,
-    limit: NonZeroUsize,
-) -> Result<Option<ImportedConversationEntryPage>, ImportedConversationRepositoryError> {
-    let mut connection = pool.acquire().await?;
-    let header = sqlx::query(
-        "SELECT conversation.storage_version,
-                conversation.declared_entry_count,
-                inventory.actual_entry_count,
-                inventory.inventory_is_complete
-           FROM imported_conversation AS conversation
-           CROSS JOIN LATERAL (
-               SELECT COUNT(*)::numeric AS actual_entry_count,
-                      COUNT(*)::numeric = conversation.declared_entry_count
-                      AND MAX(imported_entry_position) =
-                          conversation.declared_entry_count
-                          AS inventory_is_complete
-                 FROM imported_transcript_entry
-                WHERE imported_conversation_id =
-                      conversation.imported_conversation_id
-           ) AS inventory
-          WHERE conversation.imported_conversation_id = $1",
-    )
-    .bind(conversation.into_uuid())
-    .fetch_optional(&mut *connection)
-    .await?;
-    let Some(header) = header else {
-        return Ok(None);
-    };
-    require_i16(&header, "storage_version", STORAGE_VERSION)?;
-    let declared_entry_count = positive_u64(header.try_get("declared_entry_count")?)
-        .map_err(|reason| invalid_ordinal_with_reason("declared entry count", reason))?;
-    let actual_entry_count: Decimal = header.try_get("actual_entry_count")?;
-    let actual_entry_count =
-        u64::try_from(actual_entry_count).map_err(|_| invalid_ordinal("actual entry count"))?;
-    if !header.try_get::<bool, _>("inventory_is_complete")? {
-        return Err(ImportedConversationCorruption::Domain(
-            ImportedConversationReconstitutionFailure::DeclaredEntryCountMismatch {
-                declared: declared_entry_count,
-                actual: usize::try_from(actual_entry_count)
-                    .map_err(|_| invalid_ordinal("actual entry count"))?,
-            },
-        )
-        .into());
-    }
-
-    let requested = limit.get();
-    let fetch_limit = requested
-        .checked_add(1)
-        .and_then(|value| i64::try_from(value).ok())
-        .ok_or_else(|| invalid_ordinal("normalized entry page limit"))?;
-    let mut rows = sqlx::query(
-        "SELECT imported_entry_position, imported_transcript_entry_id,
-                raw_record_position, record_entry_position,
-                source_speaker_kind, content_encoding,
-                source_metadata_encoding
-           FROM imported_transcript_entry
-          WHERE imported_conversation_id = $1
-            AND imported_entry_position > $2
-          ORDER BY imported_entry_position
-          LIMIT $3",
-    )
-    .bind(conversation.into_uuid())
-    .bind(Decimal::from(after_position))
-    .bind(fetch_limit)
-    .fetch_all(&mut *connection)
-    .await?;
-    let has_more = rows.len() > requested;
-    rows.truncate(requested);
-    let mut entries = Vec::with_capacity(rows.len());
-    let mut expected_position = after_position
-        .checked_add(1)
-        .and_then(ImportedTranscriptPosition::try_from_u64);
-    for row in rows {
-        let expected =
-            expected_position.ok_or_else(|| invalid_ordinal("normalized entry page position"))?;
-        let entry = decode_normalized_entry(row, conversation, expected)?;
-        expected_position = expected.checked_next();
-        entries.push(entry);
-    }
-    Ok(Some(ImportedConversationEntryPage {
-        entries: entries.into_boxed_slice(),
-        has_more,
-    }))
 }
 
 async fn load_normalized_entries_from_connection(

@@ -203,10 +203,11 @@ the exact format and source bytes.
 The inspection read exposes no imported content a transcript snapshot does not
 already carry, and adds nothing for events, tools, results, thinking, media,
 absence, or raw records. It creates nothing, seeds no session, performs no
-durable write, and decodes stored positions, identities, content, and metadata
-fail-closed before presentation. The client resolves `latest` against this
-read's entry count before constructing the durable command, prints the resolved
-ordinal, and sends a concrete position.
+durable write, validates the immutable entry inventory once, and pages stored
+positions, identities, speaker evidence, and byte-bounded content projections
+fail-closed from PostgreSQL. The client resolves `latest` against this read's
+entry count before constructing the durable command, prints the resolved ordinal,
+and sends a concrete position.
 
 Ingestion publishes and verifies each raw blob with no database transaction
 open, then records its catalog evidence in a short transaction. Connection-local
