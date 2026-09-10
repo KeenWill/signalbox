@@ -7,7 +7,8 @@ reports a scorecard.
 
 The evaluation system defines, on top of the [workflows](workflows.md) layer,
 what an evaluation is and what its corpus and expectations are. Its recording
-schema lives in the migrations. Only the approval-judge harness is built.
+schema lives in the migrations. Approval-judge evaluation runs through the
+workflow program and the standalone harness.
 
 The harness is the `signalbox-approval-judge-eval` workspace crate, a temporary
 standalone evaluation surface for the three-disposition approval judge that the
@@ -51,8 +52,18 @@ infrastructure failures leave the request unanswered. The native program
 computes the existing offline or live scorecard through the pure library and
 returns it as the workflow result. Live scoring counts failed and ambiguous
 repeats as unsuccessful; an offline trial without a verdict faults without a
-scorecard. Missing blobs and inadmissible cases fail before provider work. No
-evaluation snapshot is sealed.
+scorecard. Missing blobs and inadmissible cases fail before provider work. The
+program calls `eval-record.seal` before returning the scorecard. The host
+re-decodes the pinned corpus, verifies complete manifest trial membership and
+derives the scorecard from retained journal answers; a supplied scorecard must
+agree. `evaluation_run` and `evaluation_trial` commit as one immutable snapshot
+keyed by the workflow run and trial ordinal, preserving corpus labels and
+provenance, verdicts, classified failures, ambiguity and full journal evidence.
+Equal identity and content retries adopt the same receipt, including recovery
+after commit but before delivery; changed identity, evidence or summary
+conflicts. A partial snapshot cannot commit, and sealed rows reject update,
+delete, truncate and late trial insertion. Sealing does not determine workflow
+terminal status.
 
 `WorkflowRuntime::with_eval` supplies the runner's host services and enables
 native eval registration; the default daemon rejects that registration. Operator
@@ -79,8 +90,7 @@ harness, because it spends provider quota.
 - Evaluation-created sessions whose provenance stays walkable through delegation
   lineage for as long as evaluation rows are read:
   [design](../design/eval-system.md).
-- Sealed workflow evaluation recordings and operator launch commands, after
-  which the judge-specific tables are dropped without data conversion:
-  [design](../design/eval-system.md).
+- Operator launch commands, after which the judge-specific tables are dropped
+  without data conversion: [design](../design/eval-system.md).
 - The judge-specific recording surface is temporary; nothing may build on it in
   a way that outlives it: [design](../design/eval-system.md).

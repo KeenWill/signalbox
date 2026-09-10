@@ -2,6 +2,7 @@
 
 mod effects;
 mod records;
+mod seal;
 
 pub use effects::{EvalServices, EvaluationEffects};
 pub use records::*;
@@ -66,7 +67,17 @@ impl NativeProgram for ApprovalJudgeEval {
             }
             outcomes.push(outcome);
         }
-        score(&input, &corpus, &outcomes).map(EvalScorecard)
+        let scorecard = score(&input, &corpus, &outcomes)?;
+        let _: SealAnswer = invoke(
+            &mut context,
+            ProgramCapability::EvalRecord,
+            "seal",
+            &SealRequest {
+                scorecard: scorecard.clone(),
+            },
+        )
+        .await?;
+        Ok(EvalScorecard(scorecard))
     }
 }
 

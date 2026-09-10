@@ -404,6 +404,7 @@ test_suite(
         "//crates/persistence:blob_postgres_ordinary",
         "//crates/persistence:conversation_import_postgres_ordinary",
         "//crates/persistence:conversation_listing_postgres_ordinary",
+        "//crates/persistence:evaluation_postgres_ordinary",
         "//crates/persistence:git_remote_authority_postgres_ordinary",
         "//crates/persistence:goal_postgres_ordinary",
         "//crates/persistence:imported_conversation_e2e_postgres_ordinary",
@@ -697,6 +698,7 @@ alias(
 
 PERSISTENCE_TEST_BINARIES = {
     "//crates/persistence:unit_tests": "signalbox_persistence",
+    "//crates/persistence:evaluation_postgres": "evaluation_postgres",
     "//crates/persistence:approval_judge_eval_postgres": "approval_judge_eval_postgres",
     "//crates/persistence:blob_postgres": "blob_postgres",
     "//crates/persistence:conversation_import_postgres": "conversation_import_postgres",

@@ -216,3 +216,15 @@ impl Usage {
             .with_cache_read_input_tokens(self.cache_read_input_tokens)
     }
 }
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealRequest {
+    pub scorecard: serde_json::Value,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealAnswer {
+    pub run: String,
+}

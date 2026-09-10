@@ -4,6 +4,7 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| evaluation | 4 | 0 | 0 | [evaluation](evaluation.md) |
 | program_primitives | 6 | 0 | 0 | [program_primitives](program_primitives.md) |
 | program_registration | 7 | 0 | 0 | [program_registration](program_registration.md) |
 | program_session | 6 | 1 | 0 | [program_session](program_session.md) |
