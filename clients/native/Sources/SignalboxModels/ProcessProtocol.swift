@@ -5093,7 +5093,11 @@ public struct SignalboxProcessError: Decodable, Equatable, Sendable {
     message = try decoder.decode("message")
     let container = try decoder.container(keyedBy: CodingKeys.self)
     switch code {
-    case .rejected:
+    case .rejected, .invalidRequest:
+      if code == .invalidRequest && !container.contains(.detail) {
+        detail = nil
+        return
+      }
       guard container.contains(.detail) else {
         throw DecodingError.keyNotFound(
           CodingKeys.detail,
@@ -5131,7 +5135,7 @@ public struct SignalboxProcessError: Decodable, Equatable, Sendable {
         throw DecodingError.dataCorrupted(
           .init(
             codingPath: decoder.codingPath + [CodingKeys.detail],
-            debugDescription: "Only rejected errors admit detail."
+            debugDescription: "Only rejected and invalid request errors admit detail."
           )
         )
       }
