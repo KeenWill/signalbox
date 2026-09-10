@@ -159,6 +159,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool_result(fixtures::TOOL_ID)?;
             success("tool_use", Some(fixtures::TOOL_ARGUMENTS))?;
         }
+        "tool_acknowledgement_tail" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
+        "tool_acknowledgement_tail_without_result" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
+        "tool_acknowledgement_tail_changes_model" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            assistant_text_with_identity(
+                fixtures::OTHER_MESSAGE_ID,
+                fixtures::OTHER_RESOLVED_MODEL,
+                fixtures::ANSWER,
+            )?;
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
+        "tool_acknowledgement_tail_proposes_tool" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            assistant_tool_with_message_id(fixtures::OTHER_MESSAGE_ID)?;
+            success("tool_use", None)?;
+        }
         "reserved_key_tool_arguments" => {
             assistant_tool_with_raw_arguments(
                 fixtures::TOOL_ID,
