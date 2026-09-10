@@ -154,21 +154,50 @@ impl RepositoryShell {
         )
     }
 
+    fn require_object_kind(
+        &self,
+        oid: git2::Oid,
+        expected: git2::ObjectType,
+    ) -> Result<(), git2::Error> {
+        if self.read_object_header(oid)?.1 != expected {
+            return Err(git2::Error::from_str("unexpected object kind"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn find_commit(&self, oid: git2::Oid) -> Result<git2::Commit<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Commit)?;
+        self.repository.find_commit(oid)
+    }
+
+    pub(super) fn find_tree(&self, oid: git2::Oid) -> Result<git2::Tree<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Tree)?;
+        self.repository.find_tree(oid)
+    }
+
+    pub(super) fn find_tag(&self, oid: git2::Oid) -> Result<git2::Tag<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Tag)?;
+        self.repository.find_tag(oid)
+    }
+
     pub(super) fn read_object_header(
         &self,
         oid: git2::Oid,
     ) -> Result<(usize, git2::ObjectType), git2::Error> {
+        let database = self.repository.odb()?;
         if let Some(source) = self.selected_objects.borrow().as_ref() {
             let mut source = source
                 .lock()
                 .map_err(|_| git2::Error::from_str("object source lock failed"))?;
-            let database = self.repository.odb()?;
             source.capture(&database, oid).map_err(|_| {
                 git2::Error::from_str("object read exceeds captured content bounds")
             })?;
-            return database.read_header(oid);
         }
-        self.repository.odb()?.read_header(oid)
+        let (size, kind) = database.read_header(oid)?;
+        if size > crate::limits::object_byte_limit(self.max_object_bytes, kind) {
+            return Err(git2::Error::from_str("object read exceeds content bounds"));
+        }
+        Ok((size, kind))
     }
 }
 

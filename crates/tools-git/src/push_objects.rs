@@ -537,6 +537,9 @@ impl ObjectSource {
         database: &Odb<'_>,
         content: &mut ObjectContent,
     ) -> Result<Oid, LocalGitFailure> {
+        if content.size > crate::limits::object_byte_limit(self.max_object_bytes, content.kind) {
+            return Err(LocalGitFailure::Repository);
+        }
         self.attach(database)?;
         content.store(self.directory.path(), self.format, self.deadline)
     }
@@ -579,7 +582,9 @@ impl ObjectSource {
             .ok_or(LocalGitFailure::Repository)?;
         let declared = size;
         let size = size.parse::<usize>().map_err(rejected)?;
-        if size.to_string() != declared || self.max_object_bytes.is_some_and(|limit| size > limit) {
+        if size.to_string() != declared
+            || size > crate::limits::object_byte_limit(self.max_object_bytes, kind)
+        {
             return Err(LocalGitFailure::Repository);
         }
         let content = ObjectContent::decode(&mut decoder, size, kind, self.deadline)?;
@@ -698,6 +703,16 @@ impl ObjectSource {
                     .ok_or(LocalGitFailure::Repository)?
             };
             crate::pack_read_bounds::validate_decoded_size(size, self.max_object_bytes)?;
+            let object_kind = match kind {
+                1 => ObjectType::Commit,
+                2 => ObjectType::Tree,
+                3 | 6 | 7 => ObjectType::Blob,
+                4 => ObjectType::Tag,
+                _ => return Err(LocalGitFailure::Repository),
+            };
+            if size > crate::limits::object_byte_limit(self.max_object_bytes, object_kind) {
+                return Err(LocalGitFailure::Repository);
+            }
             let base = match kind {
                 1..=4 => None,
                 6 => {
@@ -747,7 +762,8 @@ impl ObjectSource {
             _ => return Err(LocalGitFailure::Repository),
         };
         while let Some((_, delta)) = entries.pop() {
-            content = content.apply_delta(delta.file, self.max_object_bytes, self.deadline)?;
+            let limit = crate::limits::object_byte_limit(self.max_object_bytes, content.kind);
+            content = content.apply_delta(delta.file, Some(limit), self.deadline)?;
         }
         if self.store(database, &mut content)? != oid {
             return Err(LocalGitFailure::Repository);
