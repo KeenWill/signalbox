@@ -321,6 +321,12 @@ interruption of a live turn whose session is closing. Synchronous
 command-identity conflicts settle as rejected before submission continues to the
 next action.
 
+Checkout credential preparation, clone, fetch, checkout, and authentication
+refresh share one 300-second deadline. For App credentials, a clone or fetch
+rejected for authentication refreshes the retained token generation and retries
+once; bounded Git failure output is inspected only for that decision and is not
+persisted.
+
 Dispatched pull-request sessions whose watched repository configures
 `push_credential_file` or a `github_app` credential profile can use
 `git_push_configured` for their retained head branch on `origin` at

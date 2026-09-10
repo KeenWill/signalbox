@@ -998,12 +998,19 @@ async fn send_census_request(
     if let Some(app) = app {
         app.send(request, remaining)
             .await
-            .map_err(|_| CensusError::Credential)
+            .map_err(census_app_failure)
     } else {
         if let Some(remaining) = remaining {
             request = request.timeout(remaining);
         }
         request.send().await.map_err(|_| CensusError::Request)
+    }
+}
+
+fn census_app_failure(failure: signalbox_github_transport::AppRequestFailure) -> CensusError {
+    match failure {
+        signalbox_github_transport::AppRequestFailure::Credential(_) => CensusError::Credential,
+        signalbox_github_transport::AppRequestFailure::Request(_) => CensusError::Request,
     }
 }
 
@@ -1124,6 +1131,18 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn app_transport_failures_remain_request_failures_for_convergence_retries() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let source = Client::new().get("invalid-url").build().unwrap_err();
+        assert!(matches!(
+            census_app_failure(signalbox_github_transport::AppRequestFailure::Request(
+                source
+            )),
+            CensusError::Request,
+        ));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn census_credential_preparation_leaves_only_the_remaining_dispatch_budget() {

@@ -8,7 +8,9 @@ use signalbox_tools_git::{
     GitPushReceipt, GitPushRequest, GitPushTransport, GitPushTransportFailure,
 };
 
-use crate::repo_watch_credentials::{RepositoryWatchClientLoadError, RepositoryWatchClientLoader};
+use crate::repo_watch_credentials::{
+    RepositoryWatchClientLoadError, RepositoryWatchClientLoader, git_authentication_rejected,
+};
 
 // One exec-family command budget covers credentials, push attempts, and confirmation.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
@@ -162,7 +164,7 @@ async fn push_with_refresh<
     request.timeout = remaining_push_timeout(deadline)
         .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?;
     let first = runner.run(request.clone()).await;
-    if authentication_rejected(&first) {
+    if git_authentication_rejected(&first) {
         let remaining = remaining_push_timeout(deadline)
             .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?;
         let refreshed = tokio::time::timeout_at(deadline, refresh(remaining))
@@ -182,15 +184,6 @@ async fn push_with_refresh<
     Ok(first)
 }
 
-fn authentication_rejected(result: &ProcessRunResult) -> bool {
-    if !matches!(result.outcome, ProcessOutcome::Exited { code: Some(code) } if code != 0) {
-        return false;
-    }
-    let error = String::from_utf8_lossy(&result.stderr.bytes).to_ascii_lowercase();
-    error.contains("fatal: authentication failed")
-        || error.contains("requested url returned error: 401")
-}
-
 fn classify_push(result: &ProcessRunResult) -> Result<(), GitPushTransportFailure> {
     match result.outcome {
         ProcessOutcome::Exited { code: Some(0) } => Ok(()),
@@ -200,7 +193,7 @@ fn classify_push(result: &ProcessRunResult) -> Result<(), GitPushTransportFailur
         ProcessOutcome::Exited { code: Some(_) } => {
             let output = String::from_utf8_lossy(&result.stdout.bytes);
             let error = String::from_utf8_lossy(&result.stderr.bytes).to_ascii_lowercase();
-            if authentication_rejected(result)
+            if git_authentication_rejected(result)
                 || output.lines().any(|line| line.starts_with("!\t"))
                 || error.contains("permission denied")
                 || error.contains("authentication failed")

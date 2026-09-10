@@ -26,23 +26,49 @@ pub struct RepositoryWatchClientLoader {
 }
 
 impl RepositoryWatchClientLoader {
-    /// Supplies Git's authentication only through one invocation's environment.
-    pub(crate) async fn git_authorization(&self) -> Result<String, RepositoryWatchClientLoadError> {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
+    /// Supplies Git's authentication and retains the App generation for rejection feedback.
+    pub(crate) async fn git_authorization(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<GitCheckoutAuthentication, RepositoryWatchClientLoadError> {
+        if let Some(app) = self.credentials.github_app() {
+            let token = app
+                .token(Some(timeout))
+                .await
+                .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+            return Ok(GitCheckoutAuthentication {
+                authorization: git_authorization_header(token.credential_bytes())?,
+                token: Some(token),
+            });
+        }
         let credential = self
             .credentials
             .resolve(&self.reference)
             .await
             .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
-        let token = std::str::from_utf8(credential.expose_bytes())
+        Ok(GitCheckoutAuthentication {
+            authorization: git_authorization_header(credential.expose_bytes())?,
+            token: None,
+        })
+    }
+
+    pub(crate) async fn refresh_git_authorization(
+        &self,
+        authentication: &mut GitCheckoutAuthentication,
+        timeout: std::time::Duration,
+    ) -> Result<bool, RepositoryWatchClientLoadError> {
+        let (Some(app), Some(token)) =
+            (self.credentials.github_app(), authentication.token.as_ref())
+        else {
+            return Ok(false);
+        };
+        let refreshed = app
+            .refresh(token, Some(timeout))
+            .await
             .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
-        if token.is_empty() || token.contains(['\r', '\n', '\0']) {
-            return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
-        }
-        Ok(format!(
-            "Authorization: Basic {}",
-            STANDARD.encode(format!("x-access-token:{token}"))
-        ))
+        authentication.authorization = git_authorization_header(refreshed.credential_bytes())?;
+        authentication.token = Some(refreshed);
+        Ok(true)
     }
 
     pub(crate) async fn authenticated_push_url(
@@ -88,8 +114,7 @@ impl RepositoryWatchClientLoader {
             credentials: FileCredentialAccess::from_github(
                 repository.credential(),
                 reference.clone(),
-            )
-            .with_request_timeout(Some(OBSERVATION_TIMEOUT)),
+            ),
             reference,
         }
     }
@@ -128,6 +153,34 @@ impl RepositoryWatchClientLoader {
         GitHubClient::try_new("signalbox-repository-watch", token)
             .map_err(RepositoryWatchClientLoadError::from_construction)
     }
+}
+
+pub(crate) struct GitCheckoutAuthentication {
+    pub(crate) authorization: String,
+    token: Option<signalbox_github_transport::AppToken>,
+}
+
+fn git_authorization_header(token: &[u8]) -> Result<String, RepositoryWatchClientLoadError> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let token = std::str::from_utf8(token)
+        .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+    if token.is_empty() || token.contains(['\r', '\n', '\0']) {
+        return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
+    }
+    Ok(format!(
+        "Authorization: Basic {}",
+        STANDARD.encode(format!("x-access-token:{token}"))
+    ))
+}
+
+pub(crate) fn git_authentication_rejected(result: &signalbox_tools_exec::ProcessRunResult) -> bool {
+    if !matches!(result.outcome, signalbox_tools_exec::ProcessOutcome::Exited { code: Some(code) } if code != 0)
+    {
+        return false;
+    }
+    let error = String::from_utf8_lossy(&result.stderr.bytes).to_ascii_lowercase();
+    error.contains("fatal: authentication failed")
+        || error.contains("requested url returned error: 401")
 }
 
 pub(crate) struct GitPushAuthentication {
