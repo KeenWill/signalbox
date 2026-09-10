@@ -231,10 +231,9 @@ fn assert_well_formed_response(decoded: &DecodedResponse) {
     );
 }
 
-/// Credential-free, straight-line coverage for `require_decoded_response`'s
-/// branching: one case per accept path and one per rejected variant, so the
-/// classifier the paid ignored test relies on is also exercised by the
-/// ordinary suite.
+/// Credential-free coverage for `require_decoded_response`: the two accepted
+/// evidence variants preserve exchange and usage, while a provider error
+/// exercises the rejected path used by the paid ignored test.
 #[cfg(test)]
 mod require_decoded_response_tests {
     use super::*;
