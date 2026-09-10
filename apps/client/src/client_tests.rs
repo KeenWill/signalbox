@@ -3277,6 +3277,7 @@ async fn blob_read_returns_only_the_exact_range() -> Result<(), Box<dyn Error>> 
             range.version(),
             range.request_id(),
             ServerMessage::BlobChunkRead {
+                blob_length_bytes: CanonicalU64::new(offset_bytes.value() + length_bytes.value()),
                 digest,
                 offset_bytes,
                 bytes: BlobChunk::new(expected_bytes),

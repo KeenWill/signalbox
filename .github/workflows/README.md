@@ -5,29 +5,29 @@ file in the same pull request.
 
 ## Pools
 
-| Label                         | Use it for                                                                                                                |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `signalbox-orchestration`     | Change scope, eligibility, matrix generation, and result-only aggregation; no compilation                                 |
-| `signalbox-builds`            | Required Rust builds/tests, documentation, formatting, web checks, supply-chain checks, and provider compatibility smokes |
-| `signalbox-integration-tests` | Required PostgreSQL suites needing Docker/testcontainers                                                                  |
-| `signalbox-reports`           | Non-Docker API digest, instruction-count, and web-smoke reports                                                           |
-| `signalbox-coverage`          | Instrumented Rust coverage                                                                                                |
-| `signalbox-smokes`            | Docker-dependent smoke checks and report-only tool-eval families                                                          |
-| `ubuntu-latest`               | GitHub-hosted fallbacks and host-dependent jobs below                                                                     |
-| `macos-latest`                | macOS jobs                                                                                                                |
+| Label                         | Use it for                                                                                                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `signalbox-orchestration`     | Change scope, eligibility, and result-only aggregation; no compilation                                                                                                         |
+| `signalbox-builds`            | Required Rust builds/tests, dependency queries for PostgreSQL matrix generation, documentation, formatting, web checks, supply-chain checks, and provider compatibility smokes |
+| `signalbox-integration-tests` | Required PostgreSQL suites needing Docker/testcontainers                                                                                                                       |
+| `signalbox-reports`           | Non-Docker API digest, instruction-count, and web-smoke reports                                                                                                                |
+| `signalbox-coverage`          | Instrumented Rust coverage                                                                                                                                                     |
+| `signalbox-smokes`            | Docker-dependent smoke checks and report-only tool-eval families                                                                                                               |
+| `ubuntu-latest`               | GitHub-hosted fallbacks and host-dependent jobs below                                                                                                                          |
+| `macos-latest`                | macOS jobs                                                                                                                                                                     |
 
 The self-hosted ARC scale sets are managed outside this repository. Only
 `signalbox-integration-tests`, `signalbox-coverage`, and `signalbox-smokes`
 provide Docker.
 
-`rust.yml` calls `bazel.yml` for ordinary Rust tests on `signalbox-builds` and
-manifest PostgreSQL suites on `signalbox-integration-tests`. Its
-`validate-checks` aggregation uses orchestration; final `validate` stays on
-builds because it also executes two Cargo contract checks. The web job uses
-builds with declared browser runtimes and fonts. Report-tier jobs and Docker
-live smokes limit Cargo compilation to two jobs; the API digest also limits
-Bazel to two jobs. Docker sidecar CPU allowances are separate from runner
-compilation budgets.
+`rust.yml` calls `bazel.yml` for ordinary Rust tests and manifest PostgreSQL
+suites on `signalbox-integration-tests`. The ordinary suite includes a sparse
+blob session test requiring PostgreSQL. Its `validate-checks` aggregation uses
+orchestration; final `validate` stays on builds because it also executes two
+Cargo contract checks. The web job uses builds with declared browser runtimes
+and fonts. Report-tier jobs and Docker live smokes limit Cargo compilation to
+two jobs; the API digest also limits Bazel to two jobs. Docker sidecar CPU
+allowances are separate from runner compilation budgets.
 
 ## The routing rule
 
@@ -94,3 +94,34 @@ facilities stay hosted for now, although this may change over time.
 The `bazel-postgres` job uses the canonical routing expression with
 `signalbox-integration-tests`, or `ubuntu-latest` for fork and named bot pull
 requests.
+
+## Comparison checkouts
+
+Scope jobs fetch only the exact comparison revisions at depth one, without tags.
+Rust and provider-smoke pull requests ask GitHub for the merge-base SHA and diff
+its tree against the event head; push comparisons and Swift scope use the
+event's two endpoints. Local Git produces the complete NUL-delimited path list,
+including deletions, without the GitHub changed-files API's list limits. A
+comparison API or fetch failure fails the job instead of returning an empty
+scope. The API digest fetches its exact event baseline for the baseline build.
+Contract checks inspect the current tree and need no history.
+
+Provider eligibility keeps its comparison code inline in the workflow: it reads
+proposed files without executing scripts from the proposed checkout. Fetch
+authentication exists only in the fetch process environment.
+
+## PostgreSQL dependency selection
+
+The Rust scope passes its complete changed-path list to `postgres-matrix`. For
+existing Rust source edits, that job uses `bazel query` to select suites whose
+transitive source inputs changed. Query includes every branch of configurable
+dependencies and compiles nothing. It uses the builds pool because loading the
+Bazel graph needs more memory than the orchestration pool provides. Selected
+suites retain every manifest shard.
+
+Shared inputs, build definitions, non-Rust files, missing/deleted sources,
+unrecognized inputs, and unavailable path detail run every suite. A failed query
+fails matrix generation. Documentation prose, browser source and native client
+changes can bypass PostgreSQL through the coarse path gate; generated browser
+contracts keep the bar. API generation and API digest reports reuse the existing
+Rust scope, while documentation consistency checks still run.

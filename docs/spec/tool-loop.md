@@ -522,14 +522,14 @@ for a person; `auto` still delegates web requests. The judge decides before
 either tool reaches its transport or credential boundary.
 
 The blob tools authorize only digests present in attachment stubs in the
-rendered frontier for the issuing turn. A visibility or budget closure resolves
-the logical request before the request reaches the executor, and a store failure
-is returned by the executor after it traverses and verifies the recorded
-replicas. Both leave previously charged bytes charged and permit the next model
+rendered frontier for the issuing turn. A visibility closure resolves the
+logical request before it reaches the executor; a store failure is returned
+after the executor traverses the recorded replicas. Both permit the next model
 round; neither enters the crash-loss path nor fails the turn.
-[blob-storage](blob-storage.md) owns the budgets. `session_status_update`
-derives a durable command identity from the physical tool attempt and attributes
-the command and last-writer stamp to the exact `ToolRequestId`.
+[blob-storage](blob-storage.md) owns the per-read page size.
+`session_status_update` derives a durable command identity from the physical
+tool attempt and attributes the command and last-writer stamp to the exact
+`ToolRequestId`.
 
 Composed `file_inspect` and `file_read` declare external effect. Their resolver
 uses the same rendered-frontier attachment proof before source or worker I/O; a

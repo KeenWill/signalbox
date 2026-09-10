@@ -88,7 +88,7 @@ Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen
 session epoch, pinned target preview, and credential pin authorize that
 stateless estimate; it has no completion semantics and creates no call outcome.
-Attachment verification precedes that interaction. Cancellation or transient
+Attachment preparation precedes that interaction. Cancellation or transient
 attachment loss leaves the turn queued, and any later attempt must render and
 count the then-current preview again. A definitive attachment failure atomically
 activates and closes the exact prospective Prepared call with that evidence.
@@ -548,8 +548,6 @@ rendering instead of inventing text.
 
 - Multipart attachment rendering ([design](../design/model-call-execution.md)).
 - The executable session-tool snapshot
-  ([design](../design/model-call-execution.md)).
-- Reuse of a successful attachment verification within a turn
   ([design](../design/model-call-execution.md)).
 - The process-level exclusion-evidence event
   ([design](../design/model-call-execution.md)).

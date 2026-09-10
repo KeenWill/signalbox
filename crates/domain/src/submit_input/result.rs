@@ -224,9 +224,9 @@ pub enum SubmitInputRejectedResult {
         /// The unavailable immutable byte identity.
         digest: BlobDigest,
     },
-    /// Distinct attachment bytes exceeded the deployment ceiling.
+    /// An attachment exceeded the deployment per-blob ceiling.
     AttachmentByteBudgetExceeded {
-        /// The configured maximum aggregate byte count.
+        /// The configured maximum per-blob byte count.
         maximum_bytes: u64,
     },
     /// The target session did not exist.
