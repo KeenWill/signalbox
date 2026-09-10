@@ -62,7 +62,8 @@ features = ["test-support"]
 # pays the fixed shard costs once and stays well short of the long pole.
 shards = 1
 # Subprocess entry points invoked only by their owning process tests.
-skip = ["bridge_build_direct_invocation_fixture", "bridge_wait_"]
+# The file-media composition proof runs with the delegated sandbox in host_integration_tests.
+skip = ["bridge_build_direct_invocation_fixture", "bridge_wait_", "file_tools_enter_the_daemon_catalog_with_a_composed_frontier_resolver"]
 
 [[suite]]
 name = "terminal-client"
