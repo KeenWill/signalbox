@@ -251,28 +251,32 @@ fn rejected<T>(_: T) -> LocalGitFailure {
     LocalGitFailure::Repository
 }
 
-fn open_child(root: &File, path: &Path) -> Result<File, LocalGitFailure> {
+fn open_child(root: &File, path: &Path) -> Result<Option<File>, LocalGitFailure> {
     let parent = path.parent().ok_or(LocalGitFailure::Repository)?;
-    let directory = openat(
+    let directory = match openat(
         root,
         parent,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
-    )
-    .map_err(rejected)?;
-    let file = File::from(
-        openat(
-            directory.as_fd(),
-            path.file_name().ok_or(LocalGitFailure::Repository)?,
-            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(rejected)?,
-    );
+    ) {
+        Ok(directory) => directory,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(rejected(error)),
+    };
+    let file = match openat(
+        directory.as_fd(),
+        path.file_name().ok_or(LocalGitFailure::Repository)?,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(file) => File::from(file),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(rejected(error)),
+    };
     if !file.metadata().map_err(rejected)?.is_file() {
         return Err(LocalGitFailure::Repository);
     }
-    Ok(file)
+    Ok(Some(file))
 }
 
 impl ObjectSource {
@@ -507,17 +511,25 @@ impl ObjectSource {
         Ok(())
     }
 
-    pub(super) fn contains(&self, oid: Oid) -> Result<bool, LocalGitFailure> {
+    pub(super) fn contains(&mut self, oid: Oid) -> Result<bool, LocalGitFailure> {
+        self.check_deadline()?;
         let hex = oid.to_string();
-        if open_child(&self.objects, &PathBuf::from(&hex[..2]).join(&hex[2..])).is_ok() {
-            return Ok(true);
-        }
-        for pack in &self.packs {
-            if self.packed_offset(pack, oid)?.is_some() {
-                return Ok(true);
+        let mut present =
+            open_child(&self.objects, &PathBuf::from(&hex[..2]).join(&hex[2..]))?.is_some();
+        if !present {
+            for pack in &self.packs {
+                if self.packed_offset(pack, oid)?.is_some() {
+                    present = true;
+                    break;
+                }
             }
         }
-        Ok(false)
+        if present {
+            let database = Odb::new_ext(self.format).map_err(rejected)?;
+            // A generated private copy does not establish that the live copy is valid.
+            self.capture_live(&database, oid)?;
+        }
+        Ok(present)
     }
 
     pub(super) fn attach(&self, database: &Odb<'_>) -> Result<(), LocalGitFailure> {
@@ -600,9 +612,13 @@ impl ObjectSource {
         if database.exists(oid) {
             return Ok(());
         }
+        self.capture_live(database, oid)
+    }
+
+    fn capture_live(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
         let hex = oid.to_string();
         let path = PathBuf::from(&hex[..2]).join(&hex[2..]);
-        if open_child(&self.objects, &path).is_ok() {
+        if open_child(&self.objects, &path)?.is_some() {
             let source = self.open_file(&path)?;
             let file = self.files[source]
                 .file
