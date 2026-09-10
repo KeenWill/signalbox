@@ -216,6 +216,24 @@ pub async fn seed_failed_goal_turn(
     transaction.commit().await
 }
 
+/// Injects an acknowledgement outcome after a supervision transaction is written.
+pub async fn record_supervision_failure_with_commit<Commit, Outcome>(
+    pool: &PgPool,
+    session: SessionId,
+    failure: &(impl signalbox_application::ClassifyOperatorFailure + Sync),
+    commit: Commit,
+) -> Result<(), crate::session_lifecycle::SessionLifecycleRepositoryError>
+where
+    Commit: FnOnce(sqlx::Transaction<'static, sqlx::Postgres>) -> Outcome,
+    Outcome: std::future::Future<
+            Output = Result<(), crate::session_lifecycle::SessionLifecycleRepositoryError>,
+        >,
+{
+    crate::session_lifecycle::SessionLifecycleRepository::new(pool.clone())
+        .record_supervision_failure_with_commit(session, failure, commit)
+        .await
+}
+
 /// Releases a matching module park through the production lifecycle projection.
 pub async fn restore_module_park(
     pool: &PgPool,

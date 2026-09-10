@@ -582,10 +582,10 @@ impl FatalRecoveryReporter {
         &self,
         session: SessionId,
         nudge: &signalbox_application::InProcessEligibilityNudge,
-        mut write: Write,
+        write: Write,
     ) -> Result<(), signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError>
     where
-        Write: FnMut() -> Outcome,
+        Write: FnOnce() -> Outcome,
         Outcome: std::future::Future<
                 Output = Result<
                     (),
@@ -593,16 +593,7 @@ impl FatalRecoveryReporter {
                 >,
             >,
     {
-        use signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError;
-        let mut result = write().await;
-        if matches!(
-            result,
-            Err(SessionLifecycleRepositoryError::CommitAmbiguous(_))
-        ) {
-            // Recording is idempotent. A second commit acknowledges the durable park
-            // before local suspension can mask a later operator resume.
-            result = write().await;
-        }
+        let result = write().await;
         if result.is_ok() {
             self.fatal_signal.send_modify(|state| {
                 state.suspended.remove(&session);
@@ -4730,33 +4721,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervision_retries_an_ambiguous_park_before_releasing_local_suspension() {
+    async fn supervision_does_not_replay_an_unreconciled_ambiguous_park() {
         use signalbox_persistence::session_lifecycle::SessionLifecycleRepositoryError;
         let (execution, _) = FatalExecutionSupervisor::new(NoopExecution);
         let reporter = execution.recovery_reporter();
         let session = SessionId::from_uuid(Uuid::from_u128(144));
         reporter.report_session_recovery_required(session);
-        let mut durable_park = false;
-        let (nudge, _work_source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
+        let (nudge, _source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
         let mut writes = 0;
-        reporter
-            .record_session_failure(session, &nudge, || {
-                writes += 1;
-                let already_parked = std::mem::replace(&mut durable_park, true);
-                ready(if already_parked {
-                    Ok(())
-                } else {
-                    Err(SessionLifecycleRepositoryError::CommitAmbiguous(
-                        sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
-                    ))
+        assert!(
+            reporter
+                .record_session_failure(session, &nudge, || {
+                    writes += 1;
+                    ready(Err(SessionLifecycleRepositoryError::CommitAmbiguous(
+                        sqlx::Error::PoolClosed,
+                    )))
                 })
-            })
-            .await
-            .expect("idempotent retry acknowledges the committed park");
-        assert_eq!(writes, 2);
-        assert!(durable_park);
-        durable_park = false; // The operator durably resumes after the acknowledgement.
-        assert!(!durable_park && !execution.session_is_suspended(session));
+                .await
+                .is_err()
+        );
+        assert_eq!(writes, 1);
+        assert!(execution.session_is_suspended(session));
     }
 
     #[tokio::test]

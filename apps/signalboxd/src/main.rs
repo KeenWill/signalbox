@@ -159,10 +159,7 @@ impl HubRuntimeError {
     const fn infrastructure(phase: RuntimePhase) -> Self {
         Self {
             phase,
-            database_failure: matches!(
-                phase,
-                RuntimePhase::DatabaseConnection | RuntimePhase::Migration
-            ),
+            database_failure: matches!(phase, RuntimePhase::DatabaseConnection),
             failure_class: OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
@@ -413,6 +410,7 @@ enum SanitizedStartupCause<'a> {
     TemplateConfiguration(&'a SessionTemplateConfigurationError),
     TelemetryConfiguration(&'a TelemetryConfigurationError),
     Database(&'a FencedHubDatabaseError),
+    Migration(&'a sqlx::migrate::MigrateError),
     BlobStorage(&'a signalboxd::BlobStoreRegistryError),
     Tools(&'a DaemonToolsConstructionError),
     Socket(&'a LocalSocketError),
@@ -429,6 +427,7 @@ impl fmt::Display for SanitizedStartupCause<'_> {
             Self::TemplateConfiguration(error) => error.fmt(formatter),
             Self::TelemetryConfiguration(error) => error.fmt(formatter),
             Self::Database(error) => error.fmt(formatter),
+            Self::Migration(_) => formatter.write_str("database migration failed"),
             Self::BlobStorage(error) => error.fmt(formatter),
             Self::Tools(error) => error.fmt(formatter),
             Self::Socket(error) => error.fmt(formatter),
@@ -467,6 +466,20 @@ fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) ->
             catalog,
             signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_)
                 | signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_)
+        );
+    }
+    let migration = match &cause {
+        SanitizedStartupCause::Migration(migration) => Some(*migration),
+        SanitizedStartupCause::Database(FencedHubDatabaseError::InitializeFence(migration)) => {
+            Some(migration)
+        }
+        _ => None,
+    };
+    if let Some(migration) = migration {
+        error.database_failure = matches!(
+            migration,
+            sqlx::migrate::MigrateError::Execute(_)
+                | sqlx::migrate::MigrateError::ExecuteMigration(_, _)
         );
     }
     tracing::error!(
@@ -706,7 +719,7 @@ async fn migrate_hub_database(pool: &sqlx::PgPool) -> Result<(), HubRuntimeError
         tracing::error!(migration_detail = %error, "database migration rejected");
         erase_startup_cause(
             RuntimePhase::Migration,
-            SanitizedStartupCause::Static("database_migration_failed"),
+            SanitizedStartupCause::Migration(&error),
         )
     })?;
     tracing::info!(phase = ?RuntimePhase::Migration, "daemon startup phase completed");
@@ -1309,6 +1322,33 @@ fn recovery_incarnation_outcome(
         }
         result => GuardedIncarnationOutcome::Finished(result),
     }
+}
+
+fn reload_recovery_failure(
+    failure: &signalbox_persistence::reload_configuration::ReloadRepositoryError,
+) -> HubRuntimeError {
+    use signalbox_persistence::reload_configuration::ReloadRepositoryError;
+    let mut error = erase_startup_cause(
+        RuntimePhase::StartupScan,
+        SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
+    );
+    (error.failure_class, error.database_failure) = match failure {
+        ReloadRepositoryError::Database(_) => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            true,
+        ),
+        ReloadRepositoryError::CommitAmbiguous(_) => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            true,
+        ),
+        ReloadRepositoryError::Corruption(_) => (OperatorFailureClass::FailClosedCorruption, false),
+        ReloadRepositoryError::InvalidCommandId => (OperatorFailureClass::CallerOrHubBug, false),
+    };
+    error
 }
 
 fn startup_goal_resumption_result(
@@ -2302,12 +2342,10 @@ async fn run_hub_incarnation(
             Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
             None => None,
         };
-        configuration_reload.recover().await.map_err(|_| {
-            erase_startup_database_cause(
-                RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
-            )
-        })
+        configuration_reload
+            .recover()
+            .await
+            .map_err(|error| reload_recovery_failure(&error))
     };
     let recovery_failure = match await_while_guarded(&mut database, reconstruct).await {
         GuardedAwait::Completed(Ok(())) => None,
@@ -3490,7 +3528,12 @@ mod tests {
         use signalboxd::guard_recovery::{GuardRecoveryPolicy, run_guarded_incarnations};
         let failures = RefCell::new(VecDeque::from([
             Ok(ShutdownOutcome::GuardLost),
-            Err(HubRuntimeError::infrastructure(RuntimePhase::Migration)),
+            Err(super::erase_startup_cause(
+                RuntimePhase::Migration,
+                super::SanitizedStartupCause::Migration(&sqlx::migrate::MigrateError::Execute(
+                    sqlx::Error::PoolClosed,
+                )),
+            )),
             Err(HubRuntimeError::startup_scan(
                 OperatorFailureClass::Infrastructure {
                     commit_ambiguous: false,
@@ -3542,6 +3585,81 @@ mod tests {
                 Duration::from_secs(7),
                 Duration::from_secs(9)
             ]
+        );
+    }
+
+    #[test]
+    fn reload_recovery_reacquires_only_database_failures() {
+        use signalbox_persistence::reload_configuration::ReloadRepositoryError;
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        for (failure, expected_class, database) in [
+            (
+                ReloadRepositoryError::Database(sqlx::Error::PoolClosed),
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+                true,
+            ),
+            (
+                ReloadRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                },
+                true,
+            ),
+            (
+                ReloadRepositoryError::Corruption("fixture snapshot is incompatible"),
+                OperatorFailureClass::FailClosedCorruption,
+                false,
+            ),
+            (
+                ReloadRepositoryError::InvalidCommandId,
+                OperatorFailureClass::CallerOrHubBug,
+                false,
+            ),
+        ] {
+            let error = super::reload_recovery_failure(&failure);
+            assert_eq!(error.failure_class, expected_class, "{failure}");
+            assert_eq!(
+                matches!(
+                    super::recovery_incarnation_outcome(Err(error), true),
+                    GuardedIncarnationOutcome::Reacquire
+                ),
+                database,
+                "{failure}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_recovery_preserves_database_and_version_failures() {
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://fixture:fixture@localhost/fixture")
+            .unwrap();
+        pool.close().await;
+        let unavailable = super::migrate_hub_database(&pool)
+            .await
+            .expect_err("closed pool cannot migrate");
+        assert!(matches!(
+            super::recovery_incarnation_outcome(Err(unavailable), true),
+            GuardedIncarnationOutcome::Reacquire
+        ));
+        let mismatch = sqlx::migrate::MigrateError::VersionMismatch(1);
+        let migration = super::erase_startup_cause(
+            RuntimePhase::Migration,
+            super::SanitizedStartupCause::Migration(&mismatch),
+        );
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(migration), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == migration)
+        );
+        let initialization = signalboxd::FencedHubDatabaseError::InitializeFence(mismatch);
+        let initialization = super::erase_startup_cause(
+            RuntimePhase::Migration,
+            super::SanitizedStartupCause::Database(&initialization),
+        );
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(initialization), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == initialization)
         );
     }
 

@@ -3615,3 +3615,87 @@ async fn startup_settles_repaired_terminal_supervision_without_resuming()
     drop(container);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn ambiguous_supervision_commit_preserves_a_concurrent_operator_resume()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(116);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(interactive_creation(116))
+        .await?;
+    activate_first_turn(&pool, session, 116).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let failure = signalbox_persistence::startup::StartupScanRepositoryError::from(
+        signalbox_persistence::startup::StartupScanCorruption::Missing("fixture supervision"),
+    );
+    signalbox_persistence::test_support::record_supervision_failure_with_commit(
+        &pool,
+        session,
+        &failure,
+        |transaction| async {
+            transaction.commit().await?;
+            lifecycle.resume(session).await?;
+            Err(SessionLifecycleRepositoryError::CommitAmbiguous(
+                sqlx::Error::PoolClosed,
+            ))
+        },
+    )
+    .await?;
+    let resumed = lifecycle
+        .load(session)
+        .await?
+        .expect("resumed session exists");
+    assert!(!resumed.state().is_parked());
+    assert!(!resumed.supervision_failure().unwrap().pending);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn an_uncommitted_supervision_attempt_does_not_acknowledge_an_identical_prior_cause()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = creation_session(117);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(interactive_creation(117))
+        .await?;
+    activate_first_turn(&pool, session, 117).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let failure = signalbox_persistence::startup::StartupScanRepositoryError::from(
+        signalbox_persistence::startup::StartupScanCorruption::Missing("fixture supervision"),
+    );
+    lifecycle
+        .record_supervision_failure(session, &failure)
+        .await?;
+    lifecycle.resume(session).await?;
+    let error = signalbox_persistence::test_support::record_supervision_failure_with_commit(
+        &pool,
+        session,
+        &failure,
+        |transaction| async {
+            transaction.rollback().await?;
+            Err(SessionLifecycleRepositoryError::CommitAmbiguous(
+                sqlx::Error::PoolClosed,
+            ))
+        },
+    )
+    .await
+    .expect_err("a prior identical cause cannot acknowledge this rolled-back write");
+    assert!(matches!(
+        error,
+        SessionLifecycleRepositoryError::CommitAmbiguous(_)
+    ));
+    let prior = lifecycle
+        .load(session)
+        .await?
+        .expect("prior resumed session exists");
+    assert!(!prior.state().is_parked());
+    assert!(!prior.supervision_failure().unwrap().pending);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

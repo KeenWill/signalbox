@@ -316,6 +316,21 @@ impl SessionLifecycleRepository {
         session: SessionId,
         failure: &(impl ClassifyOperatorFailure + Sync),
     ) -> Result<(), SessionLifecycleRepositoryError> {
+        self.record_supervision_failure_with_commit(session, failure, commit)
+            .await
+    }
+
+    pub(crate) async fn record_supervision_failure_with_commit<Commit, Outcome>(
+        &self,
+        session: SessionId,
+        failure: &(impl ClassifyOperatorFailure + Sync),
+        commit: Commit,
+    ) -> Result<(), SessionLifecycleRepositoryError>
+    where
+        Commit: FnOnce(sqlx::Transaction<'static, sqlx::Postgres>) -> Outcome,
+        Outcome: std::future::Future<Output = Result<(), SessionLifecycleRepositoryError>>,
+    {
+        let supervision = Uuid::now_v7();
         let mut transaction = self.pool.begin().await?;
         sqlx::query(lock_inventory::SESSION_LIFECYCLE_SESSION)
             .bind(session_id_to_uuid(session))
@@ -362,19 +377,37 @@ impl SessionLifecycleRepository {
         };
         sqlx::query(
             "INSERT INTO session_supervision
-                (session_id, supervision_failure_class, supervision_cause_code, supervision_pending)
-             VALUES ($1, $2, $3, true)
+                (session_id, supervision_failure_class, supervision_cause_code, supervision_pending, supervision_id)
+             VALUES ($1, $2, $3, true, $4)
              ON CONFLICT (session_id) DO UPDATE
                  SET supervision_failure_class = EXCLUDED.supervision_failure_class,
                      supervision_cause_code = EXCLUDED.supervision_cause_code,
-                     supervision_pending = true",
+                     supervision_pending = true,
+                     supervision_id = EXCLUDED.supervision_id",
         )
         .bind(session_id_to_uuid(session))
         .bind(class)
         .bind(failure.operator_failure_cause_code())
+        .bind(supervision)
         .execute(&mut *transaction)
         .await?;
-        commit(transaction).await
+        let outcome = commit(transaction).await;
+        if matches!(
+            outcome,
+            Err(SessionLifecycleRepositoryError::CommitAmbiguous(_))
+        ) {
+            let recorded = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM session_supervision WHERE session_id = $1 AND supervision_id = $2)",
+            )
+            .bind(session_id_to_uuid(session))
+            .bind(supervision)
+            .fetch_one(&self.pool)
+            .await;
+            if matches!(recorded, Ok(true)) {
+                return Ok(());
+            }
+        }
+        outcome
     }
 
     /// Returns a parked session to the state its suspended turn maps to.
