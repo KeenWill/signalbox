@@ -148,3 +148,47 @@ async fn credential_capacity_absent_report_preserves_prior_evidence() -> Result<
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_capacity_probe_preserves_newer_call_evidence_and_records_its_own_provenance()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::credential_capacity::retain_credential_capacity_probe;
+    let (container, pool, _) = migrated_postgres().await?;
+    let observed_at = SystemTime::now();
+    let from_call = ProviderRateLimitSnapshot::new(
+        observed_at,
+        vec![ProviderRateLimitWindow::new(23, None, None)],
+    );
+    const CALL: u128 = 0xce00; // arbitrary independent call fixture
+    let fixture = commit_capacity_call(&pool, CALL, Some(from_call.clone())).await?;
+    let profile = model_credential_reference();
+    let stale_probe = ProviderRateLimitSnapshot::new(
+        observed_at - Duration::from_secs(1),
+        vec![ProviderRateLimitWindow::new(0, None, None)],
+    );
+    assert!(!retain_credential_capacity_probe(&pool, profile.as_str(), &stale_probe).await?);
+    assert_eq!(
+        load_credential_rate_limits(&mut *pool.acquire().await?, profile.as_str()).await?,
+        Some(from_call)
+    );
+    let source: Option<Uuid> = sqlx::query_scalar("SELECT observation_model_call_id FROM credential_rate_limit_snapshot WHERE credential_reference = $1").bind(profile.as_str()).fetch_one(&pool).await?;
+    assert_eq!(source, Some(fixture.call.into_uuid()));
+    let fresh_probe = ProviderRateLimitSnapshot::new(
+        observed_at + Duration::from_secs(1),
+        vec![ProviderRateLimitWindow::new(100, None, None)],
+    );
+    assert!(retain_credential_capacity_probe(&pool, profile.as_str(), &fresh_probe).await?);
+    assert_eq!(
+        load_credential_rate_limits(&mut *pool.acquire().await?, profile.as_str()).await?,
+        Some(fresh_probe)
+    );
+    let source: Option<Uuid> = sqlx::query_scalar("SELECT observation_model_call_id FROM credential_rate_limit_snapshot WHERE credential_reference = $1").bind(profile.as_str()).fetch_one(&pool).await?;
+    assert_eq!(
+        source, None,
+        "an out-of-call probe must not claim a model call as provenance"
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

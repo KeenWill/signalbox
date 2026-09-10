@@ -27,6 +27,9 @@ static ERROR_TAG: OnceLock<String> = OnceLock::new();
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     record_spawn()?;
+    if Path::new("fake-codex-capacity-probe").exists() {
+        return capacity_probe();
+    }
     validate_argv()?;
     if Path::new(fixtures::EARLY_STDIN_HELD_EXIT_MARKER).exists() {
         // A descendant inherits the stdin read end and never reads it, so the
@@ -870,4 +873,43 @@ fn emit(line: &str) {
             .unwrap_or(fixtures::THREAD_ID),
     );
     println!("{line}");
+}
+
+fn capacity_probe() -> Result<(), Box<dyn std::error::Error>> {
+    let mut requests = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("capacity-probe-requests")?;
+    let initialize = read_frame()?;
+    assert_eq!(initialize["method"], "initialize");
+    writeln!(requests, "initialize")?;
+    emit_value(json!({"id":initialize["id"],"result":{}}));
+    assert_eq!(read_frame()?["method"], "initialized");
+    writeln!(requests, "initialized")?;
+    let read = read_frame()?;
+    assert_eq!(read["method"], "account/rateLimits/read");
+    writeln!(requests, "account/rateLimits/read")?;
+    requests.flush()?;
+    let capacity: Value = serde_json::from_slice(&std::fs::read("fake-codex-capacity-probe")?)?;
+    if capacity["hang"] == true {
+        let descendant = std::process::Command::new("sleep").arg("60").spawn()?;
+        std::fs::write(
+            "capacity-probe-group",
+            format!(
+                "process_group={}\ndescendant={}\n",
+                std::process::id(),
+                descendant.id()
+            ),
+        )?;
+        std::thread::sleep(Duration::from_secs(60));
+    }
+    emit_value(json!({"id":read["id"],"result":{"rateLimits":capacity}}));
+    // Anything after the rate-limits read is forbidden for this peer.
+    let mut extra = String::new();
+    let _ = std::io::stdin().read_line(&mut extra)?;
+    assert!(
+        extra.is_empty(),
+        "capacity probe started a model exchange: {extra}"
+    );
+    Ok(())
 }

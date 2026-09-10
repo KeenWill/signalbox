@@ -107,11 +107,13 @@ merged-pull-request baseline retention as described in
 [repository watch](repo-watch.md). `codex_cli_version_probe_bound` bounds a
 credential-free startup probe of the configured Codex executable, and a missing,
 malformed, zero, unsuccessful, or mismatched probe fails configuration before
-the socket opens. One valid document yields correlated immutable in-memory
-catalogs: the domain `ModelTargetCatalog` for execution-time target resolution
-and the `RuntimeModelCatalog` for the provider bridge. The optional
-`repository_watch_poll_request_budget` defaults to 100 and accepts integers from
-2 through 1,000, including the quota preflight request in each attempt.
+the socket opens. The same bound limits each read-only Codex capacity probe for
+[parked credential waits](credential-availability.md). One valid document yields
+correlated immutable in-memory catalogs: the domain `ModelTargetCatalog` for
+execution-time target resolution and the `RuntimeModelCatalog` for the provider
+bridge. The optional `repository_watch_poll_request_budget` defaults to 100 and
+accepts integers from 2 through 1,000, including the quota preflight request in
+each attempt.
 
 `guard_recovery_initial_delay` and `guard_recovery_maximum_delay` are positive
 durations, with the maximum no smaller than the initial delay.
