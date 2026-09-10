@@ -3718,7 +3718,7 @@ fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
     }
 }
 
-const fn encode_error_kind(value: ToolExecutionErrorKind) -> &'static str {
+pub(crate) const fn encode_error_kind(value: ToolExecutionErrorKind) -> &'static str {
     match value {
         ToolExecutionErrorKind::UnknownTool => "unknown_tool",
         ToolExecutionErrorKind::InvalidArguments => "invalid_arguments",

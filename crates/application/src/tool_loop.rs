@@ -64,7 +64,7 @@ impl ToolInputSchema {
             NormalizedToolArguments::try_from_provider_text(value.clone()).map_err(|error| {
                 ToolInputSchemaError {
                     value: value.clone(),
-                    failure: ToolInputSchemaFailure::OutsideArgumentBound(error.failure()),
+                    failure: ToolInputSchemaFailure::NormalizationFailed(error.failure()),
                 }
             })?;
         if normalized.kind() != ToolArgumentsKind::Json {
@@ -95,8 +95,8 @@ pub enum ToolInputSchemaFailure {
     NotJson,
     /// Tool arguments require an object-shaped schema.
     NotObject,
-    /// The schema exceeded the domain argument bound or could not normalize.
-    OutsideArgumentBound(signalbox_domain::ToolArgumentsFailure),
+    /// The schema text could not be normalized.
+    NormalizationFailed(signalbox_domain::ToolArgumentsFailure),
 }
 
 /// Failed schema construction retaining the exact rejected text.
@@ -2984,6 +2984,18 @@ mod tests {
         let error = CompiledToolCatalog::try_new([first, second])
             .expect_err("duplicate dispatch names are ambiguous");
         assert_eq!(error.name(), &tool_name("same"));
+    }
+
+    #[test]
+    fn schema_normalization_reports_unrepresentable_text() {
+        assert_eq!(
+            ToolInputSchema::try_new("\0".to_owned())
+                .expect_err("NUL cannot enter durable schema text")
+                .failure(),
+            ToolInputSchemaFailure::NormalizationFailed(
+                signalbox_domain::ToolArgumentsFailure::ContainsNull
+            ),
+        );
     }
 
     #[test]
