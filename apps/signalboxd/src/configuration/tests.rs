@@ -6308,7 +6308,7 @@ max_candidate_source_bytes = 5
 max_elapsed = "6s""#,
             signalbox_application::InstructionDiscoveryLimits {
                 classified_entries: Some(3),
-                findings: Some(4),
+                findings: std::num::NonZeroUsize::new(4),
                 candidate_source_bytes: Some(5),
                 elapsed: Some(std::time::Duration::from_secs(6)),
             },
@@ -6333,4 +6333,12 @@ max_elapsed = "none""#,
             HubModelConfiguration::parse(&text).expect("configured discovery limits");
         assert_eq!(configuration.workspace_instructions().limits(), expected);
     }
+}
+
+#[test]
+fn workspace_instruction_finding_limit_rejects_zero() {
+    let text = format!(
+        "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = []\nmax_findings = 0\n"
+    );
+    assert!(HubModelConfiguration::parse(&text).is_err());
 }

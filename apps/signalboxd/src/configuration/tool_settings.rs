@@ -149,13 +149,17 @@ pub(super) fn parse_workspace_instruction_configuration(
             .map(Some)
             .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration),
     };
-    let findings = integer("max_findings", defaults.findings.map(|value| value as u64))?
-        .map(usize::try_from)
-        .transpose()
-        .map_err(|_| HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
-    if findings == Some(0) {
-        return Err(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration);
-    }
+    let findings = integer(
+        "max_findings",
+        defaults.findings.map(|value| value.get() as u64),
+    )?
+    .map(|value| {
+        usize::try_from(value)
+            .ok()
+            .and_then(std::num::NonZeroUsize::new)
+            .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)
+    })
+    .transpose()?;
     let elapsed = match table.get("max_elapsed") {
         None => defaults.elapsed,
         Some(item) if item.as_str() == Some("none") => None,

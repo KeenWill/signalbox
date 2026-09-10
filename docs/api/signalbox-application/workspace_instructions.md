@@ -76,7 +76,7 @@ impl InstructionDiscoverySnapshot {
 ```rust
 pub struct InstructionDiscoveryLimits {
     pub classified_entries: option::Option<u64>,
-    pub findings: option::Option<usize>,
+    pub findings: option::Option<nonzero::NonZeroUsize>,
     pub candidate_source_bytes: option::Option<u64>,
     pub elapsed: option::Option<time::Duration>,
 }
