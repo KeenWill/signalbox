@@ -31,6 +31,28 @@ pub struct ContextCompactionModelRequest {
     pub rendered_range: String,
 }
 
+impl ContextCompactionModelRequest {
+    /// Builds the operation used by dedicated compaction execution and input measurement.
+    pub fn into_operation(
+        self,
+        definition: &crate::RuntimeModelDefinition,
+    ) -> ModelOperation<ModelCallId> {
+        let mut operation = ModelOperation::new(
+            self.call,
+            CredentialReference::new(self.credential_reference),
+            RequestedTarget::new(render_selection(self.selection)),
+            ResolvedTarget::new(definition.provider_model().to_owned()),
+            vec![ConversationMessage::user_text(self.rendered_range)],
+            ModelSettings::new(definition.max_output_tokens()),
+        );
+        operation.system = Some(self.system_prompt);
+        operation.delivery = DeliveryMode::Buffered;
+        operation.provider_compaction = ProviderCompactionMode::Suppressed;
+        operation.provider_compaction_supported = definition.provider_compaction_supported();
+        operation
+    }
+}
+
 /// Exact successful result of one dedicated summary call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextCompactionModelResult {
@@ -108,18 +130,8 @@ where
                 .resolve(request.target)
                 .ok_or(ContextCompactionModelError::UnconfiguredTarget)?;
             let resolved = ResolvedTarget::new(definition.provider_model().to_owned());
-            let mut operation = ModelOperation::new(
-                request.call,
-                CredentialReference::new(request.credential_reference),
-                RequestedTarget::new(render_selection(request.selection)),
-                resolved.clone(),
-                vec![ConversationMessage::user_text(request.rendered_range)],
-                ModelSettings::new(definition.max_output_tokens()),
-            );
-            operation.system = Some(request.system_prompt);
-            operation.delivery = DeliveryMode::Buffered;
-            operation.provider_compaction = ProviderCompactionMode::Suppressed;
-            operation.provider_compaction_supported = definition.provider_compaction_supported();
+            let call = request.call;
+            let operation = request.into_operation(definition);
             let prepared = match self
                 .runtime
                 .prepare(operation, CancellationSignal::never())
@@ -141,7 +153,7 @@ where
                 .runtime
                 .execute(prepared, &mut observations, CancellationSignal::never())
                 .await;
-            if report.correlation != request.call {
+            if report.correlation != call {
                 return Err(ContextCompactionModelError::CorrelationMismatch);
             }
             for reported in observations.iter().filter_map(|observation| {

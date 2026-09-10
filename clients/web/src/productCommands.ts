@@ -19,7 +19,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.attention',
     title: 'Go to Attention',
-    description: 'Open Attention.',
+    description: '',
     category: 'Navigate',
     bindings: [
       {
@@ -33,7 +33,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.sessions',
     title: 'Go to Sessions',
-    description: 'Open Sessions.',
+    description: '',
     category: 'Navigate',
     bindings: [
       {
@@ -47,7 +47,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.imports',
     title: 'Go to Imports',
-    description: 'Open Imports.',
+    description: '',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
@@ -56,7 +56,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.reviews',
     title: 'Go to Reviews',
-    description: 'Open Reviews.',
+    description: '',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
@@ -65,7 +65,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.runners',
     title: 'Go to Runners',
-    description: 'Open Runners.',
+    description: '',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
@@ -83,7 +83,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.usage',
     title: 'Go to Usage',
-    description: 'Open Usage.',
+    description: '',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
@@ -92,7 +92,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.settings',
     title: 'Go to Settings',
-    description: 'Open Settings.',
+    description: '',
     category: 'Navigate',
     bindings: [
       {
@@ -106,7 +106,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.scenario',
     title: 'Go to Scenario studio',
-    description: 'Open Scenario studio.',
+    description: '',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
