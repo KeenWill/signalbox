@@ -236,6 +236,7 @@ pub(super) fn write_pack(
     mut content_for: impl FnMut(Oid) -> Result<ObjectContent, LocalGitFailure>,
     format: ObjectFormat,
     directory: &std::path::Path,
+    deadline: Option<Instant>,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), LocalGitFailure> {
     // Git pack-format and index-format v2. One publication batch owns one pair.
     if objects.len() > crate::limits::MAX_REPOSITORY_INSPECTIONS {
@@ -280,7 +281,7 @@ pub(super) fn write_pack(
         }
         let mut encoder = ZlibEncoder::new(writer, Compression::default());
         content.file.rewind().map_err(failed)?;
-        std::io::copy(&mut content.file, &mut encoder).map_err(failed)?;
+        copy_pack_pages(&mut content.file, &mut encoder, || check_deadline(deadline))?;
         writer = encoder.finish().map_err(failed)?;
         let crc = std::mem::replace(&mut writer.crc, crc32fast::Hasher::new()).finalize();
         entries.push((oid, crc, offset));
@@ -490,5 +491,51 @@ fn check_deadline(deadline: Option<Instant>) -> Result<(), LocalGitFailure> {
         Err(LocalGitFailure::Repository)
     } else {
         Ok(())
+    }
+}
+
+fn copy_pack_pages(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    mut check: impl FnMut() -> Result<(), LocalGitFailure>,
+) -> Result<(), LocalGitFailure> {
+    let mut buffer = [0; IO_BYTES];
+    loop {
+        check()?;
+        let count = reader.read(&mut buffer).map_err(failed)?;
+        if count == 0 {
+            return Ok(());
+        }
+        writer.write_all(&buffer[..count]).map_err(failed)?;
+    }
+}
+
+#[cfg(test)]
+mod pack_deadline_tests {
+    use super::*;
+    #[test]
+    fn private_pack_copy_checks_deadline_between_pages() {
+        let mut checks = 0;
+        let mut copied = 0;
+        struct Counter<'a>(&'a mut usize);
+        impl Write for Counter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                *self.0 += bytes.len();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let result = copy_pack_pages(&mut std::io::repeat(1), &mut Counter(&mut copied), || {
+            checks += 1;
+            if checks == 2 {
+                Err(LocalGitFailure::Repository)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(copied, IO_BYTES);
     }
 }

@@ -76,16 +76,7 @@ impl Hunks {
         Ok(BufReader::new(file))
     }
     pub(super) fn permitted(&mut self, deadline: Instant) -> Result<Effects, GitPushFailure> {
-        let slots = self
-            .effects
-            .checked_mul(2)
-            .and_then(|n| n.checked_add(1))
-            .and_then(u64::checked_next_power_of_two)
-            .ok_or(GitPushFailure::Repository)?;
-        let file = tempfile::tempfile().map_err(failed)?;
-        file.set_len(slots.checked_mul(48).ok_or(GitPushFailure::Repository)?)
-            .map_err(failed)?;
-        let mut effects = Effects { file, slots };
+        let mut effects = Effects::new(self.effects)?;
         let mut reader = self.reader()?;
         while let Some(record) = record(&mut reader)? {
             check(deadline)?;
@@ -178,6 +169,17 @@ pub(super) struct Effects {
     slots: u64,
 }
 impl Effects {
+    fn new(count: u64) -> Result<Self, GitPushFailure> {
+        let slots = count
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(1))
+            .and_then(u64::checked_next_power_of_two)
+            .ok_or(GitPushFailure::Repository)?;
+        let file = tempfile::tempfile().map_err(failed)?;
+        file.set_len(slots.checked_mul(48).ok_or(GitPushFailure::Repository)?)
+            .map_err(failed)?;
+        Ok(Self { file, slots })
+    }
     fn change(
         &mut self,
         hash: [u8; 32],
@@ -335,150 +337,249 @@ pub(super) fn text_hunks(
 ) -> Result<(), GitPushFailure> {
     let old = Lines::new(old, deadline)?;
     let new = Lines::new(new, deadline)?;
-    let mut prefix = 0;
-    while prefix < old.count.min(new.count) && old.line(prefix)?.hash == new.line(prefix)?.hash {
+    // Pending ranges and both search frontiers live on disk, including for
+    // highly unbalanced splits. Only the current range occupies resident memory.
+    let mut pending = Ranges::new()?;
+    pending.push([0, old.count, 0, new.count])?;
+    let mut start = true;
+    while let Some([mut a, mut b, mut c, mut d]) = pending.pop()? {
         check(deadline)?;
-        prefix += 1;
-    }
-    let mut old_end = old.count;
-    let mut new_end = new.count;
-    while old_end > prefix
-        && new_end > prefix
-        && old.line(old_end - 1)?.hash == new.line(new_end - 1)?.hash
-    {
-        check(deadline)?;
-        old_end -= 1;
-        new_end -= 1;
-    }
-    if old_end == prefix || new_end == prefix {
-        if old_end != prefix || new_end != prefix {
-            hunks.start()?;
+        if a == b && c == d {
+            start = true;
+            continue;
         }
-        for line in prefix..old_end {
-            old.emit(line, b'-', hunks, deadline)?;
+        while a < b && c < d && old.line(a)?.hash == new.line(c)?.hash {
+            check(deadline)?;
+            a += 1;
+            c += 1;
+            start = true;
         }
-        for line in prefix..new_end {
-            new.emit(line, b'+', hunks, deadline)?;
+        let mut suffix = false;
+        while a < b && c < d && old.line(b - 1)?.hash == new.line(d - 1)?.hash {
+            check(deadline)?;
+            b -= 1;
+            d -= 1;
+            suffix = true;
         }
-        return Ok(());
+        if suffix {
+            pending.push([0; 4])?;
+        }
+        if a == b && c == d {
+            continue;
+        }
+        if a == b || c == d || !have_common_line(&old, &new, [a, b, c, d], deadline)? {
+            if start {
+                hunks.start()?;
+                start = false;
+            }
+            for line in a..b {
+                old.emit(line, b'-', hunks, deadline)?;
+            }
+            for line in c..d {
+                new.emit(line, b'+', hunks, deadline)?;
+            }
+            continue;
+        }
+        let (x, y) = bisect(&old, &new, [a, b, c, d], deadline)?;
+        if (x == a && y == c) || (x == b && y == d) {
+            return Err(GitPushFailure::Repository);
+        }
+        pending.push([x, b, y, d])?;
+        pending.push([a, x, c, y])?;
     }
-    let n = i64::try_from(old_end - prefix).map_err(failed)?;
-    let m = i64::try_from(new_end - prefix).map_err(failed)?;
-    let max = n.checked_add(m).ok_or(GitPushFailure::Repository)?;
-    let frontier = tempfile::tempfile().map_err(failed)?;
-    frontier
-        .set_len(
-            u64::try_from(
-                max.checked_mul(2)
-                    .and_then(|n| n.checked_add(3))
-                    .ok_or(GitPushFailure::Repository)?,
-            )
-            .map_err(failed)?
-            .checked_mul(8)
-            .ok_or(GitPushFailure::Repository)?,
+    Ok(())
+}
+
+struct Ranges {
+    file: File,
+    count: u64,
+}
+impl Ranges {
+    fn new() -> Result<Self, GitPushFailure> {
+        Ok(Self {
+            file: tempfile::tempfile().map_err(failed)?,
+            count: 0,
+        })
+    }
+    fn push(&mut self, range: [u64; 4]) -> Result<(), GitPushFailure> {
+        let offset = self
+            .count
+            .checked_mul(32)
+            .ok_or(GitPushFailure::Repository)?;
+        for (index, value) in range.into_iter().enumerate() {
+            self.file
+                .write_all_at(&value.to_le_bytes(), offset + index as u64 * 8)
+                .map_err(failed)?;
+        }
+        self.count += 1;
+        Ok(())
+    }
+    fn pop(&mut self) -> Result<Option<[u64; 4]>, GitPushFailure> {
+        if self.count == 0 {
+            return Ok(None);
+        }
+        self.count -= 1;
+        let mut range = [0; 4];
+        for (index, value) in range.iter_mut().enumerate() {
+            let mut bytes = [0; 8];
+            self.file
+                .read_exact_at(&mut bytes, self.count * 32 + index as u64 * 8)
+                .map_err(failed)?;
+            *value = u64::from_le_bytes(bytes);
+        }
+        Ok(Some(range))
+    }
+}
+
+fn have_common_line(
+    old: &Lines,
+    new: &Lines,
+    [a, b, c, d]: [u64; 4],
+    deadline: Instant,
+) -> Result<bool, GitPushFailure> {
+    // A disjoint replacement needs no edit-distance search. This keeps the
+    // all-different case linear in source lines and scratch space.
+    let mut hashes = Effects::new(b - a)?;
+    for line in a..b {
+        hashes.change(old.line(line)?.hash, true, deadline)?;
+    }
+    for line in c..d {
+        if hashes.change(new.line(line)?.hash, false, deadline)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+struct Frontier {
+    file: File,
+    offset: i64,
+}
+impl Frontier {
+    fn new(distance: i64) -> Result<Self, GitPushFailure> {
+        let file = tempfile::tempfile().map_err(failed)?;
+        let slots = distance
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(3))
+            .ok_or(GitPushFailure::Repository)?;
+        file.set_len(
+            u64::try_from(slots)
+                .map_err(failed)?
+                .checked_mul(8)
+                .ok_or(GitPushFailure::Repository)?,
         )
         .map_err(failed)?;
-    let mut trace = BufWriter::new(tempfile::tempfile().map_err(failed)?);
-    let mut distance = 0;
-    'search: for d in 0..=max {
-        for k in (-d..=d).step_by(2) {
+        let result = Self {
+            file,
+            offset: distance + 1,
+        };
+        result.set(1, 0)?;
+        Ok(result)
+    }
+    fn position(&self, k: i64) -> Result<u64, GitPushFailure> {
+        u64::try_from(self.offset + k)
+            .map_err(failed)?
+            .checked_mul(8)
+            .ok_or(GitPushFailure::Repository)
+    }
+    fn get(&self, k: i64) -> Result<i64, GitPushFailure> {
+        let mut bytes = [0; 8];
+        self.file
+            .read_exact_at(&mut bytes, self.position(k)?)
+            .map_err(failed)?;
+        // Sparse zero pages represent unreachable diagonals.
+        Ok(i64::from_le_bytes(bytes) - 1)
+    }
+    fn set(&self, k: i64, x: i64) -> Result<(), GitPushFailure> {
+        self.file
+            .write_all_at(&(x + 1).to_le_bytes(), self.position(k)?)
+            .map_err(failed)
+    }
+}
+
+fn bisect(
+    old: &Lines,
+    new: &Lines,
+    [a, b, c, e]: [u64; 4],
+    deadline: Instant,
+) -> Result<(u64, u64), GitPushFailure> {
+    let n = i64::try_from(b - a).map_err(failed)?;
+    let m = i64::try_from(e - c).map_err(failed)?;
+    let max = n
+        .checked_add(m)
+        .and_then(|n| n.checked_add(1))
+        .ok_or(GitPushFailure::Repository)?
+        / 2;
+    let forward = Frontier::new(max)?;
+    let reverse = Frontier::new(max)?;
+    let delta = n - m;
+    let odd = delta % 2 != 0;
+    let (mut forward_start, mut forward_end, mut reverse_start, mut reverse_end) = (0, 0, 0, 0);
+    for distance in 0..=max {
+        for k in (-distance + forward_start..=distance - forward_end).step_by(2) {
             check(deadline)?;
-            let mut x = if k == -d
-                || (k != d && value(&frontier, max + k - 1)? < value(&frontier, max + k + 1)?)
-            {
-                value(&frontier, max + k + 1)?
-            } else {
-                value(&frontier, max + k - 1)? + 1
-            };
+            let mut x =
+                if k == -distance || (k != distance && forward.get(k - 1)? < forward.get(k + 1)?) {
+                    forward.get(k + 1)?
+                } else {
+                    forward.get(k - 1)? + 1
+                };
             let mut y = x - k;
-            while x < n
+            while x >= 0
+                && y >= 0
+                && x < n
                 && y < m
-                && old.line(prefix + x as u64)?.hash == new.line(prefix + y as u64)?.hash
+                && old.line(a + x as u64)?.hash == new.line(c + y as u64)?.hash
             {
                 check(deadline)?;
                 x += 1;
                 y += 1;
             }
-            frontier
-                .write_all_at(&x.to_le_bytes(), ((max + k) as u64) * 8)
-                .map_err(failed)?;
-            trace.write_all(&x.to_le_bytes()).map_err(failed)?;
-            if x >= n && y >= m {
-                distance = d;
-                break 'search;
+            forward.set(k, x)?;
+            if x > n {
+                forward_end += 2;
+            } else if y > m {
+                forward_start += 2;
+            } else if odd && (delta - k).abs() < distance {
+                let backwards = reverse.get(delta - k)?;
+                if backwards >= 0 && x >= n - backwards {
+                    return Ok((a + x as u64, c + y as u64));
+                }
+            }
+        }
+        for k in (-distance + reverse_start..=distance - reverse_end).step_by(2) {
+            check(deadline)?;
+            let mut x =
+                if k == -distance || (k != distance && reverse.get(k - 1)? < reverse.get(k + 1)?) {
+                    reverse.get(k + 1)?
+                } else {
+                    reverse.get(k - 1)? + 1
+                };
+            let mut y = x - k;
+            while x >= 0
+                && y >= 0
+                && x < n
+                && y < m
+                && old.line(b - x as u64 - 1)?.hash == new.line(e - y as u64 - 1)?.hash
+            {
+                check(deadline)?;
+                x += 1;
+                y += 1;
+            }
+            reverse.set(k, x)?;
+            if x > n {
+                reverse_end += 2;
+            } else if y > m {
+                reverse_start += 2;
+            } else if !odd && (delta - k).abs() <= distance {
+                let forwards = forward.get(delta - k)?;
+                if forwards >= 0 && forwards >= n - x {
+                    return Ok((a + forwards as u64, c + (forwards - (delta - k)) as u64));
+                }
             }
         }
     }
-    let trace = trace.into_inner().map_err(failed)?;
-    let mut operations = BufWriter::new(tempfile::tempfile().map_err(failed)?);
-    let (mut x, mut y) = (n, m);
-    for d in (1..=distance).rev() {
-        check(deadline)?;
-        let k = x - y;
-        let previous =
-            |k| -> Result<i64, GitPushFailure> { value(&trace, (d - 1) * d / 2 + (k + d - 1) / 2) };
-        let previous_k = if k == -d || (k != d && previous(k - 1)? < previous(k + 1)?) {
-            k + 1
-        } else {
-            k - 1
-        };
-        let previous_x = previous(previous_k)?;
-        let previous_y = previous_x - previous_k;
-        if x > previous_x && y > previous_y {
-            operation(&mut operations, b'=', 0)?;
-            x = previous_x + i64::from(previous_k == k - 1);
-            y = previous_y + i64::from(previous_k == k + 1);
-        }
-        if x == previous_x {
-            operation(&mut operations, b'+', prefix + (y - 1) as u64)?;
-        } else {
-            operation(&mut operations, b'-', prefix + (x - 1) as u64)?;
-        }
-        x = previous_x;
-        y = previous_y;
-    }
-    let operations = operations.into_inner().map_err(failed)?;
-    let mut position = operations.metadata().map_err(failed)?.len();
-    let mut start = true;
-    while position != 0 {
-        check(deadline)?;
-        position -= 9;
-        let mut operation = [0; 9];
-        operations
-            .read_exact_at(&mut operation, position)
-            .map_err(failed)?;
-        if operation[0] == b'=' {
-            start = true;
-            continue;
-        }
-        if start {
-            hunks.start()?;
-            start = false;
-        }
-        let line = u64::from_le_bytes(operation[1..].try_into().map_err(failed)?);
-        if operation[0] == b'-' {
-            old.emit(line, b'-', hunks, deadline)?;
-        } else {
-            new.emit(line, b'+', hunks, deadline)?;
-        }
-    }
-    Ok(())
-}
-fn value(file: &File, index: i64) -> Result<i64, GitPushFailure> {
-    let mut bytes = [0; 8];
-    file.read_exact_at(
-        &mut bytes,
-        u64::try_from(index)
-            .map_err(failed)?
-            .checked_mul(8)
-            .ok_or(GitPushFailure::Repository)?,
-    )
-    .map_err(failed)?;
-    Ok(i64::from_le_bytes(bytes))
-}
-fn operation(file: &mut impl Write, origin: u8, line: u64) -> Result<(), GitPushFailure> {
-    file.write_all(&[origin]).map_err(failed)?;
-    file.write_all(&line.to_le_bytes()).map_err(failed)
+    Err(GitPushFailure::Repository)
 }
 
 #[cfg(test)]
@@ -559,6 +660,88 @@ mod tests {
                     .is_some()
             );
         }
+    }
+    #[test]
+    fn disk_diff_matches_minimum_edit_counts_for_repeated_line_sequences() {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut seed = 19u64;
+        for case in 0..256 {
+            let mut sequence = |length: usize| -> Vec<u8> {
+                (0..length)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        b'a' + ((seed >> 32) % 4) as u8
+                    })
+                    .collect()
+            };
+            let old = sequence(case % 13);
+            let new = sequence((case / 13) % 13);
+            // A small dynamic-programming oracle checks the independent minimum
+            // edit count, including ambiguous alignments of repeated lines.
+            let mut lengths = [[0; 14]; 14];
+            for (i, &left) in old.iter().enumerate() {
+                for (j, &right) in new.iter().enumerate() {
+                    lengths[i + 1][j + 1] = if left == right {
+                        lengths[i][j] + 1
+                    } else {
+                        lengths[i][j + 1].max(lengths[i + 1][j])
+                    };
+                }
+            }
+            let text = |lines: &[u8]| -> String {
+                lines
+                    .iter()
+                    .map(|&byte| format!("{}\n", char::from(byte)))
+                    .collect()
+            };
+            let mut hunks = Hunks::new().expect("hunks");
+            text_hunks(
+                content(&text(&old)),
+                content(&text(&new)),
+                &mut hunks,
+                deadline,
+            )
+            .expect("divide-and-conquer diff");
+            assert_eq!(
+                hunks.effects as usize,
+                old.len() + new.len() - 2 * lengths[old.len()][new.len()],
+                "case {case}: {old:?} -> {new:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disk_diff_handles_fifty_thousand_mutually_different_lines() {
+        let make = |prefix: &str| {
+            let mut file = tempfile::tempfile().expect("generated text");
+            for line in 0..50_000 {
+                writeln!(file, "{prefix}-{line}").expect("line");
+            }
+            let size = file.metadata().expect("metadata").len() as usize;
+            file.rewind().expect("rewind");
+            ObjectContent {
+                file,
+                size,
+                kind: git2::ObjectType::Blob,
+            }
+        };
+        let old = make("old");
+        let new = make("new");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut hunks = Hunks::new().expect("hunks");
+        text_hunks(old, new, &mut hunks, deadline).expect("linear disjoint replacement");
+        assert_eq!(hunks.effects, 100_000);
+        let mut empty = Hunks::new()
+            .expect("empty")
+            .permitted(deadline)
+            .expect("counts");
+        let (preview, truncated) = hunks
+            .first_dropped(&mut empty, MAX_MERGE_DETAIL_BYTES, deadline)
+            .expect("comparison")
+            .expect("dropped changes");
+        assert!(preview.starts_with("-old-0\n"));
+        assert!(preview.len() <= MAX_MERGE_DETAIL_BYTES);
+        assert!(truncated);
     }
     #[test]
     fn streamed_merge_work_stops_at_its_deadline() {
