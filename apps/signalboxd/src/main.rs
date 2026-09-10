@@ -2758,9 +2758,9 @@ async fn run_hub_incarnation(
             RuntimeTaskExit::LifecycleMetrics
         });
     }
+    let mut termination_signals = TerminationSignals::new();
     guard_recovery.runtime_ready();
     tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
-    let mut termination_signals = TerminationSignals::new();
 
     let mut drain_interrupted = false;
     let mut outcome = {

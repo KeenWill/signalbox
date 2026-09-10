@@ -187,7 +187,8 @@ the connection. Neither bound limits idle connections or idle follow streams;
 
 SIGINT or SIGTERM stops admission and drains runtime work under the configured
 shutdown grace window. A subsequent termination signal interrupts that drain,
-aborts remaining runtime tasks, and proceeds immediately to cleanup.
+aborts remaining runtime tasks, and proceeds immediately to cleanup. The runtime
+creates its termination listeners before marking guard recovery complete.
 
 Every accepted non-review mutation, import transport request, or blob transport
 request produces exactly one receipt message or an error, except when a
