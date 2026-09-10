@@ -233,6 +233,9 @@ fn retry_event(
         RepoWatchEventKindV1::Labeled { label } if !current.context().labels().contains(label) => {
             return None;
         }
+        RepoWatchEventKindV1::Unlabeled { label } if current.context().labels().contains(label) => {
+            return None;
+        }
         RepoWatchEventKindV1::ChecksCompleted { .. } => RepoWatchEventKindV1::ChecksCompleted {
             outcome: if failing {
                 ChecksOutcome::Failure
@@ -482,6 +485,28 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn restored_labels_stop_an_unlabeled_retry_even_while_conflicting() {
+        let label = LabelName::try_new("repo-watch".to_owned()).expect("label");
+        let (rule, event) = origin(RepoWatchEventKindV1::Unlabeled {
+            label: label.clone(),
+        });
+        for (labels, eligible) in [(vec![], true), (vec![label], false)] {
+            let mut current = input();
+            current.context = context(labels);
+            current.mergeable_state = MergeableState::Conflicting;
+            assert_eq!(
+                retry_event(
+                    &rule,
+                    &event,
+                    &[RepoWatchPullRequestState::try_new(current).expect("pull")]
+                )
+                .is_some(),
+                eligible
+            );
+        }
     }
 
     #[test]
