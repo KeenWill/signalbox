@@ -163,7 +163,7 @@ export const commandRegistry = [
   {
     id: 'navigate.attention',
     title: 'Go to Attention',
-    description: '',
+    description: 'Open Attention.',
     category: 'Navigate',
     bindings: [{ label: 'g a', registration: { kind: 'sequence', sequence: ['G', 'A'] } }],
     available: productNavigation,
@@ -172,7 +172,7 @@ export const commandRegistry = [
   {
     id: 'navigate.sessions',
     title: 'Go to Sessions',
-    description: '',
+    description: 'Open Sessions.',
     category: 'Navigate',
     bindings: [{ label: 'g s', registration: { kind: 'sequence', sequence: ['G', 'S'] } }],
     available: productNavigation,
@@ -181,7 +181,7 @@ export const commandRegistry = [
   {
     id: 'navigate.imports',
     title: 'Go to Imports',
-    description: '',
+    description: 'Open Imports.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -190,7 +190,7 @@ export const commandRegistry = [
   {
     id: 'navigate.reviews',
     title: 'Go to Reviews',
-    description: '',
+    description: 'Open Reviews.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -199,7 +199,7 @@ export const commandRegistry = [
   {
     id: 'navigate.runners',
     title: 'Go to Runners',
-    description: '',
+    description: 'Open Runners.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -217,7 +217,7 @@ export const commandRegistry = [
   {
     id: 'navigate.usage',
     title: 'Go to Usage',
-    description: '',
+    description: 'Open Usage.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -226,7 +226,7 @@ export const commandRegistry = [
   {
     id: 'navigate.settings',
     title: 'Go to Settings',
-    description: '',
+    description: 'Open Settings.',
     category: 'Navigate',
     bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
     available: productNavigation,
@@ -235,7 +235,7 @@ export const commandRegistry = [
   {
     id: 'navigate.scenario',
     title: 'Go to Scenario studio',
-    description: '',
+    description: 'Open Scenario studio.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -244,7 +244,7 @@ export const commandRegistry = [
   {
     id: 'artifact.open',
     title: 'Open artifact inspector',
-    description: 'Look up stored content by digest.',
+    description: 'Look up a blob by digest.',
     category: 'Surface',
     bindings: [],
     available: artifactInspector,
@@ -302,7 +302,7 @@ export const commandRegistry = [
   {
     id: 'selection.next',
     title: 'Select next timeline item',
-    description: 'Move the timeline selection toward the latest item.',
+    description: 'Select the next item.',
     category: 'Navigate',
     bindings: [
       { label: 'j', registration: { kind: 'hotkey', hotkey: 'J' } },
@@ -320,7 +320,7 @@ export const commandRegistry = [
   {
     id: 'selection.previous',
     title: 'Select previous timeline item',
-    description: 'Move the timeline selection toward the first item.',
+    description: 'Select the previous item.',
     category: 'Navigate',
     bindings: [{ label: 'k', registration: { kind: 'hotkey', hotkey: 'K' } }, { label: 'ArrowUp' }],
     available: (context) => context.timelineIds.length > 0,
@@ -477,7 +477,7 @@ export const commandRegistry = [
   {
     id: 'imports.continue.fork',
     title: 'Fork from this entry',
-    description: 'Start a new branch from this entry.',
+    description: 'Start a forked session from this entry.',
     category: 'Imports',
     bindings: [],
     available: (context) =>
@@ -606,7 +606,7 @@ export const commandRegistry = [
   {
     id: 'detail.full',
     title: 'Show full transcript detail',
-    description: 'Show everything.',
+    description: 'Show all loaded events.',
     category: 'View',
     bindings: [],
     available: transcriptDetail,
@@ -633,7 +633,7 @@ export const commandRegistry = [
   {
     id: 'session.send',
     title: 'Send message',
-    description: 'Send your message.',
+    description: 'Submit input to this session.',
     category: 'Surface',
     bindings: [],
     available: (context) => context.submitSessionInput !== undefined,
@@ -718,7 +718,7 @@ export const commandRegistry = [
   {
     id: 'preferences.reset',
     title: 'Restore preference defaults',
-    description: 'Reset all settings.',
+    description: 'Reset browser preferences.',
     category: 'Settings',
     bindings: [],
     available: always,

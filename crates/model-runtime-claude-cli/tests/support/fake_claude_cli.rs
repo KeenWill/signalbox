@@ -166,6 +166,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;
         }
+        "tool_acknowledgement_thinking_then_text" | "tool_acknowledgement_thinking_only" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            emit_json(&serde_json::json!({
+                "type": "assistant", "parent_tool_use_id": null,
+                "message": {
+                    "id": fixtures::OTHER_MESSAGE_ID, "model": fixtures::MODEL,
+                    "role": "assistant", "content": [{
+                        "type": "thinking", "thinking": "synthetic acknowledgement reasoning",
+                        "signature": "synthetic-signature",
+                    }],
+                },
+            }))?;
+            if scenario == "tool_acknowledgement_thinking_then_text" {
+                assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            }
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
         "tool_acknowledgement_tail_reports_tool_use" => {
             assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
             tool_result(fixtures::TOOL_ID)?;

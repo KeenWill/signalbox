@@ -172,6 +172,7 @@ pub(crate) fn delegation_rejection_matches(
         | RejectionDetail::ToolRequestNotDelegateDenied { .. }
         | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
         | RejectionDetail::ToolDenialAlreadyOverridden { .. }
+        | RejectionDetail::ToolDenialReasonTooLong { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
         | RejectionDetail::UnknownModelAlias { .. }

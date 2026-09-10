@@ -720,7 +720,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   failTimeline = true
   await page.getByRole('button', { name: /Latest/ }).click()
 
-  await expect(page.getByRole('alert')).toContainText("Session couldn't be loaded.")
+  await expect(page.getByRole('alert')).toContainText('Session failed to load.')
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toHaveCount(0)
   await expect(
     page
@@ -758,7 +758,7 @@ test('rejects conflicting retained Session evidence after a boundary refetch', a
   contradictRetainedEvent = true
   await page.getByRole('button', { name: /Latest/ }).click()
 
-  await expect(page.getByRole('alert')).toContainText("Session couldn't be loaded.")
+  await expect(page.getByRole('alert')).toContainText('Session failed to load.')
   expect(problems.pageErrors).toEqual([])
 })
 
@@ -1337,7 +1337,7 @@ test('serves exact source-session searches through the deterministic adapter', a
   const rows = page.getByRole('rowgroup', { name: 'Imported conversation rows' })
   await expect(rows).toHaveAttribute('data-total-loaded', importsProductFixture.loadedImports)
   await page.getByRole('textbox', { name: 'Source session' }).fill('source-session-0')
-  await page.getByRole('checkbox', { name: 'Filter by source' }).check()
+  await page.getByRole('checkbox', { name: 'Filter by source session' }).check()
 
   await expect(rows).toHaveAttribute('data-total-loaded', '1')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -1809,7 +1809,7 @@ test('starts the settled exact import filter without the previous page cursor', 
   })
   await input.fill('source-session-0')
   await page.clock.runFor(200)
-  await page.getByRole('checkbox', { name: 'Filter by source' }).check()
+  await page.getByRole('checkbox', { name: 'Filter by source session' }).check()
   await expect.poll(() => requests.at(-1)?.source).toBe('source-session-0')
   await expect(page.getByRole('button', { name: 'Next', exact: true })).toBeEnabled()
   await input.fill('source-session-1')

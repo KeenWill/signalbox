@@ -101,6 +101,8 @@ pub struct OperatorStatusEndMessage {
     /// The `nonterminal_past_deadline` alarm value, target zero.
     pub lifecycle_deadline_violation_count: CanonicalU64,
     pub session_supervision_count: CanonicalU64,
+    /// Persistent undecodable outbox rows, with zero as the healthy value.
+    pub outbox_quarantine_count: CanonicalU64,
 }
 
 /// One member of a coherent operator-status snapshot.

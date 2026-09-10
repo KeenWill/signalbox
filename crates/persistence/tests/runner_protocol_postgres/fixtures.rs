@@ -1052,6 +1052,61 @@ pub(crate) async fn dispatch_next_outbox_event_at(
     Ok(dispatched.expect("the delivered outcome carries its decoded event"))
 }
 
+pub(crate) async fn assert_next_outbox_event_quarantined(
+    pool: &PgPool,
+    expected: OutboxCorruption,
+) -> Result<(), Box<dyn Error>> {
+    let outcome = OutboxDispatcher::new(pool.clone())
+        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+        .await?;
+    assert!(
+        matches!(
+            outcome,
+            OutboxDispatchOutcome::Idle | OutboxDispatchOutcome::Delivered { .. }
+        ),
+        "dispatch continues through the quarantined event: {outcome:?}"
+    );
+
+    let decode_error = expected.to_string();
+    let sequence: Decimal = sqlx::query_scalar(
+        "SELECT event_sequence
+           FROM outbox_event_quarantine
+          WHERE decode_error = $1",
+    )
+    .bind(&decode_error)
+    .fetch_one(pool)
+    .await?;
+    let quarantine_count: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox_event_quarantine")
+        .fetch_one(pool)
+        .await?;
+    let delivered = sqlx::query_scalar::<_, Decimal>(
+        "SELECT delivered_through
+           FROM outbox_consumer_cursor
+          WHERE consumer_name = 'process_protocol'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert!(
+        delivered >= sequence,
+        "the process-protocol cursor advances through the quarantined event: \
+         {delivered} < {sequence}"
+    );
+
+    let mut status =
+        signalbox_persistence::operator_status::ProcessOperatorStatusRepository::new(pool.clone())
+            .open()
+            .await?;
+    while status.next_item().await?.is_some() {}
+    assert_eq!(
+        status
+            .counts()
+            .expect("completed operator status")
+            .outbox_quarantines(),
+        u64::try_from(quarantine_count).expect("a quarantine row count fits u64")
+    );
+    Ok(())
+}
+
 pub(crate) async fn placement_outbox_facts(
     pool: &PgPool,
     session: SessionId,

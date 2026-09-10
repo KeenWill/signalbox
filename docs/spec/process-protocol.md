@@ -298,6 +298,9 @@ violations and before repository ingestion. Each carries `session_id`,
 the section order and count and presents each pending item, including corrupt
 terminal sessions skipped at startup.
 
+The end message also carries `outbox_quarantine_count`, a persistent health
+alarm whose healthy value is zero.
+
 Operator status includes one `repository_ingestion` record per configured
 watched repository and a `repository_ingestion_count` in its end message. A
 repository attempt that exhausts its request budget or leaves failed targeted
