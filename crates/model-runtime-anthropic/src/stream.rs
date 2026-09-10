@@ -532,17 +532,8 @@ impl StreamDecoder {
                 signature,
             } => BlockBuilder::Thinking {
                 text: thinking,
-                // The provider's public thinking documentation states the
-                // streamed shape: the block opens with empty-string
-                // `thinking` and `signature` placeholder fields and the
-                // real signature arrives through a later `signature_delta`
-                // (under the newest models' default omitted display, that
-                // single delta is the block's only content). An empty
-                // opening value is therefore "not delivered yet", never a
-                // first signature: counting it would reject the documented
-                // shape as a duplicate. The close-time law is unchanged —
-                // the block must still end with exactly one non-empty
-                // signature.
+                // Signatures are optional. An empty opening value is a placeholder;
+                // later signature fragments are concatenated.
                 signature: signature.filter(|value| !value.is_empty()),
             },
             WireResponseBlock::RedactedThinking { data } => BlockBuilder::RedactedThinking { data },

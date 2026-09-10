@@ -219,11 +219,9 @@ fn unparsed_block_tool_calls(opened: ToolCallsOpened) -> ToolCallsAtLoss {
 
 /// The tool fact where the decode stopped on a block it had already classified.
 ///
-/// Rejecting a block the adapter understood — a fallback marker, an unsigned
-/// thinking block, an unrecognized block type — leaves that block examined and
-/// known not to be a tool call, so only the blocks the loop never reached can
-/// withhold the answer. When the rejected block is the last one, nothing is
-/// unexamined and the negative is a fact.
+/// Rejecting a classified non-tool block leaves only later unexamined blocks
+/// able to withhold the answer. Thinking signatures are optional; stream decoding
+/// concatenates their fragments.
 fn examined_block_tool_calls(opened: ToolCallsOpened, later: LaterBlocks) -> ToolCallsAtLoss {
     match (opened, later) {
         (ToolCallsOpened::Yes, LaterBlocks::Unexamined | LaterBlocks::AllClassified) => {
