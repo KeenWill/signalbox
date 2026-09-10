@@ -1,138 +1,64 @@
-name: Bazel
-
+name: CI capacity experiment
 on:
-  workflow_call:
-    inputs:
-      postgres:
-        description: Run PostgreSQL integration shards for affected paths.
-        type: boolean
-        default: true
-      changed-paths:
-        description: JSON changed paths for conservative source dependency selection.
-        type: string
-        default: '[]'
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: bazel-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
-  bazel-tests:
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-integration-tests' }}
-    timeout-minutes: 20
+  fixture-benchmark:
+    runs-on: signalbox-integration-tests
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bazel
         with:
           remote-cache: ${{ vars.BAZEL_REMOTE_CACHE }}
-      - name: Fetch dependencies for the compile-fail fixture compiler
-        run: cargo fetch --locked
-      - name: Build and test the Bazel migration slice
+      - name: Build the pinned test executable
         run: |
-          bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 //:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation
-
-  bazel-host-integration:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-bazel
-        with:
-          remote-cache: ${{ vars.BAZEL_REMOTE_CACHE }}
-      - name: Install Bubblewrap
+          bazel build --jobs=4 //crates/persistence:postgres_integration
+          test_binary=$(bazel cquery //crates/persistence:postgres_integration --output=files)
+          python3 tooling/ci-capacity/prepare.py "$test_binary"
+          lscpu > tooling/ci-capacity/worker-cpu.txt
+          git rev-parse HEAD > tooling/ci-capacity/revision.txt
+      - name: Create an isolated eight-CPU benchmark daemon
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
-      - name: Enable unprivileged user namespaces for Bubblewrap
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Delegate the file-media task controller
-        run: |
-          sudo mkdir /sys/fs/cgroup/signalbox-file-media-ci
-          sudo sh -c 'echo +pids +memory > /sys/fs/cgroup/cgroup.subtree_control'
-          sudo mkdir /sys/fs/cgroup/signalbox-file-media-ci/runner
-          sudo sh -c 'echo +pids +memory > /sys/fs/cgroup/signalbox-file-media-ci/cgroup.subtree_control'
-          sudo chown -R "$USER" /sys/fs/cgroup/signalbox-file-media-ci
-      - name: Run host integration tests
-        env:
-          SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
-          SIGNALBOX_FILE_MEDIA_CGROUP_ROOT: /sys/fs/cgroup/signalbox-file-media-ci
-        run: |
-          runner_uid="$(id -u)"
-          runner_gid="$(id -g)"
-          runner_home="$HOME"
-          runner_path="$PATH"
-          sudo --preserve-env=CI,SIGNALBOX_RUN_BWRAP_INTEGRATION,SIGNALBOX_FILE_MEDIA_CGROUP_ROOT \
-            sh -eu -c '
-              echo $$ > "$SIGNALBOX_FILE_MEDIA_CGROUP_ROOT/runner/cgroup.procs"
-              exec setpriv --reuid="$1" --regid="$2" --init-groups \
-                env HOME="$3" PATH="$4" bazel --batch test --keep_going \
-                  --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 \
-                  --local_test_jobs=1 --test_env=SIGNALBOX_FILE_MEDIA_CGROUP_ROOT \
-                  --test_env=SIGNALBOX_RUN_BWRAP_INTEGRATION //:host_integration_tests
-            ' sh "$runner_uid" "$runner_gid" "$runner_home" "$runner_path"
-
-  postgres-matrix:
-    if: github.event_name == 'workflow_dispatch' || inputs.postgres
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-builds' }}
-    timeout-minutes: 10
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-bazel
-        with:
-          remote-cache: ${{ vars.BAZEL_REMOTE_CACHE }}
-      - id: matrix
-        env:
-          CHANGED_PATHS: ${{ inputs.changed-paths || '[]' }}
-        run: |
-          matrix=$(python3 scripts/ci_bazel_scope.py --changed-paths "$CHANGED_PATHS")
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-
-  bazel-postgres:
-    if: github.event_name == 'workflow_dispatch' || inputs.postgres
-    needs: postgres-matrix
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.postgres-matrix.outputs.matrix) }}
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-integration-tests' }}
-    # Each worker runs one manifest partition across the suite's binaries.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-bazel
-        with:
-          remote-cache: ${{ vars.BAZEL_REMOTE_CACHE }}
-      - name: Run the manifest PostgreSQL suite
-        env:
-          BAZEL_POSTGRES_SUITE: ${{ matrix.suite }}
-          BAZEL_POSTGRES_SHARD_INDEX: ${{ matrix.shard_index }}
-        run: python3 scripts/measure_docker_resources.py run --output "$RUNNER_TEMP/docker-resources.json" -- python3 scripts/postgres_integration_suites.py --run-suite "$BAZEL_POSTGRES_SUITE" --shard-index "$BAZEL_POSTGRES_SHARD_INDEX" --build-event-json "$RUNNER_TEMP/postgres-events.jsonl"
-      - name: Report Docker test-container resources
+          benchmark_container="cicapacity-${GITHUB_RUN_ID}"
+          echo "BENCHMARK_CONTAINER=$benchmark_container" >> "$GITHUB_ENV"
+          docker create --name "$benchmark_container" --label org.signalbox.ci-capacity=experiment \
+            --privileged --cgroupns=host --cgroup-parent="/cicapacity${GITHUB_RUN_ID}" \
+            --entrypoint /bin/sh \
+            docker:29.4.0-dind@sha256:a6dd5322747a95cd8e3207bd8d415a8fd20ec34e9c00f06dc019cbd912013489 /bench/boot.sh
+          docker cp tooling/ci-capacity "$benchmark_container:/bench"
+          docker start "$benchmark_container"
+          for attempt in $(seq 1 60); do
+            if docker exec "$benchmark_container" docker info >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec "$benchmark_container" docker info >/dev/null
+          docker exec "$benchmark_container" apk add --no-cache python3 procps
+          postgres_image=$(python3 -c 'import pathlib,re; print("postgres:"+re.search(r"\"([^\"]+)\"",pathlib.Path("tooling/postgres_test_image.rs").read_text())[1])')
+          docker exec "$benchmark_container" docker pull "$postgres_image"
+      - name: Compare fixture reuse and concurrency
+        run: docker exec -e BENCH_REPETITIONS=3 "$BENCHMARK_CONTAINER" python3 /bench/run.py
+      - name: Collect measurements
         if: always()
-        continue-on-error: true
-        run: python3 scripts/measure_docker_resources.py report "$RUNNER_TEMP/docker-resources.json" >> "$GITHUB_STEP_SUMMARY"
-      - name: Retain Docker resource samples
+        run: |
+          mkdir -p capacity-results
+          docker logs "$BENCHMARK_CONTAINER" > capacity-results/daemon.log 2>&1 || true
+          docker cp "$BENCHMARK_CONTAINER:/bench/results" capacity-results/ || true
+          docker cp "$BENCHMARK_CONTAINER:/bench/selected-tests.json" capacity-results/ || true
+          cp tooling/ci-capacity/worker-cpu.txt tooling/ci-capacity/revision.txt capacity-results/ || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: docker-resources-${{ github.run_attempt }}-${{ matrix.suite }}-${{ matrix.shard_index }}
-          path: ${{ runner.temp }}/docker-resources.json
+          name: ci-capacity-fixture-experiment
+          path: capacity-results/
           retention-days: 7
-      - name: Report test-result reuse and retries
+      - name: Remove the owned benchmark daemon and test containers
         if: always()
-        continue-on-error: true
-        run: python3 scripts/summarize_bazel_test_cache.py "$RUNNER_TEMP/postgres-events.jsonl" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          if docker inspect "$BENCHMARK_CONTAINER" >/dev/null 2>&1; then
+            docker exec "$BENCHMARK_CONTAINER" sh -c 'ids=$(docker ps -aq); if [ -n "$ids" ]; then docker rm -f -v $ids; fi' || true
+            docker rm -f -v "$BENCHMARK_CONTAINER"
+          fi
