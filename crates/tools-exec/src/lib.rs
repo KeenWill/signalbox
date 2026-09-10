@@ -54,13 +54,13 @@ pub use diagnostics::{
     CargoDiagnosticsToolConstructionError, CargoEvidenceProvenance, CargoFailureDetail,
     InvalidCargoDiagnosticsArguments,
 };
+pub use process::SandboxReadOnlyMount;
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,
     ExecResult, ExecToolConstructionError, ExecutionConfinement, ExecutionDiagnostic,
     InvalidExecArguments, OutputCapture, OutputEncoding, ProcessEnvironment, ProcessOutcome,
     ProcessOutput, ProcessRequest, ProcessRunResult, ProcessRunner, ProcessSpawnFailure,
     ProcessStatusProtocol, ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxConfiguration,
-    SandboxNetwork, SandboxProcessNamespace, SandboxReadOnlyMount, SandboxedCommandRunner,
-    SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner,
-    UnsandboxedExecTool,
+    SandboxNetwork, SandboxProcessNamespace, SandboxedCommandRunner, SandboxedExecTool,
+    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
