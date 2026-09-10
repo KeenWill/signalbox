@@ -8,6 +8,8 @@ CRATE_PROC_MACRO_DEPS = ["//crates/derive:signalbox_derive"]
 
 rust_package(exports = [
     "Cargo.toml",
+    "corpora/seed-responses-v1.json",
+    "corpora/seed-scorecard-v1.json",
     "corpora/seed-v1.json",
 ])
 

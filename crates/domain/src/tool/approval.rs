@@ -69,6 +69,19 @@ impl ToolApprovalResolution {
         }
     }
 
+    /// Constructs the fixed denial recorded when a human wait expires.
+    pub fn approval_timeout(request: ToolRequestId) -> Self {
+        Self {
+            request,
+            decision: ToolApprovalDecision::Deny {
+                reason: Some(ToolDenialReason(String::from("approval_wait_timeout"))),
+            },
+            source: ToolDecisionSource::RuntimeSafety,
+            decider: None,
+            rationale: None,
+        }
+    }
+
     pub(crate) const fn lifecycle_closure(request: ToolRequestId) -> Self {
         Self {
             request,

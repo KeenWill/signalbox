@@ -194,6 +194,15 @@ fn decode_process_tool_approval(
         {
             Ok(None)
         }
+        (ToolApprovalDecisionSourceStorageKind::RuntimeSafety, Some(_), None, None, None)
+            if signalbox_domain::ToolApprovalResolution::approval_timeout(
+                ToolRequestId::from_uuid(Uuid::nil()),
+            )
+            .decision()
+                == &decision =>
+        {
+            Ok(None)
+        }
         (ToolApprovalDecisionSourceStorageKind::LifecycleClosure, Some(_), None, None, None)
             if decision == (ToolApprovalDecision::Deny { reason: None }) =>
         {
