@@ -102,7 +102,7 @@ export function MissingAttachmentState({ placement }: { placement: 'composer' | 
         <strong>
           {placement === 'composer' ? 'Composer attachments' : 'Transcript attachments'}
         </strong>
-        <p>Attachments aren't available here.</p>
+        <p>Attachments unavailable.</p>
       </div>
     </section>
   )
@@ -157,7 +157,7 @@ export function AttachmentWorkbench({ commandContext }: { commandContext: Comman
           {selected ? (
             <ArtifactRenderer artifact={selected} commandContext={commandContext} />
           ) : (
-            <p className="attachment-empty">Select an attachment to preview it.</p>
+            <p className="attachment-empty">Select an attachment.</p>
           )}
         </section>
       </div>

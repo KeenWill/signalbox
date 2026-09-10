@@ -244,7 +244,7 @@ export const commandRegistry = [
   {
     id: 'artifact.open',
     title: 'Open artifact inspector',
-    description: 'Look up stored content by digest.',
+    description: 'Look up a blob by digest.',
     category: 'Surface',
     bindings: [],
     available: artifactInspector,
@@ -477,7 +477,7 @@ export const commandRegistry = [
   {
     id: 'imports.continue.fork',
     title: 'Fork from this entry',
-    description: 'Start a new branch from this entry.',
+    description: 'Start a forked session from this entry.',
     category: 'Imports',
     bindings: [],
     available: (context) =>
@@ -718,7 +718,7 @@ export const commandRegistry = [
   {
     id: 'preferences.reset',
     title: 'Restore preference defaults',
-    description: 'Reset all settings.',
+    description: 'Reset browser preferences.',
     category: 'Settings',
     bindings: [],
     available: always,
