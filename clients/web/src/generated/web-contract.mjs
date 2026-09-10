@@ -9347,7 +9347,7 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
 }
 export function decodeWebContractBootstrap(value) {
   assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "webcontractbootstrap");
-  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "2" ||
+  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "3" ||
       value.capabilities.bounded_json !== true ||
       value.capabilities.same_origin_json_mutations !== true ||
       value.capabilities.ndjson_streaming !== true ||

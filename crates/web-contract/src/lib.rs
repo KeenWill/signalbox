@@ -18,7 +18,7 @@ use signalbox_application::{
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
-pub const WEB_CONTRACT_VERSION: &str = "2";
+pub const WEB_CONTRACT_VERSION: &str = "3";
 /// Stable name of the browser HTTP contract family.
 pub const WEB_CONTRACT_NAME: &str = "signalbox.web-http";
 

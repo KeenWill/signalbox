@@ -192,11 +192,11 @@ test("generated example decoder rejects unknown fields", () => {
   );
 });
 
-test("generated bootstrap decoder rejects another contract version", () => {
+test("generated bootstrap decoder rejects the previous contract version", () => {
   assert.throws(
     () =>
       decodeWebContractBootstrap({
-        contract: { name: "signalbox.web-http", version: "999" },
+        contract: { name: "signalbox.web-http", version: "2" },
         capabilities: {
           bounded_json: true,
           bounded_session_timeline_detail: true,
@@ -236,7 +236,7 @@ test("generated bootstrap decoder rejects a disabled required capability", () =>
   assert.throws(
     () =>
       decodeWebContractBootstrap({
-        contract: { name: "signalbox.web-http", version: "2" },
+        contract: { name: "signalbox.web-http", version: "3" },
         capabilities: {
           bounded_json: true,
           bounded_lexical_search: true,
@@ -1271,7 +1271,7 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
   assert.throws(
     () =>
       decodeWebContractBootstrap({
-        contract: { name: "signalbox.web-http", version: "2" },
+        contract: { name: "signalbox.web-http", version: "3" },
         capabilities: {
           bounded_json: true,
           bounded_lexical_search: true,
