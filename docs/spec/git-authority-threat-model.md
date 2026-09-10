@@ -137,7 +137,8 @@ complete blob's SHA-256.
 Scans and result text remain bounded; worktree, staging, and object-database
 content have no aggregate byte ceiling. Commits, trees, and tags retain a 1 MiB
 decoded metadata bound before libgit2 parsing; blob content streams without that
-structural bound. Patches preview bounded content prefixes with truncation
+structural bound. Mode-only revision changes with identical object IDs do not
+imply omitted content. Patches preview bounded content prefixes with truncation
 markers, and status identifies renames by exact object identity. Worktree
 streams pin one descriptor and revalidate its identity around each page; object
 publication streams each batch into one pack and index pair. Skipping an
