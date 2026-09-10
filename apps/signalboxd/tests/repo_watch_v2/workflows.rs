@@ -332,6 +332,14 @@ async fn workflow_evaluation_quarantines_undecodable_event_and_advances()
         decode_error.as_deref(),
         Some("repository-watch retained event is invalid")
     );
+    let readable: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM gh_readable_event WHERE event_id = $1)",
+    )
+    .bind(poisoned.event.id().into_uuid())
+    .fetch_one(&module)
+    .await?;
+    assert!(!readable, "the readable event view excludes quarantine");
     module.close().await;
     core.close().await;
     Ok(())

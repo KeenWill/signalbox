@@ -735,9 +735,9 @@ pub enum OutboxConsumer {
 }
 
 #[derive(signalbox_derive::OperatorError)]
-/// Fail-closed reason a committed outbox projection could not be decoded.
+/// Fail-closed reason a consumer cursor or the shared sequence is invalid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OutboxCorruption {
+pub enum OutboxCursorCorruption {
     #[error("outbox delivery state is missing")]
     /// The selected consumer cursor was absent.
     MissingDeliveryState,
@@ -753,12 +753,18 @@ pub enum OutboxCorruption {
     #[error("outbox event header exceeds the allocated sequence")]
     /// A committed header existed beyond the allocator cursor.
     EventBeyondAllocatedSequence,
-    #[error("outbox committed event header is missing")]
-    /// The allocator named a committed sequence whose header was absent.
-    MissingCommittedEventHeader,
     #[error("outbox sequence is invalid")]
     /// A stored cursor or sequence was not an unsigned 64-bit integer.
     InvalidSequence,
+}
+
+#[derive(signalbox_derive::OperatorError)]
+/// Fail-closed reason one committed outbox event could not be decoded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboxRowCorruption {
+    #[error("outbox committed event header is missing")]
+    /// The allocator named a committed sequence whose header was absent.
+    MissingCommittedEventHeader,
     #[error("outbox input acceptance position is invalid")]
     /// An input-accepted record carried an invalid positive position.
     InvalidAcceptancePosition,
@@ -808,9 +814,12 @@ pub enum OutboxDispatchError {
     #[error("outbox dispatch database operation failed")]
     /// PostgreSQL acquisition, query, rollback, or commit failed.
     Database(#[source] sqlx::Error),
-    #[error("outbox dispatch corruption: {field_0}")]
-    /// Committed storage could not be decoded into the closed projection.
-    Corruption(#[source] OutboxCorruption),
+    #[error("outbox dispatch cursor corruption: {field_0}")]
+    /// A consumer cursor or the shared sequence was invalid.
+    CursorCorruption(#[source] OutboxCursorCorruption),
+    #[error("outbox dispatch row corruption: {field_0}")]
+    /// A committed event could not be decoded into the closed projection.
+    RowCorruption(#[source] OutboxRowCorruption),
 }
 
 impl From<sqlx::Error> for OutboxDispatchError {
@@ -819,31 +828,15 @@ impl From<sqlx::Error> for OutboxDispatchError {
     }
 }
 
-impl From<OutboxCorruption> for OutboxDispatchError {
-    fn from(error: OutboxCorruption) -> Self {
-        Self::Corruption(error)
+impl From<OutboxCursorCorruption> for OutboxDispatchError {
+    fn from(error: OutboxCursorCorruption) -> Self {
+        Self::CursorCorruption(error)
     }
 }
 
-impl OutboxCorruption {
-    const fn quarantinable(self) -> bool {
-        matches!(
-            self,
-            Self::MissingCommittedEventHeader
-                | Self::InvalidAcceptancePosition
-                | Self::InvalidAcceptedInputContent
-                | Self::UnsupportedStorageVersion
-                | Self::UnsupportedEventKind
-                | Self::MissingTypedRecord
-                | Self::InvalidLifecycleEventCorrelation
-                | Self::InvalidTerminalEventCorrelation
-                | Self::InvalidModelCallState
-                | Self::InvalidDelegationEvent
-                | Self::InvalidModelSettingsEvent
-                | Self::InvalidRunnerEvent
-                | Self::InvalidLifecycleEvent
-                | Self::InvalidSettlementEvent
-        )
+impl From<OutboxRowCorruption> for OutboxDispatchError {
+    fn from(error: OutboxRowCorruption) -> Self {
+        Self::RowCorruption(error)
     }
 }
 
@@ -899,7 +892,7 @@ impl OutboxConsumerReader {
                     transaction.rollback().await?;
                     return Ok(event);
                 }
-                Err(OutboxDispatchError::Corruption(error)) => {
+                Err(OutboxDispatchError::RowCorruption(error)) => {
                     let Some(inserted) =
                         quarantine_next_event(&mut transaction, self.consumer, delivered, error)
                             .await?
@@ -923,7 +916,7 @@ impl OutboxConsumerReader {
             return Ok(());
         }
         if delivered.checked_add(1) != Some(sequence) {
-            return Err(OutboxCorruption::DeliveryStateChanged.into());
+            return Err(OutboxCursorCorruption::DeliveryStateChanged.into());
         }
         advance_consumer_cursor(&mut transaction, self.consumer, delivered, sequence).await?;
         transaction.commit().await?;
@@ -959,7 +952,7 @@ impl OutboxDispatcher {
             let delivered = lock_consumer_cursor(&mut transaction, consumer).await?;
             let event = match load_next_event(&mut transaction, delivered).await {
                 Ok(event) => event,
-                Err(OutboxDispatchError::Corruption(error)) => {
+                Err(OutboxDispatchError::RowCorruption(error)) => {
                     let Some(inserted) =
                         quarantine_next_event(&mut transaction, consumer, delivered, error).await?
                     else {
@@ -993,14 +986,11 @@ async fn quarantine_next_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     consumer: OutboxConsumer,
     delivered: u64,
-    error: OutboxCorruption,
+    error: OutboxRowCorruption,
 ) -> Result<Option<bool>, OutboxDispatchError> {
-    if !error.quarantinable() {
-        return Ok(None);
-    }
     let next = delivered
         .checked_add(1)
-        .ok_or(OutboxCorruption::InvalidSequence)?;
+        .ok_or(OutboxCursorCorruption::InvalidSequence)?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1 FROM outbox_event WHERE event_sequence = $1
@@ -1027,7 +1017,7 @@ async fn quarantine_next_event(
     Ok(Some(inserted))
 }
 
-fn log_quarantine(inserted: bool, sequence: u64, error: OutboxCorruption) {
+fn log_quarantine(inserted: bool, sequence: u64, error: OutboxRowCorruption) {
     if inserted {
         tracing::error!(
             event_sequence = sequence,
@@ -1045,7 +1035,7 @@ async fn lock_consumer_cursor(
         .bind(outbox_consumer_to_str(consumer))
         .fetch_optional(&mut **transaction)
         .await?;
-    decode_nonnegative_sequence(delivered.ok_or(OutboxCorruption::MissingDeliveryState)?)
+    decode_nonnegative_sequence(delivered.ok_or(OutboxCursorCorruption::MissingDeliveryState)?)
         .map_err(Into::into)
 }
 
@@ -1056,19 +1046,19 @@ async fn load_next_event(
     let Some(next) = delivered.checked_add(1) else {
         let allocated = load_allocated_sequence(transaction).await?;
         if allocated < delivered {
-            return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
+            return Err(OutboxCursorCorruption::DeliveryBeyondAllocatedSequence.into());
         }
         return Ok(None);
     };
     let (allocated, event_beyond_allocated, event) = load_event(transaction, next).await?;
     if allocated < delivered {
-        return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
+        return Err(OutboxCursorCorruption::DeliveryBeyondAllocatedSequence.into());
     }
     if event_beyond_allocated {
-        return Err(OutboxCorruption::EventBeyondAllocatedSequence.into());
+        return Err(OutboxCursorCorruption::EventBeyondAllocatedSequence.into());
     }
     if event.is_none() && allocated >= next {
-        return Err(OutboxCorruption::MissingCommittedEventHeader.into());
+        return Err(OutboxRowCorruption::MissingCommittedEventHeader.into());
     }
     Ok(event)
 }
@@ -1091,7 +1081,7 @@ async fn advance_consumer_cursor(
     .execute(&mut **transaction)
     .await?;
     if updated.rows_affected() != 1 {
-        return Err(OutboxCorruption::DeliveryStateChanged.into());
+        return Err(OutboxCursorCorruption::DeliveryStateChanged.into());
     }
     Ok(())
 }
@@ -1103,7 +1093,7 @@ async fn load_allocated_sequence(
         sqlx::query_scalar("SELECT last_sequence FROM outbox_sequence_state WHERE singleton")
             .fetch_optional(&mut **transaction)
             .await?;
-    decode_nonnegative_sequence(allocated.ok_or(OutboxCorruption::MissingSequenceState)?)
+    decode_nonnegative_sequence(allocated.ok_or(OutboxCursorCorruption::MissingSequenceState)?)
         .map_err(Into::into)
 }
 
@@ -1130,15 +1120,7 @@ pub(crate) async fn load_event_header(
             event.turn_disposition,
             event.recorded_at
            FROM outbox_sequence_state AS allocator
-           LEFT JOIN (
-                SELECT event_sequence, event_kind, storage_version, session_id,
-                       turn_disposition, recorded_at
-                  FROM outbox_event
-                UNION ALL
-                SELECT event_sequence, event_kind, storage_version, session_id,
-                       NULL::text AS turn_disposition, recorded_at
-                  FROM delegation_outbox_event
-           ) AS event
+           LEFT JOIN outbox_readable_event AS event
              ON event.event_sequence = $1
           WHERE allocator.singleton",
     )
@@ -1156,7 +1138,7 @@ pub(crate) async fn load_event_header(
         recorded_at,
     }) = row
     else {
-        return Err(OutboxCorruption::MissingSequenceState.into());
+        return Err(OutboxCursorCorruption::MissingSequenceState.into());
     };
     let allocated = decode_nonnegative_sequence(allocated)?;
     let (stored_sequence, event_kind, storage_version, recorded_at) =
@@ -1165,29 +1147,29 @@ pub(crate) async fn load_event_header(
             (Some(sequence), Some(kind), Some(version), Some(recorded_at)) => {
                 (sequence, kind, version, recorded_at)
             }
-            _ => return Err(OutboxCorruption::MissingCommittedEventHeader.into()),
+            _ => return Err(OutboxRowCorruption::MissingCommittedEventHeader.into()),
         };
     if decode_positive_sequence(stored_sequence)? != expected_sequence {
-        return Err(OutboxCorruption::InvalidSequence.into());
+        return Err(OutboxCursorCorruption::InvalidSequence.into());
     }
     let discriminator = outbox_event_discriminator_from_str(&event_kind)
-        .ok_or(OutboxCorruption::UnsupportedEventKind)?;
+        .ok_or(OutboxRowCorruption::UnsupportedEventKind)?;
     if storage_version != storage_version_for(discriminator)
         && !(matches!(discriminator, OutboxEventDiscriminator::SessionCreated)
             && storage_version == 2)
     {
-        return Err(OutboxCorruption::UnsupportedStorageVersion.into());
+        return Err(OutboxRowCorruption::UnsupportedStorageVersion.into());
     }
     if stored_session.is_none() && discriminator != OutboxEventDiscriminator::CommandSettled {
-        return Err(OutboxCorruption::MissingCommittedEventHeader.into());
+        return Err(OutboxRowCorruption::MissingCommittedEventHeader.into());
     }
     let turn_disposition = match (discriminator, turn_disposition) {
         (OutboxEventDiscriminator::TurnTerminal, Some(disposition)) => Some(
             turn_disposition_kind_from_str(&disposition)
-                .ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?,
+                .ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?,
         ),
         (OutboxEventDiscriminator::TurnTerminal, None) | (_, Some(_)) => {
-            return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+            return Err(OutboxRowCorruption::InvalidTerminalEventCorrelation.into());
         }
         (_, None) => None,
     };
@@ -1243,7 +1225,7 @@ pub(crate) async fn load_event(
                 .bind(stored_session)
                 .fetch_optional(&mut **transaction)
                 .await?
-                .ok_or(OutboxCorruption::MissingTypedRecord)?;
+                .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
             let operation = match (
                 row.try_get::<Option<Uuid>, _>("model_call_id")?,
                 row.try_get::<Option<Uuid>, _>("tool_attempt_id")?,
@@ -1258,7 +1240,7 @@ pub(crate) async fn load_event(
                         ToolAttemptId::from_uuid(attempt),
                     )
                 }
-                _ => return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into()),
+                _ => return Err(OutboxRowCorruption::InvalidTerminalEventCorrelation.into()),
             };
             DispatchedOutboxEventKind::AutomaticReconciliationExhausted(
                 signalbox_application::ExhaustedAutomaticReconciliation::new(
@@ -1271,7 +1253,8 @@ pub(crate) async fn load_event(
         OutboxEventDiscriminator::CredentialPoolExhausted => {
             let row: Option<(Uuid, Uuid)> = sqlx::query_as("SELECT h.turn_id, h.terminal_attempt_id FROM credential_pool_exhaustion_outbox_event e JOIN credential_pool_terminal_exhaustion h ON h.terminal_attempt_id = e.terminal_attempt_id AND h.session_id = e.session_id WHERE e.event_sequence = $1 AND e.session_id = $2")
                 .bind(Decimal::from(expected_sequence)).bind(stored_session).fetch_optional(&mut **transaction).await?;
-            let (turn, attempt) = row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            let (turn, attempt) =
+                row.ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?;
             let session = stored_session;
             let evidence = crate::credential_pool_exhaustion::load(transaction, session, turn)
                 .await
@@ -1280,19 +1263,21 @@ pub(crate) async fn load_event(
                         error,
                     ) => OutboxDispatchError::from(error),
                     crate::credential_pool_exhaustion::CredentialPoolEvidenceError::Corruption => {
-                        OutboxDispatchError::from(OutboxCorruption::InvalidTerminalEventCorrelation)
+                        OutboxDispatchError::from(
+                            OutboxRowCorruption::InvalidTerminalEventCorrelation,
+                        )
                     }
                 })?
-                .ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+                .ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?;
             if evidence.terminal_attempt_id != attempt {
-                return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                return Err(OutboxRowCorruption::InvalidTerminalEventCorrelation.into());
             }
             DispatchedOutboxEventKind::CredentialPoolExhausted(Box::new(evidence))
         }
         OutboxEventDiscriminator::TurnTerminal => {
             let disposition = header
                 .turn_disposition
-                .ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+                .ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?;
             load_turn_terminal(transaction, expected_sequence, stored_session, disposition).await?
         }
         OutboxEventDiscriminator::GoalChanged => {
@@ -1348,13 +1333,13 @@ pub(crate) async fn load_event(
             .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?
-            .ok_or(OutboxCorruption::MissingTypedRecord)?;
+            .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
             let prior_version =
                 defaults_version_from_numeric(row.try_get("prior_defaults_version")?)
-                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
+                    .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?;
             let installed_version =
                 defaults_version_from_numeric(row.try_get("installed_defaults_version")?)
-                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
+                    .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?;
             let prior_model_settings: Value = row.try_get("prior_model_settings")?;
             let installed_model_settings: Value = row.try_get("installed_model_settings")?;
             if prior_model_settings != row.try_get::<Value, _>("prior_defaults_model_settings")?
@@ -1363,12 +1348,12 @@ pub(crate) async fn load_event(
                 || row.try_get::<Value, _>("caller_model_settings")?
                     != row.try_get::<Value, _>("command_caller_model_settings")?
             {
-                return Err(OutboxCorruption::InvalidModelSettingsEvent.into());
+                return Err(OutboxRowCorruption::InvalidModelSettingsEvent.into());
             }
             let event = SessionModelSettingsChanged::try_new(
                 session,
                 durable_command_id_from_uuid(row.try_get("command_id")?)
-                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                    .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?,
                 prior_version,
                 installed_version,
                 decode_settings_model_selection(
@@ -1382,15 +1367,15 @@ pub(crate) async fn load_event(
                     row.try_get("installed_alias_id")?,
                 )?,
                 model_settings_from_json(prior_model_settings)
-                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                    .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?,
                 model_settings_from_json(installed_model_settings)
-                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                    .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?,
                 model_settings_overlay_from_json(row.try_get::<Value, _>("caller_model_settings")?)
-                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                    .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?,
                 model_change_adjustments_from_json(row.try_get::<Value, _>("adjustments")?)
-                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                    .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?,
             )
-            .ok_or(OutboxCorruption::InvalidModelSettingsEvent)?;
+            .ok_or(OutboxRowCorruption::InvalidModelSettingsEvent)?;
             DispatchedOutboxEventKind::SessionModelSettingsChanged(event)
         }
         OutboxEventDiscriminator::TurnModelSettingsResolved => {
@@ -1453,7 +1438,7 @@ pub(crate) async fn load_event(
             .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?
-            .ok_or(OutboxCorruption::MissingTypedRecord)?;
+            .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
             let frozen = decode_settings_frozen_model(
                 row.try_get("frozen_model_kind")?,
                 row.try_get("frozen_direct_model_selection_id")?,
@@ -1463,50 +1448,50 @@ pub(crate) async fn load_event(
             if frozen.selected_direct().into_uuid()
                 != row.try_get::<Uuid, _>("selected_direct_model_id")?
             {
-                return Err(OutboxCorruption::InvalidModelSettingsEvent.into());
+                return Err(OutboxRowCorruption::InvalidModelSettingsEvent.into());
             }
             let event = TurnModelSettingsResolved::try_new(
                 AcceptedInputId::from_uuid(row.try_get("accepted_input_id")?),
                 TurnId::from_uuid(row.try_get("turn_id")?),
                 defaults_version_from_numeric(row.try_get("defaults_version")?)
-                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                    .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?,
                 frozen,
                 model_settings_overlay_from_json(
                     row.try_get::<Value, _>("per_call_model_settings")?,
                 )
-                .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?,
                 model_settings_from_json(row.try_get::<Value, _>("resolved_model_settings")?)
-                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                    .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?,
                 row.try_get::<Option<Uuid>, _>("adjusted_from_selection_id")?
                     .map(DirectModelSelection::from_uuid),
                 model_change_adjustments_from_json(row.try_get::<Value, _>("adjustments")?)
-                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                    .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?,
             )
-            .ok_or(OutboxCorruption::InvalidModelSettingsEvent)?;
+            .ok_or(OutboxRowCorruption::InvalidModelSettingsEvent)?;
             let requested = decode_settings_model_selection(
                 row.try_get("requested_model_kind")?,
                 row.try_get("requested_direct_model_selection_id")?,
                 row.try_get("requested_model_alias_id")?,
             )?;
             if requested != requested_from_frozen(event.selection()) {
-                return Err(OutboxCorruption::InvalidModelSettingsEvent.into());
+                return Err(OutboxRowCorruption::InvalidModelSettingsEvent.into());
             }
             let origin_defaults_version =
                 defaults_version_from_numeric(row.try_get("origin_defaults_version")?)
-                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
+                    .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?;
             let origin_per_call = model_settings_overlay_from_json(
                 row.try_get::<Value, _>("origin_per_call_model_settings")?,
             )
-            .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
+            .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?;
             let origin_defaults = model_settings_from_json(
                 row.try_get::<Value, _>("origin_defaults_model_settings")?,
             )
-            .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
+            .map_err(|_| OutboxRowCorruption::InvalidModelSettingsEvent)?;
             if event.defaults_version() != origin_defaults_version
                 || event.per_call_override() != origin_per_call
                 || !crate::model_settings_resolution::matches_defaults(&event, origin_defaults)
             {
-                return Err(OutboxCorruption::InvalidModelSettingsEvent.into());
+                return Err(OutboxRowCorruption::InvalidModelSettingsEvent.into());
             }
             DispatchedOutboxEventKind::TurnModelSettingsResolved(event)
         }
@@ -1587,12 +1572,12 @@ pub(crate) async fn load_event(
             .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?
-            .ok_or(OutboxCorruption::MissingTypedRecord)?;
+            .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
             let acceptance_position: Decimal = row.try_get("acceptance_position")?;
             let acceptance_position = input_position_from_numeric(acceptance_position)
-                .map_err(|_| OutboxCorruption::InvalidAcceptancePosition)?;
+                .map_err(|_| OutboxRowCorruption::InvalidAcceptancePosition)?;
             let content = crate::user_content::decode(row.try_get("content_parts")?)
-                .map_err(|_| OutboxCorruption::InvalidAcceptedInputContent)?;
+                .map_err(|_| OutboxRowCorruption::InvalidAcceptedInputContent)?;
             DispatchedOutboxEventKind::InputAccepted {
                 accepted_input: AcceptedInputId::from_uuid(row.try_get("accepted_input_id")?),
                 turn: TurnId::from_uuid(row.try_get("turn_id")?),
@@ -1648,9 +1633,9 @@ pub(crate) async fn load_event(
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, current_attempt, lifecycle_correlated) =
-                row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+                row.ok_or(OutboxRowCorruption::MissingTypedRecord)?;
             if !lifecycle_correlated {
-                return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into());
+                return Err(OutboxRowCorruption::InvalidLifecycleEventCorrelation.into());
             }
             DispatchedOutboxEventKind::TurnActivated {
                 turn: TurnId::from_uuid(turn),
@@ -1677,7 +1662,7 @@ pub(crate) async fn load_event(
             .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?
-            .ok_or(OutboxCorruption::MissingTypedRecord)?;
+            .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
             let state_kind: String = row.try_get("call_state_kind")?;
             let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
             let state = decode_model_call_state(&state_kind, terminal_disposition.as_deref())?;
@@ -1693,7 +1678,7 @@ pub(crate) async fn load_event(
                 DispatchedModelCallState::InFlight
                     if authoritative_state == DispatchedModelCallState::Prepared =>
                 {
-                    return Err(OutboxCorruption::InvalidModelCallState.into());
+                    return Err(OutboxRowCorruption::InvalidModelCallState.into());
                 }
                 DispatchedModelCallState::CancellationRequested
                     if matches!(
@@ -1701,10 +1686,10 @@ pub(crate) async fn load_event(
                         DispatchedModelCallState::Prepared | DispatchedModelCallState::InFlight
                     ) =>
                 {
-                    return Err(OutboxCorruption::InvalidModelCallState.into());
+                    return Err(OutboxRowCorruption::InvalidModelCallState.into());
                 }
                 DispatchedModelCallState::Terminal(_) if authoritative_state != state => {
-                    return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                    return Err(OutboxRowCorruption::InvalidTerminalEventCorrelation.into());
                 }
                 _ => {}
             }
@@ -1827,9 +1812,9 @@ pub(crate) async fn load_event(
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, producing_call, transition, frontier, attempt, valid) =
-                row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+                row.ok_or(OutboxRowCorruption::MissingTypedRecord)?;
             if !valid {
-                return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into());
+                return Err(OutboxRowCorruption::InvalidLifecycleEventCorrelation.into());
             }
             let state = match (transition.as_str(), frontier, attempt) {
                 ("proposed", Some(frontier), None) => DispatchedToolBatchState::Proposed {
@@ -1845,7 +1830,7 @@ pub(crate) async fn load_event(
                         attempt: ToolAttemptId::from_uuid(attempt),
                     }
                 }
-                _ => return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into()),
+                _ => return Err(OutboxRowCorruption::InvalidLifecycleEventCorrelation.into()),
             };
             DispatchedOutboxEventKind::ToolBatchTransition {
                 turn: TurnId::from_uuid(turn),
@@ -1870,7 +1855,7 @@ pub(crate) async fn load_event(
             .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?
-            .ok_or(OutboxCorruption::MissingTypedRecord)?;
+            .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
             let request = ToolRequestId::from_uuid(row.request_id);
             let mut approvals =
                 match crate::tool_loop::load_approvals_by_request(transaction, &[request]).await {
@@ -1879,14 +1864,14 @@ pub(crate) async fn load_event(
                         return Err(source.into());
                     }
                     Err(_) => {
-                        return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into());
+                        return Err(OutboxRowCorruption::InvalidLifecycleEventCorrelation.into());
                     }
                 };
             let approval = approvals
                 .remove(&request)
-                .ok_or(OutboxCorruption::InvalidLifecycleEventCorrelation)?;
+                .ok_or(OutboxRowCorruption::InvalidLifecycleEventCorrelation)?;
             let Some(decider) = approval.decider().copied() else {
-                return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into());
+                return Err(OutboxRowCorruption::InvalidLifecycleEventCorrelation.into());
             };
             DispatchedOutboxEventKind::ToolApprovalDecided {
                 turn: TurnId::from_uuid(row.turn_id),
@@ -1938,7 +1923,7 @@ pub(crate) async fn load_event(
             .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?
-            .ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            .ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?;
             DispatchedOutboxEventKind::ContextCompacted {
                 compaction: ContextCompactionId::from_uuid(row.0),
                 call: ModelCallId::from_uuid(row.1),
@@ -1977,11 +1962,13 @@ fn lifecycle_event<T>(
         crate::session_lifecycle::SessionLifecycleRepositoryError::Database(error) => {
             OutboxDispatchError::Database(error)
         }
-        _ => OutboxCorruption::InvalidLifecycleEvent.into(),
+        _ => OutboxRowCorruption::InvalidLifecycleEvent.into(),
     })
 }
 
-fn decode_session_state_kind(value: &str) -> Result<DispatchedSessionStateKind, OutboxCorruption> {
+fn decode_session_state_kind(
+    value: &str,
+) -> Result<DispatchedSessionStateKind, OutboxRowCorruption> {
     Ok(match value {
         "created" => DispatchedSessionStateKind::Created,
         "dispatched" => DispatchedSessionStateKind::Dispatched,
@@ -1990,7 +1977,7 @@ fn decode_session_state_kind(value: &str) -> Result<DispatchedSessionStateKind, 
         "recovering" => DispatchedSessionStateKind::Recovering,
         "blocked" => DispatchedSessionStateKind::Blocked,
         "parked" => DispatchedSessionStateKind::Parked,
-        _ => return Err(OutboxCorruption::InvalidLifecycleEvent),
+        _ => return Err(OutboxRowCorruption::InvalidLifecycleEvent),
     })
 }
 
@@ -2027,9 +2014,9 @@ async fn load_session_created(
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
     if !row.try_get::<bool, _>("correlated")? {
-        return Err(OutboxCorruption::InvalidLifecycleEvent.into());
+        return Err(OutboxRowCorruption::InvalidLifecycleEvent.into());
     }
     let cause: String = row.try_get("creation_cause")?;
     let module: Option<String> = row.try_get("dispatching_module")?;
@@ -2041,12 +2028,12 @@ async fn load_session_created(
         row.try_get("verified_program_run")?,
     )
     .await
-    .map_err(|()| OutboxCorruption::InvalidLifecycleEvent)?;
+    .map_err(|()| OutboxRowCorruption::InvalidLifecycleEvent)?;
     if program.is_some() != (cause == "workflow")
         || program.is_some()
             && row.try_get::<i16, _>("storage_version")? != SESSION_CREATED_STORAGE_VERSION
     {
-        return Err(OutboxCorruption::InvalidLifecycleEvent.into());
+        return Err(OutboxRowCorruption::InvalidLifecycleEvent.into());
     }
     let cause = match (
         session_creation_cause_from_str(&cause),
@@ -2056,7 +2043,7 @@ async fn load_session_created(
     ) {
         (Some(crate::mapping::SessionCreationCauseStorageKind::Workflow), None, None, None) => {
             signalbox_domain::SessionCreationProvenance::workflow(
-                program.ok_or(OutboxCorruption::InvalidLifecycleEvent)?,
+                program.ok_or(OutboxRowCorruption::InvalidLifecycleEvent)?,
             )
             .cause()
         }
@@ -2084,10 +2071,10 @@ async fn load_session_created(
                 Some(DispatchingModule::CommissionedDispatch) => ModuleDispatch::Commissioned {
                     dispatch: CommissionedDispatchId::from_uuid(dispatch),
                 },
-                None => return Err(OutboxCorruption::InvalidLifecycleEvent.into()),
+                None => return Err(OutboxRowCorruption::InvalidLifecycleEvent.into()),
             },
         },
-        _ => return Err(OutboxCorruption::InvalidLifecycleEvent.into()),
+        _ => return Err(OutboxRowCorruption::InvalidLifecycleEvent.into()),
     };
     Ok(DispatchedOutboxEventKind::SessionCreated(
         DispatchedSessionCreation {
@@ -2124,7 +2111,7 @@ async fn load_session_state_changed(
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
     let prior: String = row.try_get("prior_state_kind")?;
     Ok(DispatchedOutboxEventKind::SessionStateChanged(
         DispatchedSessionStateChange {
@@ -2175,9 +2162,9 @@ async fn load_session_terminal(
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
     if !row.try_get::<bool, _>("correlated")? {
-        return Err(OutboxCorruption::InvalidLifecycleEvent.into());
+        return Err(OutboxRowCorruption::InvalidLifecycleEvent.into());
     }
     let prior: String = row.try_get("prior_state_kind")?;
     let standing: Option<String> = row.try_get("parked_standing_cause_kind")?;
@@ -2185,7 +2172,7 @@ async fn load_session_terminal(
         DispatchedSessionTerminal {
             prior: decode_session_state_kind(&prior)?,
             outcome: lifecycle_event(decode_terminal_outcome_columns(&row))?
-                .ok_or(OutboxCorruption::InvalidLifecycleEvent)?,
+                .ok_or(OutboxRowCorruption::InvalidLifecycleEvent)?,
             standing: standing
                 .map(|cause| lifecycle_event(decode_standing_failure_cause(&cause)))
                 .transpose()?,
@@ -2212,17 +2199,18 @@ async fn load_goal_changed(
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
     let event_ordinal: Decimal = row.try_get("event_ordinal")?;
     let generation: Decimal = row.try_get("generation")?;
     let kind: String = row.try_get("event_kind")?;
     Ok(DispatchedOutboxEventKind::GoalChanged(
         DispatchedGoalChange {
             event_ordinal: decode_positive_sequence(event_ordinal)
-                .map_err(|_| OutboxCorruption::InvalidLifecycleEvent)?,
+                .map_err(|_| OutboxRowCorruption::InvalidLifecycleEvent)?,
             generation: decode_positive_sequence(generation)
-                .map_err(|_| OutboxCorruption::InvalidLifecycleEvent)?,
-            kind: goal_event_kind_from_str(&kind).ok_or(OutboxCorruption::InvalidLifecycleEvent)?,
+                .map_err(|_| OutboxRowCorruption::InvalidLifecycleEvent)?,
+            kind: goal_event_kind_from_str(&kind)
+                .ok_or(OutboxRowCorruption::InvalidLifecycleEvent)?,
         },
     ))
 }
@@ -2247,18 +2235,18 @@ async fn load_session_ownership_changed(
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
     // Creation records its bit on `session_created`; only a flip is a change.
     let transition: String = row.try_get("transition_kind")?;
     let transition = match transition.as_str() {
         "adopted" => SessionOwnershipTransition::Adopted,
         "released" => SessionOwnershipTransition::Released,
-        _ => return Err(OutboxCorruption::InvalidLifecycleEvent.into()),
+        _ => return Err(OutboxRowCorruption::InvalidLifecycleEvent.into()),
     };
     Ok(DispatchedOutboxEventKind::SessionOwnershipChanged(
         DispatchedOwnershipChange {
             event_ordinal: u64::try_from(row.try_get::<i64, _>("event_ordinal")?)
-                .map_err(|_| OutboxCorruption::InvalidLifecycleEvent)?,
+                .map_err(|_| OutboxRowCorruption::InvalidLifecycleEvent)?,
             transition,
             actor: lifecycle_event(decode_lifecycle_actor(&row))?,
         },
@@ -2284,14 +2272,14 @@ async fn load_command_settled(
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
     let command: Uuid = row.try_get("command_id")?;
     let result: String = row.try_get("result_kind")?;
     let rejection: Option<String> = row.try_get("rejection_kind")?;
     let result = match (result.as_str(), rejection) {
         ("applied", None) => DispatchedCommandSettlement::Applied,
         ("rejected", Some(kind)) => DispatchedCommandSettlement::Rejected { kind },
-        _ => return Err(OutboxCorruption::InvalidSettlementEvent.into()),
+        _ => return Err(OutboxRowCorruption::InvalidSettlementEvent.into()),
     };
     Ok(DispatchedOutboxEventKind::CommandSettled {
         command: DurableCommandId::from_uuid(command),
@@ -2318,7 +2306,7 @@ async fn load_injection_settled(
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
     let command: Uuid = row.try_get("command_id")?;
     let outcome: String = row.try_get("outcome_kind")?;
     let rejection: Option<String> = row.try_get("rejection_kind")?;
@@ -2329,7 +2317,7 @@ async fn load_injection_settled(
         },
         ("not_delivered", None, None) => DispatchedInjectionOutcome::NotDelivered,
         ("rejected", Some(kind), None) => DispatchedInjectionOutcome::Rejected { kind },
-        _ => return Err(OutboxCorruption::InvalidSettlementEvent.into()),
+        _ => return Err(OutboxRowCorruption::InvalidSettlementEvent.into()),
     };
     Ok(DispatchedOutboxEventKind::InjectionSettled {
         command: DurableCommandId::from_uuid(command),
@@ -2398,7 +2386,7 @@ async fn load_turn_terminal(
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, call, completion_entry, terminal_frontier) =
-                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+                row.ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?;
             (
                 turn,
                 DispatchedTurnTerminalDisposition::Completed {
@@ -2444,7 +2432,7 @@ async fn load_turn_terminal(
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, call, terminal_frontier) =
-                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+                row.ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?;
             (
                 turn,
                 DispatchedTurnTerminalDisposition::Refused {
@@ -2586,7 +2574,7 @@ async fn load_turn_terminal(
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, failure_entry, terminal_frontier) =
-                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+                row.ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?;
             (
                 turn,
                 DispatchedTurnTerminalDisposition::Failed {
@@ -2679,7 +2667,7 @@ async fn load_turn_terminal(
             .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?;
-            let row = row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            let row = row.ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?;
             (
                 row.turn_id,
                 DispatchedTurnTerminalDisposition::Cancelled {
@@ -2726,7 +2714,7 @@ async fn load_turn_terminal(
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, call, tool_attempt, terminal_frontier) =
-                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+                row.ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?;
             let operation = match (call, tool_attempt) {
                 (Some(call), None) => {
                     let valid: Option<bool> = sqlx::query_scalar(
@@ -2776,7 +2764,7 @@ async fn load_turn_terminal(
                     .fetch_optional(&mut **transaction)
                     .await?;
                     if valid.is_none() {
-                        return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                        return Err(OutboxRowCorruption::InvalidTerminalEventCorrelation.into());
                     }
                     DispatchedReconciliationOperation::ModelCall(ModelCallId::from_uuid(call))
                 }
@@ -2828,14 +2816,14 @@ async fn load_turn_terminal(
                     .fetch_optional(&mut **transaction)
                     .await?;
                     if valid.is_none() {
-                        return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                        return Err(OutboxRowCorruption::InvalidTerminalEventCorrelation.into());
                     }
                     DispatchedReconciliationOperation::ToolAttempt(ToolAttemptId::from_uuid(
                         attempt,
                     ))
                 }
                 (Some(_), Some(_)) | (None, None) => {
-                    return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                    return Err(OutboxRowCorruption::InvalidTerminalEventCorrelation.into());
                 }
             };
             (
@@ -2863,7 +2851,7 @@ async fn load_turn_terminal(
             .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?
-            .ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            .ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?;
             (turn, DispatchedTurnTerminalDisposition::Retired)
         }
     };
@@ -2949,22 +2937,22 @@ async fn load_runner_state_transition(
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
     let placement_revision = RunnerGeneration::try_from_u64(decode_positive_sequence(
         row.try_get("placement_revision")?,
     )?)
-    .ok_or(OutboxCorruption::InvalidRunnerEvent)?;
+    .ok_or(OutboxRowCorruption::InvalidRunnerEvent)?;
     let sandbox_text = row.try_get::<String, _>("sandbox_profile")?;
     let sandbox =
-        runner_sandbox_from_str(&sandbox_text).ok_or(OutboxCorruption::InvalidRunnerEvent)?;
+        runner_sandbox_from_str(&sandbox_text).ok_or(OutboxRowCorruption::InvalidRunnerEvent)?;
     let working_directory = row
         .try_get::<Option<String>, _>("working_directory")?
         .map(RunnerWorkingDirectory::try_new)
         .transpose()
-        .map_err(|_| OutboxCorruption::InvalidRunnerEvent)?;
+        .map_err(|_| OutboxRowCorruption::InvalidRunnerEvent)?;
     let state_kind = row.try_get::<String, _>("state_kind")?;
     let state = dispatched_runner_state_from_str(&state_kind)
-        .ok_or(OutboxCorruption::InvalidRunnerEvent)?;
+        .ok_or(OutboxRowCorruption::InvalidRunnerEvent)?;
     let connection_source_shape_matches = match state {
         DispatchedRunnerState::Suspect | DispatchedRunnerState::Connected => {
             row.try_get::<Option<Uuid>, _>("connection_enrollment_id")?
@@ -2998,7 +2986,7 @@ async fn load_runner_state_transition(
     if source_sandbox != row.try_get::<String, _>("sandbox_profile")?
         || source_working_directory != row.try_get::<Option<String>, _>("working_directory")?
     {
-        return Err(OutboxCorruption::InvalidRunnerEvent.into());
+        return Err(OutboxRowCorruption::InvalidRunnerEvent.into());
     }
     let source_event = row.try_get::<String, _>("source_event_kind")?;
     let source_state = row.try_get::<String, _>("source_state_kind")?;
@@ -3080,7 +3068,7 @@ async fn load_runner_state_transition(
         }
     };
     if !connection_source_shape_matches || !source_matches {
-        return Err(OutboxCorruption::InvalidRunnerEvent.into());
+        return Err(OutboxRowCorruption::InvalidRunnerEvent.into());
     }
     Ok(DispatchedOutboxEventKind::RunnerStateTransition {
         runner: RunnerId::from_uuid(runner_uuid),
@@ -3124,7 +3112,7 @@ pub(crate) async fn load_delegation_update(
     .bind(materialize_content)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
     let spawning_request = ToolRequestId::from_uuid(row.try_get("spawning_tool_request_id")?);
     let update_kind: String = row.try_get("update_kind")?;
     match decode_delegation_update_kind(&update_kind)? {
@@ -3147,7 +3135,7 @@ pub(crate) async fn load_delegation_update(
                         on_parent_cancelled: decode_bound_action(&cancelled)?,
                     }
                 }
-                _ => return Err(OutboxCorruption::InvalidDelegationEvent.into()),
+                _ => return Err(OutboxRowCorruption::InvalidDelegationEvent.into()),
             };
             Ok(DispatchedDelegationUpdate::ChildSpawned {
                 spawning_request,
@@ -3165,7 +3153,7 @@ pub(crate) async fn load_delegation_update(
             mode: decode_wait_mode(
                 row.try_get::<Option<String>, _>("wait_mode")?
                     .as_deref()
-                    .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+                    .ok_or(OutboxRowCorruption::InvalidDelegationEvent)?,
             )?,
         }),
         DelegationUpdateStorageKind::ChildLifecycleDisposition => {
@@ -3176,12 +3164,12 @@ pub(crate) async fn load_delegation_update(
                 outcome: decode_delegation_outcome(
                     row.try_get::<Option<String>, _>("outcome_kind")?
                         .as_deref()
-                        .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+                        .ok_or(OutboxRowCorruption::InvalidDelegationEvent)?,
                 )?,
                 reason: decode_delegation_reason(
                     row.try_get::<Option<String>, _>("reason_kind")?
                         .as_deref()
-                        .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+                        .ok_or(OutboxRowCorruption::InvalidDelegationEvent)?,
                 )?,
                 provenance: decode_delegation_provenance(&row)?,
             })
@@ -3190,11 +3178,11 @@ pub(crate) async fn load_delegation_update(
             let outcome = decode_delegation_outcome(
                 row.try_get::<Option<String>, _>("outcome_kind")?
                     .as_deref()
-                    .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+                    .ok_or(OutboxRowCorruption::InvalidDelegationEvent)?,
             )?;
             let content_present: bool = row.try_get("content_present")?;
             if content_present != (outcome == DispatchedDelegationOutcome::ResultReturned) {
-                return Err(OutboxCorruption::InvalidDelegationEvent.into());
+                return Err(OutboxRowCorruption::InvalidDelegationEvent.into());
             }
             Ok(DispatchedDelegationUpdate::ChildResult {
                 spawning_request,
@@ -3203,7 +3191,7 @@ pub(crate) async fn load_delegation_update(
                 reason: decode_delegation_reason(
                     row.try_get::<Option<String>, _>("reason_kind")?
                         .as_deref()
-                        .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+                        .ok_or(OutboxRowCorruption::InvalidDelegationEvent)?,
                 )?,
                 provenance: decode_delegation_provenance(&row)?,
                 content: if materialize_content {
@@ -3215,7 +3203,7 @@ pub(crate) async fn load_delegation_update(
         }
         DelegationUpdateStorageKind::SessionMessage => {
             if !row.try_get::<bool, _>("content_present")? {
-                return Err(OutboxCorruption::InvalidDelegationEvent.into());
+                return Err(OutboxRowCorruption::InvalidDelegationEvent.into());
             }
             Ok(DispatchedDelegationUpdate::SessionMessage {
                 spawning_request,
@@ -3226,7 +3214,7 @@ pub(crate) async fn load_delegation_update(
                 delivery_sequence: required_positive_sequence(&row, "delivery_sequence")?,
                 content: if materialize_content {
                     row.try_get::<Option<String>, _>("content_text")?
-                        .ok_or(OutboxCorruption::InvalidDelegationEvent)?
+                        .ok_or(OutboxRowCorruption::InvalidDelegationEvent)?
                 } else {
                     String::new()
                 },
@@ -3252,7 +3240,7 @@ async fn load_delegation_wake(
     .bind(stored_session)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    .ok_or(OutboxRowCorruption::MissingTypedRecord)?;
     let spawning_uuid: Uuid = row.try_get("spawning_tool_request_id")?;
     let spawning_request = ToolRequestId::from_uuid(spawning_uuid);
     let subject: String = row.try_get("subject_kind")?;
@@ -3260,7 +3248,7 @@ async fn load_delegation_wake(
         DelegationWakeStorageKind::Result => {
             if row.try_get::<Option<Uuid>, _>("result_spawning_request_id")? != Some(spawning_uuid)
             {
-                return Err(OutboxCorruption::InvalidDelegationEvent.into());
+                return Err(OutboxRowCorruption::InvalidDelegationEvent.into());
             }
             Ok(DispatchedDelegationWake::Result {
                 spawning_request,
@@ -3276,28 +3264,28 @@ async fn load_delegation_wake(
     }
 }
 
-fn required_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Result<Uuid, OutboxCorruption> {
+fn required_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Result<Uuid, OutboxRowCorruption> {
     row.try_get::<Option<Uuid>, _>(column)
-        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?
-        .ok_or(OutboxCorruption::InvalidDelegationEvent)
+        .map_err(|_| OutboxRowCorruption::InvalidDelegationEvent)?
+        .ok_or(OutboxRowCorruption::InvalidDelegationEvent)
 }
 
 fn required_session(
     row: &sqlx::postgres::PgRow,
     column: &str,
-) -> Result<SessionId, OutboxCorruption> {
+) -> Result<SessionId, OutboxRowCorruption> {
     required_uuid(row, column).map(session_id_from_uuid)
 }
 
 fn required_positive_sequence(
     row: &sqlx::postgres::PgRow,
     column: &str,
-) -> Result<u64, OutboxCorruption> {
+) -> Result<u64, OutboxRowCorruption> {
     let value = row
         .try_get::<Option<Decimal>, _>(column)
-        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?
-        .ok_or(OutboxCorruption::InvalidDelegationEvent)?;
-    decode_positive_sequence(value).map_err(|_| OutboxCorruption::InvalidDelegationEvent)
+        .map_err(|_| OutboxRowCorruption::InvalidDelegationEvent)?
+        .ok_or(OutboxRowCorruption::InvalidDelegationEvent)?;
+    decode_positive_sequence(value).map_err(|_| OutboxRowCorruption::InvalidDelegationEvent)
 }
 
 /// Decodes the durable `update_kind` spelling.
@@ -3308,30 +3296,30 @@ fn required_positive_sequence(
 /// durable `CHECK` constraint actually admits.
 pub fn decode_delegation_update_kind(
     value: &str,
-) -> Result<DelegationUpdateStorageKind, OutboxCorruption> {
-    delegation_update_kind_from_str(value).ok_or(OutboxCorruption::InvalidDelegationEvent)
+) -> Result<DelegationUpdateStorageKind, OutboxRowCorruption> {
+    delegation_update_kind_from_str(value).ok_or(OutboxRowCorruption::InvalidDelegationEvent)
 }
 
 /// Decodes the durable `policy_kind` spelling, lifting as above.
 pub fn decode_delegation_policy_kind(
     value: &str,
-) -> Result<DelegationPolicyStorageKind, OutboxCorruption> {
-    delegation_policy_kind_from_str(value).ok_or(OutboxCorruption::InvalidDelegationEvent)
+) -> Result<DelegationPolicyStorageKind, OutboxRowCorruption> {
+    delegation_policy_kind_from_str(value).ok_or(OutboxRowCorruption::InvalidDelegationEvent)
 }
 
 /// Decodes the durable `subject_kind` spelling, lifting as above.
 pub fn decode_delegation_wake_subject(
     value: &str,
-) -> Result<DelegationWakeStorageKind, OutboxCorruption> {
-    delegation_wake_subject_from_str(value).ok_or(OutboxCorruption::InvalidDelegationEvent)
+) -> Result<DelegationWakeStorageKind, OutboxRowCorruption> {
+    delegation_wake_subject_from_str(value).ok_or(OutboxRowCorruption::InvalidDelegationEvent)
 }
 
 /// Decodes the durable `on_parent_stopped` / `on_parent_cancelled` spelling.
 ///
 /// Public so a test can drive it with the spellings the durable `CHECK`
 /// constraint actually admits, rather than restating the table beside it.
-pub fn decode_bound_action(value: &str) -> Result<DispatchedBoundChildAction, OutboxCorruption> {
-    match bound_child_action_from_str(value).ok_or(OutboxCorruption::InvalidDelegationEvent)? {
+pub fn decode_bound_action(value: &str) -> Result<DispatchedBoundChildAction, OutboxRowCorruption> {
+    match bound_child_action_from_str(value).ok_or(OutboxRowCorruption::InvalidDelegationEvent)? {
         BoundChildAction::KeepRunning => Ok(DispatchedBoundChildAction::KeepRunning),
         BoundChildAction::Stop => Ok(DispatchedBoundChildAction::Stop),
         BoundChildAction::Cancel => Ok(DispatchedBoundChildAction::Cancel),
@@ -3342,8 +3330,8 @@ pub fn decode_bound_action(value: &str) -> Result<DispatchedBoundChildAction, Ou
 ///
 /// Public so a test can drive it with the spellings the durable `CHECK`
 /// constraint actually admits, rather than restating the table beside it.
-pub fn decode_wait_mode(value: &str) -> Result<DispatchedDelegationWaitMode, OutboxCorruption> {
-    match delegation_wait_mode_from_str(value).ok_or(OutboxCorruption::InvalidDelegationEvent)? {
+pub fn decode_wait_mode(value: &str) -> Result<DispatchedDelegationWaitMode, OutboxRowCorruption> {
+    match delegation_wait_mode_from_str(value).ok_or(OutboxRowCorruption::InvalidDelegationEvent)? {
         DelegationWaitMode::Foreground => Ok(DispatchedDelegationWaitMode::Foreground),
         DelegationWaitMode::Background => Ok(DispatchedDelegationWaitMode::Background),
     }
@@ -3355,8 +3343,10 @@ pub fn decode_wait_mode(value: &str) -> Result<DispatchedDelegationWaitMode, Out
 /// constraint actually admits, rather than restating the table beside it.
 pub fn decode_delegation_outcome(
     value: &str,
-) -> Result<DispatchedDelegationOutcome, OutboxCorruption> {
-    match delegation_outcome_kind_from_str(value).ok_or(OutboxCorruption::InvalidDelegationEvent)? {
+) -> Result<DispatchedDelegationOutcome, OutboxRowCorruption> {
+    match delegation_outcome_kind_from_str(value)
+        .ok_or(OutboxRowCorruption::InvalidDelegationEvent)?
+    {
         DelegationOutcomeKind::ResultReturned => Ok(DispatchedDelegationOutcome::ResultReturned),
         DelegationOutcomeKind::ChildFailed => Ok(DispatchedDelegationOutcome::ChildFailed),
         DelegationOutcomeKind::ChildStopped => Ok(DispatchedDelegationOutcome::ChildStopped),
@@ -3372,9 +3362,9 @@ pub fn decode_delegation_outcome(
 /// constraint actually admits, rather than restating the table beside it.
 pub fn decode_delegation_reason(
     value: &str,
-) -> Result<DispatchedDelegationReason, OutboxCorruption> {
+) -> Result<DispatchedDelegationReason, OutboxRowCorruption> {
     match delegation_outcome_reason_from_str(value)
-        .ok_or(OutboxCorruption::InvalidDelegationEvent)?
+        .ok_or(OutboxRowCorruption::InvalidDelegationEvent)?
     {
         DelegationOutcomeReason::ChildCompleted => Ok(DispatchedDelegationReason::ChildCompleted),
         DelegationOutcomeReason::ChildExecutionFailed => {
@@ -3397,26 +3387,26 @@ pub fn decode_delegation_reason(
         }
         | DelegationOutcomeReason::ParentCancelled {
             scope: DescendantTerminationScope::ParentAlone,
-        } => Err(OutboxCorruption::InvalidDelegationEvent),
+        } => Err(OutboxRowCorruption::InvalidDelegationEvent),
     }
 }
 
 pub(crate) fn decode_delegation_provenance(
     row: &sqlx::postgres::PgRow,
-) -> Result<DispatchedDelegationProvenance, OutboxCorruption> {
+) -> Result<DispatchedDelegationProvenance, OutboxRowCorruption> {
     let kind: Option<String> = row
         .try_get("provenance_kind")
-        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?;
+        .map_err(|_| OutboxRowCorruption::InvalidDelegationEvent)?;
     let session = required_session(row, "provenance_session_id")?;
     let turn: Option<Uuid> = row
         .try_get("provenance_turn_id")
-        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?;
+        .map_err(|_| OutboxRowCorruption::InvalidDelegationEvent)?;
     let goal: Option<Decimal> = row
         .try_get("provenance_goal_generation")
-        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?;
+        .map_err(|_| OutboxRowCorruption::InvalidDelegationEvent)?;
     let command: Option<Uuid> = row
         .try_get("provenance_command_id")
-        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?;
+        .map_err(|_| OutboxRowCorruption::InvalidDelegationEvent)?;
     match (kind.as_deref(), turn, goal, command) {
         (Some("child_turn"), Some(turn), None, None) => {
             Ok(DispatchedDelegationProvenance::ChildTurn {
@@ -3435,7 +3425,7 @@ pub(crate) fn decode_delegation_provenance(
             Ok(DispatchedDelegationProvenance::ParentGoalCommand {
                 session,
                 goal_generation: decode_positive_sequence(goal)
-                    .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?,
+                    .map_err(|_| OutboxRowCorruption::InvalidDelegationEvent)?,
                 command: DurableCommandId::from_uuid(command),
             })
         }
@@ -3445,21 +3435,21 @@ pub(crate) fn decode_delegation_provenance(
                 command: DurableCommandId::from_uuid(command),
             })
         }
-        _ => Err(OutboxCorruption::InvalidDelegationEvent),
+        _ => Err(OutboxRowCorruption::InvalidDelegationEvent),
     }
 }
 
-fn decode_nonnegative_sequence(value: Decimal) -> Result<u64, OutboxCorruption> {
+fn decode_nonnegative_sequence(value: Decimal) -> Result<u64, OutboxCursorCorruption> {
     if !value.fract().is_zero() || value.is_sign_negative() {
-        return Err(OutboxCorruption::InvalidSequence);
+        return Err(OutboxCursorCorruption::InvalidSequence);
     }
-    u64::try_from(value).map_err(|_| OutboxCorruption::InvalidSequence)
+    u64::try_from(value).map_err(|_| OutboxCursorCorruption::InvalidSequence)
 }
 
-fn decode_positive_sequence(value: Decimal) -> Result<u64, OutboxCorruption> {
+fn decode_positive_sequence(value: Decimal) -> Result<u64, OutboxCursorCorruption> {
     let sequence = decode_nonnegative_sequence(value)?;
     if sequence == 0 {
-        Err(OutboxCorruption::InvalidSequence)
+        Err(OutboxCursorCorruption::InvalidSequence)
     } else {
         Ok(sequence)
     }
@@ -3468,7 +3458,7 @@ fn decode_positive_sequence(value: Decimal) -> Result<u64, OutboxCorruption> {
 fn decode_model_call_state(
     state_kind: &str,
     terminal_disposition: Option<&str>,
-) -> Result<DispatchedModelCallState, OutboxCorruption> {
+) -> Result<DispatchedModelCallState, OutboxRowCorruption> {
     match (state_kind, terminal_disposition) {
         ("prepared", None) => Ok(DispatchedModelCallState::Prepared),
         ("in_flight", None) => Ok(DispatchedModelCallState::InFlight),
@@ -3488,7 +3478,7 @@ fn decode_model_call_state(
         ("terminal", Some("ambiguous")) => Ok(DispatchedModelCallState::Terminal(
             DispatchedModelCallDisposition::Ambiguous,
         )),
-        _ => Err(OutboxCorruption::InvalidModelCallState),
+        _ => Err(OutboxRowCorruption::InvalidModelCallState),
     }
 }
 
@@ -3496,7 +3486,7 @@ fn decode_settings_model_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
-) -> Result<ModelSelectionRequest, OutboxCorruption> {
+) -> Result<ModelSelectionRequest, OutboxRowCorruption> {
     match (kind.as_str(), direct, alias) {
         ("direct", Some(selection), None) => Ok(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(selection),
@@ -3504,7 +3494,7 @@ fn decode_settings_model_selection(
         ("alias", None, Some(alias)) => {
             Ok(ModelSelectionRequest::Alias(ModelAlias::from_uuid(alias)))
         }
-        _ => Err(OutboxCorruption::InvalidModelSettingsEvent),
+        _ => Err(OutboxRowCorruption::InvalidModelSettingsEvent),
     }
 }
 
@@ -3513,7 +3503,7 @@ fn decode_settings_frozen_model(
     direct: Option<Uuid>,
     alias: Option<Uuid>,
     alias_selected: Option<Uuid>,
-) -> Result<FrozenModelSelection, OutboxCorruption> {
+) -> Result<FrozenModelSelection, OutboxRowCorruption> {
     match (kind.as_str(), direct, alias, alias_selected) {
         ("direct", Some(selection), None, None) => Ok(FrozenModelSelection::Direct(
             DirectModelSelection::from_uuid(selection),
@@ -3526,7 +3516,7 @@ fn decode_settings_frozen_model(
                 )),
             })
         }
-        _ => Err(OutboxCorruption::InvalidModelSettingsEvent),
+        _ => Err(OutboxRowCorruption::InvalidModelSettingsEvent),
     }
 }
 

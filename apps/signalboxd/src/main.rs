@@ -989,9 +989,9 @@ fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailure
                 commit_ambiguous: false,
             }
         }
-        ProcessRuntimeError::Dispatch(OutboxDispatchError::Corruption(_)) => {
-            OperatorFailureClass::FailClosedCorruption
-        }
+        ProcessRuntimeError::Dispatch(
+            OutboxDispatchError::CursorCorruption(_) | OutboxDispatchError::RowCorruption(_),
+        ) => OperatorFailureClass::FailClosedCorruption,
         ProcessRuntimeError::Encode(_)
         | ProcessRuntimeError::EncodeInvariant
         | ProcessRuntimeError::InboundFrameBudgetClosed
@@ -3479,8 +3479,8 @@ mod tests {
     #[test]
     fn runtime_failure_class_reports_dispatch_corruption() {
         let corruption = ProcessRuntimeError::Dispatch(
-            signalbox_persistence::outbox::OutboxDispatchError::Corruption(
-                signalbox_persistence::outbox::OutboxCorruption::MissingDeliveryState,
+            signalbox_persistence::outbox::OutboxDispatchError::CursorCorruption(
+                signalbox_persistence::outbox::OutboxCursorCorruption::MissingDeliveryState,
             ),
         );
         assert_eq!(

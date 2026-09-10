@@ -2552,8 +2552,11 @@ async fn model_call_transactions_complete_first_reply() -> Result<(), Box<dyn Er
     )
     .execute(&pool)
     .await?;
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
-        .await?;
+    assert_next_outbox_event_quarantined(
+        &pool,
+        OutboxRowCorruption::InvalidTerminalEventCorrelation,
+    )
+    .await?;
     sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;

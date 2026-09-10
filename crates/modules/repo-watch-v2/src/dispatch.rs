@@ -76,9 +76,8 @@ impl RepoWatchStore {
                  LEFT JOIN rule_evaluation_cursor AS cursor
                    ON cursor.repository = active.repository AND cursor.rule_id = active.rule_id
                     AND cursor.rule_revision = active.active_revision
-                 JOIN gh_event AS event ON event.repository = active.repository
+                 JOIN gh_readable_event AS event ON event.repository = active.repository
                   AND event.repository_event_ordinal > GREATEST(revision.activated_after_event_ordinal, COALESCE(cursor.event_ordinal, 0))
-                  AND event.decode_error IS NULL
                  WHERE active.repository = $1 AND active.rule_id = $2 AND active.active_revision = $3
                    AND cursor.effect_id IS NULL
                  ORDER BY event.repository_event_ordinal LIMIT 1")
@@ -263,10 +262,10 @@ impl RepoWatchStore {
                     terminal.event_id AS terminal_event_id, terminal.event_kind AS reason,
                     terminal.recorded_at
              FROM dispatch_ledger AS origin
-             JOIN gh_event AS dispatched ON dispatched.event_id = origin.event_id
+             JOIN gh_readable_event AS dispatched ON dispatched.event_id = origin.event_id
              JOIN LATERAL (
                  SELECT fact.event_id, fact.event_kind, fact.recorded_at
-                 FROM gh_event AS fact
+                 FROM gh_readable_event AS fact
                  WHERE fact.repository = dispatched.repository
                    AND fact.pull_request_number = dispatched.pull_request_number
                    AND fact.repository_event_ordinal > dispatched.repository_event_ordinal
