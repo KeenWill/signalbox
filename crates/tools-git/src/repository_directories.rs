@@ -305,7 +305,9 @@ pub(super) fn require_branch_unoccupied(
         }
         Ok(())
     };
-    inspect(&authority.git_directory)?;
+    if !authority.common_repository_is_bare()? {
+        inspect(&authority.git_directory)?;
+    }
     let worktrees = match openat(
         &authority.git_directory,
         "worktrees",

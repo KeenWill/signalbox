@@ -204,6 +204,15 @@ fn execute(
 
 #[tokio::test]
 async fn every_git_tool_operates_on_a_linked_worktree() {
+    exercise_linked_repository(false).await;
+}
+
+#[tokio::test]
+async fn every_git_tool_operates_on_a_linked_worktree_of_a_bare_repository() {
+    exercise_linked_repository(true).await;
+}
+
+async fn exercise_linked_repository(bare: bool) {
     let fixture = super::support::Fixture::new();
     let repository = git2::Repository::open(fixture.root()).expect("fixture opens");
     // Exceed the diff prefix budget so both diff modes exercise truncation.
@@ -219,9 +228,65 @@ async fn every_git_tool_operates_on_a_linked_worktree() {
         .expect("scale branch");
     let parent = tempfile::tempdir().expect("linked parent");
     let linked = parent.path().join("linked");
-    repository
-        .worktree("linked", &linked, None)
-        .expect("linked worktree creates");
+    if bare {
+        let bare_root = parent.path().join("bare.git");
+        assert!(
+            Command::new("git")
+                .args(["clone", "--bare", "--"])
+                .arg(fixture.root())
+                .arg(&bare_root)
+                .output()
+                .expect("bare clone")
+                .status
+                .success()
+        );
+        assert!(
+            git2::Repository::open_bare(&bare_root)
+                .expect("bare common repository")
+                .config()
+                .expect("common config")
+                .get_bool("core.bare")
+                .expect("bare flag")
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&bare_root)
+                .args(["worktree", "add", "-b", "linked"])
+                .arg(&linked)
+                .output()
+                .expect("native linked checkout")
+                .status
+                .success()
+        );
+        let native = Command::new("git")
+            .arg("-C")
+            .arg(&linked)
+            .args(["rev-parse", "--is-bare-repository"])
+            .output()
+            .expect("native checkout bareness");
+        assert!(native.status.success());
+        assert_eq!(native.stdout, b"false\n");
+        let (_, executor) = LocalGitTools::try_new(LocalWorkspaceFileSystem, &linked, identity())
+            .expect("bare common config admits checkout")
+            .into_parts();
+        // A bare common HEAD is not an occupied worktree branch.
+        execute(
+            &executor,
+            LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+                name: repository
+                    .head()
+                    .expect("source HEAD")
+                    .shorthand()
+                    .expect("source branch")
+                    .to_owned(),
+            }),
+        );
+    } else {
+        repository
+            .worktree("linked", &linked, None)
+            .expect("linked worktree creates");
+    }
     let main_head = fs::read(fixture.root().join(".git/HEAD")).expect("main HEAD");
     let main_index = fs::read(fixture.root().join(".git/index")).expect("main index");
     exercise_every_git_tool(linked).await;

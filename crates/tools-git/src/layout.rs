@@ -71,7 +71,10 @@ pub(super) fn validate_repository_layout(
     let worktree_directory = directories.worktree;
     unsupported_control_files_are_absent(git_directory.as_fd())
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-    let config = open_repository_config_at(&git_directory)?;
+    let config = open_repository_config_at(
+        &git_directory,
+        administration.worktree != administration.common,
+    )?;
     let head = open_repository_head_at(&worktree_directory, config.object_format)?;
     let refs = open_repository_refs_at(&git_directory)?;
     reject_administrative_symlinks_for_format(&git_directory, config.object_format)?;
@@ -519,6 +522,7 @@ fn validate_shallow_file_at_with_hook<AfterRead: FnOnce()>(
 
 pub(super) fn open_repository_config_at(
     git_directory: &fs::File,
+    linked_checkout: bool,
 ) -> Result<RepositoryConfig, LocalGitToolsConstructionError> {
     let descriptor = openat(
         git_directory,
@@ -527,11 +531,12 @@ pub(super) fn open_repository_config_at(
         Mode::empty(),
     )
     .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-    validate_repository_config_descriptor(descriptor)
+    validate_repository_config_descriptor(descriptor, linked_checkout)
 }
 
 fn validate_repository_config_descriptor(
     descriptor: OwnedFd,
+    linked_checkout: bool,
 ) -> Result<RepositoryConfig, LocalGitToolsConstructionError> {
     let mut file = fs::File::from(descriptor);
     let metadata = file
@@ -660,7 +665,7 @@ fn validate_repository_config_descriptor(
         && parsed
             .get_bool("core.bare")
             .ok()
-            .filter(|value| !value)
+            .filter(|value| !value || linked_checkout)
             .is_none()
     {
         return Err(LocalGitToolsConstructionError::Repository);
