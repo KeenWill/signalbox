@@ -26,9 +26,9 @@ judge binding in its immutable run input. At least one selected case is
 required. Trials follow case order, then repeat order, with a maximum of 1,000
 calls. Offline scoring requires one repeat. `corpus.load` reads and preflights
 every selected case before provider work, rejecting duplicate selected live case
-names; `judge.evaluate` addresses a trial ordinal in that retained manifest. The
-attempt reuses its decoded, preflighted corpus across trials; recovery reloads
-it once when needed.
+names. Only selected live JSONL rows are decoded. `judge.evaluate` addresses a
+trial ordinal in that retained manifest. The attempt reuses its decoded,
+preflighted corpus across trials; recovery reloads it once when needed.
 
 The host adapters reuse the catalog's verified blob reads and `judge_eval_case`.
 Judge answers retain call identity, rendered-request digest, binding and

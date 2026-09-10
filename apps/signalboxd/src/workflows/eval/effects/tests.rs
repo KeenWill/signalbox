@@ -140,6 +140,22 @@ fn duplicate_live_names(fixture: &mut Fixture) {
 }
 
 #[tokio::test]
+async fn live_corpus_decodes_only_selected_positions() {
+    let mut fixture = Fixture::lazy();
+    let bytes = b"invalid unselected row\n{\"name\":\"synthetic-read\",\"category\":\"workspace_benign\",\"tool\":\"current_time\",\"arguments\":\"{}\",\"expected\":\"approve\"}\n";
+    fixture.manifest.format = CorpusFormat::Live;
+    fixture.manifest.cases = vec![1];
+    fixture.manifest.corpus = BlobDigest::digest(bytes).to_string();
+    fixture.services.blobs = Arc::new(MemoryBlobs(bytes.to_vec()));
+    let corpus = fixture.services.corpus(&fixture.manifest).await.unwrap();
+    assert!(matches!(&corpus.cases[..], [Case::Live(case)] if case.name == "synthetic-read"));
+    fixture.manifest.cases = vec![0];
+    assert!(fixture.services.corpus(&fixture.manifest).await.is_err());
+    fixture.manifest.cases = vec![2];
+    assert!(fixture.services.corpus(&fixture.manifest).await.is_err());
+}
+
+#[tokio::test]
 async fn duplicate_selected_live_names_fail_before_provider_work() {
     let mut fixture = Fixture::lazy();
     duplicate_live_names(&mut fixture);
