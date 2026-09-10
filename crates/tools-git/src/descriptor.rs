@@ -756,7 +756,7 @@ pub(super) fn remove_entry_if_identity(
     expected: FileIdentity,
     removal_flags: AtFlags,
 ) -> Result<(), LocalGitFailure> {
-    remove_entry_if_identity_with_hook(parent, name, expected, None, removal_flags, |_| {})
+    remove_entry_if_identity_with_hook(parent, name, expected, None, removal_flags, |_| {}, || {})
 }
 
 pub(super) fn remove_file_if_snapshot_identity(
@@ -771,6 +771,7 @@ pub(super) fn remove_file_if_snapshot_identity(
         Some(expected),
         AtFlags::empty(),
         |_| {},
+        || {},
     )
 }
 
@@ -794,13 +795,65 @@ fn removal_snapshot(
     Ok(file_snapshot_identity(&metadata))
 }
 
-fn remove_entry_if_identity_with_hook<AfterQuarantine: FnOnce(&QuarantineDirectory)>(
+fn removal_content_digest(
+    parent: &OwnedFd,
+    name: &OsStr,
+    expected: FileSnapshotIdentity,
+) -> Result<[u8; 32], LocalGitFailure> {
+    let mut file = fs::File::from(
+        openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Operation)?,
+    );
+    let validate = |file: &fs::File| {
+        let metadata = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
+        if !metadata.is_file()
+            || file_snapshot_identity(&metadata) != expected
+            || removal_snapshot(parent, name)? != expected
+        {
+            return Err(LocalGitFailure::Operation);
+        }
+        Ok(())
+    };
+    let mut digest = Sha256::new();
+    let mut buffer = [0; crate::streamed_object::IO_BYTES];
+    let mut length = 0u64;
+    loop {
+        validate(&file)?;
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        validate(&file)?;
+        length = length
+            .checked_add(count as u64)
+            .filter(|length| *length <= expected.length)
+            .ok_or(LocalGitFailure::Operation)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    if length != expected.length {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(digest.finalize().into())
+}
+
+fn remove_entry_if_identity_with_hook<
+    AfterQuarantine: FnOnce(&QuarantineDirectory),
+    BeforeRename: FnOnce(),
+>(
     parent: &OwnedFd,
     name: &OsStr,
     expected: FileIdentity,
     snapshot: Option<FileSnapshotIdentity>,
     removal_flags: AtFlags,
     after_quarantine: AfterQuarantine,
+    before_rename: BeforeRename,
 ) -> Result<(), LocalGitFailure> {
     let current = match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(status) => Some(stat_file_identity(&status)),
@@ -812,6 +865,9 @@ fn remove_entry_if_identity_with_hook<AfterQuarantine: FnOnce(&QuarantineDirecto
     {
         return Err(LocalGitFailure::Operation);
     }
+    let expected_digest = snapshot
+        .map(|expected| removal_content_digest(parent, name, expected))
+        .transpose()?;
     let mut quarantine = QuarantineDirectory::create(parent)?;
     quarantine.keep();
     after_quarantine(&quarantine);
@@ -819,6 +875,7 @@ fn remove_entry_if_identity_with_hook<AfterQuarantine: FnOnce(&QuarantineDirecto
         quarantine.remove_if_empty_and_current()?;
         return Err(LocalGitFailure::Operation);
     }
+    before_rename();
     let quarantined_name = OsStr::new("owned");
     rustix::fs::renameat_with(
         parent,
@@ -838,12 +895,18 @@ fn remove_entry_if_identity_with_hook<AfterQuarantine: FnOnce(&QuarantineDirecto
     let moved_snapshot = snapshot
         .map(|expected| {
             let actual = removal_snapshot(quarantine.descriptor(), quarantined_name)?;
-            // Rename changes ctime. All other snapshot fields must remain equal;
-            // retain the new full snapshot for the final pre-unlink validation.
+            // Rename changes ctime, so compare content as well as the remaining
+            // snapshot fields before retaining the post-rename snapshot.
             let mut before_rename = actual;
             before_rename.changed_seconds = expected.changed_seconds;
             before_rename.changed_nanoseconds = expected.changed_nanoseconds;
-            if before_rename != expected {
+            if before_rename != expected
+                || Some(removal_content_digest(
+                    quarantine.descriptor(),
+                    quarantined_name,
+                    actual,
+                )?) != expected_digest
+            {
                 return Err(LocalGitFailure::Operation);
             }
             Ok(actual)
@@ -904,12 +967,82 @@ pub(super) fn remove_entry_if_identity_with_test_hook<
         None,
         removal_flags,
         after_quarantine,
+        || {},
     )
 }
 
 #[cfg(test)]
 mod removal_snapshot_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "generated 1 GB removal scale fixture"]
+    fn snapshot_conditioned_removal_streams_one_gigabyte() {
+        let root = tempfile::tempdir().expect("scale fixture directory");
+        let path = root.path().join("tracked");
+        let file = fs::File::create(&path).expect("sparse file");
+        file.set_len(1_000_000_000).expect("1 GB fixture");
+        let expected = file_snapshot_identity(&file.metadata().expect("snapshot"));
+        let parent = openat(
+            rustix::fs::CWD,
+            root.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("parent descriptor");
+
+        remove_file_if_snapshot_identity(&parent, OsStr::new("tracked"), expected)
+            .expect("unchanged content removed");
+
+        assert!(!path.try_exists().expect("removed path"));
+        assert_eq!(
+            fs::read_dir(root.path()).expect("fixture entries").count(),
+            0
+        );
+    }
+
+    #[test]
+    fn snapshot_conditioned_removal_preserves_a_rewrite_with_restored_mtime_before_rename() {
+        let root = tempfile::tempdir().expect("fixture directory");
+        let path = root.path().join("tracked");
+        fs::write(&path, b"clean").expect("clean file");
+        let file = fs::File::open(&path).expect("tracked file");
+        let modified = std::time::SystemTime::UNIX_EPOCH;
+        file.set_modified(modified).expect("initial mtime");
+        let expected = file_snapshot_identity(&file.metadata().expect("clean snapshot"));
+        let parent = openat(
+            rustix::fs::CWD,
+            root.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("parent descriptor");
+
+        let result = remove_entry_if_identity_with_hook(
+            &parent,
+            OsStr::new("tracked"),
+            expected.file,
+            Some(expected),
+            AtFlags::empty(),
+            |_| {},
+            || {
+                fs::write(&path, b"other")
+                    .expect("same-length rewrite after the last snapshot check");
+                file.set_modified(modified).expect("restore mtime");
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).expect("edit restored"), b"other");
+        assert_eq!(
+            file_identity(&fs::metadata(&path).expect("same inode")),
+            expected.file
+        );
+        assert_eq!(
+            fs::read_dir(root.path()).expect("fixture entries").count(),
+            1
+        );
+    }
 
     #[test]
     fn snapshot_conditioned_removal_preserves_an_in_place_edit_during_quarantine() {
@@ -938,6 +1071,7 @@ mod removal_snapshot_tests {
                         .set_modified(std::time::SystemTime::UNIX_EPOCH)
                         .expect("distinct modification timestamp");
                 },
+                || {},
             );
             assert!(result.is_err());
             assert_eq!(fs::read(&path).expect("edit preserved"), edited);
