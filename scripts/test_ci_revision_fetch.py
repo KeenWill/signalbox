@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import check_migration_versions
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -117,6 +118,59 @@ class RevisionFetchTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.execute(code, response={"message": "comparison unavailable"})
         self.assertFalse((self.directory / "output").exists())
+
+    def migration_checkout(self, version):
+        migrations = self.source / "crates/fixture/migrations"
+        migrations.mkdir(parents=True)
+        (migrations / "100_initial.sql").write_text("SELECT 1;\n")
+        self.commit("initial migration")
+        self.git(self.source, "checkout", "-b", "stack/parent")
+        (migrations / "200_parent.sql").write_text("SELECT 2;\n")
+        self.commit("parent migration")
+        self.git(self.source, "checkout", "-b", "candidate")
+        (migrations / f"{version}_candidate.sql").write_text("SELECT 3;\n")
+        self.commit("candidate migration")
+        self.git(self.source, "checkout", "main")
+        (migrations / "300_main.sql").write_text("SELECT 4;\n")
+        self.commit("main migration")
+        checkout = self.directory / "migration-checkout"
+        self.git(self.directory, "clone", "--depth=1", "--branch=candidate",
+                 self.source.as_uri(), str(checkout))
+        return checkout
+
+    def check_migrations(self, checkout):
+        output = io.StringIO()
+        with contextlib.chdir(checkout), patch("sys.argv", ["checker", "--base", "origin/stack/parent"]), contextlib.redirect_stdout(output):
+            result = check_migration_versions.main()
+        return result, output.getvalue()
+
+    def fetch_migration_baselines(self, checkout, base="stack/parent"):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/rust.yml").read_text())
+        code = next(step["run"] for step in workflow["jobs"]["contract-checks"]["steps"]
+                    if step.get("name") == "Fetch migration baseline trees")
+        with contextlib.chdir(checkout), patch.dict(os.environ, {"BASE_REF": base, "GH_TOKEN": "fixture-token"}):
+            exec(compile(code, "workflow migration fetch", "exec"), {})
+
+    def test_shallow_contract_checkout_checks_main_and_stacked_parent_migrations(self):
+        checkout = self.migration_checkout(250)
+        self.assertIn("cannot read migration base", self.check_migrations(checkout)[1])
+        self.fetch_migration_baselines(checkout)
+        result, output = self.check_migrations(checkout)
+        self.assertEqual(result, 1)
+        self.assertIn("250_candidate.sql must sort after", output)
+        self.assertIn("version 300", output)
+        for branch in ("main", "stack/parent"):
+            self.assertEqual(self.git(checkout, "rev-list", "--count", f"origin/{branch}"), "1")
+
+    def test_shallow_contract_checkout_accepts_a_migration_after_both_baselines(self):
+        checkout = self.migration_checkout(400)
+        self.fetch_migration_baselines(checkout)
+        self.assertEqual(self.check_migrations(checkout)[0], 0)
+
+    def test_missing_migration_baseline_fails_the_fetch(self):
+        checkout = self.migration_checkout(400)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.fetch_migration_baselines(checkout, base="missing-parent")
 
 
 if __name__ == "__main__":

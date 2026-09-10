@@ -33,6 +33,7 @@ pub enum ProgramGrant {
     EvalRecord,
     Blob,
     Register,
+    RepoWatch,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```

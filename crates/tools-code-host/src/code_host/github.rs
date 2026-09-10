@@ -221,6 +221,7 @@ impl Drop for CensusHistory {
 /// Production GitHub transport with fixed endpoints and deployment-supplied policy.
 #[derive(Clone, Debug)]
 pub struct GitHubCodeHostTransport {
+    app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
     convergence_policy: Option<signalbox_convergence::ConvergencePolicy>,
     convergence_history: ConvergenceHistory,
     client: Client,
@@ -266,6 +267,7 @@ impl GitHubCodeHostTransport {
         let rest_base = Url::parse(REST_BASE_URL).map_err(|_| GitHubCodeHostConstructionError)?;
         let graphql_url = Url::parse(GRAPHQL_URL).map_err(|_| GitHubCodeHostConstructionError)?;
         Ok(Self {
+            app: None,
             convergence_policy: None,
             convergence_history: Default::default(),
             client,
@@ -273,6 +275,15 @@ impl GitHubCodeHostTransport {
             graphql_url,
             bounds,
         })
+    }
+
+    /// Uses the profile's shared installation authentication for every request.
+    pub fn with_app(
+        mut self,
+        app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
+    ) -> Self {
+        self.app = app;
+        self
     }
 
     /// Installs the operator's convergence policy for both convergence reads.
@@ -606,12 +617,19 @@ impl GitHubCodeHostTransport {
             .send_authenticated_with_accept(Method::GET, url, None, BLOB_RAW_ACCEPT, credential)
             .await?;
         ensure_expected_status(&response, StatusCode::OK)?;
-        select_repository_file_content(
+        let scrubber = response_scrubber(&response);
+        let mut body = select_repository_file_content(
             response.bytes_stream(),
             line_range,
             self.bounds.repository_file_content_bytes(),
         )
-        .await
+        .await?;
+        if let Some(scrubber) = scrubber
+            && let RepositoryFileBodyKind::Text(selection) = &mut body.kind
+        {
+            selection.redact(&scrubber);
+        }
+        Ok(body)
     }
 
     fn repository_contents_url(
@@ -1549,6 +1567,7 @@ impl GitHubCodeHostTransport {
             .send_authenticated(Method::GET, url, None, credential)
             .await?;
         ensure_expected_status(&response, StatusCode::FOUND)?;
+        let scrubber = response_scrubber(&response);
         let location = response
             .headers()
             .get(LOCATION)
@@ -1576,7 +1595,10 @@ impl GitHubCodeHostTransport {
             minimum_optional_limit(self.bounds.job_log_bytes(), self.bounds.result_text_bytes());
         let (bytes, completeness) =
             read_optionally_bounded(response.bytes_stream(), retained_limit).await?;
-        let (text, completeness) = bounded_lossy_text(&bytes, completeness, retained_limit);
+        let initial_scrubber = super::CredentialScrubber::try_new(credential)
+            .ok_or(CodeHostTransportFailure::InvalidCredential)?;
+        let scrubbers = [Some(&initial_scrubber), scrubber.as_ref()];
+        let (text, completeness) = job_log_text(&bytes, completeness, retained_limit, &scrubbers);
         let result = CiJobLogResult::try_new(self.bounds, arguments.job_id(), text, completeness)
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         Ok(CodeHostResult::CiJobLog(result))
@@ -1658,6 +1680,23 @@ impl GitHubCodeHostTransport {
         let headers = HeaderMap::from_iter([(ACCEPT, HeaderValue::from_static(accept))]);
         let request =
             authenticated_request(&self.client, method, url, authentication, body).headers(headers);
+        let request = match self.bounds.request_timeout() {
+            Some(timeout) => request.timeout(timeout),
+            None => request,
+        };
+        if let Some(app) = &self.app {
+            return app
+                .send(request, self.bounds.request_timeout())
+                .await
+                .map_err(|failure| match failure {
+                    signalbox_github_transport::AppRequestFailure::Credential(_) => {
+                        CodeHostTransportFailure::InvalidCredential
+                    }
+                    signalbox_github_transport::AppRequestFailure::Request(_) => {
+                        CodeHostTransportFailure::DispatchUnknown
+                    }
+                });
+        }
         request
             .send()
             .await
@@ -1706,6 +1745,7 @@ impl GitHubCodeHostTransport {
         expected: StatusCode,
     ) -> Result<(serde_json::Value, CodeHostResultCompleteness), CodeHostTransportFailure> {
         ensure_expected_status(&response, expected)?;
+        let scrubber = response_scrubber(&response);
         let completeness = if has_next_page(response.headers()) {
             CodeHostResultCompleteness::Truncated
         } else {
@@ -1716,8 +1756,11 @@ impl GitHubCodeHostTransport {
         if body_completeness == CodeHostResultCompleteness::Truncated {
             return Err(CodeHostTransportFailure::ResponseTooLarge);
         }
-        let value =
+        let mut value =
             serde_json::from_slice(&body).map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        if let Some(scrubber) = scrubber {
+            scrubber.redact_value(&mut value);
+        }
         Ok((value, completeness))
     }
 }
@@ -1731,47 +1774,56 @@ impl CodeHostTransport for GitHubCodeHostTransport {
         &mut self,
         operation: CodeHostOperation,
         credential: &CredentialValue,
+        request_timeout: Option<Duration>,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let mut transport = self.clone();
+        transport.bounds.request_timeout = request_timeout;
         match operation {
-            CodeHostOperation::Summary(arguments) => self.summary(arguments, credential).await,
+            CodeHostOperation::Summary(arguments) => transport.summary(arguments, credential).await,
             CodeHostOperation::ChangedFiles(arguments) => {
-                self.changed_files(arguments, credential).await
+                transport.changed_files(arguments, credential).await
             }
-            CodeHostOperation::FilePatch(arguments) => self.file_patch(arguments, credential).await,
+            CodeHostOperation::FilePatch(arguments) => {
+                transport.file_patch(arguments, credential).await
+            }
             CodeHostOperation::ListDirectory(arguments) => {
-                self.repository_list_directory(arguments, credential).await
+                transport
+                    .repository_list_directory(arguments, credential)
+                    .await
             }
             CodeHostOperation::ReadFile(arguments) => {
-                self.repository_read_file(arguments, credential).await
+                transport.repository_read_file(arguments, credential).await
             }
             CodeHostOperation::ChecksStatus(arguments) => {
-                self.checks_status(arguments, credential).await
+                transport.checks_status(arguments, credential).await
             }
-            CodeHostOperation::Comment(arguments) => self.comment(arguments, credential).await,
+            CodeHostOperation::Comment(arguments) => transport.comment(arguments, credential).await,
             CodeHostOperation::ConvergenceState(arguments) => {
-                self.convergence_state(arguments, credential).await
+                transport.convergence_state(arguments, credential).await
             }
             CodeHostOperation::ReviewThreads(arguments) => {
-                self.review_threads(arguments, credential).await
+                transport.review_threads(arguments, credential).await
             }
             CodeHostOperation::StackState(arguments) => {
-                self.stack_state(arguments, credential).await
+                transport.stack_state(arguments, credential).await
             }
             CodeHostOperation::ThreadInventory(arguments) => {
-                self.thread_inventory(arguments, credential).await
+                transport.thread_inventory(arguments, credential).await
             }
             CodeHostOperation::ThreadReply(arguments) => {
-                self.thread_reply(arguments, credential).await
+                transport.thread_reply(arguments, credential).await
             }
             CodeHostOperation::ThreadResolve(arguments) => {
-                self.thread_resolve(arguments, credential).await
+                transport.thread_resolve(arguments, credential).await
             }
-            CodeHostOperation::CiJobLog(arguments) => self.ci_job_log(arguments, credential).await,
+            CodeHostOperation::CiJobLog(arguments) => {
+                transport.ci_job_log(arguments, credential).await
+            }
             CodeHostOperation::RerunFailedJobs(arguments) => {
-                self.rerun_failed_jobs(arguments, credential).await
+                transport.rerun_failed_jobs(arguments, credential).await
             }
             CodeHostOperation::ReviewGateCheck(arguments) => {
-                self.review_gate_check(arguments, credential).await
+                transport.review_gate_check(arguments, credential).await
             }
         }
     }
@@ -1810,6 +1862,15 @@ struct RepositoryFileSelection {
     returned_lines: u32,
     last_line_complete: bool,
     completeness: CodeHostResultCompleteness,
+}
+
+impl RepositoryFileSelection {
+    fn redact(&mut self, scrubber: &super::CredentialScrubber) {
+        scrubber.redact_text(&mut self.content);
+        if self.completeness == CodeHostResultCompleteness::Truncated {
+            scrubber.redact_trailing_prefix(&mut self.content);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1895,6 +1956,7 @@ async fn bounded_json_page(
     limit: usize,
 ) -> Result<(serde_json::Value, CodeHostResultCompleteness), CodeHostTransportFailure> {
     ensure_expected_status(&response, expected)?;
+    let scrubber = response_scrubber(&response);
     let completeness = if has_next_page(response.headers()) {
         CodeHostResultCompleteness::Truncated
     } else {
@@ -1904,8 +1966,11 @@ async fn bounded_json_page(
     if body_completeness == CodeHostResultCompleteness::Truncated {
         return Err(CodeHostTransportFailure::ResponseTooLarge);
     }
-    let value =
+    let mut value =
         serde_json::from_slice(&body).map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+    if let Some(scrubber) = scrubber {
+        scrubber.redact_value(&mut value);
+    }
     Ok((value, completeness))
 }
 
@@ -2331,6 +2396,24 @@ const fn classify_public_destination_error(
             CodeHostTransportFailure::DispatchUnknown
         }
     }
+}
+
+fn job_log_text(
+    bytes: &[u8],
+    completeness: CodeHostResultCompleteness,
+    limit: Option<usize>,
+    scrubbers: &[Option<&super::CredentialScrubber>],
+) -> (String, CodeHostResultCompleteness) {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    for scrubber in scrubbers.iter().flatten() {
+        scrubber.redact_text(&mut text);
+    }
+    if completeness == CodeHostResultCompleteness::Truncated {
+        for scrubber in scrubbers.iter().rev().flatten() {
+            scrubber.redact_trailing_prefix(&mut text);
+        }
+    }
+    bounded_lossy_text(text.as_bytes(), completeness, limit)
 }
 
 fn bounded_lossy_text(
@@ -3032,6 +3115,11 @@ fn required_bool(
         .ok_or(CodeHostTransportFailure::InvalidResponse)
 }
 
+fn response_scrubber(response: &Response) -> Option<super::CredentialScrubber> {
+    signalbox_github_transport::response_credential(response)
+        .and_then(|bytes| super::CredentialScrubber::try_new(&CredentialValue::new(bytes)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3139,6 +3227,134 @@ mod tests {
                 "failed censuses must not retain empty entries"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn credential_preparation_leaves_only_the_remaining_app_dispatch_budget() {
+        let configured = Duration::from_secs(30);
+        let started = tokio::time::Instant::now();
+        let reference = signalbox_model_runtime::CredentialReference::new(
+            super::super::CODE_HOST_CREDENTIAL_REFERENCE,
+        );
+        let resolution = async {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            Ok(test_credential())
+        };
+        let (credential, remaining) =
+            super::super::prepare_credential(Some(configured), resolution, &reference)
+                .await
+                .expect("credential resolves within the operation budget");
+        let bounds = CodeHostNumericBounds::new(Some(configured), None, None, None, None, None);
+        const SYNTHETIC_APP_ID: u64 = 42;
+        const SYNTHETIC_INSTALLATION_ID: u64 = 73;
+        let app = std::sync::Arc::new(signalbox_github_transport::AppAuthentication::new(
+            SYNTHETIC_APP_ID,
+            SYNTHETIC_INSTALLATION_ID,
+            std::sync::Arc::new(|| Box::pin(std::future::pending())),
+        ));
+        let mut transport = GitHubCodeHostTransport::try_new(bounds)
+            .unwrap()
+            .with_app(Some(app));
+        let operation = CodeHostOperation::Summary(
+            serde_json::from_value(serde_json::json!({
+                "repository": FILE_PATCH_REPOSITORY, "number": FILE_PATCH_NUMBER,
+            }))
+            .unwrap(),
+        );
+        let result = transport.execute(operation, &credential, remaining).await;
+        assert_eq!(remaining, Some(Duration::from_secs(10)));
+        assert_eq!(started.elapsed(), configured);
+        assert_eq!(
+            result.err(),
+            Some(CodeHostTransportFailure::InvalidCredential)
+        );
+        assert_eq!(
+            transport.numeric_bounds().request_timeout(),
+            Some(configured)
+        );
+    }
+
+    #[test]
+    fn downloaded_job_log_scrubs_the_token_used_for_the_redirect() {
+        const REFRESHED_TOKEN: &str = "refreshed-installation-token";
+        let scrubber =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new(REFRESHED_TOKEN))
+                .unwrap();
+        let body = format!("Authorization: Bearer {REFRESHED_TOKEN}\nfinished\n");
+        let (text, completeness) = job_log_text(
+            body.as_bytes(),
+            CodeHostResultCompleteness::Complete,
+            None,
+            &[Some(&scrubber)],
+        );
+        assert_eq!(text, "Authorization: Bearer [redacted]\nfinished\n");
+        assert_eq!(completeness, CodeHostResultCompleteness::Complete);
+    }
+
+    #[test]
+    fn downloaded_job_log_reapplies_its_bound_after_scrubbing() {
+        const SHORT_TOKEN: &str = "token";
+        let scrubber =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new(SHORT_TOKEN)).unwrap();
+        let (text, completeness) = job_log_text(
+            b"token",
+            CodeHostResultCompleteness::Complete,
+            Some(5),
+            &[Some(&scrubber)],
+        );
+        assert_eq!(text, "[reda");
+        assert_eq!(completeness, CodeHostResultCompleteness::Truncated);
+    }
+
+    #[tokio::test]
+    async fn downloaded_job_log_scrubs_credentials_split_at_the_retained_limit() {
+        const INITIAL_TOKEN: &str = "initial-installation-token";
+        const REFRESHED_TOKEN: &str = "refreshed\"installation\\token";
+        let initial =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new(INITIAL_TOKEN))
+                .unwrap();
+        let refreshed =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new(REFRESHED_TOKEN))
+                .unwrap();
+        // The smaller result bound retains only twelve bytes of each credential.
+        let retained_limit = minimum_optional_limit(Some(24), Some(19));
+        for token_text in [
+            INITIAL_TOKEN,
+            REFRESHED_TOKEN,
+            r#"refreshed\"installation\\token"#,
+        ] {
+            let body = format!("output\n{token_text}\nfinished\n");
+            let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(body)]);
+            let (bytes, completeness) = read_optionally_bounded(stream, retained_limit)
+                .await
+                .unwrap();
+            let (text, completeness) = job_log_text(
+                &bytes,
+                completeness,
+                retained_limit,
+                &[Some(&initial), Some(&refreshed)],
+            );
+            assert_eq!(
+                text, "output\n[redacted]",
+                "credential spelling: {token_text}"
+            );
+            assert_eq!(completeness, CodeHostResultCompleteness::Truncated);
+        }
+    }
+
+    #[test]
+    fn complete_job_logs_retain_text_that_only_matches_a_credential_prefix() {
+        const TOKEN: &str = "installation-token";
+        let scrubber =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new(TOKEN)).unwrap();
+        let (text, completeness) = job_log_text(
+            b"finished installation",
+            CodeHostResultCompleteness::Complete,
+            None,
+            &[Some(&scrubber)],
+        );
+        assert_eq!(text, "finished installation");
+        assert_eq!(completeness, CodeHostResultCompleteness::Complete);
     }
 
     #[tokio::test]
@@ -6521,5 +6737,50 @@ mod tests {
             selection.completeness,
             CodeHostResultCompleteness::Truncated
         );
+    }
+
+    #[tokio::test]
+    async fn repository_content_scrubs_response_tokens_split_at_the_retained_limit() {
+        const RESPONSE_TOKEN: &str = "refreshed\"installation\\token";
+        let scrubber =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new(RESPONSE_TOKEN))
+                .unwrap();
+        // Retain twelve credential bytes, including the escaped quote when present.
+        let retained_limit = Some("output\n".len() + 12);
+        for token_text in [RESPONSE_TOKEN, r#"refreshed\"installation\\token"#] {
+            let body = format!("output\n{token_text}\nfinished\n");
+            let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(body)]);
+            let body = select_repository_file_content(stream, None, retained_limit)
+                .await
+                .unwrap();
+            let RepositoryFileBodyKind::Text(mut selection) = body.kind else {
+                panic!("fixture is text")
+            };
+            selection.redact(&scrubber);
+            assert_eq!(selection.content, "output\n[redacted]");
+            assert_eq!(
+                selection.completeness,
+                CodeHostResultCompleteness::Truncated
+            );
+            assert_eq!(selection.returned_lines, 2);
+            assert!(!selection.last_line_complete);
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_repository_content_retains_a_credential_prefix() {
+        let scrubber =
+            super::super::CredentialScrubber::try_new(&CredentialValue::new("installation-token"))
+                .unwrap();
+        let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(b"installation")]);
+        let body = select_repository_file_content(stream, None, None)
+            .await
+            .unwrap();
+        let RepositoryFileBodyKind::Text(mut selection) = body.kind else {
+            panic!("fixture is text")
+        };
+        selection.redact(&scrubber);
+        assert_eq!(selection.content, "installation");
+        assert_eq!(selection.completeness, CodeHostResultCompleteness::Complete);
     }
 }

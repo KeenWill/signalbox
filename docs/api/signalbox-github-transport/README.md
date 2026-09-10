@@ -5,3 +5,4 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | root | 2 | 0 | 8 | [root](root.md) |
+| app | 5 | 0 | 1 | [app](app.md) |

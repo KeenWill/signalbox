@@ -104,7 +104,9 @@ event's two endpoints. Local Git produces the complete NUL-delimited path list,
 including deletions, without the GitHub changed-files API's list limits. A
 comparison API or fetch failure fails the job instead of returning an empty
 scope. The API digest fetches its exact event baseline for the baseline build.
-Contract checks inspect the current tree and need no history.
+Contract checks fetch depth-one trees for `main` and the pull request base
+branch because migration ordering checks compare against both baselines. They do
+not need the intervening commit history.
 
 Provider eligibility keeps its comparison code inline in the workflow: it reads
 proposed files without executing scripts from the proposed checkout. Fetch
