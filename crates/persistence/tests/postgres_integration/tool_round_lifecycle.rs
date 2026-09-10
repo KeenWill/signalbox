@@ -4,6 +4,76 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn completed_image_attempt_reloads_in_the_active_batch() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    // Supplies distinct identities for the completed tool-round fixture.
+    const FIXTURE_SEED: u128 = 0x473_0000;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, FIXTURE_SEED, "file_read", "{}").await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    let authorized = repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    let identity = signalbox_domain::MediaValidationIdentity::try_new(
+        signalbox_domain::BlobDigest::from_bytes([1; 32]),
+        "image/png".into(),
+        "fixture".into(),
+        "png".into(),
+        "v1".into(),
+        signalbox_domain::MediaValidationEvidence::StrongSignature,
+    )
+    .unwrap();
+    let result = ToolResultContent::Media {
+        text: ToolResultText::try_new("retained image result".to_owned()).unwrap(),
+        reference: signalbox_domain::ToolMediaReference::image(
+            identity.clone(),
+            identity,
+            std::num::NonZeroU64::new(64).unwrap(),
+        )
+        .unwrap(),
+    };
+    repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: result.clone(),
+                }),
+        )
+        .await?;
+    let batch = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("completed attempt remains in its active batch");
+    let Some(signalbox_domain::ReconstitutedToolAttempt::Ended(ended)) = batch.attempt(request)
+    else {
+        panic!("the committed attempt reloads as ended");
+    };
+    assert_eq!(ended.end(), &ToolAttemptEnd::Completed { result });
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn failure_context_migration_preserves_populated_attempts() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _) = migrated_postgres().await?;
     // Supplies distinct identities for the pre-migration tool attempt.
@@ -397,36 +467,10 @@ async fn prepare_confirmed_tool_attempt(
     Ok((fixture, attempt))
 }
 
-/// One durable `blob_read_tool_charge` projection with its labels preserved.
-#[derive(Debug, sqlx::FromRow)]
-struct StoredBlobReadCharge {
-    blob_digest: Vec<u8>,
-    decoded_byte_count: Decimal,
-    admission: bool,
-}
-
-/// Whether a recorded charge granted the request its decoded bytes.
-#[derive(Debug, Eq, PartialEq)]
-enum BlobReadChargeAdmission {
-    Admitted,
-    Rejected,
-}
-
-impl StoredBlobReadCharge {
-    fn admission(&self) -> BlobReadChargeAdmission {
-        if self.admission {
-            BlobReadChargeAdmission::Admitted
-        } else {
-            BlobReadChargeAdmission::Rejected
-        }
-    }
-}
-
-/// blob-read visibility and decoded-byte charges commit before
-/// dispatch authority.
+/// Visible blob reads receive dispatch authority.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn blob_read_preauthorization_is_visible_bounded_and_durable() -> Result<(), Box<dyn Error>> {
+async fn blob_read_preauthorization_authorizes_visible_pages() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let visible_seed = 0xd000;
     let visible_digest = BlobDigest::digest(b"visible");
@@ -459,21 +503,6 @@ async fn blob_read_preauthorization_is_visible_bounded_and_durable() -> Result<(
         visible,
         ToolAttemptAuthorizationOutcome::Authorized(_)
     ));
-    let charge: StoredBlobReadCharge = sqlx::query_as(
-        "SELECT blob_digest, decoded_byte_count, admitted AS admission
-           FROM blob_read_tool_charge
-          WHERE request_id = (
-                SELECT request_id FROM tool_attempt WHERE attempt_id = $1)",
-    )
-    .bind(visible_attempt.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(charge.blob_digest, visible_digest.as_bytes().as_slice());
-    assert_eq!(
-        charge.decoded_byte_count,
-        Decimal::from(visible_decoded_bytes)
-    );
-    assert_eq!(charge.admission(), BlobReadChargeAdmission::Admitted);
 
     pool.close().await;
     drop(container);
@@ -5528,9 +5557,14 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     )));
     let limits =
         ToolContinuationUsageLimit::new(target, FastMode::Disabled, OUTPUT_CEILING, 200_000);
-    let fixture =
-        checkpoint_restart_model_call_with_limits(&pool, FIXTURE_SEED, false, None, &[limits])
-            .await?;
+    let fixture = checkpoint_restart_model_call_with_limits(
+        &pool,
+        FIXTURE_SEED,
+        false,
+        None,
+        std::slice::from_ref(&limits),
+    )
+    .await?;
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_SEED + 5)),
         target,
@@ -5798,9 +5832,14 @@ async fn assert_bounded_269_kib_batch(arguments: &str) -> Result<Vec<i64>, Box<d
     )));
     let limits = ToolContinuationUsageLimit::new(target, FastMode::Disabled, 8_192, 258_400)
         .with_compaction_prompt_bytes(COMPACTION_PROMPT.len() as u64);
-    let fixture =
-        checkpoint_restart_model_call_with_limits(&pool, FIXTURE_SEED, false, None, &[limits])
-            .await?;
+    let fixture = checkpoint_restart_model_call_with_limits(
+        &pool,
+        FIXTURE_SEED,
+        false,
+        None,
+        std::slice::from_ref(&limits),
+    )
+    .await?;
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_SEED + 5)),
         target,

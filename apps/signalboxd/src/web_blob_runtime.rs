@@ -250,7 +250,7 @@ impl DeterministicBlobProducer for ImageProducer {
                     | BlobReadError::Corrupt
                     | BlobReadError::Integrity
                     | BlobReadError::NotFound
-                    | BlobReadError::RangeOutOfBounds { .. },
+                    | BlobReadError::RangeOutOfBounds,
                 ) => return Ok(false),
             }
         }

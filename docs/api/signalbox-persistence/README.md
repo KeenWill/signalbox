@@ -4,7 +4,7 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
-| approval_judge | 10 | 0 | 0 | [approval_judge](approval_judge.md) |
+| approval_judge | 10 | 0 | 1 | [approval_judge](approval_judge.md) |
 | approval_judge_eval | 5 | 0 | 2 | [approval_judge_eval](approval_judge_eval.md) |
 | attention | 5 | 0 | 0 | [attention](attention.md) |
 | automatic_reconciliation | 2 | 0 | 1 | [automatic_reconciliation](automatic_reconciliation.md) |
@@ -27,7 +27,7 @@
 | hub_fence | 4 | 0 | 3 | [hub_fence](hub_fence.md) |
 | lifecycle_metrics | 8 | 0 | 0 | [lifecycle_metrics](lifecycle_metrics.md) |
 | mapping | 6 | 0 | 29 | [mapping](mapping.md) |
-| model_execution | 15 | 0 | 0 | [model_execution](model_execution.md) |
+| model_execution | 15 | 1 | 0 | [model_execution](model_execution.md) |
 | oauth_credential | 15 | 0 | 0 | [oauth_credential](oauth_credential.md) |
 | operator_status | 6 | 0 | 0 | [operator_status](operator_status.md) |
 | outbox | 31 | 0 | 7 | [types](outbox/types.md), [types-2](outbox/types-2.md), [functions](outbox/functions.md) |

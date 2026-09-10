@@ -3,8 +3,8 @@
 //! The `approval-judge-eval` binary replays labeled cases through the same
 //! system prompt, payload rendering, structured-output contract, and provider
 //! adapter the daemon uses for live delegated approvals, so a measured verdict
-//! reflects the deployed judge rather than a reimplementation. Nothing here is
-//! reachable from daemon execution; the daemon path keeps its own wiring.
+//! reflects the deployed judge rather than a reimplementation. Workflow
+//! evaluation uses this path outside durable approval decisions.
 
 use std::{error::Error, fmt, num::NonZeroU64};
 

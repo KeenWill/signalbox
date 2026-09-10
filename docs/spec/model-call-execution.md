@@ -48,48 +48,53 @@ summarized range. Attachments render as the bounded textual stubs
 Context compaction produces its summary through a dedicated physical model call
 with its own durable prepared, in-flight, and terminal lifecycle, separate from
 ordinary calls. The compaction call's own input budget is its context window
-less the output ceiling and the required prompt. Before tool results enter
-context, each result receives an equal share of the smaller of that safe-prefix
-budget and the producing call's remaining headroom, reserving the next
-response's output, the following call's output ceiling, the current result
-envelopes, and envelopes with empty-prefix markers for the maximum admitted next
-tool batch. Successful text and failure details share the same admission bound;
-typed failure kinds remain intact. Oversized text is truncated at a UTF-8
-boundary with an explicit marker naming the retained and dropped byte counts;
-JSON escaping and the marker count against the share. The admitted text is
-durable and used by ordinary rendering, compaction, and headroom accounting;
-exact executor text and failure details remain observation evidence. When
-framing or an indivisible exchange exceeds the compaction input budget, source
-text is bounded with UTF-8-safe truncation and retained/dropped byte markers.
-The dedicated call summarizes that bounded material. Its summary text is bounded
-by the configured output reservation in bytes; headroom measures the admitted
-text separately from billed provider output. Automatic compaction targets the
-first safe boundary at or beyond half the rendered bytes, falls back to the
-latest fitting safe boundary, and includes the first indivisible exchange when
-none fits. A prefix summary absorbs the next complete exchange when one remains.
-Before activating a queued turn, the guard repeats compaction until its
-continuation fits. When only a summary remains, its replacement is bounded to
-half its bytes. If the one-byte summary still leaves insufficient headroom, the
-queued turn closes without another compaction call. A failed provider compaction
-closes the queued turn without preparing an ordinary call.
+less the output ceiling and the serialized adapter request envelope, including
+the required prompt and JSON escaping. Before tool results enter context, each
+result receives an equal share of the smaller of that safe-prefix budget and the
+producing call's remaining headroom, reserving the next response's output, the
+following call's output ceiling, the current result envelopes, and envelopes
+with empty-prefix markers for the maximum admitted next tool batch. Successful
+text and failure details share the same admission bound; typed failure kinds
+remain intact. Oversized text is truncated at a UTF-8 boundary with an explicit
+marker naming the retained and dropped byte counts; JSON escaping and the marker
+count against the share. The admitted text is durable and used by ordinary
+rendering, compaction, and headroom accounting; exact executor text and failure
+details remain observation evidence. When framing or an indivisible exchange
+exceeds the compaction input budget, source text is bounded with UTF-8-safe
+truncation and retained/dropped byte markers. The complete serialized request is
+measured when bounding that material. The dedicated call summarizes that bounded
+material. Its summary text is bounded by the configured output reservation in
+bytes; headroom measures the admitted text separately from billed provider
+output. Automatic compaction targets the first safe boundary at or beyond half
+the rendered bytes, falls back to the latest fitting safe boundary, and includes
+the first indivisible exchange when none fits. A prefix summary absorbs the next
+complete exchange when one remains. Before activating a queued turn, the guard
+repeats compaction until its continuation fits. When only a summary remains, its
+replacement is bounded to half its bytes. If the one-byte summary still leaves
+insufficient headroom, the queued turn closes without another compaction call. A
+failed provider compaction closes the queued turn without preparing an ordinary
+call.
 
 A tool-result continuation exceeding reserved headroom commits its results and a
 compaction checkpoint while retaining the active turn. The daemon summarizes the
 checkpoint through its last safe boundary, then prepares the continuation from
 the results and appended summary after rechecking headroom including the frozen
 system prompt, tool definitions, summary preface, message framing, pending
-steering, and output reservation. Admission retires the checkpoint when it
-prepares a call or parks for credential availability. Checkpoints schedule a
-follow-up eligibility pass and survive restarts; tool results are reused without
-execution. Successful compaction preserves the same turn and goal lineage for
-every session kind. A failed or refused automatic compaction closes the active
-checkpoint, as does a one-byte summary that still lacks continuation headroom.
+steering, every model-visible entry appended after the summary (including runner
+placement boundaries), and output reservation. A placement boundary following a
+summary retains the summarized batch's complete-result authority. Admission
+retires the checkpoint when it prepares a call or parks for credential
+availability. Checkpoints schedule a follow-up eligibility pass and survive
+restarts; tool results are reused without execution. Successful compaction
+preserves the same turn and goal lineage for every session kind. A failed or
+refused automatic compaction closes the active checkpoint, as does a one-byte
+summary that still lacks continuation headroom.
 
 Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen
 session epoch, pinned target preview, and credential pin authorize that
 stateless estimate; it has no completion semantics and creates no call outcome.
-Attachment verification precedes that interaction. Cancellation or transient
+Attachment preparation precedes that interaction. Cancellation or transient
 attachment loss leaves the turn queued, and any later attempt must render and
 count the then-current preview again. A definitive attachment failure atomically
 activates and closes the exact prospective Prepared call with that evidence.
@@ -552,8 +557,6 @@ rendering instead of inventing text.
   [daemon survival design](../design/daemon-survival.md).
 - Multipart attachment rendering ([design](../design/model-call-execution.md)).
 - The executable session-tool snapshot
-  ([design](../design/model-call-execution.md)).
-- Reuse of a successful attachment verification within a turn
   ([design](../design/model-call-execution.md)).
 - The process-level exclusion-evidence event
   ([design](../design/model-call-execution.md)).

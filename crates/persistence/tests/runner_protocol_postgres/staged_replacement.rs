@@ -66,7 +66,7 @@ async fn staged_replacement_appends_one_boundary_after_all_batch_results()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn staged_replacement_keeps_results_and_relocation_before_headroom_failure()
+async fn staged_replacement_keeps_results_and_relocation_at_compaction_checkpoint()
 -> Result<(), Box<dyn Error>> {
     assert_staged_batch_boundary(StagedBoundaryCase::ExhaustHeadroom).await
 }
@@ -228,23 +228,12 @@ async fn assert_staged_batch_boundary(case: StagedBoundaryCase) -> Result<(), Bo
                 .expect("the successor revision fits"),
         })
     );
-    let suffix: Vec<String> = sqlx::query_scalar("SELECT entry.payload_kind FROM turn_lifecycle AS turn LEFT JOIN model_call AS call ON call.model_call_id = $2 JOIN LATERAL resolve_context_frontier_members(turn.session_id, COALESCE(call.context_frontier_id, turn_lifecycle_effective_terminal_frontier(turn.session_id, turn.turn_id))) AS member ON true JOIN semantic_transcript_entry AS entry USING (source_session_id, semantic_entry_id) WHERE turn.turn_id = $1 ORDER BY member.member_position DESC LIMIT $3")
-        .bind(fixture.turn.into_uuid()).bind(call.into_uuid()).bind(if case == StagedBoundaryCase::ExhaustHeadroom { 3_i64 } else { 2 }).fetch_all(&pool).await?;
-    if case == StagedBoundaryCase::ExhaustHeadroom {
-        assert_eq!(
-            suffix,
-            [
-                "turn_failed",
-                "runner_placement_changed",
-                "tool_execution_result"
-            ]
-        );
-    } else {
-        assert_eq!(
-            suffix,
-            ["runner_placement_changed", "tool_execution_result"]
-        );
-    }
+    let suffix: Vec<String> = sqlx::query_scalar("SELECT entry.payload_kind FROM turn_lifecycle AS turn LEFT JOIN model_call AS call ON call.model_call_id = $2 JOIN LATERAL resolve_context_frontier_members(turn.session_id, COALESCE(call.context_frontier_id, turn.compaction_frontier_id, turn_lifecycle_effective_terminal_frontier(turn.session_id, turn.turn_id))) AS member ON true JOIN semantic_transcript_entry AS entry USING (source_session_id, semantic_entry_id) WHERE turn.turn_id = $1 ORDER BY member.member_position DESC LIMIT 2")
+        .bind(fixture.turn.into_uuid()).bind(call.into_uuid()).fetch_all(&pool).await?;
+    assert_eq!(
+        suffix,
+        ["runner_placement_changed", "tool_execution_result"]
+    );
     let boundaries: i64 =
         sqlx::query_scalar("SELECT count(*) FROM runner_placement_boundary WHERE session_id = $1")
             .bind(fixture.session.into_uuid())
@@ -616,5 +605,182 @@ async fn assert_terminal_batch_retires_replacement(
             .fetch_one(&pool)
             .await?;
     assert_eq!(state, "terminal");
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PlacementEntryMeasurement;
+
+impl signalbox_persistence::model_execution::ToolContinuationEntryMeasurement
+    for PlacementEntryMeasurement
+{
+    fn additional_entry_bytes(
+        &self,
+        operation: &signalbox_application::PreparedModelOperation,
+    ) -> Option<u64> {
+        assert!(
+            matches!(
+                operation.messages(),
+                [
+                    signalbox_application::ModelConversationMessage::ContextSummary { .. },
+                    signalbox_application::ModelConversationMessage::RunnerPlacementChanged { .. },
+                ]
+            ),
+            "the measurement receives the complete post-summary projection"
+        );
+        // A renderer-supplied envelope larger than this fixture's 100-token window.
+        Some(512)
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn staged_replacement_after_compaction_is_measured_before_continuation()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        ContextCompactionId, ContextCompactionTokenUsage, FastMode, ProviderModelIdentity,
+        ResolvedProviderTarget,
+    };
+    use signalbox_persistence::context_compaction::{
+        ContextCompactionRepository, PrepareContextCompactionOutcome,
+        PrepareContextCompactionRequest,
+    };
+    use signalbox_persistence::model_execution::ToolContinuationUsageLimit;
+    let (_container, pool) = migrated_postgres().await?;
+    let (fixture, _) = completed_pinned_batch(&pool).await?;
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(uuid(0xa159)));
+    let calls =
+        model_repository(&pool).with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+            target,
+            FastMode::Disabled,
+            100,
+            100,
+        )]);
+    let producing = calls
+        .tool_loop_repository()
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the completed batch remains active")
+        .producing_call();
+    // The fixture records exhausted provider input so the first boundary checkpoints.
+    sqlx::raw_sql("ALTER TABLE model_call DISABLE TRIGGER ALL;")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE model_call SET usage_input_tokens = 100 WHERE model_call_id = $1")
+        .bind(producing.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::raw_sql("ALTER TABLE model_call ENABLE TRIGGER ALL;")
+        .execute(&pool)
+        .await?;
+    let identities = || {
+        signalbox_application::ToolContinuationIdentities::new(
+            vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+            ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ModelCallId::from_uuid(Uuid::now_v7()),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            ContextFrontierId::from_uuid(Uuid::now_v7()),
+        )
+    };
+    assert!(matches!(
+        calls
+            .tool_loop_repository()
+            .prepare_continuation(
+                fixture.session,
+                fixture.turn,
+                producing,
+                identities(),
+                |_| panic!("no steering"),
+            )
+            .await?,
+        signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(_)
+    ));
+    let compaction = ContextCompactionRepository::new(pool.clone());
+    let range = compaction
+        .preview_automatic_range(fixture.session)
+        .await?
+        .expect("the active checkpoint has an automatic range");
+    let through = range
+        .members()
+        .last()
+        .expect("the checkpoint is nonempty")
+        .position();
+    let PrepareContextCompactionOutcome::Prepared(prepared) = compaction
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::now_v7()),
+            session: fixture.session,
+            requested_through_position: Some(through),
+            automatic_for_turn: Some(fixture.turn),
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(uuid(0xa101)),
+            target,
+            input_includes_cache_tokens: false,
+            credential_reference: String::from("fixture-credential-reference"),
+            call: ModelCallId::from_uuid(Uuid::now_v7()),
+            compaction: ContextCompactionId::from_uuid(Uuid::now_v7()),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::now_v7()),
+        })
+        .await?
+    else {
+        panic!("the complete tool checkpoint can be summarized")
+    };
+    compaction.authorize(&prepared).await?;
+    compaction
+        .complete(
+            &prepared,
+            "small summary",
+            ContextCompactionTokenUsage::unreported(),
+        )
+        .await?;
+    lose_batch(&fixture).await?;
+    let candidate = fixture
+        .store
+        .enroll_pristine(super::super::recovery_commands::enrollment_request())
+        .await?
+        .into_receipt();
+    fixture
+        .store
+        .open_connection(candidate.identities().enrollment())
+        .await?;
+    assert_eq!(
+        fixture
+            .store
+            .replace_lost_runner(ReplaceLostRunner {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                session: fixture.session,
+                revision: None,
+            })
+            .await?,
+        RunnerRecoveryOutcome::Pending
+    );
+    let calls = model_repository(&pool)
+        .with_runner_recovery(fixture.store.clone())
+        .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+            target,
+            FastMode::Disabled,
+            10,
+            100,
+        )
+        .with_entry_measurement(std::sync::Arc::new(PlacementEntryMeasurement))]);
+    assert!(
+        matches!(
+            calls
+                .tool_loop_repository()
+                .prepare_continuation(
+                    fixture.session,
+                    fixture.turn,
+                    producing,
+                    identities(),
+                    |_| panic!("no steering"),
+                )
+                .await?,
+            signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(_)
+        ),
+        "the summary fits alone but the appended placement event requires compaction"
+    );
     Ok(())
 }

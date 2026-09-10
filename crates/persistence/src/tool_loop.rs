@@ -56,12 +56,10 @@ use crate::{
     commit_failure_is_ambiguous,
     mapping::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
-        BlobReadRejectionStorageKind, ToolApprovalDecisionSourceStorageKind,
-        ToolAttemptDispositionStorageKind, ToolResultContentStorageKind,
-        approval_judge_state_to_str, approval_judge_terminal_disposition_to_str,
-        blob_read_rejection_from_str, blob_read_rejection_to_str,
-        dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
-        durable_command_id_to_uuid, positive_u64_from_numeric, session_id_from_uuid,
+        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
+        ToolResultContentStorageKind, approval_judge_state_to_str,
+        approval_judge_terminal_disposition_to_str, dangerous_tool_auto_approval_from_str,
+        durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
         session_id_to_uuid, tool_approval_decision_source_from_str,
         tool_approval_decision_source_to_str, tool_approval_posture_from_str,
         tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
@@ -76,14 +74,12 @@ use crate::{
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
 
-/// Largest decoded byte count one `blob_read` request may charge.
+/// Largest decoded byte count one `blob_read` request may return.
 ///
 /// The durable admission here and the daemon's argument validator are the two
 /// constructors of this bound, so it is declared once here and imported at the
 /// tool boundary rather than restated there.
 pub const MAX_BLOB_READ_TOOL_BYTES: u64 = 524_288;
-const MAX_BLOB_READ_TURN_BYTES: u64 = 2_097_152;
-const MAX_BLOB_READ_REQUESTS_PER_TURN: i64 = 64;
 
 const BLOB_NOT_VISIBLE_DETAIL: &str = "blob_not_visible";
 
@@ -91,34 +87,13 @@ const BLOB_NOT_VISIBLE_DETAIL: &str = "blob_not_visible";
 enum BlobReadAdmission {
     Admitted,
     NotVisible,
-    TurnByteBudgetExceeded,
-    TurnReadCountExceeded,
 }
 
 impl BlobReadAdmission {
-    /// Durable rejection spelling this admission records on its charge row.
-    ///
-    /// A visibility refusal returns before any charge exists, so it is absent
-    /// here as well as on the admitted path.
-    const fn rejection(self) -> Option<BlobReadRejectionStorageKind> {
-        match self {
-            Self::Admitted | Self::NotVisible => None,
-            Self::TurnByteBudgetExceeded => {
-                Some(BlobReadRejectionStorageKind::TurnByteBudgetExceeded)
-            }
-            Self::TurnReadCountExceeded => {
-                Some(BlobReadRejectionStorageKind::TurnReadCountExceeded)
-            }
-        }
-    }
-
     fn detail(self) -> Option<&'static str> {
         match self {
             Self::Admitted => None,
             Self::NotVisible => Some(BLOB_NOT_VISIBLE_DETAIL),
-            Self::TurnByteBudgetExceeded | Self::TurnReadCountExceeded => {
-                self.rejection().map(blob_read_rejection_to_str)
-            }
         }
     }
 
@@ -130,31 +105,6 @@ impl BlobReadAdmission {
                 })
             })
             .transpose()
-    }
-
-    fn from_charge(
-        admitted: bool,
-        rejection_reason: Option<String>,
-    ) -> Result<Self, ToolLoopRepositoryError> {
-        match (admitted, rejection_reason.as_deref()) {
-            (true, None) => Ok(Self::Admitted),
-            (false, Some(reason)) => match blob_read_rejection_from_str(reason) {
-                Some(BlobReadRejectionStorageKind::TurnByteBudgetExceeded) => {
-                    Ok(Self::TurnByteBudgetExceeded)
-                }
-                Some(BlobReadRejectionStorageKind::TurnReadCountExceeded) => {
-                    Ok(Self::TurnReadCountExceeded)
-                }
-                None => Err(ToolLoopCorruption::Unsupported {
-                    field: "rejection_reason",
-                    value: reason.to_owned(),
-                }
-                .into()),
-            },
-            (true, Some(_)) | (false, None) => {
-                Err(ToolLoopCorruption::Inconsistent("blob read rejection reason").into())
-            }
-        }
     }
 }
 
@@ -3129,7 +3079,9 @@ async fn load_attempts(
 ) -> Result<Vec<ReconstitutedToolAttempt>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT attempt.*
-           FROM runner_current_tool_attempt AS attempt
+           FROM tool_attempt AS attempt
+           JOIN runner_current_tool_attempt AS current
+             ON current.attempt_id = attempt.attempt_id
            JOIN tool_request AS request
              ON request.request_id = attempt.request_id
           WHERE request.producing_model_call_id = $1
@@ -4760,84 +4712,7 @@ async fn admit_tool_preauthorization(
         return Err(ToolLoopCorruption::Inconsistent("blob read request byte bound").into());
     }
 
-    let existing = sqlx::query(
-        "SELECT session_id, turn_id, blob_digest, decoded_byte_count, admitted,
-                rejection_reason
-           FROM blob_read_tool_charge
-          WHERE request_id = $1",
-    )
-    .bind(tool_request_id_to_uuid(request))
-    .fetch_optional(&mut **transaction)
-    .await?;
-    if let Some(row) = existing {
-        let recorded_bytes = positive_u64_from_numeric(required(&row, "decoded_byte_count")?)
-            .map_err(|_| ToolLoopCorruption::Inconsistent("blob read charged byte count"))?;
-        if required::<Uuid>(&row, "session_id")? != session_id_to_uuid(session)
-            || required::<Uuid>(&row, "turn_id")? != turn_id_to_uuid(turn)
-            || required::<Vec<u8>>(&row, "blob_digest")? != digest.as_bytes().as_slice()
-            || recorded_bytes != decoded_bytes.get()
-        {
-            return Err(ToolLoopCorruption::Inconsistent("blob read request charge").into());
-        }
-        return BlobReadAdmission::from_charge(
-            required(&row, "admitted")?,
-            row.try_get::<Option<String>, _>("rejection_reason")?,
-        );
-    }
-
-    let totals = sqlx::query(
-        "SELECT count(*) AS request_count,
-                COALESCE(sum(decoded_byte_count), 0) AS decoded_bytes
-           FROM blob_read_tool_charge
-          WHERE turn_id = $1 AND admitted",
-    )
-    .bind(turn_id_to_uuid(turn))
-    .fetch_one(&mut **transaction)
-    .await?;
-    let request_count: i64 = required(&totals, "request_count")?;
-    let decoded_total: Decimal = required(&totals, "decoded_bytes")?;
-    if request_count < 0 || !decoded_total.fract().is_zero() || decoded_total.is_sign_negative() {
-        return Err(ToolLoopCorruption::Inconsistent("blob read turn charge totals").into());
-    }
-    let decoded_total = u64::try_from(decoded_total)
-        .map_err(|_| ToolLoopCorruption::Inconsistent("blob read turn charged bytes"))?;
-    let admission = blob_read_charge_admission(request_count, decoded_total, decoded_bytes);
-    let admitted = admission == BlobReadAdmission::Admitted;
-    let rows = sqlx::query(
-        "INSERT INTO blob_read_tool_charge
-            (request_id, session_id, turn_id, blob_digest, decoded_byte_count, admitted,
-             rejection_reason)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
-    )
-    .bind(tool_request_id_to_uuid(request))
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .bind(digest.as_bytes().as_slice())
-    .bind(Decimal::from(decoded_bytes.get()))
-    .bind(admitted)
-    .bind(admission.rejection().map(blob_read_rejection_to_str))
-    .execute(&mut **transaction)
-    .await?
-    .rows_affected();
-    require_single(rows, "blob read request charge")?;
-    Ok(admission)
-}
-
-fn blob_read_charge_admission(
-    request_count: i64,
-    decoded_total: u64,
-    requested: NonZeroU64,
-) -> BlobReadAdmission {
-    if request_count >= MAX_BLOB_READ_REQUESTS_PER_TURN {
-        BlobReadAdmission::TurnReadCountExceeded
-    } else if decoded_total
-        .checked_add(requested.get())
-        .is_none_or(|total| total > MAX_BLOB_READ_TURN_BYTES)
-    {
-        BlobReadAdmission::TurnByteBudgetExceeded
-    } else {
-        BlobReadAdmission::Admitted
-    }
+    Ok(BlobReadAdmission::Admitted)
 }
 
 fn required<T>(row: &PgRow, column: &'static str) -> Result<T, ToolLoopRepositoryError>
@@ -4875,47 +4750,6 @@ async fn finish_commit<T>(
             transaction.rollback().await?;
             Err(error)
         }
-    }
-}
-
-#[cfg(test)]
-mod blob_read_budget_tests {
-    use super::*;
-
-    #[test]
-    fn exact_blob_read_turn_byte_bound_is_admitted() {
-        assert_eq!(
-            blob_read_charge_admission(
-                3,
-                MAX_BLOB_READ_TURN_BYTES - MAX_BLOB_READ_TOOL_BYTES,
-                NonZeroU64::new(MAX_BLOB_READ_TOOL_BYTES).expect("the tool bound is positive"),
-            ),
-            BlobReadAdmission::Admitted
-        );
-    }
-
-    #[test]
-    fn blob_read_turn_byte_overflow_is_rejected() {
-        assert_eq!(
-            blob_read_charge_admission(
-                4,
-                MAX_BLOB_READ_TURN_BYTES,
-                NonZeroU64::new(1).expect("one is positive"),
-            ),
-            BlobReadAdmission::TurnByteBudgetExceeded
-        );
-    }
-
-    #[test]
-    fn blob_read_turn_request_count_bound_is_rejected() {
-        assert_eq!(
-            blob_read_charge_admission(
-                MAX_BLOB_READ_REQUESTS_PER_TURN,
-                0,
-                NonZeroU64::new(1).expect("one is positive"),
-            ),
-            BlobReadAdmission::TurnReadCountExceeded
-        );
     }
 }
 

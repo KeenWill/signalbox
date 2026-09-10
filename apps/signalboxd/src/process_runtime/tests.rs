@@ -563,6 +563,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn automatic_compaction_source_reserves_the_adapter_envelope_and_json_escaping() {
+        let configuration = crate::configuration::HubModelConfiguration::parse(
+            &crate::configuration::tests::CONFIGURATION.replace(
+                "Summarize the prior conversation faithfully for continuation.",
+                r#"Summarize \"quoted\" text and \n newlines."#,
+            ),
+        ).expect("the compaction configuration parses");
+        let selection = DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000001").expect("fixture selection"),
+        );
+        let window = 2048_u64;
+        let output = 256_u64;
+        let framing = configuration.compaction_request_bytes(selection, "x")
+            .expect("the request serializes") - 1;
+        let budget = window - output - framing;
+        let source = "\\\"\n".repeat(1024);
+        let raw_bounded = super::bounded_compaction_source(source.clone(), budget);
+        assert!(configuration.compaction_request_bytes(selection, &raw_bounded)
+            .expect("the request serializes") + output > window);
+        let bounded = super::bounded_compaction_request_source(&configuration, selection, source, budget)
+            .expect("the source fits the complete request budget");
+        assert!(bounded.contains("compaction text truncated"));
+        assert!(configuration.compaction_request_bytes(selection, &bounded)
+            .expect("the request serializes") + output <= window);
+    }
+
+    #[test]
     fn oversized_compaction_source_retains_a_marked_utf8_prefix() {
         let source = "🦀".repeat(269 * 1024 / 4);
         let bounded = super::bounded_compaction_material(source, 1024);

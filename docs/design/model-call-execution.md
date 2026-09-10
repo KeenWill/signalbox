@@ -7,15 +7,14 @@ This document describes committed work that is not built; it extends
 
 The daemon renders admitted attachments as typed provider-neutral content parts,
 and provider-native delivery follows the open rendering decision. It advertises
-only the tools executable in the session. It reuses a successful attachment
-verification within a turn. It emits a process-level event carrying the complete
-exclusion evidence of a pre-call pool exhaustion. It checks at reconstitution
-that the pinned pool policy contains the pinned profile with the expected
-adapter and delivery kind. It carries a program-declared structured-output
-contract through preparation into runtime enforcement. It records durable
-provider-target evidence, pending the per-call provenance schema decision. It
-lets a user resolve an unstopped ambiguity. It carries the workspace-instruction
-region into the model operation as its own typed part.
+only the tools executable in the session. It emits a process-level event
+carrying the complete exclusion evidence of a pre-call pool exhaustion. It
+checks at reconstitution that the pinned pool policy contains the pinned profile
+with the expected adapter and delivery kind. It carries a program-declared
+structured-output contract through preparation into runtime enforcement. It
+records durable provider-target evidence, pending the per-call provenance schema
+decision. It lets a user resolve an unstopped ambiguity. It carries the
+workspace-instruction region into the model operation as its own typed part.
 
 ## Design
 
@@ -44,12 +43,6 @@ Credential matching between a repository entry and the session's grant is owned
 by [configuration-and-credentials](../spec/configuration-and-credentials.md);
 selector binding and loss consequences by [tool-loop](../spec/tool-loop.md) and
 [runner-protocol](../spec/runner-protocol.md).
-
-A bounded turn-scoped verification inventory records each attachment digest's
-successful verification keyed by the store's immutable-generation token. A later
-range in the same turn reuses that record instead of streaming and verifying the
-replica again. The token is supplied by a blob-store adapter under
-[blob-storage](../spec/blob-storage.md).
 
 The pre-call pool-exhaustion failure emits one process-level event carrying the
 complete nonempty evidence list in policy-member order. Each member carries its
@@ -111,9 +104,6 @@ The runtime operation's tool list stays a function of preparation, and a
 tool-call part naming a tool outside that list stays an unknown proposal that
 enters the confirmation path instead of a bridge rejection.
 
-Later attachment ranges in a turn reverify until the turn-scoped inventory above
-lands, and nothing caches a verification without an immutable-generation token.
-
 The typed domain cause of pre-call exhaustion and the sealed pool-exhausted turn
 transition do not change when the process event lands.
 
@@ -145,9 +135,6 @@ criterion when the open rendering decision adopts it.
 
 A session composed without a workspace advertises exactly the tools that can
 execute in it.
-
-A second attachment range in one turn reads only that range, conditional on the
-pinned generation, and does not verify the full replica again.
 
 A pre-call pool exhaustion produces one process event whose member list equals
 the frozen policy's members in order, and the domain cause is unchanged.
