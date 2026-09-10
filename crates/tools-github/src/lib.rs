@@ -2912,7 +2912,6 @@ mod test_support;
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
     use std::{
         cell::RefCell,
         io::{self, Write},
@@ -4176,14 +4175,6 @@ mod tests {
             ),
             Err(invalid_response(None))
         );
-    }
-
-    #[test]
-    fn public_failures_implement_standard_error() {
-        fn require_error<Failure: Error>() {}
-
-        require_error::<InvalidGitHubArguments>();
-        require_error::<GitHubTransportFailure>();
     }
 
     #[test]

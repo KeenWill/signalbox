@@ -63,6 +63,54 @@ async fn real_worker_has_the_accepted_isolation_profile() -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// The fixture parser rejects the daemon environment and succeeds only inside the worker.
+#[tokio::test]
+#[ignore = "requires the delegated real file-media sandbox profile"]
+async fn file_read_parses_only_inside_the_accepted_sandbox() -> Result<(), Box<dyn Error>> {
+    use signalbox_file_media_runtime::{
+        FileReadInput, FileReadRequest, FileReadResult, ReadContinuation,
+    };
+    let (processor, _) = available_processor(FileMediaProcessCeilings::version_one()).await?;
+    let (declaration, _) = declaration()?;
+    let registry = FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )?;
+    let source = BytesSource(vec![b'I']);
+    let result = registry
+        .read(
+            &processor,
+            FileReadRequest {
+                inspection: InspectionRequest {
+                    source: FileUse::new(
+                        source.digest(),
+                        source.byte_length(),
+                        AttachmentKind::File,
+                        DeclaredMediaType::try_new("application/x-signalbox-synthetic")?,
+                        None,
+                    ),
+                    visible_part: None,
+                },
+                view: ReadViewName::try_new("text")?,
+                input: FileReadInput::Initial {
+                    options: serde_json::json!({}),
+                },
+            },
+            &source,
+            &NeverCancelled,
+        )
+        .await?;
+    assert_eq!(
+        result,
+        FileReadResult::Text {
+            body: "synthetic".into(),
+            continuation: ReadContinuation::Complete
+        }
+    );
+    Ok(())
+}
+
 /// worker source reads pass only through the daemon's bounded broker.
 #[tokio::test]
 #[ignore = "requires the delegated real file-media sandbox profile"]

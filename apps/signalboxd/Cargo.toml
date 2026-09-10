@@ -17,6 +17,12 @@ test-support = [
 ]
 
 [dependencies]
+signalbox-file-media-runtime = { path = "../../crates/file-media-runtime" }
+signalbox-file-media-processor-runtime = { path = "../../crates/file-media-processor-runtime" }
+signalbox-file-media-provider-runtime = { path = "../../crates/file-media-provider-runtime" }
+signalbox-file-media-adapters-text = { path = "../../crates/file-media-adapters-text" }
+signalbox-tools-file-media = { path = "../../crates/tools-file-media" }
+
 signalbox-github-transport = { path = "../../crates/github-transport" }
 signalbox-approval-judge-eval = { path = "../../crates/approval-judge-eval" }
 signalbox-derive = { path = "../../crates/derive" }

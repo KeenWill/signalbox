@@ -1477,6 +1477,24 @@ async fn checkpoint_restart_model_call_with_limits(
     attachment: Option<BlobDigest>,
     limits: &[ToolContinuationUsageLimit],
 ) -> Result<RestartModelCallFixture, Box<dyn Error>> {
+    let input = start_input_with_attachment(
+        seed + 8,
+        seed + 1,
+        "restart-classification request",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+        attachment,
+    );
+    checkpoint_restart_model_call_with_input(pool, seed, authorize, input, limits).await
+}
+
+async fn checkpoint_restart_model_call_with_input(
+    pool: &PgPool,
+    seed: u128,
+    authorize: bool,
+    input: SubmitInput,
+    limits: &[ToolContinuationUsageLimit],
+) -> Result<RestartModelCallFixture, Box<dyn Error>> {
     let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
     let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
     let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 3));
@@ -1491,21 +1509,11 @@ async fn checkpoint_restart_model_call_with_limits(
             ModelSelectionRequest::Direct(selection),
         ))
         .await?;
-    let submit_repository = match attachment {
-        Some(_) => SubmitInputRepository::new(pool.clone())
-            .with_attachment_maximum_bytes(FIXTURE_ATTACHMENT_MAXIMUM_BYTES),
-        None => SubmitInputRepository::new(pool.clone()),
-    };
+    let submit_repository = SubmitInputRepository::new(pool.clone())
+        .with_attachment_maximum_bytes(FIXTURE_ATTACHMENT_MAXIMUM_BYTES);
     submit_repository
         .handle(
-            start_input_with_attachment(
-                seed + 8,
-                seed + 1,
-                "restart-classification request",
-                1,
-                ModelSelectionOverride::UseSessionDefault,
-                attachment,
-            ),
+            input,
             AcceptedInputId::from_uuid(Uuid::from_u128(seed + 9)),
             Some(turn),
         )
@@ -1592,6 +1600,21 @@ async fn authorize_checkpointed_model_call_with_attachment(
 > {
     let fixture =
         checkpoint_restart_model_call_with_attachment(pool, seed, false, attachment).await?;
+    authorize_checkpointed_fixture(pool, seed, fixture).await
+}
+
+async fn authorize_checkpointed_fixture(
+    pool: &PgPool,
+    seed: u128,
+    fixture: RestartModelCallFixture,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        AuthorizedModelCall,
+    ),
+    Box<dyn Error>,
+> {
     let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
     let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(

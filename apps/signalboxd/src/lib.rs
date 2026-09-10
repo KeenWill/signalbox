@@ -126,11 +126,11 @@ pub use credential_pools::{
     CredentialProfile, GithubCredentialDelivery, GithubCredentialProfile, OauthDelivery,
 };
 pub use daemon_tools::{
-    BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonToolCatalog,
-    DaemonToolComposition, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
-    DaemonToolsConstructionError, MappedDaemonCredentialInputs, PinnedWorkspaceFileSystem,
-    PostgresSessionStatusWriter, PostgresSessionStatusWriterError, SessionWorkspaceRoots,
-    WorkspaceInstructionRootResolver,
+    BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonFileMediaExecutor,
+    DaemonToolCatalog, DaemonToolComposition, DaemonToolExecutor, DaemonToolExecutorError,
+    DaemonTools, DaemonToolsConstructionError, MappedDaemonCredentialInputs,
+    PinnedWorkspaceFileSystem, PostgresSessionStatusWriter, PostgresSessionStatusWriterError,
+    SessionWorkspaceRoots, WorkspaceInstructionRootResolver,
 };
 pub use fenced_database::{
     FencedHubDatabase, FencedHubDatabaseError, FencedPoolFloorReconciliation,
