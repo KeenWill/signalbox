@@ -252,7 +252,10 @@ pub(super) fn verify_merge(
         };
         let own_delta = own_index.and_then(|index| own.get_delta(index));
         let base_delta = base_index.and_then(|index| base_changes.get_delta(index));
-        if streamed::regeneratable_path(source_path) {
+        let base_path = base_delta
+            .and_then(|delta| delta.new_file().path())
+            .unwrap_or(source_path);
+        if streamed::regeneratable_path(source_path) || streamed::regeneratable_path(base_path) {
             let ancestor = base_delta.or(own_delta).map(|delta| delta.old_file());
             if let Some(old) = ancestor
                 && let Some(contents) = merge_contents(
@@ -266,7 +269,8 @@ pub(super) fn verify_merge(
                     deadline,
                 )?
             {
-                base_hunks = streamed::protected_base_hunks(source_path, contents, deadline)?;
+                base_hunks =
+                    streamed::protected_base_hunks(source_path, base_path, contents, deadline)?;
             }
         }
         let mut retained = result_hunks.permitted(streamed::EffectsToMatch::Text, deadline)?;

@@ -946,8 +946,18 @@ fn fixture_range(
     Ok(true)
 }
 
+fn overlapping_edits(left: &std::ops::Range<u64>, right: &std::ops::Range<u64>) -> bool {
+    match (left.is_empty(), right.is_empty()) {
+        (true, true) => left.start == right.start,
+        (true, false) => right.start < left.start && left.start < right.end,
+        (false, true) => left.start < right.start && right.start < left.end,
+        (false, false) => left.start < right.end && right.start < left.end,
+    }
+}
+
 pub(super) fn protected_base_hunks(
     path: &std::path::Path,
+    base_path: &std::path::Path,
     contents: [ObjectContent; 4],
     deadline: Instant,
 ) -> Result<Hunks, GitPushFailure> {
@@ -959,8 +969,10 @@ pub(super) fn protected_base_hunks(
     let own = changed_ranges(&ancestor, &branch, deadline)?;
     let main = changed_ranges(&ancestor, &base, deadline)?;
     let merged = changed_ranges(&ancestor, &result, deadline)?;
-    let generated =
-        path.extension().is_some_and(|extension| extension == "md") && generated_marker(&base)?;
+    let generated = base_path
+        .extension()
+        .is_some_and(|extension| extension == "md")
+        && generated_marker(&base)?;
     let fixture = test_source(path);
     let mut protected = Hunks::new()?;
     for index in 0..main.count {
@@ -970,7 +982,7 @@ pub(super) fn protected_base_hunks(
         for own_index in 0..own.count {
             check(deadline)?;
             let a = range_at(&own, own_index)?.ok_or(GitPushFailure::Repository)?;
-            if a[0] > b[1] || b[0] > a[1] {
+            if !overlapping_edits(&(a[0]..a[1]), &(b[0]..b[1])) {
                 continue;
             }
             let own_effects = replacement_hashes(
@@ -1000,8 +1012,7 @@ pub(super) fn protected_base_hunks(
             {
                 for result_index in 0..merged.count {
                     let r = range_at(&merged, result_index)?.ok_or(GitPushFailure::Repository)?;
-                    if r[0] <= b[1]
-                        && b[0] <= r[1]
+                    if overlapping_edits(&(r[0]..r[1]), &(b[0]..b[1]))
                         && r[2] < r[3]
                         && fixture_range(&ancestor, &result, r, deadline)?
                     {
@@ -1051,25 +1062,30 @@ pub(super) fn preserves_nonconflicting_text(
         check(deadline)?;
         let a = range_at(&own, i)?;
         let b = range_at(&main, j)?;
-        let start = match (a, b) {
+        let (start, mut end, own_first) = match (a, b) {
             (None, None) => break,
-            (Some(a), None) => a[0],
-            (None, Some(b)) => b[0],
-            (Some(a), Some(b)) => a[0].min(b[0]),
+            (Some(a), None) => (a[0], a[1], true),
+            (None, Some(b)) => (b[0], b[1], false),
+            (Some(a), Some(b)) if (a[0], a[1]) <= (b[0], b[1]) => (a[0], a[1], true),
+            (Some(_), Some(b)) => (b[0], b[1], false),
         };
-        let mut end = start;
         let (first_i, first_j) = (i, j);
+        if own_first {
+            i += 1;
+        } else {
+            j += 1;
+        }
         loop {
             let before = (i, j);
             while let Some(r) = range_at(&own, i)? {
-                if r[0] > end {
+                if !overlapping_edits(&(start..end), &(r[0]..r[1])) {
                     break;
                 }
                 end = end.max(r[1]);
                 i += 1;
             }
             while let Some(r) = range_at(&main, j)? {
-                if r[0] > end {
+                if !overlapping_edits(&(start..end), &(r[0]..r[1])) {
                     break;
                 }
                 end = end.max(r[1]);
@@ -1169,6 +1185,7 @@ mod tests {
             format!("r##\"{{\"payload\":\"{payload}\",\"branch\":true,\"main\":true}}\"##,\n");
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut protected = protected_base_hunks(
+            std::path::Path::new("tests/fixture.rs"),
             std::path::Path::new("tests/fixture.rs"),
             [
                 content(&ancestor),
