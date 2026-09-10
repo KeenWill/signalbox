@@ -168,9 +168,9 @@ recovery is registered as part of the reader's validation.
 
 ## Planned
 
-- Image, audio, and general-file views, whose derived bytes publish and register
-  before the read's result commits and leave no dangling result on failure. See
-  the [design](../design/file-and-media.md).
+- Audio and general-file views, whose derived bytes publish and register before
+  the read's result commits and leave no dangling result on failure. See the
+  [design](../design/file-and-media.md).
 
 ## Image presentation
 
