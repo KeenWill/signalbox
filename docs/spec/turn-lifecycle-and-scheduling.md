@@ -186,8 +186,8 @@ exchange it covers.
 
 A retired turn contributes no terminal frontier and stays out of queue order and
 predecessor selection; its immutable origin can still prove the interrupt that
-stopped its predecessor. The scheduling projection retains retired origins as
-interrupt evidence. A completed tool-using model round ends the current attempt
+stopped its predecessor. The scheduling projection retains retired interrupt
+origins as evidence. A completed tool-using model round ends the current attempt
 as a tool-round yield; approval completion creates the next attempt in that
 chain without creating a new turn.
 
