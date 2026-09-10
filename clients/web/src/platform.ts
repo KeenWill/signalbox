@@ -48,7 +48,7 @@ export const scenarios = [
   {
     id: 'approval',
     title: 'Approval required',
-    description: 'A pending tool operation needs operator attention.',
+    description: 'Tool approval required.',
     connection: 'connected',
     timelineTotal: 180,
     tableTotal: 240,
