@@ -165,23 +165,24 @@ regardless of parent order. A missing or ambiguous fence binding refuses the
 push with `UnprovenMergeParents`. Multiple merge bases refuse it with
 `AmbiguousMergeBases`, listing base object IDs and an omitted count when the
 detail cannot fit them all; verification does not construct a virtual merge
-base. Before pushing a merge, the executor checks the base parent's changes
-relative to the merge base: the merge result must keep every line the base added
-verbatim and must not reintroduce any line the base removed. Line offsets are
-ignored; matching additions and removals in the carried change cancel within
-each file. The branch's own lines may be re-expressed inside conflict regions.
-Reversing a base line change refuses the push with `MergeDroppedBaseChanges`.
-Rename detection correlates parent renames through their common source paths,
-permitting either parent's destination while retaining exact carried
-destinations. Non-text changes relative to the base parent must occur in the
-branch diff. Collected dropped-hunk previews share a 4 KiB budget, and
-collection truncation remains explicit in the detail. Its bounded JSON detail
-lists filenames before hunk previews, marks each shortened preview with
-`truncated`, and counts omitted filenames and previews explicitly when they
-cannot fit. Filenames use bytewise Git path quoting. Verification supports
-two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
-the parent count before capturing the push snapshot or traversing ancestry. It
-retains only the first dropped hunk per file. Non-merge pushes are unaffected.
+base. Before pushing a merge, the executor compares the base parent's additions
+and removals relative to the merge base with the merge result's additions and
+removals relative to that same ancestor, ignoring line offsets and consuming
+each matching effect once. The merge result must keep every line the base added
+verbatim and must not restore a line the base removed; the branch's own lines
+may be re-expressed inside conflict regions. A missing base effect refuses the
+push with `MergeDroppedBaseChanges` and names its base hunk. Rename detection
+correlates parent renames through their common source paths, permitting either
+parent's destination while retaining exact carried destinations. Non-text
+changes relative to the base parent must occur in the branch diff. Collected
+dropped-hunk previews share a 4 KiB budget, and collection truncation remains
+explicit in the detail. Its bounded JSON detail lists filenames before hunk
+previews, marks each shortened preview with `truncated`, and counts omitted
+filenames and previews explicitly when they cannot fit. Filenames use bytewise
+Git path quoting. Verification supports two-parent merges and refuses larger
+merges with `UnsupportedMergeShape` naming the parent count before capturing the
+push snapshot or traversing ancestry. It retains only the first dropped hunk per
+file. Non-merge pushes are unaffected.
 
 A rename/delete resolution may retain the branch's rename destination with its
 exact branch blob and mode while leaving the base-deleted source absent.

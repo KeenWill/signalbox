@@ -217,6 +217,7 @@ pub(super) fn verify_merge(
                 }
             }
         }
+        let delta = carried.get_delta(index).ok_or(GitPushFailure::Repository)?;
         let branch_hunks = own_index
             .map(|index| hunks(&own, index, None))
             .transpose()?
@@ -226,45 +227,82 @@ pub(super) fn verify_merge(
             .transpose()?
             .unwrap_or_default();
         let carried_hunks = hunks(&carried, index, Some(source_path))?;
-        let base_lines: HashSet<_> = base_hunks
+        let result_hunks = match base_index {
+            Some(index) => {
+                let base_delta = base_changes
+                    .get_delta(index)
+                    .ok_or(GitPushFailure::Repository)?;
+                let old = if base_delta.old_file().id().is_zero()
+                    || base_delta.old_file().mode() == git2::FileMode::Commit
+                {
+                    None
+                } else {
+                    Some(
+                        repository
+                            .find_blob(base_delta.old_file().id())
+                            .map_err(repository_failure)?,
+                    )
+                };
+                let new = if delta.new_file().id().is_zero()
+                    || delta.new_file().mode() == git2::FileMode::Commit
+                {
+                    None
+                } else {
+                    Some(
+                        repository
+                            .find_blob(delta.new_file().id())
+                            .map_err(repository_failure)?,
+                    )
+                };
+                let patch = Patch::from_buffers(
+                    old.as_ref().map_or(&[], git2::Blob::content),
+                    None,
+                    new.as_ref().map_or(&[], git2::Blob::content),
+                    None,
+                    Some(&mut diff_options()),
+                )
+                .map_err(repository_failure)?;
+                text_hunks(&patch)?
+            }
+            None => Vec::new(),
+        };
+        let mut retained = BTreeMap::new();
+        for effect in result_hunks
             .iter()
             .flat_map(Hunk::effects)
-            .filter_map(text_change)
-            .collect();
-        let carried_lines = line_changes(&carried_hunks);
+            .filter(|effect| is_text_change(effect))
+        {
+            *retained.entry(effect).or_insert(0usize) += 1;
+        }
         let mut permitted = BTreeMap::new();
         for effect in branch_hunks
             .iter()
             .flat_map(Hunk::effects)
-            .filter(|effect| text_change(effect).is_none())
+            .filter(|effect| !is_text_change(effect))
         {
             *permitted.entry(effect).or_insert(0usize) += 1;
         }
-        for hunk in &carried_hunks {
-            let carried = hunk.effects().all(|effect| {
-                if let Some((line, direction)) = text_change(effect) {
-                    let carried_change = carried_lines.get(line).copied().unwrap_or_default();
-                    return carried_change.signum() != direction
-                        || !base_lines.contains(&(line, -direction));
-                }
-                let Some(remaining) = permitted.get_mut(effect) else {
-                    return false;
-                };
-                if *remaining == 0 {
-                    return false;
-                }
-                *remaining -= 1;
-                true
-            });
-            if !carried {
-                let prefix = hunk.bytes.len().min(preview_bytes);
-                let (preview, shortened) =
-                    crate::bounded::bounded_bytes(&hunk.bytes[..prefix], preview_bytes);
-                let truncated = shortened || prefix < hunk.bytes.len();
-                preview_bytes -= preview.len();
-                dropped.insert(path.to_owned(), (preview, truncated));
-                break;
-            }
+        let missing_base = base_hunks.iter().find(|hunk| {
+            !hunk
+                .effects()
+                .filter(|effect| is_text_change(effect))
+                .all(|effect| consume_effect(&mut retained, effect))
+        });
+        let invalid_metadata = || {
+            carried_hunks.iter().find(|hunk| {
+                !hunk
+                    .effects()
+                    .filter(|effect| !is_text_change(effect))
+                    .all(|effect| consume_effect(&mut permitted, effect))
+            })
+        };
+        if let Some(hunk) = missing_base.or_else(invalid_metadata) {
+            let prefix = hunk.bytes.len().min(preview_bytes);
+            let (preview, shortened) =
+                crate::bounded::bounded_bytes(&hunk.bytes[..prefix], preview_bytes);
+            let truncated = shortened || prefix < hunk.bytes.len();
+            preview_bytes -= preview.len();
+            dropped.insert(path.to_owned(), (preview, truncated));
         }
     }
     source.validate(authority).map_err(repository_failure)?;
@@ -341,20 +379,40 @@ impl Hunk {
     }
 }
 
-fn text_change(effect: &[u8]) -> Option<(&[u8], isize)> {
-    match effect.split_first()? {
-        (b'+', line) => Some((line, 1)),
-        (b'-', line) => Some((line, -1)),
-        _ => None,
-    }
+fn is_text_change(effect: &[u8]) -> bool {
+    matches!(effect.first(), Some(b'+' | b'-'))
 }
 
-fn line_changes(hunks: &[Hunk]) -> BTreeMap<&[u8], isize> {
-    let mut changes = BTreeMap::new();
-    for (line, direction) in hunks.iter().flat_map(Hunk::effects).filter_map(text_change) {
-        *changes.entry(line).or_default() += direction;
+fn consume_effect(permitted: &mut BTreeMap<&[u8], usize>, effect: &[u8]) -> bool {
+    let Some(remaining) = permitted.get_mut(effect) else {
+        return false;
+    };
+    if *remaining == 0 {
+        return false;
     }
-    changes
+    *remaining -= 1;
+    true
+}
+
+fn text_hunks(patch: &Patch<'_>) -> Result<Vec<Hunk>, GitPushFailure> {
+    let mut hunks = Vec::new();
+    for index in 0..patch.num_hunks() {
+        let (_, lines) = patch.hunk(index).map_err(repository_failure)?;
+        let mut hunk = Hunk::default();
+        for line in 0..lines {
+            let line = patch
+                .line_in_hunk(index, line)
+                .map_err(repository_failure)?;
+            let start = hunk.bytes.len();
+            hunk.bytes.push(line.origin() as u8);
+            hunk.bytes.extend_from_slice(line.content());
+            if matches!(line.origin(), '+' | '-') {
+                hunk.changes.push(start..hunk.bytes.len());
+            }
+        }
+        hunks.push(hunk);
+    }
+    Ok(hunks)
 }
 
 fn hunks(
@@ -390,22 +448,7 @@ fn hunks(
         ));
     }
     if let Some(patch) = Patch::from_diff(diff, index).map_err(repository_failure)? {
-        for index in 0..patch.num_hunks() {
-            let (_, lines) = patch.hunk(index).map_err(repository_failure)?;
-            let mut hunk = Hunk::default();
-            for line in 0..lines {
-                let line = patch
-                    .line_in_hunk(index, line)
-                    .map_err(repository_failure)?;
-                let start = hunk.bytes.len();
-                hunk.bytes.push(line.origin() as u8);
-                hunk.bytes.extend_from_slice(line.content());
-                if matches!(line.origin(), '+' | '-') {
-                    hunk.changes.push(start..hunk.bytes.len());
-                }
-            }
-            hunks.push(hunk);
-        }
+        hunks.extend(text_hunks(&patch)?);
         if patch.num_hunks() > 0 || delta.old_file().id() == delta.new_file().id() {
             return Ok(hunks);
         }

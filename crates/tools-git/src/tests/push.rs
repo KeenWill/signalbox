@@ -1081,7 +1081,7 @@ async fn push_refuses_branch_side_resolution_that_drops_base_changes() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             crate::push_merge::DroppedBaseChanges {
                 file: "shared.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
@@ -1220,6 +1220,41 @@ async fn push_refuses_dropping_a_line_main_moved() {
 }
 
 #[tokio::test]
+async fn push_accepts_independent_branch_additions_matching_main_removed_text() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(
+        &repository,
+        "main old\nanchor one\nanchor two\nanchor three\n",
+        &[],
+    );
+    let branch = merge_test_commit(
+        &repository,
+        "main old\nanchor one\nanchor two\nanchor three\nmain old\nbranch\n",
+        &[ancestor],
+    );
+    let base = merge_test_commit(
+        &repository,
+        "main new\nanchor one\nanchor two\nanchor three\n",
+        &[ancestor],
+    );
+    let merge = merge_test_commit(
+        &repository,
+        "main new\nanchor one\nanchor two\nanchor three\nmain old\nbranch regrouped\n",
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("main replacement and the independent branch addition survive");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
 async fn push_accepts_a_plain_commit() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
@@ -1315,7 +1350,7 @@ async fn merge_refusal_retains_only_the_first_dropped_hunk_per_file() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             crate::push_merge::DroppedBaseChanges {
                 file: "shared.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "-shared\n+base\n".to_owned(),
                 truncated: false,
             },
         ]))
@@ -1416,7 +1451,7 @@ async fn push_refuses_a_branch_rename_that_drops_the_base_edit() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: "new.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
@@ -1476,17 +1511,17 @@ async fn merge_refusal_distinguishes_non_utf8_paths_from_each_other_and_literal_
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: r#""a\\200""#.to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "-shared\n+base\n".to_owned(),
                 truncated: false,
             },
             DroppedBaseChanges {
                 file: r#""a\200""#.to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "-shared\n+base\n".to_owned(),
                 truncated: false,
             },
             DroppedBaseChanges {
                 file: r#""a\201""#.to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "-shared\n+base\n".to_owned(),
                 truncated: false,
             },
         ]))
@@ -1587,7 +1622,7 @@ async fn push_refuses_a_base_rename_that_drops_the_base_edit() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: "new.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
@@ -1745,7 +1780,7 @@ async fn push_refuses_divergent_parent_renames_dropping_base_content_at_the_bran
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: "branch.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
@@ -1830,7 +1865,7 @@ async fn push_refuses_divergent_parent_renames_that_drop_the_base_edit() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: "new.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
@@ -1858,7 +1893,7 @@ async fn push_refuses_dropped_base_changes_when_the_base_is_the_first_parent() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: "shared.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
