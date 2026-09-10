@@ -80,6 +80,63 @@ async fn evaluation_commands_print_sealed_scorecards_without_provider_access()
     runtime.stop().await
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn evaluation_launch_rejects_corrupt_recorded_responses_before_pinning()
+-> Result<(), Box<dyn Error>> {
+    const RESPONSES: &[u8] =
+        br#"{"responses":[{"disposition":"approve","rationale":"Synthetic permission."}]}"#;
+    let mut fixture = CommittedBlobReadFixture::from_runtime(
+        RunningRuntime::start_evaluation().await?,
+        RESPONSES,
+    )
+    .await?;
+    let corpus = include_bytes!("../../../../crates/approval-judge-eval/corpora/seed-v1.json");
+    let corpus_digest = CanonicalBlobDigest::from_digest(BlobDigest::digest(corpus));
+    commit_blob_upload(
+        &mut fixture.connection,
+        corpus_digest,
+        CanonicalU64::new(corpus.len() as u64),
+        corpus,
+    )
+    .await?;
+    // The replica remains valid JSON with its catalogued length but different content.
+    let corrupt = std::str::from_utf8(RESPONSES)?.replace("Synthetic", "Corrupted");
+    std::fs::write(fixture.object_path(), corrupt)?;
+    let run_id = CanonicalUuid::from_uuid(uuid::Uuid::new_v4());
+    let registration_id = CanonicalUuid::from_uuid(uuid::Uuid::new_v4());
+    let request = ClientRequest::LaunchEvaluation {
+        run_id,
+        registration_id,
+        input: signalbox_process_protocol::EvaluationInput {
+            corpus: corpus_digest,
+            format: signalbox_process_protocol::EvaluationCorpusFormat::Offline,
+            cases: vec![0],
+            repeats: 1,
+            recorded_responses: Some(fixture.wire_digest),
+        },
+    };
+    assert!(matches!(
+        program_request(&mut fixture.connection, request.clone()).await?,
+        ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    std::fs::write(fixture.object_path(), RESPONSES)?;
+    assert!(matches!(
+        program_request(&mut fixture.connection, request).await?,
+        ServerMessage::ProgramRunStarted { .. }
+    ));
+    assert!(matches!(
+        program_result(&mut fixture.connection, run_id)
+            .await?
+            .outcome,
+        ProgramRunState::Succeeded { .. }
+    ));
+    fixture.runtime.stop().await
+}
+
 async fn program_request(
     connection: &mut Connection,
     request: ClientRequest,

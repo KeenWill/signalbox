@@ -22,7 +22,12 @@ pub fn recorded_binding() -> JudgeBinding {
         credential_reference: "offline-recorded-response".into(),
         provider_model: PROVIDER_MODEL.into(),
         contract_digest: stable_digest(
-            signalbox_model_provider_runtime::approval_judge_output_contract_text().as_bytes(),
+            format!(
+                "{}\u{0}{}",
+                crate::approval_judge_eval::judge_system_prompt(),
+                signalbox_model_provider_runtime::approval_judge_output_contract_text(),
+            )
+            .as_bytes(),
         ),
         cache_accounting: "input_excludes_cache".into(),
     }
