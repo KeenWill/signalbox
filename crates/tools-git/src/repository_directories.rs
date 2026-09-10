@@ -95,7 +95,10 @@ fn open_directory(parent: &File, path: &Path) -> Result<File, LocalGitFailure> {
 }
 
 fn marker_path(bytes: &[u8]) -> Result<&Path, LocalGitFailure> {
-    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let bytes = bytes
+        .strip_suffix(b"\r\n")
+        .or_else(|| bytes.strip_suffix(b"\n"))
+        .unwrap_or(bytes);
     if bytes.is_empty() || bytes.contains(&0) || bytes.contains(&b'\n') || bytes.contains(&b'\r') {
         return Err(LocalGitFailure::Repository);
     }
@@ -356,4 +359,14 @@ pub(super) fn require_branch_unoccupied(
         _ => return Err(LocalGitFailure::Repository),
     }
     snapshot.validate_supported_layout()
+}
+
+#[cfg(test)]
+mod marker_tests {
+    #[test]
+    fn administration_markers_reject_embedded_and_unterminated_carriage_returns() {
+        for bytes in [b"../comm\ron\r\n".as_slice(), b"../common\r".as_slice()] {
+            assert!(super::marker_path(bytes).is_err());
+        }
+    }
 }

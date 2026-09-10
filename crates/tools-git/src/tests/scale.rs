@@ -521,3 +521,38 @@ fn sibling_occupancy_scan_handles_five_thousand_worktrees() {
     let visits = measure_sibling_scan(5_000);
     eprintln!("5,000 sibling worktrees: {visits} administration entry visits");
 }
+
+#[test]
+fn linked_worktree_accepts_crlf_administration_markers() {
+    let fixture = super::support::Fixture::new();
+    let repository = git2::Repository::open(fixture.root()).expect("main repository");
+    let parent = tempfile::tempdir().expect("linked parent");
+    let linked = parent.path().join("linked");
+    repository
+        .worktree("linked", &linked, None)
+        .expect("linked worktree");
+    let worktree = git2::Repository::open(&linked).expect("linked repository");
+    for marker in [linked.join(".git"), worktree.path().join("commondir")] {
+        let bytes = fs::read(&marker).expect("administration marker");
+        let mut crlf = bytes.strip_suffix(b"\n").expect("LF marker").to_vec();
+        crlf.extend_from_slice(b"\r\n");
+        fs::write(marker, crlf).expect("CRLF marker");
+    }
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&linked)
+            .args(["rev-parse", "--git-common-dir"])
+            .output()
+            .expect("native Git marker resolution")
+            .status
+            .success()
+    );
+    let (_, executor) = LocalGitTools::try_new(LocalWorkspaceFileSystem, &linked, identity())
+        .expect("CRLF markers admitted")
+        .into_parts();
+    assert_eq!(
+        execute(&executor, LocalOperation::Status)["entries"],
+        serde_json::json!([])
+    );
+}
