@@ -32,7 +32,8 @@ identities frame the repository, pull-request number and head SHA, event kind,
 and provider suite or run ID with completion generation, or review ID; mutable
 pull-request presentation and payload fields are excluded. Check-run occurrence
 sequences distinguish later conclusion changes. `ThreadOpened` carries the
-thread author's GitHub login, and `ThreadResolved` carries the resolver's.
+thread author's GitHub login when GitHub reports it, and `ThreadResolved`
+carries the resolver's when GitHub reports it.
 
 Rules are versioned `RepoWatchRule` values. Fields within one matcher are
 conjunctive and rules are evaluated independently. The checked matcher owns the

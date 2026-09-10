@@ -100,7 +100,7 @@ fn merged_pull_request_payload(baseline: &RepoWatchMergedPullRequestBaselineV1) 
             .map(|thread| json!({
                 "thread": thread.thread().as_str(),
                 "state": thread_state_storage(thread.state()),
-                "author": thread.author().as_str(),
+                "author": thread.author().map(RepoWatchAuthorLogin::as_str),
                 "resolver": thread.resolver().map(RepoWatchAuthorLogin::as_str),
             }))
             .collect::<Vec<_>>(),
@@ -172,7 +172,7 @@ fn pull_request_payload(state: &RepoWatchPullRequestState) -> Value {
             .map(|thread| json!({
                 "thread": thread.thread().as_str(),
                 "state": thread_state_storage(thread.state()),
-                "author": thread.author().as_str(),
+                "author": thread.author().map(RepoWatchAuthorLogin::as_str),
                 "resolver": thread.resolver().map(RepoWatchAuthorLogin::as_str),
             }))
             .collect::<Vec<_>>(),

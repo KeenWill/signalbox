@@ -1,5 +1,5 @@
 use crate::observation_decode::{
-    conclusion, context, mergeable, reaction_subject, review_state, text,
+    conclusion, context, mergeable, optional_field, reaction_subject, review_state, text,
 };
 use serde_json::Value;
 use signalbox_session_ownership::{
@@ -46,11 +46,15 @@ pub(crate) fn event(id: RepoWatchEventId, bytes: &[u8]) -> Option<RepoWatchEvent
         },
         "thread_opened" => RepoWatchEventKindV1::ThreadOpened {
             thread: ReviewThreadId::try_new(text(&k["thread"])?).ok()?,
-            author: RepoWatchAuthorLogin::try_new(text(&k["author"])?).ok()?,
+            author: optional_field(k.get("author"), |v| {
+                RepoWatchAuthorLogin::try_new(text(v)?).ok()
+            })?,
         },
         "thread_resolved" => RepoWatchEventKindV1::ThreadResolved {
             thread: ReviewThreadId::try_new(text(&k["thread"])?).ok()?,
-            author: RepoWatchAuthorLogin::try_new(text(&k["author"])?).ok()?,
+            author: optional_field(k.get("author"), |v| {
+                RepoWatchAuthorLogin::try_new(text(v)?).ok()
+            })?,
         },
         "labeled" => RepoWatchEventKindV1::Labeled {
             label: LabelName::try_new(text(&k["label"])?).ok()?,
@@ -88,5 +92,46 @@ pub(crate) fn event(id: RepoWatchEventId, bytes: &[u8]) -> Option<RepoWatchEvent
             _ => None,
         },
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn retained_thread_events_without_author_decode_with_unavailable_attribution() {
+        for name in ["thread_opened", "thread_resolved"] {
+            let payload = json!({
+                "repository": "example/project",
+                "target": {
+                    "kind": "pull_request",
+                    "number": 1,
+                    "head_sha": "1111111111111111111111111111111111111111",
+                    "head_repository": "example/project",
+                    "base_branch": "main",
+                    "head_branch": "topic",
+                    "title": "Title",
+                    "body": "Body",
+                    "labels": [],
+                    "draft": false,
+                    "author": null,
+                },
+                "kind": {"name": name, "thread": "thread-one"},
+            });
+            let bytes = serde_json::to_vec(&payload).expect("fixture encodes");
+            let retained = event(RepoWatchEventId::from_uuid(Uuid::from_u128(1)), &bytes)
+                .expect("parent-version thread event decodes");
+
+            match retained.kind() {
+                RepoWatchEventKindV1::ThreadOpened { author, .. }
+                | RepoWatchEventKindV1::ThreadResolved { author, .. } => {
+                    assert_eq!(author, &None);
+                }
+                kind => panic!("unexpected retained kind: {kind:?}"),
+            }
+        }
     }
 }

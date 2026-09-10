@@ -172,11 +172,11 @@ pub enum RepoWatchEventKindV1 {
     },
     ThreadOpened {
         thread: ReviewThreadId,
-        author: RepoWatchAuthorLogin,
+        author: option::Option<RepoWatchAuthorLogin>,
     },
     ThreadResolved {
         thread: ReviewThreadId,
-        author: RepoWatchAuthorLogin,
+        author: option::Option<RepoWatchAuthorLogin>,
     },
     Labeled {
         label: LabelName,

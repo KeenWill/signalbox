@@ -109,14 +109,15 @@ fn pull_request(v: &Value) -> Option<RepoWatchPullRequestState> {
 
 fn thread(v: &Value) -> Option<RepoWatchThreadObservation> {
     let id = ReviewThreadId::try_new(text(&v["thread"])?).ok()?;
-    let author = RepoWatchAuthorLogin::try_new(text(&v["author"])?).ok()?;
+    let author = optional_field(v.get("author"), |v| {
+        RepoWatchAuthorLogin::try_new(text(v)?).ok()
+    })?;
+    let resolver = optional_field(v.get("resolver"), |v| {
+        RepoWatchAuthorLogin::try_new(text(v)?).ok()
+    })?;
     match v["state"].as_str()? {
-        "open" if v["resolver"].is_null() => Some(RepoWatchThreadObservation::open(id, author)),
-        "resolved" => Some(RepoWatchThreadObservation::resolved(
-            id,
-            author,
-            RepoWatchAuthorLogin::try_new(text(&v["resolver"])?).ok()?,
-        )),
+        "open" if resolver.is_none() => Some(RepoWatchThreadObservation::open(id, author)),
+        "resolved" => Some(RepoWatchThreadObservation::resolved(id, author, resolver)),
         _ => None,
     }
 }
@@ -195,6 +196,16 @@ fn optional<T>(v: &Value, decode: impl FnOnce(&Value) -> Option<T>) -> Option<Op
     }
 }
 
+pub(crate) fn optional_field<T>(
+    v: Option<&Value>,
+    decode: impl FnOnce(&Value) -> Option<T>,
+) -> Option<Option<T>> {
+    match v {
+        None => Some(None),
+        Some(v) => optional(v, decode),
+    }
+}
+
 pub(crate) fn merged_baselines(
     value: &Value,
 ) -> Option<Vec<crate::ingest::MergedPullRequestBaseline>> {
@@ -246,4 +257,53 @@ pub(crate) fn merged_baselines(
             .ok()?,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn comparison_baseline_threads_without_authors_decode_as_unavailable() {
+        let payload = json!({
+            "signal_reviewers": [],
+            "pull_requests": [{
+                "context": {
+                    "number": 1,
+                    "head_sha": "1111111111111111111111111111111111111111",
+                    "head_repository": "example/project",
+                    "base_branch": "main",
+                    "head_branch": "topic",
+                    "title": "Title",
+                    "body": "Body",
+                    "labels": [],
+                    "draft": false,
+                    "author": null,
+                },
+                "lifecycle": "open",
+                "mergeable_state": "unknown",
+                "completed_check_suites": [],
+                "completed_check_runs": [],
+                "reviews": [],
+                "threads": [
+                    {"thread": "thread-open", "state": "open"},
+                    {"thread": "thread-resolved", "state": "resolved"},
+                ],
+                "reactions": [],
+            }],
+            "workflow_runs": [],
+            "branch_heads": [],
+        });
+
+        let baseline = observation(&payload).expect("parent-version baseline decodes");
+        let threads = baseline.state().pull_requests()[0].threads();
+
+        assert_eq!(threads.len(), 2);
+        assert!(
+            threads
+                .iter()
+                .all(|thread| thread.author().is_none() && thread.resolver().is_none())
+        );
+    }
 }

@@ -981,7 +981,7 @@ async fn kickoff_with_unresolved_threads_requests_repair_and_thread_replies()
         "labeled-review-response",
         vec![RepoWatchThreadObservation::open(
             ReviewThreadId::try_new("fixture-thread".to_owned())?,
-            RepoWatchAuthorLogin::try_new("reviewer".to_owned())?,
+            Some(RepoWatchAuthorLogin::try_new("reviewer".to_owned())?),
         )],
     )
     .await?;
@@ -1031,7 +1031,7 @@ async fn kickoff_without_push_credentials_requests_a_reviewable_diff() -> Result
         "labeled-review-response",
         vec![RepoWatchThreadObservation::open(
             ReviewThreadId::try_new("fixture-thread".to_owned())?,
-            RepoWatchAuthorLogin::try_new("reviewer".to_owned())?,
+            Some(RepoWatchAuthorLogin::try_new("reviewer".to_owned())?),
         )],
     )
     .await?;

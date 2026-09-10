@@ -208,16 +208,16 @@ pub struct RepoWatchThreadObservation {/* private */}
 impl RepoWatchThreadObservation {
     pub const fn open(
         thread: signalbox_domain::ReviewThreadId,
-        author: signalbox_domain::RepoWatchAuthorLogin,
+        author: option::Option<signalbox_domain::RepoWatchAuthorLogin>,
     ) -> Self;
     pub const fn resolved(
         thread: signalbox_domain::ReviewThreadId,
-        author: signalbox_domain::RepoWatchAuthorLogin,
-        resolver: signalbox_domain::RepoWatchAuthorLogin,
+        author: option::Option<signalbox_domain::RepoWatchAuthorLogin>,
+        resolver: option::Option<signalbox_domain::RepoWatchAuthorLogin>,
     ) -> Self;
     pub const fn thread(&self) -> &signalbox_domain::ReviewThreadId;
     pub const fn state(&self) -> RepoWatchThreadState;
-    pub const fn author(&self) -> &signalbox_domain::RepoWatchAuthorLogin;
+    pub const fn author(&self) -> option::Option<&signalbox_domain::RepoWatchAuthorLogin>;
     pub const fn resolver(&self) -> option::Option<&signalbox_domain::RepoWatchAuthorLogin>;
 }
 ```

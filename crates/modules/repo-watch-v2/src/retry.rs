@@ -450,7 +450,7 @@ mod tests {
         current.mergeable_state = MergeableState::Mergeable;
         current.threads = vec![RepoWatchThreadObservation::open(
             ReviewThreadId::try_new("remaining-review".to_owned()).expect("thread"),
-            thread_author(),
+            Some(thread_author()),
         )];
         let retry = retry_event(
             &rule,
@@ -518,13 +518,13 @@ mod tests {
         let thread = ReviewThreadId::try_new("thread".to_owned()).expect("thread");
         let (rule, event) = origin(RepoWatchEventKindV1::ThreadOpened {
             thread: thread.clone(),
-            author: thread_author(),
+            author: Some(thread_author()),
         });
         let mut current = input();
         current.threads = vec![RepoWatchThreadObservation::resolved(
             thread,
-            thread_author(),
-            thread_author(),
+            Some(thread_author()),
+            Some(thread_author()),
         )];
         assert!(
             retry_event(
@@ -541,10 +541,13 @@ mod tests {
         let thread = ReviewThreadId::try_new("thread".to_owned()).expect("thread");
         let (rule, event) = origin(RepoWatchEventKindV1::ThreadOpened {
             thread: thread.clone(),
-            author: thread_author(),
+            author: Some(thread_author()),
         });
         let mut current = input();
-        current.threads = vec![RepoWatchThreadObservation::open(thread, thread_author())];
+        current.threads = vec![RepoWatchThreadObservation::open(
+            thread,
+            Some(thread_author()),
+        )];
         assert!(
             retry_event(
                 &rule,

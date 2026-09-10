@@ -1027,20 +1027,27 @@ async fn fetch_threads(
         let connection = &value["data"]["repository"]["pullRequest"]["reviewThreads"];
         for thread in value.admit(connection["nodes"].as_array())? {
             let id = value.admit(ReviewThreadId::try_new(value.text(&thread["id"])?).ok())?;
-            let author = value.admit(
-                RepoWatchAuthorLogin::try_new(
-                    value.text(&thread["comments"]["nodes"][0]["author"]["login"])?,
-                )
-                .ok(),
-            )?;
+            let comments = value.admit(thread["comments"]["nodes"].as_array())?;
+            let comment = value.admit(comments.first())?;
+            let author = if comment["author"].is_null() {
+                None
+            } else {
+                Some(value.admit(
+                    RepoWatchAuthorLogin::try_new(value.text(&comment["author"]["login"])?).ok(),
+                )?)
+            };
             threads.push(if value.admit(thread["isResolved"].as_bool())? {
                 RepoWatchThreadObservation::resolved(
                     id,
                     author,
-                    value.admit(
-                        RepoWatchAuthorLogin::try_new(value.text(&thread["resolvedBy"]["login"])?)
+                    Some(
+                        value.admit(
+                            RepoWatchAuthorLogin::try_new(
+                                value.text(&thread["resolvedBy"]["login"])?,
+                            )
                             .ok(),
-                    )?,
+                        )?,
+                    ),
                 )
             } else {
                 RepoWatchThreadObservation::open(id, author)
@@ -1612,7 +1619,13 @@ mod tests {
         );
         assert_eq!(pull.reviews()[0].state(), Some(ReviewState::Approved));
         assert_eq!(pull.threads()[0].state(), RepoWatchThreadState::Resolved);
-        assert_eq!(pull.threads()[0].author().as_str(), "thread-author");
+        assert_eq!(
+            pull.threads()[0]
+                .author()
+                .expect("thread retains its author")
+                .as_str(),
+            "thread-author"
+        );
         assert_eq!(
             pull.threads()[0]
                 .resolver()
@@ -1628,6 +1641,25 @@ mod tests {
                 .as_str(),
             "CI"
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_opening_comment_author_does_not_reject_threads() {
+        let mut io = fixture();
+        let thread =
+            &mut io.threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0];
+        thread["isResolved"] = json!(false);
+        thread["comments"]["nodes"][0]["author"] = Value::Null;
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+
+        let observed = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect("unavailable thread author is accepted");
+        let thread = &observed.observation.state().pull_requests()[0].threads()[0];
+
+        assert_eq!(thread.state(), RepoWatchThreadState::Open);
+        assert_eq!(thread.author(), None);
     }
 
     #[tokio::test]

@@ -1957,12 +1957,12 @@ fn normalized_event_payload(event: &RepoWatchEvent) -> Value {
         RepoWatchEventKindV1::ThreadOpened { thread, author } => json!({
             "name": "thread_opened",
             "thread": thread.as_str(),
-            "author": author.as_str(),
+            "author": author.as_ref().map(RepoWatchAuthorLogin::as_str),
         }),
         RepoWatchEventKindV1::ThreadResolved { thread, author } => json!({
             "name": "thread_resolved",
             "thread": thread.as_str(),
-            "author": author.as_str(),
+            "author": author.as_ref().map(RepoWatchAuthorLogin::as_str),
         }),
         RepoWatchEventKindV1::Labeled { label } => json!({
             "name": "labeled",

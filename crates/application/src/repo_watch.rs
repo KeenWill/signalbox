@@ -457,12 +457,12 @@ pub enum RepoWatchThreadState {
 pub struct RepoWatchThreadObservation {
     thread: ReviewThreadId,
     state: RepoWatchThreadState,
-    author: RepoWatchAuthorLogin,
+    author: Option<RepoWatchAuthorLogin>,
     resolver: Option<RepoWatchAuthorLogin>,
 }
 
 impl RepoWatchThreadObservation {
-    pub const fn open(thread: ReviewThreadId, author: RepoWatchAuthorLogin) -> Self {
+    pub const fn open(thread: ReviewThreadId, author: Option<RepoWatchAuthorLogin>) -> Self {
         Self {
             thread,
             state: RepoWatchThreadState::Open,
@@ -473,14 +473,14 @@ impl RepoWatchThreadObservation {
 
     pub const fn resolved(
         thread: ReviewThreadId,
-        author: RepoWatchAuthorLogin,
-        resolver: RepoWatchAuthorLogin,
+        author: Option<RepoWatchAuthorLogin>,
+        resolver: Option<RepoWatchAuthorLogin>,
     ) -> Self {
         Self {
             thread,
             state: RepoWatchThreadState::Resolved,
             author,
-            resolver: Some(resolver),
+            resolver,
         }
     }
 
@@ -492,19 +492,12 @@ impl RepoWatchThreadObservation {
         self.state
     }
 
-    pub const fn author(&self) -> &RepoWatchAuthorLogin {
-        &self.author
+    pub const fn author(&self) -> Option<&RepoWatchAuthorLogin> {
+        self.author.as_ref()
     }
 
     pub const fn resolver(&self) -> Option<&RepoWatchAuthorLogin> {
         self.resolver.as_ref()
-    }
-
-    const fn resolution_author(&self) -> &RepoWatchAuthorLogin {
-        match self.resolver.as_ref() {
-            Some(resolver) => resolver,
-            None => &self.author,
-        }
     }
 }
 
@@ -1858,7 +1851,7 @@ fn derive_compacted_thread_events(
                 current.context(),
                 RepoWatchEventKindV1::ThreadOpened {
                     thread: thread.thread().clone(),
-                    author: thread.author().clone(),
+                    author: thread.author().cloned(),
                 },
                 RepoWatchEventStreamKeyV1::Thread {
                     number: current.context().number(),
@@ -1877,7 +1870,7 @@ fn derive_compacted_thread_events(
                     current.context(),
                     RepoWatchEventKindV1::ThreadResolved {
                         thread: thread.thread().clone(),
-                        author: thread.resolution_author().clone(),
+                        author: thread.resolver().cloned(),
                     },
                     RepoWatchEventStreamKeyV1::Thread {
                         number: current.context().number(),
@@ -1895,7 +1888,7 @@ fn derive_compacted_thread_events(
                     current.context(),
                     RepoWatchEventKindV1::ThreadOpened {
                         thread: thread.thread().clone(),
-                        author: thread.author().clone(),
+                        author: thread.author().cloned(),
                     },
                     RepoWatchEventStreamKeyV1::Thread {
                         number: current.context().number(),
@@ -2055,7 +2048,7 @@ fn derive_thread_events(
                 current.context(),
                 RepoWatchEventKindV1::ThreadOpened {
                     thread: thread.thread().clone(),
-                    author: thread.author().clone(),
+                    author: thread.author().cloned(),
                 },
                 RepoWatchEventStreamKeyV1::Thread {
                     number: current.context().number(),
@@ -2074,7 +2067,7 @@ fn derive_thread_events(
                     current.context(),
                     RepoWatchEventKindV1::ThreadResolved {
                         thread: thread.thread().clone(),
-                        author: thread.resolution_author().clone(),
+                        author: thread.resolver().cloned(),
                     },
                     RepoWatchEventStreamKeyV1::Thread {
                         number: current.context().number(),
@@ -2092,7 +2085,7 @@ fn derive_thread_events(
                     current.context(),
                     RepoWatchEventKindV1::ThreadOpened {
                         thread: thread.thread().clone(),
-                        author: thread.author().clone(),
+                        author: thread.author().cloned(),
                     },
                     RepoWatchEventStreamKeyV1::Thread {
                         number: current.context().number(),
@@ -2581,7 +2574,13 @@ fn hash_event_kind(hash: &mut RepoWatchIdentityHasher, kind: &RepoWatchEventKind
         RepoWatchEventKindV1::ThreadOpened { thread, author }
         | RepoWatchEventKindV1::ThreadResolved { thread, author } => {
             hash.text(thread.as_str());
-            hash.text(author.as_str());
+            match author {
+                Some(author) => {
+                    hash.boolean(true);
+                    hash.text(author.as_str());
+                }
+                None => hash.boolean(false),
+            }
         }
         RepoWatchEventKindV1::Labeled { label } | RepoWatchEventKindV1::Unlabeled { label } => {
             hash.text(label.as_str());
@@ -3079,8 +3078,8 @@ mod tests {
                 )],
                 threads: vec![RepoWatchThreadObservation::resolved(
                     ReviewThreadId::try_new(String::from(THREAD_ID))?,
-                    reviewer(REVIEWER)?,
-                    reviewer(REPLACEMENT_REVIEWER)?,
+                    Some(reviewer(REVIEWER)?),
+                    Some(reviewer(REPLACEMENT_REVIEWER)?),
                 )],
                 reactions: vec![reaction()?],
                 ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
@@ -3533,8 +3532,8 @@ mod tests {
             vec![pull_request(PullRequestFacts {
                 threads: vec![RepoWatchThreadObservation::resolved(
                     thread.clone(),
-                    reviewer(REVIEWER)?,
-                    reviewer(REPLACEMENT_REVIEWER)?,
+                    Some(reviewer(REVIEWER)?),
+                    Some(reviewer(REPLACEMENT_REVIEWER)?),
                 )],
                 ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
             })?],
@@ -3550,14 +3549,14 @@ mod tests {
             events[0].kind(),
             &RepoWatchEventKindV1::ThreadOpened {
                 thread: thread.clone(),
-                author: reviewer(REVIEWER)?,
+                author: Some(reviewer(REVIEWER)?),
             }
         );
         assert_eq!(
             events[1].kind(),
             &RepoWatchEventKindV1::ThreadResolved {
                 thread,
-                author: reviewer(REPLACEMENT_REVIEWER)?,
+                author: Some(reviewer(REPLACEMENT_REVIEWER)?),
             }
         );
         Ok(())
@@ -3798,8 +3797,8 @@ mod tests {
         );
         let current_thread = RepoWatchThreadObservation::resolved(
             ReviewThreadId::try_new(String::from(THREAD_ID))?,
-            reviewer(REVIEWER)?,
-            reviewer(REPLACEMENT_REVIEWER)?,
+            Some(reviewer(REVIEWER)?),
+            Some(reviewer(REPLACEMENT_REVIEWER)?),
         );
         let current_reaction = reaction()?;
         let current_label = label(LABEL_READY)?;
@@ -3864,17 +3863,14 @@ mod tests {
             events[3].kind(),
             &RepoWatchEventKindV1::ThreadOpened {
                 thread: current_thread.thread().clone(),
-                author: current_thread.author().clone(),
+                author: current_thread.author().cloned(),
             }
         );
         assert_eq!(
             events[4].kind(),
             &RepoWatchEventKindV1::ThreadResolved {
                 thread: current_thread.thread().clone(),
-                author: current_thread
-                    .resolver()
-                    .expect("resolved fixture has resolver")
-                    .clone(),
+                author: current_thread.resolver().cloned(),
             }
         );
         assert_eq!(
@@ -3954,11 +3950,11 @@ mod tests {
         let duplicate = ReviewThreadId::try_new(String::from(THREAD_ID))?;
         let mut input = merged_baseline_input()?;
         input.threads = vec![
-            RepoWatchThreadObservation::open(duplicate.clone(), reviewer(REVIEWER)?),
+            RepoWatchThreadObservation::open(duplicate.clone(), Some(reviewer(REVIEWER)?)),
             RepoWatchThreadObservation::resolved(
                 duplicate.clone(),
-                reviewer(REVIEWER)?,
-                reviewer(REPLACEMENT_REVIEWER)?,
+                Some(reviewer(REVIEWER)?),
+                Some(reviewer(REPLACEMENT_REVIEWER)?),
             ),
         ];
 

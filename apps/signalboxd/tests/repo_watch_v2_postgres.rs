@@ -391,8 +391,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             )],
             threads: vec![RepoWatchThreadObservation::resolved(
                 ReviewThreadId::try_new(String::from("thread-1"))?,
-                author.clone(),
-                author.clone(),
+                Some(author.clone()),
+                Some(author.clone()),
             )],
             reactions: vec![RepoWatchReactionObservation::new(
                 ReactionSubject::ReviewComment {
