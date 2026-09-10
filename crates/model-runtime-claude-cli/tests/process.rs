@@ -570,6 +570,15 @@ async fn success_rejects_every_contradictory_error_field_shape() {
 }
 
 #[tokio::test]
+async fn native_session_limit_is_quota_exhaustion() {
+    let result = execute_scenario("session_limit", OperationShape::Text).await;
+    let failure = provider_error(&result.evidence);
+
+    assert_eq!(failure.kind, ProviderErrorKind::QuotaExhausted);
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn nonzero_exit_is_a_typed_provider_failure() {
     let result = execute_scenario("process_nonzero", OperationShape::Text).await;
     let failure = provider_error(&result.evidence);
