@@ -526,6 +526,23 @@ pub(super) fn historical_review_activation(
     Some((run, pass))
 }
 
+pub(super) fn activate_queued_review_pass(
+    current_run: ReviewRun,
+    current_pass: ReviewPass,
+    turn: TurnId,
+    lifecycle_state: ReviewTurnLifecycleState,
+) -> Option<(ReviewRun, ReviewPass)> {
+    if !matches!(
+        lifecycle_state,
+        ReviewTurnLifecycleState::Active | ReviewTurnLifecycleState::Terminal(_)
+    ) || current_run.state() != ReviewRunState::Queued
+        || current_pass.state() != &ReviewPassState::Queued
+    {
+        return None;
+    }
+    historical_review_activation(&current_run, &current_pass, turn)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_activate_review_pass<Writer>(
     writer: &mut Writer,
@@ -585,30 +602,15 @@ where
     {
         return write_review_invalid(writer, version, request_id).await;
     }
-    let evidence = ReviewPassTurnEvidence::new(
-        turn_id,
-        current_pass.session(),
-        current_pass.accepted_input(),
-        ReviewPassTurnOutcome::Active,
-        None,
-    );
-    let policy = current_run.policy();
-    let active_pass_state = ReviewPassState::Running { turn: turn_id };
-    let active_run_state = ReviewRunState::Running {
-        active_pass: current_pass.reference(),
-    };
-    let (run, pass) = if lifecycle.state() == ReviewTurnLifecycleState::Active
-        && current_run.state() == ReviewRunState::Queued
+    let (run, pass) = if current_run.state() == ReviewRunState::Queued
         && current_pass.state() == &ReviewPassState::Queued
     {
-        let Ok(pass) = current_pass.transition(active_pass_state, Some(evidence)) else {
+        let Some(activation) =
+            activate_queued_review_pass(current_run, current_pass, turn_id, lifecycle.state())
+        else {
             return write_review_invalid(writer, version, request_id).await;
         };
-        let pass_evidence = ReviewPassEvidence::from_pass(&pass, policy);
-        let Ok(run) = current_run.transition(active_run_state, Some(pass_evidence)) else {
-            return write_review_invalid(writer, version, request_id).await;
-        };
-        (run, pass)
+        activation
     } else if review_activation_was_applied(&current_run, &current_pass, turn_id) {
         let Some(activation) = historical_review_activation(&current_run, &current_pass, turn_id)
         else {
