@@ -143,6 +143,7 @@ async fn ssh_push_uses_configured_key_with_both_destination_forms() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[ignore = "requires host Bubblewrap user and mount namespaces"]
 async fn ssh_push_uses_agent_and_account_trust_files_inside_sandbox_for_both_destination_forms() {
     for scp_style in [false, true] {
         exercise_ssh_push(false, scp_style, 1024).await;
@@ -158,6 +159,7 @@ async fn ssh_push_streams_a_generated_gigabyte_blob() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[ignore = "requires host Bubblewrap user and mount namespaces"]
 async fn ssh_push_keeps_account_trust_visible_under_workspace() {
     const CHILD_ENVIRONMENT: &str = "SIGNALBOX_TEST_SSH_WORKSPACE_HOME";
     if std::env::var_os(CHILD_ENVIRONMENT).is_some() {
@@ -193,7 +195,7 @@ async fn ssh_push_keeps_account_trust_visible_under_workspace() {
         .arg(home.path()).arg("/workspace")
         .args(["--setenv", "TMPDIR", "/tmp", "--setenv", CHILD_ENVIRONMENT, "1"])
         .arg(std::env::current_exe().expect("test executable"))
-        .args(["--exact", "daemon_tools::git_push::ssh_tests::ssh_push_keeps_account_trust_visible_under_workspace", "--nocapture"])
+        .args(["--exact", "daemon_tools::git_push::ssh_tests::ssh_push_keeps_account_trust_visible_under_workspace", "--ignored", "--nocapture"])
         .output().expect("nested sandbox fixture starts");
     assert!(
         output.status.success(),
