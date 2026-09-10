@@ -25,133 +25,263 @@ pub(crate) enum LaterRecords {
     AllApplied,
 }
 
-struct ObservedContent {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapshotEnd<'a> {
+    Added,
+    Done,
+    Terminal(&'a str),
+}
+
+enum ContentState {
+    Open {
+        deltas: Option<String>,
+        snapshot: String,
+    },
+    Done(String),
+}
+
+struct ContentPart {
     kind: &'static str,
-    deltas: Option<String>,
-    snapshot: Option<String>,
-    complete: bool,
+    state: ContentState,
 }
 
-#[derive(Eq, PartialEq)]
-struct CompletedFunctionCall {
-    call_id: Option<String>,
-    name: Option<String>,
-    status: Option<String>,
-}
-
-#[derive(Default)]
-struct ItemParts {
-    kind: Option<String>,
-    nonempty: BTreeMap<u32, bool>,
-    content: BTreeMap<u32, ObservedContent>,
-    complete: bool,
-    item_done: bool,
-    completed_call: Option<CompletedFunctionCall>,
-}
-
-impl ItemParts {
-    fn content(&mut self, index: u32, kind: &'static str) -> Result<&mut ObservedContent, String> {
-        let content = self
-            .content
-            .entry(index)
-            .or_insert_with(|| ObservedContent {
-                kind,
-                deltas: None,
-                snapshot: None,
-                complete: false,
-            });
-        if content.kind != kind {
-            return Err("content part changed its observed type".to_string());
+impl ContentPart {
+    fn occupancy(&self) -> Option<bool> {
+        match &self.state {
+            ContentState::Done(value) => Some(!value.is_empty()),
+            ContentState::Open { deltas, snapshot } => (!snapshot.is_empty()
+                || deltas.as_ref().is_some_and(|s| !s.is_empty()))
+            .then_some(true),
         }
-        Ok(content)
     }
+}
 
-    fn observe_delta(
-        &mut self,
+enum ItemPhase {
+    Open,
+    MessageDone,
+    FunctionDone {
+        call_id: Option<String>,
+        name: Option<String>,
+        status: Option<String>,
+    },
+    ReasoningDone {
+        ciphertext: Option<String>,
+        raw: Box<serde_json::value::RawValue>,
+    },
+}
+
+struct ItemState {
+    id: String,
+    kind: String,
+    phase: ItemPhase,
+    content: BTreeMap<u32, ContentPart>,
+    argument_nesting: ProviderJsonNestingValidator,
+}
+
+enum ItemUpdate<'a> {
+    Delta {
         index: u32,
         kind: &'static str,
-        fragment: &str,
-    ) -> Result<(), String> {
-        let content = self.content(index, kind)?;
-        if content.complete {
-            return Err("delta follows content completion".to_string());
-        }
-        if !fragment.is_empty() {
-            content
-                .deltas
-                .get_or_insert_with(String::new)
-                .push_str(fragment);
-        }
-        Ok(())
-    }
-
-    fn observe_snapshot(
-        &mut self,
+        fragment: &'a str,
+    },
+    Content {
         index: u32,
         kind: &'static str,
-        value: &str,
-        complete: bool,
-    ) -> Result<(), String> {
-        let content = self.content(index, kind)?;
-        if content.snapshot.as_deref().is_some_and(|previous| {
-            if content.complete {
-                value != previous
-            } else {
-                !value.starts_with(previous)
-            }
-        }) || (complete
-            && content
-                .deltas
-                .as_deref()
-                .is_some_and(|deltas| value != deltas))
-        {
-            return Err("completed content differs from its observed bytes".to_string());
-        }
-        content.snapshot = Some(value.to_string());
-        content.complete |= complete;
-        Ok(())
-    }
+        value: &'a str,
+        end: SnapshotEnd<'a>,
+    },
+    Snapshot {
+        item: WireOutputItem,
+        raw: &'a mut Box<serde_json::value::RawValue>,
+        end: SnapshotEnd<'a>,
+    },
+    Indexed,
+    ReasoningDelta,
+}
 
-    fn observe_content(
-        &mut self,
-        index: u32,
-        part: &WireContent,
-        complete: bool,
-    ) -> Result<(), String> {
-        let (kind, text) = match part {
-            WireContent::OutputText { text } => ("output_text", text.as_str()),
-            WireContent::Refusal { refusal } => ("refusal", refusal.as_str()),
-            WireContent::Unknown => return Err("unrecognized output content type".to_string()),
-        };
-        self.observe_snapshot(index, kind, text, complete)
-    }
-
-    fn observe_part(&mut self, index: u32, nonempty: bool) -> Result<(), String> {
-        match self.nonempty.get(&index) {
-            Some(&previous) if previous != nonempty => {
-                return Err("content part changed its observed occupancy".to_string());
-            }
-            None if self.complete => {
-                return Err("completed message gained a content part".to_string());
+impl ItemState {
+    fn transition(&mut self, update: ItemUpdate<'_>) -> Result<(), String> {
+        match (&self.phase, &update) {
+            (ItemPhase::Open, _) => {}
+            (_, ItemUpdate::Delta { .. } | ItemUpdate::ReasoningDelta) => {
+                return Err("delta follows output item completion".into());
             }
             _ => {}
         }
-        self.nonempty.insert(index, nonempty);
+        match update {
+            ItemUpdate::Delta {
+                index,
+                kind,
+                fragment,
+            } => {
+                if self.kind == "function_call" {
+                    self.argument_nesting
+                        .validate_fragment(fragment.as_bytes())
+                        .map_err(|e| e.to_string())?;
+                }
+                let ContentState::Open { deltas, .. } = &mut self.part(index, kind)?.state else {
+                    return Err("delta follows content completion".into());
+                };
+                if !fragment.is_empty() {
+                    deltas.get_or_insert_with(String::new).push_str(fragment);
+                }
+            }
+            ItemUpdate::Content {
+                index,
+                kind,
+                value,
+                end,
+            } => {
+                let part = self.part(index, kind)?;
+                match &mut part.state {
+                    ContentState::Open { deltas, snapshot }
+                        if value.starts_with(snapshot.as_str())
+                            && (end == SnapshotEnd::Added
+                                || deltas.as_deref().is_none_or(|s| s == value)) =>
+                    {
+                        if end == SnapshotEnd::Added {
+                            *snapshot = value.to_string();
+                        } else {
+                            part.state = ContentState::Done(value.to_string());
+                        }
+                    }
+                    ContentState::Done(previous) if previous == value => {}
+                    _ => return Err("content snapshot does not fit accumulated bytes".into()),
+                }
+            }
+            ItemUpdate::Snapshot { item, raw, end } => {
+                if let SnapshotEnd::Terminal(status) = end {
+                    match (item.kind.as_str(), item.status.as_deref(), status) {
+                        ("reasoning", None, _)
+                        | (_, Some("completed"), _)
+                        | (_, Some("incomplete"), "incomplete") => {}
+                        _ => return Err("item status does not fit terminal response".into()),
+                    }
+                }
+                match &self.phase {
+                    ItemPhase::FunctionDone {
+                        call_id,
+                        name,
+                        status,
+                    } if (&item.call_id, &item.name, &item.status) != (call_id, name, status) => {
+                        return Err("function snapshot does not fit completed item".into());
+                    }
+                    ItemPhase::ReasoningDone {
+                        ciphertext,
+                        raw: retained,
+                    } => {
+                        let consistent = match end {
+                            SnapshotEnd::Terminal(_) => item
+                                .encrypted_content
+                                .as_ref()
+                                .is_none_or(|content| ciphertext.as_ref() == Some(content)),
+                            _ => raw.get() == retained.get(),
+                        };
+                        if !consistent {
+                            return Err("reasoning snapshot does not fit completed item".into());
+                        }
+                        *raw = retained.clone();
+                        return Ok(());
+                    }
+                    ItemPhase::MessageDone
+                        if item.content.as_ref().map_or(0, Vec::len) != self.content.len() =>
+                    {
+                        return Err("snapshot changes completed content layout".into());
+                    }
+                    _ => {}
+                }
+                match self.kind.as_str() {
+                    "message" => {
+                        let parts = item.content.as_deref().unwrap_or_default();
+                        let length = u32::try_from(parts.len()).map_err(|e| e.to_string())?;
+                        if end != SnapshotEnd::Added
+                            && self.content.range(length..).next().is_some()
+                        {
+                            return Err("snapshot omits observed content".into());
+                        }
+                        for (index, part) in parts.iter().enumerate() {
+                            let index = u32::try_from(index).map_err(|e| e.to_string())?;
+                            let (kind, value) = content_value(part)?;
+                            self.transition(ItemUpdate::Content {
+                                index,
+                                kind,
+                                value,
+                                end,
+                            })?;
+                        }
+                    }
+                    "function_call" => {
+                        if let Some(value) = item.arguments.as_deref() {
+                            self.transition(ItemUpdate::Content {
+                                index: 0,
+                                kind: "function_call_arguments",
+                                value,
+                                end,
+                            })?;
+                        }
+                    }
+                    _ => {}
+                }
+                if end != SnapshotEnd::Added && matches!(self.phase, ItemPhase::Open) {
+                    self.phase = match self.kind.as_str() {
+                        "function_call" => ItemPhase::FunctionDone {
+                            call_id: item.call_id,
+                            name: item.name,
+                            status: item.status,
+                        },
+                        "reasoning" => ItemPhase::ReasoningDone {
+                            ciphertext: item.encrypted_content,
+                            raw: raw.clone(),
+                        },
+                        _ => ItemPhase::MessageDone,
+                    };
+                }
+            }
+            ItemUpdate::Indexed | ItemUpdate::ReasoningDelta => {}
+        }
         Ok(())
     }
 
-    fn finish(&mut self, parts: BTreeMap<u32, bool>) -> Result<(), String> {
-        if self
-            .nonempty
-            .iter()
-            .any(|(index, nonempty)| parts.get(index) != Some(nonempty))
-            || (self.complete && self.nonempty != parts)
-        {
-            return Err("completed message rewrites its observed content layout".to_string());
+    fn part(&mut self, index: u32, kind: &'static str) -> Result<&mut ContentPart, String> {
+        if !matches!(self.phase, ItemPhase::Open) && !self.content.contains_key(&index) {
+            return Err("completed item gained content".into());
         }
-        self.nonempty = parts;
-        self.complete = true;
-        Ok(())
+        let part = self.content.entry(index).or_insert_with(|| ContentPart {
+            kind,
+            state: ContentState::Open {
+                deltas: None,
+                snapshot: String::new(),
+            },
+        });
+        if part.kind != kind {
+            return Err("content type does not fit accumulated item".into());
+        }
+        Ok(part)
+    }
+
+    fn width(&self) -> Option<u32> {
+        match (&*self.kind, &self.phase) {
+            ("function_call", _) => Some(1),
+            ("reasoning", ItemPhase::ReasoningDone { ciphertext, .. }) => {
+                Some(u32::from(ciphertext.is_some()))
+            }
+            ("message", ItemPhase::MessageDone) => u32::try_from(
+                self.content
+                    .values()
+                    .filter(|part| part.occupancy() == Some(true))
+                    .count(),
+            )
+            .ok(),
+            _ => None,
+        }
+    }
+}
+
+fn content_value(part: &WireContent) -> Result<(&'static str, &str), String> {
+    match part {
+        WireContent::OutputText { text } => Ok(("output_text", text)),
+        WireContent::Refusal { refusal } => Ok(("refusal", refusal)),
+        WireContent::Unknown => Err("unrecognized output content type".into()),
     }
 }
 
@@ -171,11 +301,8 @@ pub(crate) struct StreamDecoder {
     opened_tool_calls: bool,
     discarded_unexamined_bytes: bool,
     later_records: LaterRecords,
-    item_ids: BTreeMap<u32, String>,
-    item_parts: BTreeMap<u32, ItemParts>,
-    completed_reasoning: BTreeMap<u32, Box<serde_json::value::RawValue>>,
+    items: BTreeMap<u32, ItemState>,
     pending_deltas: Vec<PendingDelta>,
-    argument_nesting: BTreeMap<u32, ProviderJsonNestingValidator>,
 }
 
 impl StreamDecoder {
@@ -189,11 +316,8 @@ impl StreamDecoder {
             opened_tool_calls: false,
             discarded_unexamined_bytes: false,
             later_records: LaterRecords::AllApplied,
-            item_ids: BTreeMap::new(),
-            item_parts: BTreeMap::new(),
-            completed_reasoning: BTreeMap::new(),
+            items: BTreeMap::new(),
             pending_deltas: Vec::new(),
-            argument_nesting: BTreeMap::new(),
         }
     }
 
@@ -219,20 +343,6 @@ impl StreamDecoder {
         if event.kind.starts_with("response.function_call_arguments.") {
             self.opened_tool_calls = true;
         }
-        if matches!(
-            event.kind.as_str(),
-            "response.output_text.delta"
-                | "response.refusal.delta"
-                | "response.function_call_arguments.delta"
-                | "response.reasoning_text.delta"
-                | "response.reasoning_summary_text.delta"
-        ) && event.output_index.is_some_and(|index| {
-            self.item_parts
-                .get(&index)
-                .is_some_and(|parts| parts.item_done)
-        }) {
-            return self.violation("delta follows output item completion");
-        }
         let step = match event.kind.as_str() {
             "error" => StreamStep::Terminal(Box::new(provider_error(
                 ResponseError {
@@ -244,10 +354,10 @@ impl StreamDecoder {
                 self.usage,
             ))),
             "response.created" | "response.in_progress" | "response.queued" => {
-                let Some(response) = event.response else {
+                let Some(mut response) = event.response else {
                     return self.violation("lifecycle event lacks response");
                 };
-                if let Err(detail) = self.observe_response(&response, correlation, sink) {
+                if let Err(detail) = self.observe_response(&mut response, correlation, sink) {
                     return self.violation(detail);
                 }
                 StreamStep::Continue
@@ -290,28 +400,14 @@ impl StreamDecoder {
                         self.finish_reported = Some(finish);
                     }
                 }
-                if let Err(detail) = self.observe_response(&response, correlation, sink) {
+                if let Err(detail) = self.observe_response(&mut response, correlation, sink) {
                     return self.violation(detail);
                 }
-                let terminal_has_tools = !failed
-                    && response.output_items().is_ok_and(|items| {
-                        output_tool_calls(items.as_deref()) == ToolCallsAtLoss::Opened
-                    });
-                if self.opened_tool_calls
-                    && !terminal_has_tools
-                    && response.status.as_deref() == Some("completed")
-                {
-                    return self.violation("completed response omits an announced function call");
-                }
-                self.opened_tool_calls |= terminal_has_tools;
                 if response.usage.is_none()
                     && self.usage == TokenUsage::unreported()
                     && response.status.as_deref() != Some("failed")
                 {
                     return self.violation("terminal response lacks usage");
-                }
-                if let Err(detail) = self.restore_completed_reasoning(&mut response) {
-                    return self.violation(detail);
                 }
                 self.flush_deltas(correlation, sink);
                 let evidence = decode_response(
@@ -337,219 +433,10 @@ impl StreamDecoder {
                     evidence => StreamStep::Terminal(Box::new(evidence)),
                 }
             }
-            "response.output_item.added" | "response.output_item.done" => {
-                let (Some(index), Some(raw)) = (event.output_index, event.item) else {
-                    return self.violation("output item event lacks index or item");
-                };
-                let item: WireOutputItem = match serde_json::from_str(raw.get()) {
-                    Ok(item) => item,
-                    Err(e) => {
-                        return StreamStep::Terminal(Box::new(
-                            self.undecoded_violation_evidence(e.to_string()),
-                        ));
-                    }
-                };
-                if item.kind == "function_call" {
-                    self.opened_tool_calls = true;
-                }
-                if !matches!(
-                    item.kind.as_str(),
-                    "message" | "function_call" | "reasoning"
-                ) {
-                    self.discarded_unexamined_bytes = true;
-                    return self.violation("unrecognized output item type");
-                }
-                let Some(id) = &item.id else {
-                    return self.violation("output item lacks id");
-                };
-                if let Err(detail) = self.observe_item(index, id) {
-                    return self.violation(detail);
-                }
-                if let Err(detail) =
-                    self.observe_item_parts(index, &item, event.kind == "response.output_item.done")
-                {
-                    return self.violation(detail);
-                }
-                if event.kind == "response.output_item.done" {
-                    self.item_parts.entry(index).or_default().item_done = true;
-                    if item.kind == "reasoning" {
-                        if self
-                            .completed_reasoning
-                            .get(&index)
-                            .is_some_and(|previous| previous.get() != raw.get())
-                        {
-                            return self.violation("completed reasoning item changed its bytes");
-                        }
-                        self.completed_reasoning.insert(index, raw);
-                    }
-                }
-                StreamStep::Continue
-            }
-            "response.output_text.delta"
-            | "response.refusal.delta"
-            | "response.function_call_arguments.delta" => {
-                if event.kind == "response.function_call_arguments.delta" {
-                    self.opened_tool_calls = true;
-                }
-                let (Some(index), Some(id), Some(delta)) =
-                    (event.output_index, event.item_id, event.delta)
-                else {
-                    return self.violation("delta lacks index, item id, or fragment");
-                };
-                if let Err(detail) = self.observe_item(index, &id) {
-                    return self.violation(detail);
-                }
-                let tool_arguments = event.kind == "response.function_call_arguments.delta";
-                if let Err(detail) = self.observe_item_kind(
-                    index,
-                    if tool_arguments {
-                        "function_call"
-                    } else {
-                        "message"
-                    },
-                ) {
-                    return self.violation(detail);
-                }
-                let content_index = if tool_arguments {
-                    if let Err(e) = self
-                        .argument_nesting
-                        .entry(index)
-                        .or_default()
-                        .validate_fragment(delta.as_bytes())
-                    {
-                        return self.violation(e.to_string());
-                    }
-                    0
-                } else {
-                    let Some(content_index) = event.content_index else {
-                        return self.violation("text delta lacks content index");
-                    };
-                    content_index
-                };
-                let content_kind = match event.kind.as_str() {
-                    "response.function_call_arguments.delta" => "function_call_arguments",
-                    "response.refusal.delta" => "refusal",
-                    _ => "output_text",
-                };
-                if let Err(detail) = self.item_parts.entry(index).or_default().observe_delta(
-                    content_index,
-                    content_kind,
-                    &delta,
-                ) {
-                    return self.violation(detail);
-                }
-                if tool_arguments || !delta.is_empty() {
-                    let layout = self.item_parts.entry(index).or_default();
-                    if let Err(detail) = layout.observe_part(content_index, true) {
-                        return self.violation(detail);
-                    }
-                    layout.complete |= tool_arguments;
-                    self.pending_deltas.push(PendingDelta {
-                        output_index: index,
-                        content_index,
-                        fragment: delta,
-                        tool_arguments,
-                    });
-                }
-                StreamStep::Continue
-            }
-            "response.content_part.added"
-            | "response.content_part.done"
-            | "response.output_text.done"
-            | "response.output_text.annotation.added"
-            | "response.refusal.done"
-            | "response.function_call_arguments.done"
-            | "response.reasoning_text.delta"
-            | "response.reasoning_text.done"
-            | "response.reasoning_summary_part.added"
-            | "response.reasoning_summary_part.done"
-            | "response.reasoning_summary_text.delta"
-            | "response.reasoning_summary_text.done" => {
-                let (Some(index), Some(id)) = (event.output_index, event.item_id) else {
-                    return self.violation("indexed event lacks output index or item id");
-                };
-                if let Err(detail) = self.observe_item(index, &id) {
-                    return self.violation(detail);
-                }
-                let kind = if event.kind.starts_with("response.reasoning_") {
-                    "reasoning"
-                } else if event.kind == "response.function_call_arguments.done" {
-                    "function_call"
-                } else {
-                    "message"
-                };
-                if let Err(detail) = self.observe_item_kind(index, kind) {
-                    return self.violation(detail);
-                }
-                let completed_content = match event.kind.as_str() {
-                    "response.output_text.done" => Some(("output_text", event.text)),
-                    "response.refusal.done" => Some(("refusal", event.refusal)),
-                    "response.function_call_arguments.done" => {
-                        Some(("function_call_arguments", event.arguments))
-                    }
-                    _ => None,
-                };
-                if let Some((content_kind, value)) = completed_content {
-                    let Some(value) = value else {
-                        return self.violation("content completion lacks its value");
-                    };
-                    let tool_arguments = content_kind == "function_call_arguments";
-                    let content_index = if tool_arguments {
-                        0
-                    } else if let Some(content_index) = event.content_index {
-                        content_index
-                    } else {
-                        return self.violation("content completion lacks content index");
-                    };
-                    let layout = self.item_parts.entry(index).or_default();
-                    if let Err(detail) =
-                        layout.observe_snapshot(content_index, content_kind, &value, true)
-                    {
-                        return self.violation(detail);
-                    }
-                    if let Err(detail) =
-                        layout.observe_part(content_index, tool_arguments || !value.is_empty())
-                    {
-                        return self.violation(detail);
-                    }
-                    layout.complete |= tool_arguments;
-                }
-                if matches!(
-                    event.kind.as_str(),
-                    "response.content_part.added" | "response.content_part.done"
-                ) {
-                    let Some(part) = event.part else {
-                        return self.violation("content part event lacks part");
-                    };
-                    let Some(content_index) = event.content_index else {
-                        return self.violation("content part lacks content index");
-                    };
-                    let Some(text) = part.text() else {
-                        return self.violation("unrecognized output content type");
-                    };
-                    if let Err(detail) = self.item_parts.entry(index).or_default().observe_content(
-                        content_index,
-                        &part,
-                        event.kind == "response.content_part.done",
-                    ) {
-                        return self.violation(detail);
-                    }
-                    if (!text.is_empty() || event.kind == "response.content_part.done")
-                        && let Err(detail) = self
-                            .item_parts
-                            .entry(index)
-                            .or_default()
-                            .observe_part(content_index, !text.is_empty())
-                    {
-                        return self.violation(detail);
-                    }
-                }
-                StreamStep::Continue
-            }
-            other => {
-                self.discarded_unexamined_bytes = true;
-                self.violation(format!("unrecognized Responses event type {other:?}"))
-            }
+            _ => match self.observe_item_event(event) {
+                Ok(()) => StreamStep::Continue,
+                Err(detail) => self.violation(detail),
+            },
         };
         if matches!(step, StreamStep::Continue) {
             self.flush_deltas(correlation, sink);
@@ -559,12 +446,12 @@ impl StreamDecoder {
 
     fn observe_response<C: Clone>(
         &mut self,
-        response: &Response,
+        response: &mut Response,
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), String> {
         let metadata = self.observe_response_metadata(response, correlation, sink);
-        let output = response.output_items().map_err(|error| {
+        let mut output = response.output_items().map_err(|error| {
             self.discarded_unexamined_bytes = true;
             error.to_string()
         })?;
@@ -588,82 +475,22 @@ impl StreamDecoder {
         if matches!(response.status.as_deref(), Some("completed" | "incomplete")) {
             let length = u32::try_from(output.as_ref().map_or(0, Vec::len))
                 .map_err(|error| error.to_string())?;
-            if self.item_ids.range(length..).next().is_some() {
+            if self.items.range(length..).next().is_some() {
                 return Err("terminal response omits an observed output index".to_string());
             }
         }
-        for (index, raw) in output.iter().flatten().enumerate() {
-            let item: WireOutputItem = serde_json::from_str(raw.get()).map_err(|error| {
-                self.discarded_unexamined_bytes = true;
-                error.to_string()
-            })?;
-            let id = item.id.as_deref().ok_or("response output item lacks id")?;
-            let index = u32::try_from(index).map_err(|error| error.to_string())?;
-            self.observe_item(index, id)?;
-            let terminal = matches!(
-                response.status.as_deref(),
-                Some("completed" | "incomplete" | "failed")
-            );
-            if item.kind == "reasoning" && terminal {
-                if let Some(status) = item.status.as_deref()
-                    && status != "completed"
-                    && !(response.status.as_deref() == Some("incomplete") && status == "incomplete")
-                {
-                    if response.error.is_none()
-                        && !(response.status.as_deref() == Some("completed")
-                            && response.incomplete_details.is_some())
-                    {
-                        let finish = map_terminal(
-                            response.status.as_deref().unwrap_or_default(),
-                            response
-                                .incomplete_details
-                                .as_ref()
-                                .map(|details| details.reason.as_str()),
-                            output_tool_calls(output.as_deref()),
-                        );
-                        if !matches!(finish, FinishReason::Unrecognized { .. }) {
-                            self.finish_reported = Some(finish);
-                        }
-                    }
-                    return Err(
-                        "reasoning item status disagrees with its terminal response".to_string()
-                    );
-                }
-                if let Some(raw) = self.completed_reasoning.get(&index) {
-                    let completed: WireOutputItem =
-                        serde_json::from_str(raw.get()).map_err(|error| error.to_string())?;
-                    if item.encrypted_content.as_ref().is_some_and(|content| {
-                        completed.encrypted_content.as_ref() != Some(content)
-                    }) {
-                        return Err(
-                            "terminal reasoning differs from the completed encrypted content"
-                                .to_string(),
-                        );
-                    }
-                    self.observe_item_parts(index, &completed, true)?;
-                    continue;
-                }
-            }
-            self.observe_item_parts(index, &item, terminal)?;
-        }
-        Ok(())
-    }
-
-    fn restore_completed_reasoning(&self, response: &mut Response) -> Result<(), String> {
-        if self.completed_reasoning.is_empty() {
-            return Ok(());
-        }
-        let Some(mut output) = response.output_items().map_err(|error| error.to_string())? else {
-            return Ok(());
+        let end = match response.status.as_deref() {
+            Some(status @ ("completed" | "incomplete" | "failed")) => SnapshotEnd::Terminal(status),
+            _ => SnapshotEnd::Added,
         };
-        for (&index, raw) in &self.completed_reasoning {
-            let item = output
-                .get_mut(usize::try_from(index).map_err(|error| error.to_string())?)
-                .ok_or("terminal response omits completed reasoning")?;
-            *item = raw.clone();
+        for (index, raw) in output.iter_mut().flatten().enumerate() {
+            let index = u32::try_from(index).map_err(|error| error.to_string())?;
+            self.observe_snapshot(index, raw, end)?;
         }
-        response.output =
-            Some(serde_json::value::to_raw_value(&output).map_err(|error| error.to_string())?);
+        if let Some(output) = output {
+            response.output =
+                Some(serde_json::value::to_raw_value(&output).map_err(|e| e.to_string())?);
+        }
         Ok(())
     }
 
@@ -725,99 +552,186 @@ impl StreamDecoder {
         }
     }
 
-    fn observe_item_kind(&mut self, index: u32, kind: &str) -> Result<(), String> {
-        let layout = self.item_parts.entry(index).or_default();
-        if layout
-            .kind
-            .as_deref()
-            .is_some_and(|previous| previous != kind)
-        {
-            return Err("output item kind changed at its index".to_string());
+    fn item(&mut self, index: u32, id: &str, kind: &str) -> Result<&mut ItemState, String> {
+        let item = self.items.entry(index).or_insert_with(|| ItemState {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            phase: ItemPhase::Open,
+            content: BTreeMap::new(),
+            argument_nesting: ProviderJsonNestingValidator::default(),
+        });
+        if id.is_empty() || (item.id.as_str(), item.kind.as_str()) != (id, kind) {
+            return Err("item identity does not fit its output index".into());
         }
-        layout.kind = Some(kind.to_string());
-        Ok(())
+        Ok(item)
     }
 
-    fn observe_item_parts(
+    fn observe_snapshot(
         &mut self,
         index: u32,
-        item: &WireOutputItem,
-        complete: bool,
+        raw: &mut Box<serde_json::value::RawValue>,
+        end: SnapshotEnd<'_>,
     ) -> Result<(), String> {
-        self.observe_item_kind(index, &item.kind)?;
-        let layout = self.item_parts.entry(index).or_default();
+        let item: WireOutputItem = serde_json::from_str(raw.get()).map_err(|e| {
+            self.discarded_unexamined_bytes = true;
+            e.to_string()
+        })?;
         match item.kind.as_str() {
-            "reasoning" => {
-                if complete {
-                    layout.finish(BTreeMap::from([(0, item.encrypted_content.is_some())]))?;
-                }
+            "function_call" => self.opened_tool_calls = true,
+            "message" | "reasoning" => {}
+            _ => {
+                self.discarded_unexamined_bytes = true;
+                return Err("unrecognized output item type".into());
             }
-            "function_call" => {
-                let identity = CompletedFunctionCall {
-                    call_id: item.call_id.clone(),
-                    name: item.name.clone(),
-                    status: item.status.clone(),
-                };
-                if layout
-                    .completed_call
-                    .as_ref()
-                    .is_some_and(|previous| previous != &identity)
-                {
-                    return Err(
-                        "completed function call changed its call id, name, or status".to_string(),
-                    );
-                }
-                if complete {
-                    layout.completed_call = Some(identity);
-                }
-                if let Some(arguments) = item.arguments.as_deref() {
-                    layout.observe_snapshot(0, "function_call_arguments", arguments, complete)?;
-                }
-                layout.finish(BTreeMap::from([(0, true)]))?;
-            }
-            "message" => {
-                let mut parts = BTreeMap::new();
-                for (position, part) in item.content.iter().flatten().enumerate() {
-                    let text = part.text().ok_or("unrecognized output content type")?;
-                    let position = u32::try_from(position).map_err(|error| error.to_string())?;
-                    layout.observe_content(position, part, complete)?;
-                    if complete {
-                        parts.insert(position, !text.is_empty());
-                    } else if !text.is_empty() {
-                        layout.observe_part(position, true)?;
-                    }
-                }
-                if complete {
-                    layout.finish(parts)?;
-                }
-            }
-            _ => {}
         }
+        let state = self.item(
+            index,
+            item.id.as_deref().ok_or("output item lacks id")?,
+            &item.kind,
+        )?;
+        state.transition(ItemUpdate::Snapshot { item, raw, end })
+    }
+
+    fn observe_item_event(&mut self, event: ResponseEvent) -> Result<(), String> {
+        if matches!(
+            event.kind.as_str(),
+            "response.output_item.added" | "response.output_item.done"
+        ) {
+            let index = event.output_index.ok_or("output item lacks index")?;
+            let mut raw = event.item.ok_or("output item event lacks item")?;
+            let end = if event.kind == "response.output_item.done" {
+                SnapshotEnd::Done
+            } else {
+                SnapshotEnd::Added
+            };
+            return self.observe_snapshot(index, &mut raw, end);
+        }
+        let content_index = || {
+            event
+                .content_index
+                .ok_or_else(|| "content event lacks index".to_string())
+        };
+        let (kind, update) = match event.kind.as_str() {
+            "response.output_text.delta"
+            | "response.refusal.delta"
+            | "response.function_call_arguments.delta" => {
+                let (kind, content_kind, index) = match event.kind.as_str() {
+                    "response.function_call_arguments.delta" => {
+                        ("function_call", "function_call_arguments", 0)
+                    }
+                    "response.refusal.delta" => ("message", "refusal", content_index()?),
+                    _ => ("message", "output_text", content_index()?),
+                };
+                (
+                    kind,
+                    ItemUpdate::Delta {
+                        index,
+                        kind: content_kind,
+                        fragment: event.delta.as_deref().ok_or("delta lacks fragment")?,
+                    },
+                )
+            }
+            "response.output_text.done"
+            | "response.refusal.done"
+            | "response.function_call_arguments.done" => {
+                let (kind, content_kind, index, value) = match event.kind.as_str() {
+                    "response.function_call_arguments.done" => (
+                        "function_call",
+                        "function_call_arguments",
+                        0,
+                        &event.arguments,
+                    ),
+                    "response.refusal.done" => {
+                        ("message", "refusal", content_index()?, &event.refusal)
+                    }
+                    _ => ("message", "output_text", content_index()?, &event.text),
+                };
+                (
+                    kind,
+                    ItemUpdate::Content {
+                        index,
+                        kind: content_kind,
+                        value: value.as_deref().ok_or("content completion lacks value")?,
+                        end: SnapshotEnd::Done,
+                    },
+                )
+            }
+            "response.content_part.added" | "response.content_part.done" => {
+                let (kind, value) =
+                    content_value(event.part.as_ref().ok_or("content part event lacks part")?)?;
+                let end = if event.kind == "response.content_part.done" {
+                    SnapshotEnd::Done
+                } else {
+                    SnapshotEnd::Added
+                };
+                (
+                    "message",
+                    ItemUpdate::Content {
+                        index: content_index()?,
+                        kind,
+                        value,
+                        end,
+                    },
+                )
+            }
+            "response.output_text.annotation.added" => ("message", ItemUpdate::Indexed),
+            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                ("reasoning", ItemUpdate::ReasoningDelta)
+            }
+            "response.reasoning_text.done"
+            | "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_part.done"
+            | "response.reasoning_summary_text.done" => ("reasoning", ItemUpdate::Indexed),
+            other => {
+                self.discarded_unexamined_bytes = true;
+                return Err(format!("unrecognized Responses event type {other:?}"));
+            }
+        };
+        let index = event
+            .output_index
+            .ok_or("indexed event lacks output index")?;
+        let id = event
+            .item_id
+            .as_deref()
+            .ok_or("indexed event lacks item id")?;
+        let pending = match &update {
+            ItemUpdate::Delta {
+                index: content_index,
+                fragment,
+                ..
+            } if kind == "function_call" || !fragment.is_empty() => Some(PendingDelta {
+                output_index: index,
+                content_index: *content_index,
+                fragment: (*fragment).to_string(),
+                tool_arguments: kind == "function_call",
+            }),
+            _ => None,
+        };
+        self.item(index, id, kind)?.transition(update)?;
+        self.pending_deltas.extend(pending);
         Ok(())
     }
 
     fn part_index(&self, output_index: u32, content_index: u32) -> Option<u32> {
         let mut offset = 0u32;
         let mut next_item = 0;
-        for (&index, layout) in self.item_parts.range(..output_index) {
-            if index != next_item || !layout.complete {
+        for (&index, layout) in self.items.range(..output_index) {
+            if index != next_item {
                 return None;
             }
-            offset = offset.checked_add(
-                u32::try_from(layout.nonempty.values().filter(|&&value| value).count()).ok()?,
-            )?;
+            offset = offset.checked_add(layout.width()?)?;
             next_item += 1;
         }
         if next_item != output_index {
             return None;
         }
-        let layout = self.item_parts.get(&output_index)?;
+        let layout = self.items.get(&output_index)?;
         let mut next_part = 0;
-        for (&index, &nonempty) in layout.nonempty.range(..content_index) {
+        for (&index, part) in layout.content.range(..content_index) {
             if index != next_part {
                 return None;
             }
-            offset = offset.checked_add(u32::from(nonempty))?;
+            offset = offset.checked_add(u32::from(part.occupancy()?))?;
             next_part += 1;
         }
         (next_part == content_index).then_some(offset)
@@ -849,19 +763,6 @@ impl StreamDecoder {
         }
     }
 
-    fn observe_item(&mut self, index: u32, id: &str) -> Result<(), String> {
-        if id.is_empty()
-            || self
-                .item_ids
-                .get(&index)
-                .is_some_and(|previous| previous != id)
-        {
-            return Err("output item id is empty or changed at its index".to_string());
-        }
-        self.item_ids.insert(index, id.to_string());
-        Ok(())
-    }
-
     fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
         if self.opened_tool_calls {
             ToolCallsAtLoss::Opened
@@ -882,20 +783,12 @@ impl StreamDecoder {
     fn loss(&self, cause: LossCause, tool_calls: ToolCallsAtLoss) -> TerminalEvidence {
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             response_content_observed: self.opened_tool_calls
-                || !self.completed_reasoning.is_empty()
-                || self.item_parts.values().any(|item| {
-                    item.nonempty.values().any(|nonempty| *nonempty)
-                        || item.content.values().any(|content| {
-                            content
-                                .deltas
-                                .as_deref()
-                                .is_some_and(|text| !text.is_empty())
-                                || content
-                                    .snapshot
-                                    .as_deref()
-                                    .is_some_and(|text| !text.is_empty())
-                        })
-                        || item.kind.as_deref() == Some("reasoning")
+                || self.items.values().any(|item| {
+                    item.kind == "reasoning"
+                        || item
+                            .content
+                            .values()
+                            .any(|part| part.occupancy() == Some(true))
                 }),
             cause,
             exchange: self.exchange.clone(),
@@ -972,6 +865,107 @@ mod tests {
         };
         *evidence
     }
+    #[test]
+    fn output_ceiling_retains_arguments_through_open_and_done_item_states() {
+        let arguments = r#"{"query":"part"#;
+        let item = json!({"type":"function_call","id":"fc_fixture","status":"incomplete",
+            "call_id":"call_fixture","name":"lookup","arguments":arguments});
+        for closing_events in [
+            vec![],
+            vec![
+                json!({"type":"response.function_call_arguments.done","output_index":0,
+                    "item_id":"fc_fixture","arguments":arguments}),
+                json!({"type":"response.output_item.done","output_index":0,"item":item}),
+            ],
+        ] {
+            let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+            let mut sink = Vec::new();
+            assert!(matches!(
+                apply(
+                    &mut decoder,
+                    json!({"type":"response.output_item.added",
+                "output_index":0,"item":{"type":"function_call","id":"fc_fixture",
+                "status":"in_progress","arguments":""}}),
+                    &mut sink
+                ),
+                StreamStep::Continue
+            ));
+            assert!(matches!(
+                apply(
+                    &mut decoder,
+                    json!({"type":"response.function_call_arguments.delta",
+                "output_index":0,"item_id":"fc_fixture","delta":arguments}),
+                    &mut sink
+                ),
+                StreamStep::Continue
+            ));
+            for event in closing_events {
+                assert!(matches!(
+                    apply(&mut decoder, event, &mut sink),
+                    StreamStep::Continue
+                ));
+            }
+            assert!(!sink.iter().any(|o| matches!(
+                o.fact,
+                ObservationFact::ToolCallProposed(_) | ObservationFact::FinishReported(_)
+            )));
+            let mut event = terminal();
+            event["type"] = json!("response.incomplete");
+            event["response"]["status"] = json!("incomplete");
+            event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+            event["response"]["output"] = json!([item]);
+            let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                panic!("output ceiling terminates the stream");
+            };
+            let TerminalEvidence::Completed(result) = *evidence else {
+                panic!("open and done incomplete calls retain typed output-ceiling completion");
+            };
+            assert_eq!(result.finish, CompletionFinish::MaxOutputTokens);
+            assert!(
+                matches!(result.content.as_slice(), [signalbox_model_runtime::AssistantPart::ToolCall(call)]
+                if call.arguments_json == arguments && call.id.as_str() == "call_fixture")
+            );
+        }
+    }
+
+    #[test]
+    fn frozen_content_cannot_resume_even_with_an_empty_delta() {
+        for done in [
+            json!({"type":"response.output_text.done","output_index":0,"content_index":0,
+                "item_id":"msg_fixture","text":"ready"}),
+            json!({"type":"response.output_item.done","output_index":0,
+                "item":{"type":"message","id":"msg_fixture","status":"completed","role":"assistant",
+                    "content":[{"type":"output_text","text":"ready"}]}}),
+        ] {
+            let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+            let mut sink = Vec::new();
+            assert!(matches!(
+                apply(&mut decoder, done, &mut sink),
+                StreamStep::Continue
+            ));
+            let StreamStep::Terminal(evidence) = apply(
+                &mut decoder,
+                json!({"type":"response.output_text.delta",
+                "output_index":0,"content_index":0,"item_id":"msg_fixture","delta":""}),
+                &mut sink,
+            ) else {
+                panic!("a frozen content part cannot resume");
+            };
+            assert!(matches!(
+                *evidence,
+                TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    response_content_observed: true,
+                    cause: LossCause::StreamProtocolViolation { .. },
+                    ..
+                })
+            ));
+            assert!(
+                sink.is_empty(),
+                "invalid transitions publish no completion or refusal"
+            );
+        }
+    }
+
     #[test]
     fn terminal_payload_type_completes_despite_an_unrelated_sse_event_name() {
         assert!(matches!(decode(terminal()), TerminalEvidence::Completed(_)));
