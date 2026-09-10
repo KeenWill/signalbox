@@ -75,8 +75,8 @@ pub(super) struct PinnedObjectDatabase {
 }
 
 impl RepositoryShell {
-    pub(super) fn object_byte_limit(&self) -> usize {
-        self.max_object_bytes.unwrap_or(usize::MAX)
+    pub(super) fn object_byte_limit(&self, kind: git2::ObjectType) -> usize {
+        crate::limits::object_byte_limit(self.max_object_bytes, kind)
     }
     pub(super) fn capture_objects_on_read(
         &self,
@@ -198,7 +198,7 @@ impl RepositoryShell {
             })?;
         }
         let (size, kind) = database.read_header(oid)?;
-        if size > crate::limits::object_byte_limit(self.max_object_bytes, kind) {
+        if size > self.object_byte_limit(kind) {
             return Err(git2::Error::from_str("object read exceeds content bounds"));
         }
         Ok((size, kind))
