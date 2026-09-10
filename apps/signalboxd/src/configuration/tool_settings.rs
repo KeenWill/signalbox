@@ -507,3 +507,31 @@ pub(super) fn parse_approval_wait_timeout(
             .ok_or(HubModelConfigurationError::InvalidToolSettings),
     }
 }
+
+pub(super) fn parse_tool_proposal_limits(
+    item: Option<&Item>,
+) -> Result<signalbox_application::ToolProposalLimits, HubModelConfigurationError> {
+    let defaults = signalbox_application::ToolProposalLimits::default();
+    let Some(item) = item else {
+        return Ok(defaults);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidField)?;
+    reject_unknown_fields(table, &["max_requests", "max_argument_bytes"])?;
+    let bound = |key, default| -> Result<Option<u64>, HubModelConfigurationError> {
+        match table.get(key) {
+            None => Ok(default),
+            Some(item) if item.as_str() == Some("none") => Ok(None),
+            Some(item) => item
+                .as_integer()
+                .and_then(|value| u64::try_from(value).ok())
+                .map(Some)
+                .ok_or(HubModelConfigurationError::InvalidField),
+        }
+    };
+    Ok(signalbox_application::ToolProposalLimits {
+        max_requests: bound("max_requests", defaults.max_requests)?,
+        max_argument_bytes: bound("max_argument_bytes", defaults.max_argument_bytes)?,
+    })
+}

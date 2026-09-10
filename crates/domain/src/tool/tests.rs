@@ -168,8 +168,7 @@ fn arguments_preserve_reserved_number_key_objects() {
     }
 }
 
-/// the byte bound, rather than serde's default recursion cutoff, governs syntactically valid nested
-/// JSON.
+/// Syntactically valid nested JSON is independent of serde's default recursion cutoff.
 #[test]
 fn deeply_nested_arguments_remain_json() {
     let depth = 512;
@@ -516,17 +515,12 @@ fn user_command_preparation_preserves_agency() {
     assert!(applied.resolution().is_approved());
 }
 
-/// one provider response admits at most the recorded 32 logical tool requests without accepting a
-/// partial prefix.
 #[test]
-fn tool_response_request_count_is_bounded() {
-    let admitted = ToolUsingAssistantResponse::try_from_parts(tool_response_parts(32))
-        .expect("the exact per-response limit is admitted");
-    let rejected = ToolUsingAssistantResponse::try_from_parts(tool_response_parts(33))
-        .expect_err("the first response above the limit is rejected whole");
-
-    assert_eq!(admitted.tool_count(), 32);
-    assert_eq!(rejected.into_parts().len(), 33);
+fn tool_response_preserves_large_tool_batches() {
+    let response = ToolUsingAssistantResponse::try_from_parts(tool_response_parts(40))
+        .expect("the response retains admitted and rejected requests together");
+    assert_eq!(response.tool_count(), 40);
+    assert_eq!(response.parts().len(), 40);
 }
 
 /// user-global command sentinels never enter the canonical

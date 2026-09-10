@@ -31,6 +31,7 @@ impl ToolRequest {
         proposal: ToolCallProposal,
         approval: InitialToolApproval,
     ) -> Self {
+        let inadmissible_reason = proposal.inadmissible_reason();
         Self {
             id,
             session,
@@ -40,7 +41,7 @@ impl ToolRequest {
             name: proposal.name,
             arguments: proposal.arguments,
             approval_posture: approval.posture(),
-            inadmissible_reason: None,
+            inadmissible_reason,
         }
     }
 

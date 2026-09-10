@@ -3793,3 +3793,12 @@ fn runner_replacement_reports_complete_grant_change() {
         expected_after_tools
     );
 }
+
+#[test]
+fn runner_tool_model_definition_rejects_a_schema_exceeding_the_storage_bound() {
+    let schema = serde_json::json!({"description": "x".repeat(1024 * 1024)}).to_string();
+    assert_eq!(
+        RunnerToolModelDefinition::try_new("Inspect the workspace".to_owned(), schema),
+        Err(RunnerDomainError::InvalidToolInputSchema),
+    );
+}
