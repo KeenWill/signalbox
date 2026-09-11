@@ -3774,6 +3774,17 @@ const schemas = {
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": "string"
       },
+      "WebSessionSupervisionClass": {
+        "description": "Closed class of a retained session supervision failure.",
+        "enum": [
+          "infrastructure",
+          "commit_ambiguous",
+          "corruption",
+          "identity_collision",
+          "bug"
+        ],
+        "type": "string"
+      },
       "WebSessionTimelineSizeFacts": {
         "additionalProperties": false,
         "description": "Explicit lifetime size facts used only for browser loading policy.",
@@ -3928,6 +3939,34 @@ const schemas = {
       "sizes": {
         "$ref": "#/$defs/WebSessionTimelineSizeFacts"
       },
+      "supervision": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "description": "Session supervision evidence independent of transcript detail reads.",
+            "properties": {
+              "cause_code": {
+                "type": "string"
+              },
+              "class": {
+                "$ref": "#/$defs/WebSessionSupervisionClass"
+              },
+              "pending": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "class",
+              "cause_code",
+              "pending"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "work": {
         "$ref": "#/$defs/WebSessionWorkFacts"
       },
@@ -3949,6 +3988,7 @@ const schemas = {
       }
     },
     "required": [
+      "supervision",
       "workspace_root_kind",
       "repository_watch",
       "session_id",

@@ -27,6 +27,7 @@ impl error::Error for process_read::ProcessReadCorruption {
 
 ```rust
 pub enum ProcessReadError {
+    ResyncRequired,
     Database(error::Error),
     Corruption(process_read::ProcessReadCorruption),
 }
@@ -107,6 +108,14 @@ impl process_read::ProcessReadRepository {
     pub async fn open_transcript(
         &self,
         requested_session: signalbox_domain::SessionId,
+    ) -> result::Result<
+        option::Option<process_read::ProcessTranscriptReader>,
+        process_read::ProcessReadError,
+    >;
+    pub async fn open_transcript_after(
+        &self,
+        requested_session: signalbox_domain::SessionId,
+        after_frontier: option::Option<signalbox_domain::ContextFrontierId>,
     ) -> result::Result<
         option::Option<process_read::ProcessTranscriptReader>,
         process_read::ProcessReadError,
