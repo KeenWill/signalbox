@@ -379,7 +379,8 @@ producer, and its one-to-one seed must name the exact stored frontier whose
 membership matches the selected prefix.
 
 Active-turn compaction retains the active turn while its dedicated call is
-prepared or in flight.
+prepared or in flight. Consumed steering after completion extends the validated
+compaction result by exactly the consumed entries in acceptance order.
 
 Stored active phases are conclusions derived from complete owner facts, never
 trusted discriminators. A recovery-decision wait reconstitutes from an ambiguous
