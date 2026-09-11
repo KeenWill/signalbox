@@ -115,6 +115,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     system_init(&arguments)?;
     match scenario.as_str() {
+        "api_error_diagnostic"
+        | "api_error_diagnostic_without_result"
+        | "api_error_diagnostic_wrong_session" => {
+            assistant_text(fixtures::REFUSAL)?;
+            let session = if scenario == "api_error_diagnostic_wrong_session" {
+                fixtures::OTHER_SESSION_ID
+            } else {
+                fixtures::SESSION_ID
+            };
+            emit_json(&serde_json::json!({
+                "type": "assistant", "session_id": session,
+                "is_api_error_message": true, "error": "invalid_request",
+                "message": { "id": fixtures::OTHER_MESSAGE_ID, "model": "<synthetic>",
+                    "role": "assistant", "stop_reason": "refusal",
+                    "content": [{ "type": "text", "text": fixtures::ANSWER }] }
+            }))?;
+            if scenario != "api_error_diagnostic_without_result" {
+                success("refusal", Some(fixtures::REFUSAL))?;
+            }
+        }
+        "refusal_notice" | "refusal_notice_without_result" | "refusal_notice_wrong_session" => {
+            let session = if scenario == "refusal_notice_wrong_session" {
+                fixtures::OTHER_SESSION_ID
+            } else {
+                fixtures::SESSION_ID
+            };
+            emit_json(&serde_json::json!({
+                "type": "system", "subtype": "model_refusal_no_fallback",
+                "session_id": session, "original_model": fixtures::MODEL,
+                "request_id": null, "content": "",
+                "api_refusal_category": "synthetic_refusal"
+            }))?;
+            if scenario != "refusal_notice_without_result" {
+                assistant_text(fixtures::REFUSAL)?;
+                success("refusal", Some(fixtures::REFUSAL))?;
+            }
+        }
         "session_window_status"
         | "session_window_without_status"
         | "request_size_status"
@@ -140,23 +177,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "session_id": fixtures::SESSION_ID, "api_error_status": status,
                 "result": message
             }))?;
-        }
-        "refusal_notice" | "refusal_notice_without_result" | "refusal_notice_wrong_session" => {
-            let session = if scenario == "refusal_notice_wrong_session" {
-                fixtures::OTHER_SESSION_ID
-            } else {
-                fixtures::SESSION_ID
-            };
-            emit_json(&serde_json::json!({
-                "type": "system", "subtype": "model_refusal_no_fallback",
-                "session_id": session, "original_model": fixtures::MODEL,
-                "request_id": null, "content": "",
-                "api_refusal_category": "synthetic_refusal"
-            }))?;
-            if scenario != "refusal_notice_without_result" {
-                assistant_text(fixtures::REFUSAL)?;
-                success("refusal", Some(fixtures::REFUSAL))?;
-            }
         }
         "native_prompt_too_large" => {
             emit_json(&serde_json::json!({

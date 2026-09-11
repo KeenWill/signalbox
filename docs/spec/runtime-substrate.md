@@ -418,21 +418,23 @@ becomes the provider message id. A bare `error` event or an HTTP-200 response
 with `status: failed` supplies definitive provider-error evidence without
 non-acceptance proof. Failed status and error are classified before ancillary
 response fields. Claude Code CLI events stay bound to the initialized exchange:
-the first assistant event may name the provider-resolved model and every later
-assistant event must repeat that value, and a result carrying a different
-session id is a protocol violation. Assistant content retains its first message
-id. After every proposed tool has its bridge acknowledgement, one message with a
-distinct id, text and optional thinking blocks, and at least one text block may
-acknowledge the batch. Its content is discarded; the reported finish must be
-`end_turn`, while the effective completion of the original batch is `ToolUse`. A
-different message id outside that acknowledgement is a protocol violation.
+the first non-diagnostic assistant event may name the provider-resolved model
+and every later non-diagnostic assistant event must repeat that value, and a
+result carrying a different session id is a protocol violation. Assistant
+content retains its first message id. After every proposed tool has its bridge
+acknowledgement, one message with a distinct id, text and optional thinking
+blocks, and at least one text block may acknowledge the batch. Its content is
+discarded; the reported finish must be `end_turn`, while the effective
+completion of the original batch is `ToolUse`.
+
+Claude native refusal notifications and text-only API-error diagnostics stay
+bound to the initialized session and are nonterminal. Diagnostics report the
+native `<synthetic>` label, which is not a provider model identity; their text
+does not become assistant content. The result event supplies the outcome.
 
 Claude CLI native compaction boundaries must name the initialized session. The
 adapter logs the reported trigger and pre-compaction token count; the boundary
 does not replace the daemon's canonical transcript.
-
-A Claude native refusal notification stays bound to the initialized session and
-is nonterminal; the result event supplies the refusal evidence.
 
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
