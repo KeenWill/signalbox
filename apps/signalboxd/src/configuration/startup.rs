@@ -32,6 +32,21 @@ pub(super) fn parse_startup(
     content: &str,
     document: &DocumentMut,
 ) -> Result<ParsedStartup, HubModelConfigurationError> {
+    parse_startup_with_credential_home_admission(content, document, true)
+}
+
+pub(super) fn parse_bootstrap(
+    content: &str,
+    document: &DocumentMut,
+) -> Result<ParsedStartup, HubModelConfigurationError> {
+    parse_startup_with_credential_home_admission(content, document, false)
+}
+
+fn parse_startup_with_credential_home_admission(
+    content: &str,
+    document: &DocumentMut,
+    admit_credential_homes: bool,
+) -> Result<ParsedStartup, HubModelConfigurationError> {
     reject_unknown_fields(
         document.as_table(),
         &[
@@ -130,7 +145,13 @@ pub(super) fn parse_startup(
         git_identity,
         exec_supervisor_executable,
     )?;
-    let credential_profiles = parse_credential_profiles(document.get("credential_profiles"))?;
+    let credential_profiles = if admit_credential_homes {
+        parse_credential_profiles(document.get("credential_profiles"))?
+    } else {
+        crate::credential_pools::parse_bootstrap_credential_profiles(
+            document.get("credential_profiles"),
+        )?
+    };
     let credential_pools =
         parse_credential_pools(document.get("credential_pools"), &credential_profiles)?;
     let approval_wait_timeout =
@@ -431,7 +452,13 @@ mod tests {
     #[test]
     fn startup_validation_defers_reloadable_sections_to_retained_snapshot_selection() {
         let models = crate::configuration::checked_in_example_configuration().expect("models");
-        let mut document = models.source().parse::<DocumentMut>().expect("document");
+        let source = models.source().replace(
+            "\ndelivery = \"ambient\"\n",
+            "\ndelivery = \"codex_home\"\ncodex_home = \"relative/account-a\"\n",
+        );
+        assert!(HubModelConfiguration::startup_numeric_bounds(&source).is_ok());
+        assert!(HubModelConfiguration::parse(&source).is_err());
+        let mut document = source.parse::<DocumentMut>().expect("document");
         for section in ["models", "serving_targets", "aliases", "repository_watch"] {
             document.insert(section, toml_edit::value(0));
         }

@@ -186,6 +186,7 @@ impl CredentialDelivery {
         adapter: ModelAdapter,
         name: &Arc<str>,
         billing_kind: BillingKind,
+        admit_credential_homes: bool,
     ) -> Result<Self, HubModelConfigurationError> {
         let key = required_string(profile, "delivery")?;
         if !DELIVERY_KEYS.contains(&key) {
@@ -217,12 +218,19 @@ impl CredentialDelivery {
                 let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
                 allowed.extend_from_slice(&["codex_home", "max_concurrent_invocations"]);
                 reject_unknown_fields(profile, &allowed)?;
-                let path = normalize_absolute_path(required_string(profile, "codex_home")?)
-                    .map_err(|_| HubModelConfigurationError::InvalidCredentialHome {
-                        credential_profile: Arc::clone(name),
-                        failure: CredentialHomeAdmissionFailure::InvalidPath,
+                let codex_home = required_string(profile, "codex_home")?;
+                let path = if admit_credential_homes {
+                    let path = normalize_absolute_path(codex_home).map_err(|_| {
+                        HubModelConfigurationError::InvalidCredentialHome {
+                            credential_profile: Arc::clone(name),
+                            failure: CredentialHomeAdmissionFailure::InvalidPath,
+                        }
                     })?;
-                admit_credential_home(name, &path)?;
+                    admit_credential_home(name, &path)?;
+                    path
+                } else {
+                    PathBuf::new()
+                };
                 let max_concurrent_invocations = parse_max_concurrent_invocations(profile)?;
                 Ok(Self::CodexHome {
                     path,
@@ -739,6 +747,19 @@ impl CredentialPool {
 pub(crate) fn parse_credential_profiles(
     item: Option<&Item>,
 ) -> Result<HashMap<Arc<str>, CredentialProfile>, HubModelConfigurationError> {
+    parse_credential_profiles_with_home_admission(item, true)
+}
+
+pub(crate) fn parse_bootstrap_credential_profiles(
+    item: Option<&Item>,
+) -> Result<HashMap<Arc<str>, CredentialProfile>, HubModelConfigurationError> {
+    parse_credential_profiles_with_home_admission(item, false)
+}
+
+fn parse_credential_profiles_with_home_admission(
+    item: Option<&Item>,
+    admit_credential_homes: bool,
+) -> Result<HashMap<Arc<str>, CredentialProfile>, HubModelConfigurationError> {
     let tables = item
         .and_then(Item::as_array_of_tables)
         .ok_or(HubModelConfigurationError::MissingCredentialProfiles)?;
@@ -755,7 +776,13 @@ pub(crate) fn parse_credential_profiles(
         let name = validated_credential_catalog_name(required_string(profile, "name")?)?;
         let adapter = ModelAdapter::parse(required_string(profile, "adapter")?)?;
         let billing_kind = BillingKind::parse(required_string(profile, "billing_kind")?)?;
-        let delivery = CredentialDelivery::parse(profile, adapter, &name, billing_kind)?;
+        let delivery = CredentialDelivery::parse(
+            profile,
+            adapter,
+            &name,
+            billing_kind,
+            admit_credential_homes,
+        )?;
         // The mixed-delivery rule is a property of one adapter's login store,
         // so both sides of the pair must be Codex profiles. Another adapter's
         // `ambient` profile shares no store with a Codex home and must not be
@@ -780,8 +807,14 @@ pub(crate) fn parse_credential_profiles(
         if delivery == CredentialDelivery::Ambient && !ambient_adapters.insert(adapter) {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
-        if let CredentialDelivery::File { path, .. } | CredentialDelivery::CodexHome { path, .. } =
-            &delivery
+        let path = match &delivery {
+            CredentialDelivery::File { path, .. } => Some(path),
+            CredentialDelivery::CodexHome { path, .. } if admit_credential_homes => Some(path),
+            CredentialDelivery::Ambient
+            | CredentialDelivery::Oauth(_)
+            | CredentialDelivery::CodexHome { .. } => None,
+        };
+        if let Some(path) = path
             && !file_paths.insert((adapter, path.clone()))
         {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
