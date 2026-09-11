@@ -17,8 +17,8 @@ use crate::bridge::{SERVER_NAME, TOOL_ACKNOWLEDGEMENT, TOOL_PREFIX};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
-    AssistantContent, AssistantEvent, AssistantRawEvent, RawToolUse, ResultEvent, SystemInit,
-    UserEvent,
+    AssistantContent, AssistantEvent, AssistantRawEvent, RawToolUse, ResultEvent, ResultSubtype,
+    SystemInit, UserEvent,
 };
 
 fn reject_duplicate_json_members(line: &str) -> Result<(), DecodeFailure> {
@@ -70,7 +70,7 @@ enum CliTerminal {
         stop_reason: String,
     },
     Error {
-        subtype: String,
+        subtype: ResultSubtype,
         status: Option<u16>,
         message: String,
     },
@@ -528,7 +528,7 @@ impl<C: Clone> EventDecoder<C> {
         // event produces, and so a nonzero process exit after this point cannot
         // strand the progress fact.
         self.report_usage(sink);
-        if event.subtype == "success" && !event.is_error {
+        if matches!(event.subtype, ResultSubtype::Success) && !event.is_error {
             if !event.errors.is_empty() || event.api_error_status.is_some() {
                 return Err(DecodeFailure::stream_protocol(
                     "Claude success carries contradictory error facts",
@@ -585,7 +585,7 @@ impl<C: Clone> EventDecoder<C> {
                 status,
                 message,
             } => {
-                let kind = classify_error(status, &subtype, &message);
+                let kind = classify_error(status, &subtype);
 
                 self.report_usage(sink);
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
@@ -595,7 +595,7 @@ impl<C: Clone> EventDecoder<C> {
                     kind,
                     non_acceptance_proven: false,
                     native: NativeErrorFacts {
-                        error_token: Some(subtype),
+                        error_token: Some(subtype.into_token()),
                         error_code: status.map(|value| value.to_string()),
                         message: Some(message),
                     },
@@ -680,7 +680,6 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn provider_error_after_exit(
         mut self,
         fallback: &str,
-        fallback_kind: ProviderErrorKind,
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence {
         // Every other terminal path reports usage before returning its evidence;
@@ -694,17 +693,7 @@ impl<C: Clone> EventDecoder<C> {
             message,
         }) = self.terminal
         {
-            // A generic structured error (`error_during_execution`) determines no
-            // kind on its own, while the process exit carries definitive stderr
-            // (`authentication failed`). Fall back to the exit classification in
-            // exactly that case so the shared provider-error vocabulary reflects
-            // all the evidence available, rather than reporting `Unrecognized`
-            // beside a stderr that names the cause. A structured error that does
-            // determine a kind still wins: it is the provider's own statement.
-            let kind = match classify_error(status, &subtype, &message) {
-                ProviderErrorKind::Unrecognized => fallback_kind,
-                determined => determined,
-            };
+            let kind = classify_error(status, &subtype);
 
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 credential_recovery: None,
@@ -713,7 +702,7 @@ impl<C: Clone> EventDecoder<C> {
                 kind,
                 non_acceptance_proven: false,
                 native: NativeErrorFacts {
-                    error_token: Some(subtype),
+                    error_token: Some(subtype.into_token()),
                     error_code: status.map(|value| value.to_string()),
                     message: Some(message),
                 },
@@ -724,7 +713,7 @@ impl<C: Clone> EventDecoder<C> {
                 credential_recovery: None,
                 exchange: self.exchange,
                 reported_model: self.reported_model,
-                kind: fallback_kind,
+                kind: ProviderErrorKind::Unrecognized,
                 non_acceptance_proven: false,
                 native: NativeErrorFacts {
                     error_token: Some("claude_cli_exit".to_string()),
@@ -746,8 +735,7 @@ impl<C: Clone> EventDecoder<C> {
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence {
         if matches!(self.terminal, Some(CliTerminal::Error { .. })) {
-            let kind = classify_error(None, "process_exit", "Claude reported an error");
-            self.provider_error_after_exit("Claude reported an error", kind, sink)
+            self.provider_error_after_exit("Claude reported an error", sink)
         } else {
             self.loss(cause)
         }
@@ -1027,10 +1015,9 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
     fn provider_error_after_exit(
         self,
         message: &str,
-        classification: &str,
+        _classification: &str,
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence {
-        let kind = classify_error(None, "process_exit", classification);
-        EventDecoder::provider_error_after_exit(self, message, kind, sink)
+        EventDecoder::provider_error_after_exit(self, message, sink)
     }
 }
