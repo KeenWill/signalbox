@@ -1,5 +1,8 @@
 # Session workflow tools
 
+Committed unbuilt behavior for [tool loop](../spec/tool-loop.md) and
+[workflows](../spec/workflows.md).
+
 Sessions receive six ordinary daemon tools through `signalbox-tools-workflows`.
 The invoking session and logical tool request come from trusted dispatch
 correlation. Model arguments cannot select the caller or mutation identities.
@@ -17,14 +20,16 @@ List enumerates all retained registered runs in run-identity order, with
 registration identity, name and revision, state, started and terminal times, and
 an `own_run` marker for runs started or replayed by the caller. Each response
 fits the tool-result bound and returns a nullable exclusive `next_after` cursor.
-Read returns the socket's frame-bounded input and result prefixes and extents,
-plus registration name, revision and journal length. Stop preserves the socket's
-`applied`, `not_found` and `already_terminal` receipt algebra.
+Read returns input and result prefixes and extents bounded by both the socket
+frame and serialized tool-result ceilings, plus registration name, revision and
+journal length. Stop preserves the socket's `applied`, `not_found` and
+`already_terminal` receipt algebra.
 
 Replay creates a new run pinned to the original registration and retained exact
 input bytes. It does not resume the original journal. Registration reads source
 bytes and UTF-8 artifact text from paths confined to the calling session's
-workspace; native registration is unavailable.
+workspace, reading at most the existing process-frame ceiling per file;
+oversized files receive a typed refusal. Native registration is unavailable.
 
 Each template's `workflow_tools` table grants operations explicitly. List, read
 and stop take an `enabled` flag; start, replay and register take `names`, either
