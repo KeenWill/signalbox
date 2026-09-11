@@ -535,6 +535,36 @@ async fn lifecycle_drain_settles_creation_before_pending_replay() -> Result<(), 
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn lifecycle_frontier_leaves_later_facts_replayable() -> Result<(), Box<dyn Error>> {
+    let mut fixture =
+        CheckoutFixture::with_rule("checkout/project", "labeled-review-response").await?;
+    fixture.submit_without_lifecycle_settlement().await;
+    let source = signalbox_session_ownership::LifecycleEventSource::new(fixture.core.clone());
+    let bounded = source.through_current_frontier().await?;
+    // Replaying the unsettled creation appends a later start-release settlement.
+    fixture.submit_without_lifecycle_settlement().await;
+    let mut observed = Vec::new();
+    while let Some(event) = bounded.next().await? {
+        observed.push(event.sequence());
+        bounded.acknowledge(&event).await?;
+    }
+    let last = observed
+        .last()
+        .expect("the captured pass contains creation facts");
+    let later = source
+        .next()
+        .await?
+        .expect("the later settlement remains replayable");
+    assert!(later.sequence() > *last);
+    assert!(
+        bounded.next().await?.is_none(),
+        "a captured pass does not follow the moving tail"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn kickoff_replays_after_provisioning_and_after_input_commit() -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{DeliveryRequest, SubmitInputResult};
     use signalbox_persistence::submit_input::SubmitInputRepository;
