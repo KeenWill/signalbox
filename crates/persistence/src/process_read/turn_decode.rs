@@ -346,6 +346,9 @@ pub(super) fn decode_transcript_turn(
         let cause = match required::<String>(row, "credential_wait_cause")?.as_str() {
             "exhausted" => signalbox_domain::CredentialAvailabilityWaitCause::Exhausted,
             "contended" => signalbox_domain::CredentialAvailabilityWaitCause::Contended,
+            "network_unavailable" => {
+                signalbox_domain::CredentialAvailabilityWaitCause::NetworkUnavailable
+            }
             _ => {
                 return Err(ProcessReadCorruption::Inconsistent(
                     "credential availability wait cause",

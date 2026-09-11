@@ -120,6 +120,8 @@ export type WebContractLimits = {
   readonly min_timeline_detail_bytes: number;
 };
 
+export type WebCredentialAvailabilityWaitCause = "contended" | "exhausted" | "network_unavailable";
+
 export type WebDollarAmount = string;
 
 export type WebImportContinuationReference = {
@@ -292,6 +294,10 @@ export type WebSessionId = string;
 export type WebSessionLiveActiveState = {
   readonly kind: "running";
   readonly model_call_id: string | null;
+} | {
+  readonly cause: WebCredentialAvailabilityWaitCause;
+  readonly kind: "awaiting_credential_availability";
+  readonly wait_attempt_id: WebLiveResourceId;
 } | {
   readonly kind: "awaiting_model_call_recovery";
   readonly model_call_id: WebLiveResourceId;

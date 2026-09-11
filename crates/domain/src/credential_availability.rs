@@ -9,6 +9,8 @@ pub enum CredentialAvailabilityWaitCause {
     Contended,
     /// Every member is excluded and at least one can become available again.
     Exhausted,
+    /// Every pool member exhausted provider-internal retries and awaits network recovery.
+    NetworkUnavailable,
 }
 
 /// The immutable attempt and frontier from which credential admission parked.

@@ -3327,6 +3327,7 @@ public struct SignalboxTranscriptTurn: Decodable, Equatable, Sendable {
 public enum SignalboxCredentialAvailabilityWaitCause: String, Decodable, Equatable, Sendable {
   case contended
   case exhausted
+  case networkUnavailable = "network_unavailable"
 }
 
 public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {

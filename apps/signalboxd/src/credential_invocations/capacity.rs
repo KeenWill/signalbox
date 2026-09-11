@@ -1,10 +1,9 @@
 //! Re-observes capacity for parked subscription-home members.
 use super::PROCESS_GROUP_RECHECK_INTERVAL;
-use crate::configuration::HubModelConfiguration;
+use crate::configuration_reload::ConfigurationReload;
 use signalbox_application::ReconciliationSweepInterval;
 use signalbox_domain::{ProviderRateLimitSnapshot, ProviderRateLimitWindow};
 use signalbox_model_runtime::CredentialReference;
-use signalbox_model_runtime_codex_cli::{CodexCliConstructionError, CodexCliRuntime};
 use signalbox_persistence::{credential_capacity, model_execution::ModelCallRepositoryError};
 use std::time::Duration;
 use tokio::sync::watch;
@@ -12,8 +11,7 @@ use tokio::sync::watch;
 /// Read-only Codex capacity reconciliation, independent of model admission.
 pub struct CodexCapacityRefresh {
     pool: sqlx::PgPool,
-    runtime: CodexCliRuntime,
-    profiles: Vec<String>,
+    configuration: ConfigurationReload,
     interval: Duration,
     probe_bound: Duration,
 }
@@ -23,30 +21,22 @@ impl CodexCapacityRefresh {
     /// interval and CLI probe bound govern polling and each read respectively.
     pub fn new(
         pool: sqlx::PgPool,
-        models: &HubModelConfiguration,
+        configuration: ConfigurationReload,
         reconciliation: Option<ReconciliationSweepInterval>,
         probe_bound: Duration,
-    ) -> Result<Option<Self>, CodexCliConstructionError> {
-        let Some(runtime) = models.codex_cli_runtime(None, None)? else {
-            return Ok(None);
-        };
-        Ok(Some(Self {
+    ) -> Self {
+        Self {
             pool,
-            runtime,
-            profiles: models
-                .credential_invocation_registrations()
-                .into_iter()
-                .map(|(profile, _)| profile)
-                .collect(),
+            configuration,
             interval: reconciliation.map_or(
                 PROCESS_GROUP_RECHECK_INTERVAL,
                 ReconciliationSweepInterval::get,
             ),
             probe_bound,
-        }))
+        }
     }
 
-    /// Observes live headroom waits until shutdown; failed reads preserve prior
+    /// Observes live headroom and network waits until shutdown; failed reads preserve prior
     /// evidence and are retried on the next reconciliation pass.
     pub async fn run(&self, mut shutdown: watch::Receiver<bool>) {
         if *shutdown.borrow() {
@@ -69,11 +59,24 @@ impl CodexCapacityRefresh {
     }
 
     async fn refresh(&self) -> Result<(), ModelCallRepositoryError> {
-        for profile in
-            credential_capacity::waiting_capacity_profiles(&self.pool, &self.profiles).await?
+        let catalogs = self.configuration.catalogs();
+        let runtime = match catalogs.models.codex_cli_runtime(None, None) {
+            Ok(Some(runtime)) => runtime,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(%error, "credential capacity runtime construction failed");
+                return Ok(());
+            }
+        };
+        let profiles = catalogs
+            .models
+            .credential_invocation_registrations()
+            .into_iter()
+            .map(|(profile, _)| profile)
+            .collect::<Vec<_>>();
+        for profile in credential_capacity::waiting_capacity_profiles(&self.pool, &profiles).await?
         {
-            let snapshot = match self
-                .runtime
+            let snapshot = match runtime
                 .read_credential_capacity(&CredentialReference::new(&profile), self.probe_bound)
                 .await
             {

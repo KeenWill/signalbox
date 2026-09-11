@@ -577,3 +577,6 @@ async fn credential_pool_quota_rotation_prefers_another_member_after_capacity_re
     drop(container);
     Ok(())
 }
+
+#[path = "credential_wait_network.rs"]
+mod network;

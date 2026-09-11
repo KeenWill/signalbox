@@ -123,8 +123,8 @@ pub async fn retain_credential_capacity_probe(
     Ok(result.rows_affected() != 0)
 }
 
-/// Configured profiles whose live waits retain a headroom exclusion. Probing
-/// these members can observe an external quota reset before its old deadline.
+/// Configured profiles with live headroom or network exclusions. The existing
+/// probe loop observes quota resets and network restoration for these waits.
 pub async fn waiting_capacity_profiles(
     pool: &sqlx::PgPool,
     configured_profiles: &[String],
@@ -136,7 +136,12 @@ pub async fn waiting_capacity_profiles(
          WHERE member.profile = ANY($1) AND waiting.consumed_by_attempt_id IS NULL
            AND active.state_kind = 'active' AND NOT active.delegation_runtime_terminal
            AND goal_turn_is_runtime_relevant(active.session_id, active.turn_id)
-           AND member.exclusions @> '[{\"exclusion\":{\"kind\":\"headroom_reserve\"}}]'::jsonb
+           AND (member.exclusions @> '[{\"exclusion\":{\"kind\":\"headroom_reserve\"}}]'::jsonb
+                OR EXISTS (SELECT 1 FROM credential_pool_chain_exclusion chain
+                    WHERE chain.session_id = waiting.session_id AND chain.turn_id = waiting.turn_id
+                      AND chain.credential_reference = member.profile AND chain.cause_kind = 'provider_internal'
+                      AND NOT EXISTS (SELECT 1 FROM credential_pool_exclusion_release released
+                          WHERE released.predecessor_model_call_id = chain.predecessor_model_call_id)))
          ORDER BY member.profile",
     ).bind(configured_profiles).fetch_all(pool).await?)
 }

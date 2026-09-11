@@ -328,6 +328,19 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> Option<WebSessionLiveSnap
                         }),
                     }
                 }
+                SessionLiveActiveState::AwaitingCredentialAvailability { attempt, cause } => {
+                    WebSessionLiveActiveState::AwaitingCredentialAvailability {
+                        wait_attempt_id: WebLiveResourceId::from_uuid_bytes(attempt.into_uuid().into_bytes()),
+                        cause: match cause {
+                            signalbox_domain::CredentialAvailabilityWaitCause::Contended =>
+                                signalbox_web_contract::WebCredentialAvailabilityWaitCause::Contended,
+                            signalbox_domain::CredentialAvailabilityWaitCause::Exhausted =>
+                                signalbox_web_contract::WebCredentialAvailabilityWaitCause::Exhausted,
+                            signalbox_domain::CredentialAvailabilityWaitCause::NetworkUnavailable =>
+                                signalbox_web_contract::WebCredentialAvailabilityWaitCause::NetworkUnavailable,
+                        },
+                    }
+                }
                 SessionLiveActiveState::AwaitingModelCallRecovery { call } => {
                     WebSessionLiveActiveState::AwaitingModelCallRecovery {
                         model_call_id: WebLiveResourceId::from_uuid_bytes(

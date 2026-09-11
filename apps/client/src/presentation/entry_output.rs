@@ -135,6 +135,8 @@ impl<'a> Output<'a> {
                         "contended",
                     signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted =>
                         "exhausted",
+                    signalbox_process_protocol::CredentialAvailabilityWaitCause::NetworkUnavailable =>
+                        "network_unavailable",
                 },
             ),
             TurnState::ActiveAwaitingRunnerRecovery {

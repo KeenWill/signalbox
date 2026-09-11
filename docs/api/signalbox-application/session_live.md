@@ -16,6 +16,10 @@ pub enum SessionLiveActiveState {
     Running {
         model_call: option::Option<signalbox_domain::ModelCallId>,
     },
+    AwaitingCredentialAvailability {
+        attempt: signalbox_domain::TurnAttemptId,
+        cause: signalbox_domain::CredentialAvailabilityWaitCause,
+    },
     AwaitingModelCallRecovery {
         call: signalbox_domain::ModelCallId,
     },

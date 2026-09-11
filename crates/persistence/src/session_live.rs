@@ -170,13 +170,18 @@ SELECT lifecycle.turn_id, lifecycle.active_phase_kind,
        lifecycle.recovery_model_call_id, lifecycle.approval_tool_request_id,
        lifecycle.child_wait_request_id, child_wait.child_session_id,
        lifecycle.recovery_tool_attempt_id, lifecycle.runner_recovery_runner_id,
-       lifecycle.runner_recovery_placement_revision, current_call.model_call_id
+       lifecycle.runner_recovery_placement_revision, current_call.model_call_id,
+       credential_wait.wait_attempt_id, credential_wait.cause AS credential_wait_cause
   FROM turn_lifecycle AS lifecycle
   LEFT JOIN session_delegation_wait AS child_wait
     ON child_wait.awaiting_tool_request_id = lifecycle.child_wait_request_id
    AND child_wait.parent_turn_id = lifecycle.turn_id
    AND child_wait.parent_session_id = lifecycle.session_id
    AND child_wait.wait_mode = 'foreground'
+  LEFT JOIN credential_availability_wait AS credential_wait
+    ON credential_wait.session_id = lifecycle.session_id
+   AND credential_wait.turn_id = lifecycle.turn_id
+   AND credential_wait.consumed_by_attempt_id IS NULL
   LEFT JOIN model_call AS current_call
     ON current_call.turn_attempt_id = lifecycle.current_attempt_id
    AND current_call.turn_id = lifecycle.turn_id
@@ -217,6 +222,35 @@ SELECT turn_id, state_kind, terminal_disposition_kind,
 fn decode_active(row: &PgRow) -> Result<SessionLiveActiveTurn, SessionLiveRepositoryError> {
     let turn = TurnId::from_uuid(row.try_get("turn_id")?);
     let phase: String = row.try_get("active_phase_kind")?;
+    let wait_attempt: Option<Uuid> = row.try_get("wait_attempt_id")?;
+    let wait_cause: Option<String> = row.try_get("credential_wait_cause")?;
+    if (phase == "awaiting_credential_availability") != wait_attempt.is_some()
+        || wait_attempt.is_some() != wait_cause.is_some()
+    {
+        return Err(SessionLiveRepositoryError::Corruption(
+            "credential wait shape",
+        ));
+    }
+    let credential_wait = if let (Some(attempt), Some(cause)) = (wait_attempt, wait_cause) {
+        let cause = match cause.as_str() {
+            "contended" => signalbox_domain::CredentialAvailabilityWaitCause::Contended,
+            "exhausted" => signalbox_domain::CredentialAvailabilityWaitCause::Exhausted,
+            "network_unavailable" => {
+                signalbox_domain::CredentialAvailabilityWaitCause::NetworkUnavailable
+            }
+            _ => {
+                return Err(SessionLiveRepositoryError::Corruption(
+                    "credential wait cause",
+                ));
+            }
+        };
+        Some(SessionLiveActiveState::AwaitingCredentialAvailability {
+            attempt: signalbox_domain::TurnAttemptId::from_uuid(attempt),
+            cause,
+        })
+    } else {
+        None
+    };
     let shape = (
         phase.as_str(),
         row.try_get::<Option<Uuid>, _>("model_call_id")?,
@@ -229,6 +263,11 @@ fn decode_active(row: &PgRow) -> Result<SessionLiveActiveTurn, SessionLiveReposi
         row.try_get::<Option<Decimal>, _>("runner_recovery_placement_revision")?,
     );
     let state = match shape {
+        ("awaiting_credential_availability", None, None, None, None, None, None, None, None) => {
+            credential_wait.ok_or(SessionLiveRepositoryError::Corruption(
+                "credential wait shape",
+            ))?
+        }
         ("running", model_call, None, None, None, None, None, None, None) => {
             SessionLiveActiveState::Running {
                 model_call: model_call.map(ModelCallId::from_uuid),

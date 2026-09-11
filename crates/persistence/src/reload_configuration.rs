@@ -222,7 +222,7 @@ impl ReloadConfigurationRepository {
         self.finish_with_profiles(request, result, &[]).await
     }
 
-    /// Records successful installation and wakes authentication waits for changed profiles.
+    /// Records successful installation and wakes recoverable credential waits for changed profiles.
     pub async fn finish_profile_reload(
         &self,
         request: ReloadConfiguration,
@@ -271,11 +271,11 @@ impl ReloadConfigurationRepository {
                     .await?;
             }
             sqlx::query(
-                "INSERT INTO credential_authentication_release (predecessor_model_call_id, command_id)
+                "INSERT INTO credential_pool_exclusion_release (predecessor_model_call_id, command_id)
                  SELECT chain.predecessor_model_call_id, $1
                  FROM credential_pool_chain_exclusion chain
                  JOIN credential_availability_wait waiting USING (session_id, turn_id)
-                 WHERE chain.credential_reference = ANY($2) AND chain.cause_kind = 'credential_rejected'
+                 WHERE chain.credential_reference = ANY($2) AND chain.cause_kind IN ('credential_rejected', 'provider_internal')
                    AND waiting.consumed_by_attempt_id IS NULL
                  ON CONFLICT DO NOTHING",
             )
@@ -284,7 +284,7 @@ impl ReloadConfigurationRepository {
                 "UPDATE credential_availability_wait waiting SET eligible = true
                  WHERE consumed_by_attempt_id IS NULL AND NOT eligible AND EXISTS (
                      SELECT 1 FROM credential_pool_chain_exclusion chain
-                     JOIN credential_authentication_release released USING (predecessor_model_call_id)
+                     JOIN credential_pool_exclusion_release released USING (predecessor_model_call_id)
                      WHERE chain.session_id = waiting.session_id AND chain.turn_id = waiting.turn_id
                        AND released.command_id = $1)",
             )

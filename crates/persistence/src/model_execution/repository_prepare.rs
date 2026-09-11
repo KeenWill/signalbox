@@ -1,3 +1,4 @@
+use super::CredentialPoolRuntimeExhaustion;
 use super::continuation::resolve_session_credential;
 use super::credential_pool::{
     DurablePoolExclusions, SelectedRuntimePoolCredential, acquire_model_call_outbox_order_guard,
@@ -772,8 +773,13 @@ impl PostgresModelCallRepository {
                                 .same_credential_attempt_bound
                                 .is_none_or(|bound| same_credential_attempts < bound.get())))
                         && !stop_requested;
-                    let rotation_candidate =
-                        action == CredentialPoolRuntimeAction::SwitchNow && !stop_requested;
+                    let network_exhausted = cause
+                        == signalbox_domain::ProviderModelCallFailureCause::ProviderInternal
+                        && policy.on_pool_exhausted == CredentialPoolRuntimeExhaustion::Park
+                        && !retry_candidate;
+                    let rotation_candidate = (action == CredentialPoolRuntimeAction::SwitchNow
+                        || network_exhausted)
+                        && !stop_requested;
                     let mut durable_exclusions = if retry_candidate || rotation_candidate {
                         Some(
                             load_durable_pool_exclusions(
@@ -792,8 +798,8 @@ impl PostgresModelCallRepository {
                             !exclusions.excluded.contains(&current_reference)
                         });
                     // The failed credential itself must still be admitted for a
-                    // retry. Otherwise only the pinned action may authorize a
-                    // rotation; every other action follows the terminal path.
+                    // retry. Rotation follows the pinned switch action or the
+                    // park-pool network exhaustion rule.
                     let rotating = !retrying_same_credential && rotation_candidate;
                     if retrying_same_credential || rotating {
                         let Some(DurablePoolExclusions {
