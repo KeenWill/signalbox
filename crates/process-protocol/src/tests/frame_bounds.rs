@@ -185,6 +185,7 @@ fn all_client_request_variants_encode_with_current_version()
         request(4)?,
         ClientRequest::ReadTranscript {
             session_id: uuid(6),
+            after_frontier: None,
         },
     )?;
     assert_client_request_current_version(

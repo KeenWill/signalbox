@@ -944,7 +944,10 @@ async fn read_streams_conservative_imported_seed_snapshot() -> Result<(), Box<dy
         .request_version(
             ProtocolVersion::One,
             2,
-            ClientRequest::ReadTranscript { session_id },
+            ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
         )
         .await?;
     let start = response_within(&mut read_connection).await?;

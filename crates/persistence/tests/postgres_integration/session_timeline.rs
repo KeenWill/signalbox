@@ -1891,3 +1891,72 @@ async fn collect_detail_text(
     }
     Ok(collected)
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn supervision_remains_readable_when_creation_ancestry_is_corrupt()
+-> Result<(), Box<dyn Error>> {
+    // Arbitrary identity for the sole session in this isolated database.
+    const CORRUPT_SESSION: u128 = 0x0009_9151;
+    const CAUSE: &str = "durable_state_corruption";
+    const DETAIL_BYTE_LIMIT: u32 = 4096;
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(CORRUPT_SESSION);
+    create_session(&pool, identity).await?;
+    sqlx::query(
+        "INSERT INTO session_supervision
+         (session_id, supervision_id, supervision_failure_class, supervision_cause_code, supervision_pending)
+         VALUES ($1, $1, 'corruption', $2, true)",
+    )
+    .bind(identity.into_uuid())
+    .bind(CAUSE)
+    .execute(&pool)
+    .await?;
+    let mut corruption = pool.begin().await?;
+    sqlx::raw_sql(
+        "SET LOCAL session_replication_role = replica;
+                  ALTER TABLE session DROP CONSTRAINT session_creation_cause_shape;",
+    )
+    .execute(&mut *corruption)
+    .await?;
+    sqlx::query("UPDATE session SET spawning_tool_request_id = $2 WHERE session_id = $1")
+        .bind(identity.into_uuid())
+        .bind(Uuid::now_v7())
+        .execute(&mut *corruption)
+        .await?;
+    corruption.commit().await?;
+
+    let repository = SessionTimelineRepository::new(pool.clone());
+    let descriptor = repository
+        .read_descriptor(identity)
+        .await?
+        .expect("supervision descriptor survives corrupt ancestry");
+    let supervision = descriptor
+        .supervision
+        .expect("retained supervision is projected");
+    assert_eq!(
+        supervision.class,
+        signalbox_application::OperatorFailureClass::FailClosedCorruption
+    );
+    assert_eq!(supervision.cause_code, CAUSE);
+    assert!(supervision.pending);
+    let address = descriptor
+        .bounds
+        .first
+        .expect("the creation address remains available");
+    let detail = repository
+        .read_item_details(
+            identity,
+            address,
+            None,
+            TimelineDetailLimits::new(1, DETAIL_BYTE_LIMIT).expect("one bounded creation detail"),
+        )
+        .await;
+    assert!(
+        detail.is_err(),
+        "corrupt ancestry must remain closed to transcript reads"
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

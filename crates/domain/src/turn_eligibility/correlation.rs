@@ -443,8 +443,8 @@ pub(super) fn refused_terminal_matches(
 }
 
 /// Returns the one completed call whose proposals and correlated result suffix
-/// fill `terminal` up to its ending `terminal_marker`, or `None` when no call
-/// or more than one call can claim that suffix.
+/// fill `terminal` before its validated compaction suffix and ending
+/// `terminal_marker`, or `None` when no call or more than one call claims it.
 ///
 /// Terminal materialization closes every request that did not complete
 /// ordinary execution as `ToolClosed`, so this window admits closed stand-ins.
@@ -460,14 +460,28 @@ pub(super) fn tool_round_terminal_producing_call(
     assistant_by_call: &BTreeMap<crate::ModelCallId, BTreeSet<SemanticTranscriptEntryRef>>,
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
     semantic_entries: &BTreeMap<SemanticTranscriptEntryRef, SemanticTranscriptEntry>,
+    compactions: &[&crate::ContextCompaction],
 ) -> Option<crate::ModelCallId> {
     if terminal.ordered_entries().next_back() != Some(terminal_marker) {
         return None;
     }
+    let mut results_end = terminal.entry_count().saturating_sub(1);
+    for compaction in compactions.iter().rev() {
+        let result = snapshots.get(&compaction.result_frontier().snapshot())?;
+        if result.entry_count() != results_end {
+            continue;
+        }
+        if !result.is_semantic_prefix_of(terminal) {
+            return None;
+        }
+        results_end = snapshots
+            .get(&compaction.source_frontier().snapshot())?
+            .entry_count();
+    }
     tool_round_producing_call_in_window(
         turn,
         terminal,
-        terminal.entry_count().saturating_sub(1),
+        results_end,
         ToolRoundResultWindow::TerminalClosure,
         terminal_tool_attempts,
         terminal_tool_denials,

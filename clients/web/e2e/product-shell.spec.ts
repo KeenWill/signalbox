@@ -174,6 +174,7 @@ const useDeterministicSession = async (
     return route.fulfill({
       json: {
         session_id: requestedSessionId,
+        supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
         sizes: {

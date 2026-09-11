@@ -9,6 +9,7 @@ pub(super) async fn handle_read_transcript<Writer>(
     version: ProtocolVersion,
     request_id: RequestId,
     session_id: CanonicalUuid,
+    after_frontier: Option<CanonicalUuid>,
     pool: &PgPool,
     model_configuration: &HubModelConfiguration,
     reload: Option<&crate::configuration_reload::ConfigurationReload>,
@@ -21,6 +22,8 @@ where
     let spool_result = spool_transcript(
         ProcessReadRepository::new(pool.clone()),
         selected_session,
+        after_frontier
+            .map(|frontier| signalbox_domain::ContextFrontierId::from_uuid(frontier.into_uuid())),
         version,
         request_id,
         model_configuration,
@@ -36,6 +39,15 @@ where
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::NotFound),
+            )
+            .await;
+        }
+        Err(TranscriptSpoolError::Read(ProcessReadError::ResyncRequired)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ResyncRequired),
             )
             .await;
         }
@@ -76,6 +88,7 @@ where
         spool_transcript(
             ProcessReadRepository::new(pool.clone()),
             selected_session,
+            None,
             version,
             request_id,
             model_configuration,
@@ -237,12 +250,15 @@ pub(super) enum TranscriptSpoolError {
 pub(super) async fn spool_transcript(
     repository: ProcessReadRepository,
     session: SessionId,
+    after_frontier: Option<signalbox_domain::ContextFrontierId>,
     version: ProtocolVersion,
     request_id: RequestId,
     model_configuration: &HubModelConfiguration,
     reload: Option<&crate::configuration_reload::ConfigurationReload>,
 ) -> Result<Option<TranscriptSpool>, TranscriptSpoolError> {
-    let reader = repository.open_transcript(session).await;
+    let reader = repository
+        .open_transcript_after(session, after_frontier)
+        .await;
     let Some(mut reader) = reader.map_err(TranscriptSpoolError::Read)? else {
         return Ok(None);
     };
@@ -257,6 +273,7 @@ pub(super) async fn spool_transcript(
         version,
         request_id,
         ServerMessage::TranscriptSnapshotStart {
+            after_frontier: after_frontier.map(|frontier| wire_uuid(frontier.into_uuid())),
             workspace_root_kind: reader.workspace_root_kind().map(|kind| match kind {
                 signalbox_domain::SessionWorkspaceRootKind::Derived => {
                     signalbox_process_protocol::SessionWorkspaceRootKind::Derived
@@ -291,8 +308,12 @@ pub(super) async fn spool_transcript(
     )
     .await
     .map_err(TranscriptSpoolError::Spool)?;
-    let mut model_calls_ended = false;
+    let suffix = after_frontier.is_some();
+    let mut model_calls_ended = suffix;
     let mut model_call_count = 0_u64;
+    let mut emitted_turn_count = 0_u64;
+    let mut suffix_queued_turn_emitted = false;
+    let mut emitted_entry_count = 0_u64;
     while let Some(item) = reader
         .next_item()
         .await
@@ -300,27 +321,55 @@ pub(super) async fn spool_transcript(
     {
         match item {
             ProcessTranscriptItem::Turn(turn) => {
-                write_transcript_turn(&mut file, version, request_id, &turn)
+                let queued = matches!(
+                    turn.state(),
+                    ProcessTurnState::Queued { .. }
+                        | ProcessTurnState::QueuedDelegated { .. }
+                        | ProcessTurnState::QueuedDelegationWake { .. }
+                );
+                let active = matches!(
+                    turn.state(),
+                    ProcessTurnState::ActiveAwaitingCredentialAvailability { .. }
+                        | ProcessTurnState::ActiveRunning { .. }
+                        | ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
+                        | ProcessTurnState::ActiveAwaitingToolApproval { .. }
+                        | ProcessTurnState::ActiveAwaitingChild { .. }
+                        | ProcessTurnState::ActiveAwaitingToolRecovery { .. }
+                        | ProcessTurnState::ActiveAwaitingRunnerRecovery { .. }
+                );
+                let emit = !suffix || active || (queued && !suffix_queued_turn_emitted);
+                if emit {
+                    write_transcript_turn(&mut file, version, request_id, &turn)
+                        .await
+                        .map_err(SnapshotSpoolError::from_connection)
+                        .map_err(TranscriptSpoolError::Spool)?;
+                    emitted_turn_count = emitted_turn_count
+                        .checked_add(1)
+                        .ok_or(SnapshotSpoolError::EncodeInvariant)
+                        .map_err(TranscriptSpoolError::Spool)?;
+                    if suffix && queued {
+                        suffix_queued_turn_emitted = true;
+                    }
+                }
+            }
+            ProcessTranscriptItem::ModelCallUsage(usage) => {
+                if !suffix {
+                    write_model_call_usage(
+                        &mut file,
+                        version,
+                        request_id,
+                        model_call_count,
+                        &usage,
+                        model_configuration,
+                    )
                     .await
                     .map_err(SnapshotSpoolError::from_connection)
                     .map_err(TranscriptSpoolError::Spool)?;
-            }
-            ProcessTranscriptItem::ModelCallUsage(usage) => {
-                write_model_call_usage(
-                    &mut file,
-                    version,
-                    request_id,
-                    model_call_count,
-                    &usage,
-                    model_configuration,
-                )
-                .await
-                .map_err(SnapshotSpoolError::from_connection)
-                .map_err(TranscriptSpoolError::Spool)?;
-                model_call_count = model_call_count
-                    .checked_add(1)
-                    .ok_or(SnapshotSpoolError::EncodeInvariant)
-                    .map_err(TranscriptSpoolError::Spool)?;
+                    model_call_count = model_call_count
+                        .checked_add(1)
+                        .ok_or(SnapshotSpoolError::EncodeInvariant)
+                        .map_err(TranscriptSpoolError::Spool)?;
+                }
             }
             ProcessTranscriptItem::Entry(entry) => {
                 if !model_calls_ended {
@@ -334,6 +383,10 @@ pub(super) async fn spool_transcript(
                     .await
                     .map_err(SnapshotSpoolError::from_connection)
                     .map_err(TranscriptSpoolError::Spool)?;
+                emitted_entry_count = emitted_entry_count
+                    .checked_add(1)
+                    .ok_or(SnapshotSpoolError::EncodeInvariant)
+                    .map_err(TranscriptSpoolError::Spool)?;
             }
         }
     }
@@ -341,7 +394,7 @@ pub(super) async fn spool_transcript(
         .summary()
         .ok_or(SnapshotSpoolError::EncodeInvariant)
         .map_err(TranscriptSpoolError::Spool)?;
-    if !model_calls_ended {
+    if !suffix && !model_calls_ended {
         write_model_calls_end(&mut file, version, request_id, model_call_count)
             .await
             .map_err(SnapshotSpoolError::from_connection)
@@ -354,8 +407,11 @@ pub(super) async fn spool_transcript(
         ServerMessage::TranscriptSnapshotEnd {
             session_id,
             cursor,
-            turn_count: CanonicalU64::new(summary.turn_count()),
-            entry_count: CanonicalU64::new(summary.entry_count()),
+            turn_count: CanonicalU64::new(emitted_turn_count),
+            entry_count: CanonicalU64::new(emitted_entry_count),
+            frontier: summary
+                .frontier()
+                .map(|frontier| wire_uuid(frontier.into_uuid())),
         },
     )
     .await

@@ -11,6 +11,9 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let response = match error {
+        ProcessReadError::ResyncRequired => {
+            ProtocolError::without_detail(ErrorCode::ResyncRequired)
+        }
         ProcessReadError::Database(_) => ProtocolError::without_detail(ErrorCode::Unavailable),
         ProcessReadError::Corruption(_) => internal_protocol_error(
             session_id.map(CanonicalUuid::into_uuid),

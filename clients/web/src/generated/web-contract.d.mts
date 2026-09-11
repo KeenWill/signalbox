@@ -331,6 +331,8 @@ export type WebSessionRate = {
   readonly turn_count: WebU64;
 };
 
+export type WebSessionSupervisionClass = "infrastructure" | "commit_ambiguous" | "corruption" | "identity_collision" | "bug";
+
 export type WebSessionTimelineDetail = {
   readonly address: WebTimelineAddress;
   readonly body: WebSessionTimelineDetailBody;
@@ -990,6 +992,11 @@ export type WebSessionTimelineDescriptor = {
 } | null;
   readonly session_id: WebSessionId;
   readonly sizes: WebSessionTimelineSizeFacts;
+  readonly supervision: {
+  readonly cause_code: string;
+  readonly class: WebSessionSupervisionClass;
+  readonly pending: boolean;
+} | null;
   readonly work: WebSessionWorkFacts;
   readonly workspace_root_kind: "derived" | "configured" | "provisioned" | null;
 };

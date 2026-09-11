@@ -216,9 +216,10 @@ member with an unreleased chain exclusion.
 A successful reload that changes a member's Codex-home path releases its
 authentication and provider-internal exclusions for already parked turns and
 grants their waits eligibility in the receipt transaction. Replay releases
-nothing again. Unchanged profiles, time passage, and restart do not release
-authentication exclusions. A successful nonempty capacity observation newer than
-a provider-internal exclusion releases that exclusion and grants the parked wait
+nothing again. The prior home directory need not remain available for delivery.
+Unchanged profiles, time passage, and restart do not release authentication
+exclusions. A successful nonempty capacity observation newer than a
+provider-internal exclusion releases that exclusion and grants the parked wait
 eligibility in the same transaction. Empty or stale observations do not release
 it. The existing capacity reconciliation loop reads the current profile catalog
 and also probes network-excluded members; it introduces no separate timer or

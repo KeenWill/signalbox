@@ -1115,6 +1115,7 @@ async fn assert_pending_approval(
     connection
         .send(ClientRequest::ReadTranscript {
             session_id: session,
+            after_frontier: None,
         })
         .await?;
     let start = connection.response_within().await?;
