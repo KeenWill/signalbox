@@ -626,16 +626,17 @@ the hint until a full nudge buffer has capacity.
 
 The workflow family exposes `workflow_list`, `workflow_read`, `workflow_start`,
 `workflow_stop`, `workflow_replay` and `workflow_register`. List and read
-default to automatic approval; mutations default to delegated approval. Each
-template's `workflow_tools` operation entry selects `auto`, `delegated` or
-`human` posture. List, read and stop require `enabled = true`; start, replay and
-register require `names`, an exact registration-name list or `"*"`. Absent
-grants refuse with `workflow_grant_denied`, retained as an ordinary typed tool
-failure independently of approval. Policy resolves through the session's
-retained template name in the reloadable catalog; each proposed call freezes its
-posture. The judge receives the configured operation grant alongside the
-ordinary request context. [Workflows](workflows.md) owns run views, registration
-and mutation receipts.
+default to automatic approval and are effect-free; mutations default to
+delegated approval. Each template's `workflow_tools` operation entry selects
+`auto`, `delegated` or `human` posture. List, read and stop require
+`enabled = true`; start, replay and register require `names`, an exact
+registration-name list or `"*"`. Absent grants refuse with
+`workflow_grant_denied`, retained as an ordinary typed tool failure
+independently of approval. Policy resolves through the session's retained
+template name in the reloadable catalog; each proposed call freezes its posture.
+The judge receives the configured operation grant alongside the ordinary request
+context. [Workflows](workflows.md) owns run views, registration and mutation
+receipts.
 
 ## Planned
 

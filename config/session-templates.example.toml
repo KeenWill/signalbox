@@ -1,8 +1,8 @@
 # Signalbox daemon session-template configuration, version 1.
 #
 # Ordinary templates and the optional review library share this one catalog.
-# A template copies its complete bundle into each new session; increasing a
-# source version or changing content affects only later creations.
+# Session defaults are copied at creation. Workflow grants resolve from the
+# current catalog; workflow approval posture freezes per proposed call.
 version = 1
 
 # This merge-forward template uses the least-expensive "haiku" alias from

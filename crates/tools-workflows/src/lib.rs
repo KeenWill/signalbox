@@ -360,21 +360,19 @@ impl ToolArgumentValidator for Validator {
 pub fn catalog() -> Result<CompiledToolCatalog, ConstructionError> {
     let detail = ToolExecutionErrorDetail::try_new("invalid workflow arguments".into())
         .map_err(|_| ConstructionError)?;
-    fn definition<C: ToolContract>()
-    -> Result<signalbox_application::ToolDefinition, ConstructionError> {
-        compile_contract_definition::<C>(
-            ToolPermissionDefault::Auto,
-            ToolEffectClass::ExternalEffect,
-        )
-        .map_err(|_| ConstructionError)
+    fn definition<C: ToolContract>(
+        effect: ToolEffectClass,
+    ) -> Result<signalbox_application::ToolDefinition, ConstructionError> {
+        compile_contract_definition::<C>(ToolPermissionDefault::Auto, effect)
+            .map_err(|_| ConstructionError)
     }
     let definitions = [
-        definition::<ListContract>()?,
-        definition::<ReadContract>()?,
-        definition::<StartContract>()?,
-        definition::<StopContract>()?,
-        definition::<ReplayContract>()?,
-        definition::<RegisterContract>()?,
+        definition::<ListContract>(ToolEffectClass::EffectFree)?,
+        definition::<ReadContract>(ToolEffectClass::EffectFree)?,
+        definition::<StartContract>(ToolEffectClass::ExternalEffect)?,
+        definition::<StopContract>(ToolEffectClass::ExternalEffect)?,
+        definition::<ReplayContract>(ToolEffectClass::ExternalEffect)?,
+        definition::<RegisterContract>(ToolEffectClass::ExternalEffect)?,
     ];
     let compiled = definitions
         .into_iter()
@@ -434,6 +432,43 @@ impl<Port: WorkflowPort> ToolExecutor for WorkflowExecutor<Port> {
 mod tests {
     use super::*;
     use signalbox_application::ToolCatalog;
+    #[test]
+    fn lost_workflow_reads_end_as_known_failures() {
+        use signalbox_domain::{
+            ReconstitutedToolAttempt, SessionId, ToolAttemptCrashOutcome, ToolAttemptEnd,
+            ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+            ToolDispatchGeneration, ToolExecutionErrorKind, ToolRequestId, TurnAttemptId, TurnId,
+        };
+        let catalog = catalog().unwrap();
+        for name in ["workflow_list", "workflow_read"] {
+            let name = signalbox_domain::ToolName::try_new(name.to_owned()).unwrap();
+            let definition = catalog.definition(&name).unwrap();
+            // Synthetic identities for one retained in-flight attempt.
+            let retained = ToolAttemptReconstitutionInput::new(
+                ToolAttemptId::from_uuid(Uuid::from_u128(1)),
+                ToolRequestId::from_uuid(Uuid::from_u128(2)),
+                SessionId::from_uuid(Uuid::from_u128(3)),
+                TurnId::from_uuid(Uuid::from_u128(4)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(5)),
+                definition.effect_class(),
+                ToolDispatchGeneration::first(),
+                ToolAttemptReconstitutionState::InFlight,
+            )
+            .reconstitute()
+            .unwrap();
+            let ReconstitutedToolAttempt::Current(attempt) = retained else {
+                panic!("the retained read is in flight");
+            };
+            let ToolAttemptCrashOutcome::KnownFailed(ended) = attempt.classify_crash_loss() else {
+                panic!("a lost read cannot have an ambiguous external effect");
+            };
+            assert!(matches!(
+                ended.end(),
+                ToolAttemptEnd::KnownFailed { error }
+                    if error.kind() == ToolExecutionErrorKind::CrashLost
+            ));
+        }
+    }
     #[test]
     fn target_grants_never_authorize_another_name_or_operation() {
         let policy: WorkflowPolicy = serde_json::from_str(
