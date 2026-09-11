@@ -468,7 +468,8 @@ identity and digest. The activation transaction captures each repository's
 current event tail and retains it for idempotent replay. Before replay activates
 any retained effects, startup validates the retained reloadable snapshot
 together with the on-disk startup-only sections; incompatibility fails startup
-and leaves the intent pending. Startup replays any undelivered intent from its
+and leaves the intent pending. Reloadable sections from the file are not
+validated independently. Startup replays any undelivered intent from its
 retained payload even if the configuration files changed, before terminalizing
 its claim.
 
