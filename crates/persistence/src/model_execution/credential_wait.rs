@@ -43,7 +43,7 @@ fn member_deadline(exclusions: &[Candidate]) -> Option<i64> {
         .max()
 }
 
-fn selects_wait(members: &[Vec<Candidate>]) -> bool {
+fn selects_wait(members: &[Vec<Candidate>], authentication: &HashSet<Uuid>) -> bool {
     members.iter().all(|exclusions| !exclusions.is_empty())
         && members.iter().any(|exclusions| {
             !exclusions.is_empty()
@@ -57,7 +57,9 @@ fn selects_wait(members: &[Vec<Candidate>]) -> bool {
                         CredentialPoolExclusion::MembershipExclusion { record_generation } => {
                             record_generation.unwrap_or(0) > 0 || exclusion.action.is_none()
                         }
-                        CredentialPoolExclusion::ChainExclusion { .. } => false,
+                        CredentialPoolExclusion::ChainExclusion {
+                            predecessor_model_call_id,
+                        } => authentication.contains(predecessor_model_call_id),
                         CredentialPoolExclusion::TransientExclusion { .. }
                         | CredentialPoolExclusion::HeadroomReserve { .. } => true,
                     })
@@ -85,13 +87,35 @@ pub(super) async fn admission_snapshot(
         &excluded.headroom,
     )
     .await?;
+    let authentication = authentication_exclusions(connection, session, turn, true).await?;
     Ok(
-        (!bounded.is_empty() || selects_wait(&members)).then_some(WaitSnapshot {
+        (!bounded.is_empty() || selects_wait(&members, &authentication)).then_some(WaitSnapshot {
             members,
             target,
             bounded,
         }),
     )
+}
+
+async fn authentication_exclusions(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    require_registered: bool,
+) -> Result<HashSet<Uuid>, ModelCallRepositoryError> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "SELECT predecessor_model_call_id FROM credential_pool_chain_exclusion chain
+         WHERE session_id = $1 AND turn_id = $2 AND cause_kind = 'credential_rejected'
+           AND (NOT $3 OR EXISTS (SELECT 1 FROM credential_invocation_capacity capacity
+               WHERE capacity.profile = chain.credential_reference AND capacity.registered))",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(require_registered)
+    .fetch_all(connection)
+    .await?
+    .into_iter()
+    .collect())
 }
 
 pub(super) async fn park_initial(
@@ -185,9 +209,11 @@ pub(crate) async fn load_phase(
         .iter()
         .filter_map(|member| member_deadline(member))
         .min();
+    let authentication = authentication_exclusions(connection, session, turn, false).await?;
     if deadline.map(|deadline| deadline.unix_timestamp_nanos() / 1_000_000)
         != expected.map(i128::from)
-        || (cause == CredentialAvailabilityWaitCause::Exhausted && !selects_wait(&members))
+        || (cause == CredentialAvailabilityWaitCause::Exhausted
+            && !selects_wait(&members, &authentication))
     {
         return Err(
             ModelCallCorruption::Inconsistent("credential wait evidence and deadline").into(),
@@ -629,13 +655,13 @@ mod tests {
         ]];
         assert_eq!(member_deadline(&members[0]), None);
         assert!(
-            selects_wait(&members),
+            selects_wait(&members, &HashSet::new()),
             "an operator can clear the quarantine"
         );
     }
 
     #[test]
-    fn credential_pool_wait_chain_exclusions_never_qualify_for_park() {
+    fn only_authentication_chain_exclusions_qualify_for_profile_change_wait() {
         let members = vec![vec![
             transient(30),
             Candidate {
@@ -647,13 +673,17 @@ mod tests {
                 reset: None,
             },
         ]];
-        assert!(!selects_wait(&members));
+        assert!(!selects_wait(&members, &HashSet::new()));
+        assert!(selects_wait(&members, &HashSet::from([Uuid::from_u128(2)])));
         assert_eq!(member_deadline(&members[0]), None);
     }
 
     #[test]
     fn credential_pool_wait_requires_exhaustion_of_every_member() {
-        assert!(!selects_wait(&[vec![transient(30)], vec![]]));
-        assert!(!selects_wait(&[]));
+        assert!(!selects_wait(
+            &[vec![transient(30)], vec![]],
+            &HashSet::new()
+        ));
+        assert!(!selects_wait(&[], &HashSet::new()));
     }
 }

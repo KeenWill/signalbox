@@ -48,11 +48,6 @@ match reviews, completed checks and mergeability changes. The example
 `merge-forward` template instructs the session to reply without editing unless
 the metadata tool reports `mergeable: false`.
 
-The example `merge-forward` template instructs the session to stop on a
-`git_push_configured` `MergeDroppedBaseChanges` refusal, leave the conflict
-visible, and reply once naming the files reported by the base-hunk preservation
-check in [tool-loop](tool-loop.md).
-
 The module schema contains seventeen tables:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A
@@ -489,12 +484,13 @@ repair, validation, commit, push with `git_push_configured`, replies naming the
 commit, and thread resolution; a stored observation with no unresolved threads
 instead requests a one-turn mergeability and gating-check convergence check, a
 plain pull request reply, and a clean finish. `renovate-merge-forward` requests
-merging the base forward, resolving only conflicts, validating, committing,
-pushing, and reporting the result. Push instructions require the same configured
-authority as `git_push_configured`: a configured push credential file, a GitHub
-HTTPS destination with a `github_app` credential profile, or an SSH destination
-with an available host agent on Linux, and a head in the watched repository.
-Without that authority, kickoff states that push is unavailable and requests a
+merging the base forward, resolving conflicts and integration errors caused by
+combining the branches, validating, committing, pushing, and reporting the
+result. Push instructions require the same configured authority as
+`git_push_configured`: a configured push credential file, a GitHub HTTPS
+destination with a `github_app` credential profile, or an SSH destination with
+an available host agent on Linux, and a head in the watched repository. Without
+that authority, kickoff states that push is unavailable and requests a
 reviewable diff in a plain pull request reply, leaving unresolved threads open
 for the owner to apply the diff. The publication instruction is retained with
 the kickoff command identity and remains unchanged on replay.
