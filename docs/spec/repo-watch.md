@@ -174,7 +174,8 @@ observation, last poll start and outcome, last newly accepted webhook delivery,
 and events recorded in the current process. Poll evidence includes
 webhook-triggered fetches. These measurements reset at process startup and
 survive configuration reloads; replayed events and deliveries do not advance
-their counts or delivery timestamp.
+their counts or delivery timestamp. Daemon tracing records available GitHub
+quota response headers: resource, limit, used, remaining and reset time.
 
 The module's repository task serializes polling and webhook wakes. Poll
 intervals are start-to-start; a wake received during an attempt waits for that
