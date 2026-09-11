@@ -293,7 +293,7 @@ final class ProcessProtocolTests: XCTestCase {
 
     XCTAssertEqual(
       String(decoding: encoded, as: UTF8.self),
-      #"{"request":{"session_id":"\#(sessionID)","type":"read_transcript"},"request_id":"7","version":1}"#
+      #"{"request":{"after_frontier":null,"session_id":"\#(sessionID)","type":"read_transcript"},"request_id":"7","version":1}"#
     )
   }
 

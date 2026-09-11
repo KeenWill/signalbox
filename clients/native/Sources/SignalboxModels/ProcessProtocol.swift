@@ -650,6 +650,7 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     case .readTranscript(let sessionID):
       try container.encode("read_transcript", forKey: "type")
       try container.encode(sessionID, forKey: "session_id")
+      try container.encodeNil(forKey: "after_frontier")
     case .followSession(let sessionID):
       try container.encode("follow_session", forKey: "type")
       try container.encode(sessionID, forKey: "session_id")

@@ -3893,6 +3893,7 @@ async fn assert_projected_origin(
         RequestId::try_new(1)?,
         ClientRequest::ReadTranscript {
             session_id: CanonicalUuid::from_uuid(session.into_uuid()),
+            after_frontier: None,
         },
     )?;
     writer.write_all(&encode_client_line(&request)?).await?;

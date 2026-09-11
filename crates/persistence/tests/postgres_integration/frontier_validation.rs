@@ -1,5 +1,7 @@
 use std::error::Error;
 
+use signalbox_domain::{ContextFrontierId, SessionId};
+use signalbox_persistence::process_read::{ProcessReadError, ProcessReadRepository};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -202,6 +204,132 @@ async fn insert_deep_frontier_fixture(pool: &PgPool) -> Result<FrontierFixture, 
         divergent,
         equivalent,
     })
+}
+
+async fn install_process_read_latest_frontier(
+    pool: &PgPool,
+    fixture: &FrontierFixture,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql("ALTER TABLE context_compaction DISABLE TRIGGER ALL;")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO context_compaction
+            (context_compaction_id, session_id, predecessor_compaction_id,
+             source_frontier_id, result_frontier_id, producing_call_id,
+             first_source_session_id, first_entry_id,
+             through_source_session_id, through_entry_id, summary_entry_id)
+         VALUES (
+            $1, $2, NULL, $3, $4, $5,
+            $2, md5('entry-1')::uuid,
+            $2, md5('entry-900')::uuid, md5('entry-1')::uuid
+         )",
+    )
+    .bind(Uuid::from_u128(0xf604_1001))
+    .bind(fixture.session)
+    .bind(fixture.prefix)
+    .bind(fixture.checked)
+    .bind(Uuid::from_u128(0xf604_1002))
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE context_compaction ENABLE TRIGGER ALL;")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn assert_transcript_suffix_requires_resync(
+    pool: &PgPool,
+    session: Uuid,
+    after_frontier: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    let mut reader = ProcessReadRepository::new(pool.clone())
+        .open_transcript_after(
+            SessionId::from_uuid(session),
+            Some(ContextFrontierId::from_uuid(after_frontier)),
+        )
+        .await?
+        .ok_or_else(|| std::io::Error::other("the transcript fixture session must exist"))?;
+    loop {
+        match reader.next_item().await {
+            Err(ProcessReadError::ResyncRequired) => return Ok(()),
+            Err(error) => {
+                return Err(std::io::Error::other(format!(
+                    "invalid acknowledgement returned {error:?} instead of resync-required"
+                ))
+                .into());
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(std::io::Error::other(
+                    "invalid acknowledgement completed a transcript suffix",
+                )
+                .into());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stale_transcript_frontier_requires_resynchronization() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = insert_deep_frontier_fixture(&pool).await?;
+    install_process_read_latest_frontier(&pool, &fixture).await?;
+    let stale_frontier = Uuid::from_u128(0xf604_2001);
+
+    assert_transcript_suffix_requires_resync(&pool, fixture.session, stale_frontier).await?;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn foreign_session_transcript_frontier_requires_resynchronization()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = insert_deep_frontier_fixture(&pool).await?;
+    install_process_read_latest_frontier(&pool, &fixture).await?;
+    let foreign_session = insert_outbox_session_fixture(&pool, 0xf606).await?;
+    let foreign_frontier = Uuid::from_u128(0xf606_0001);
+    sqlx::raw_sql("ALTER TABLE context_frontier DISABLE TRIGGER ALL;")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count,
+             prefix_context_frontier_id)
+         VALUES ($1, $2, 0, NULL)",
+    )
+    .bind(foreign_session)
+    .bind(foreign_frontier)
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE context_frontier ENABLE TRIGGER ALL;")
+        .execute(&pool)
+        .await?;
+
+    assert_transcript_suffix_requires_resync(&pool, fixture.session, foreign_frontier).await?;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn nonprefix_transcript_frontier_requires_resynchronization() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = insert_deep_frontier_fixture(&pool).await?;
+    install_process_read_latest_frontier(&pool, &fixture).await?;
+
+    assert_transcript_suffix_requires_resync(&pool, fixture.session, fixture.divergent).await?;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
