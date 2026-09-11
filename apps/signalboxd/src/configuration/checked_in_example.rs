@@ -121,18 +121,15 @@ fn example_watch_rules_dispatch_unlabeled_agent_openings() {
         .repository_watch()
         .expect("repository watch")
         .rules();
-    for branch in ["agent/stack-child"] {
-        let event = stacked_opening(branch, Vec::new());
-        let matched = matching_rules(rules, &event);
-        assert_eq!(
-            matched
-                .iter()
-                .map(|rule| rule.id().as_str())
-                .collect::<Vec<_>>(),
-            ["renovate-merge-forward", "labeled-review-response"],
-            "opening {branch}",
-        );
-    }
+    let event = stacked_opening("agent/stack-child", Vec::new());
+    let matched = matching_rules(rules, &event);
+    assert_eq!(
+        matched
+            .iter()
+            .map(|rule| rule.id().as_str())
+            .collect::<Vec<_>>(),
+        ["renovate-merge-forward", "labeled-review-response"],
+    );
 }
 
 #[test]
