@@ -20,7 +20,13 @@ use crate::{HubModelConfiguration, SessionTemplateConfiguration};
 use signalbox_persistence::convergence_sweep::PostgresConvergenceSweepStore;
 
 // The design admits these catalog sections; all other model-document keys are startup-only.
-const RELOADABLE_KEYS: [&str; 4] = ["models", "serving_targets", "aliases", "repository_watch"];
+const RELOADABLE_KEYS: [&str; 5] = [
+    "models",
+    "serving_targets",
+    "aliases",
+    "repository_watch",
+    "credential_profiles",
+];
 
 /// Complete immutable pair observed by one admitted request.
 #[derive(Clone, Debug)]
@@ -366,6 +372,8 @@ impl ConfigurationReload {
         on_disk: &str,
         snapshot: &str,
     ) -> Result<ConfigurationCatalogs, ReloadResult> {
+        let on_disk_models = HubModelConfiguration::parse(on_disk)
+            .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
         let snapshot: RetainedSnapshot = serde_json::from_str(snapshot)
             .map_err(|_| failure(ReloadPhase::Validate, "retained snapshot cannot be decoded"))?;
         let mut source = on_disk
@@ -389,6 +397,12 @@ impl ConfigurationReload {
         }
         let models = HubModelConfiguration::parse(&source.to_string())
             .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
+        if startup_sections(&models)? != startup_sections(&on_disk_models)? {
+            return Err(failure(
+                ReloadPhase::Validate,
+                "startup-only configuration differs",
+            ));
+        }
         let templates =
             SessionTemplateConfiguration::parse_snapshot(&snapshot.session_templates, &models)
                 .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
@@ -432,6 +446,10 @@ impl ConfigurationReload {
         mut replacement: ConfigurationCatalogs,
         recovering: bool,
     ) -> Result<ReloadLookup, ReloadRepositoryError> {
+        let prior = self.restore(&intent.prior_snapshot).map_err(|_| {
+            ReloadRepositoryError::Corruption("prior reload snapshot cannot be restored")
+        })?;
+        let changed_profiles = changed_codex_homes(&prior.models, &replacement.models);
         Arc::make_mut(&mut replacement.models).reuse_github_credentials(&self.catalogs().models);
         let prepared_watch = if let Some(watch) = &self.watch {
             let prepared = match watch.prepare_reload(replacement.clone()).await {
@@ -516,7 +534,7 @@ impl ConfigurationReload {
             watch.nudge_restored(restored).await;
         }
         self.repository
-            .finish(request, &ReloadResult::Reloaded)
+            .finish_profile_reload(request, &changed_profiles)
             .await?;
         Ok(ReloadLookup::Recorded(ReloadResult::Reloaded))
     }
@@ -694,8 +712,42 @@ pub(crate) fn validate_catalogs(catalogs: &ConfigurationCatalogs) -> Result<(), 
 fn startup_sections(models: &HubModelConfiguration) -> Result<toml::Table, ReloadResult> {
     let mut source: toml::Table = toml::from_str(models.source())
         .map_err(|_| failure(ReloadPhase::Validate, "model source is invalid"))?;
-    source.retain(|key, _| !RELOADABLE_KEYS.contains(&key));
+    source.retain(|key, _| key == "credential_profiles" || !RELOADABLE_KEYS.contains(&key));
+    if let Some(profiles) = source
+        .get_mut("credential_profiles")
+        .and_then(toml::Value::as_array_mut)
+    {
+        for profile in profiles {
+            if profile.get("delivery").and_then(toml::Value::as_str) == Some("codex_home")
+                && let Some(profile) = profile.as_table_mut()
+            {
+                profile.remove("codex_home");
+            }
+        }
+    }
     Ok(source)
+}
+
+fn changed_codex_homes(
+    prior: &HubModelConfiguration,
+    replacement: &HubModelConfiguration,
+) -> Vec<String> {
+    replacement
+        .credential_invocation_registrations()
+        .into_iter()
+        .filter_map(|(name, _)| {
+            use crate::credential_pools::CredentialDelivery::CodexHome;
+            match (
+                prior.credential_profile(&name)?.delivery(),
+                replacement.credential_profile(&name)?.delivery(),
+            ) {
+                (CodexHome { path: old, .. }, CodexHome { path: new, .. }) if old != new => {
+                    Some(name)
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 fn failure(phase: ReloadPhase, reason: &str) -> ReloadResult {
@@ -725,6 +777,60 @@ fn failure(phase: ReloadPhase, reason: &str) -> ReloadResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_home_replacement_survives_retained_reload_without_reloading_other_profile_fields() {
+        let homes = tempfile::tempdir().expect("synthetic profile homes");
+        let before_home = homes.path().join("before");
+        let after_home = homes.path().join("after");
+        std::fs::create_dir(&before_home).expect("initial home directory");
+        std::fs::create_dir(&after_home).expect("replacement home directory");
+        let before_path = before_home.to_str().expect("UTF-8 fixture path");
+        let after_path = after_home.to_str().expect("UTF-8 fixture path");
+        let source = crate::configuration::checked_in_example_configuration()
+            .expect("checked example")
+            .source()
+            .replace(
+                "\ndelivery = \"ambient\"\n",
+                &format!("\ndelivery = \"codex_home\"\ncodex_home = {before_path:?}\n"),
+            );
+        let replacement = source.replace(before_path, after_path);
+        let before = HubModelConfiguration::parse(&source).expect("initial home catalog");
+        let after = HubModelConfiguration::parse(&replacement).expect("replacement home catalog");
+        assert_eq!(startup_sections(&before), startup_sections(&after));
+        assert_eq!(changed_codex_homes(&before, &after), ["codex-ambient"]);
+        assert!(changed_codex_homes(&after, &after).is_empty());
+        let equivalent_path = homes.path().join("unused/../before");
+        let equivalent = source.replace(before_path, equivalent_path.to_str().unwrap());
+        let equivalent =
+            HubModelConfiguration::parse(&equivalent).expect("equivalent normalized home");
+        assert!(changed_codex_homes(&before, &equivalent).is_empty());
+        let identity_change = replacement.replace("codex-ambient", "another-codex-profile");
+        let identity_change =
+            HubModelConfiguration::parse(&identity_change).expect("other profile");
+        assert_ne!(
+            startup_sections(&before),
+            startup_sections(&identity_change)
+        );
+        let snapshot = ConfigurationCatalogs {
+            models: Arc::new(after),
+            templates: Arc::new(
+                SessionTemplateConfiguration::parse_snapshot("version = 1", &before)
+                    .expect("empty templates"),
+            ),
+        }
+        .retained()
+        .expect("retained replacement");
+        let restored = ConfigurationReload::startup_snapshot(
+            &source,
+            &serde_json::to_string(&snapshot).unwrap(),
+        )
+        .expect("home change restores from durable intent");
+        assert_eq!(
+            changed_codex_homes(&before, &restored.models),
+            ["codex-ambient"]
+        );
+    }
 
     #[test]
     fn failure_reasons_are_bounded_utf8_without_control_characters() {
