@@ -409,7 +409,8 @@ resumable only when its extended snapshot is a strict prefix-preserving
 extension of the turn's starting snapshot and its membership equals the checked
 semantic entries. An interrupt at a tool-result compaction checkpoint retains
 the recorded result entries and completed compaction boundaries without
-inserting the results again.
+inserting the results again; scheduling reconstitution validates the results
+before those retained boundaries.
 
 Every rendered message keeps its source-qualified semantic-entry reference and
 content-authority provenance; role and provenance derive from the entry itself,
