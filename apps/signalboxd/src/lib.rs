@@ -2948,9 +2948,13 @@ async fn execute_approval_judge(
         rendered_request.push_str(
             "\nDaemon-configured workflow operation grant (approval cannot widen this grant): ",
         );
-        rendered_request.push_str(
-            &serde_json::to_string(&authority.workflow.0.get(&operation)).unwrap_or_default(),
-        );
+        match authority.workflow.0.get(&operation) {
+            Some(grant) => {
+                rendered_request.push_str(&serde_json::to_string(grant).unwrap_or_default())
+            }
+            None => rendered_request
+                .push_str("No grant configured; this operation is denied at execution."),
+        }
     }
     let capability = match model
         .prepare(ApprovalJudgeModelRequest {

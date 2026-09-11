@@ -246,24 +246,23 @@ impl DaemonWorkflowPort {
                 WHERE entry.run_id = run.run_id AND (entry.frame_kind IN ('run_cancel','fault') OR (entry.frame_kind = 'answer' AND EXISTS (SELECT 1 FROM program_run_journal_entry AS request WHERE request.run_id = entry.run_id AND request.frame_kind = 'terminal' AND request.request_ordinal = entry.resolves_request_ordinal))) ORDER BY entry.journal_position LIMIT 1) AS terminal ON true
             WHERE ($1::uuid IS NULL OR run.run_id > $1) ORDER BY run.run_id")
             .bind(after).bind(session.into_uuid()).fetch(&self.policy.pool);
-        let mut output = json!({"runs":[],"next_after":null});
+        // Every cursor has the same encoded UUID width; reserve it before admitting rows.
+        let mut output = json!({"runs":[],"next_after":Uuid::nil().to_string()});
+        let mut encoded_bytes = output.to_string().len();
         let mut last = None;
         while let Some(row) = rows.try_next().await? {
             let run: Uuid = row.try_get("run_id")?;
             let item = json!({"run_id":run.to_string(),"registration_id":row.try_get::<Uuid,_>("registration_id")?.to_string(),"name":row.try_get::<String,_>("name")?,"revision":row.try_get::<String,_>("revision")?,"state":row.try_get::<String,_>("state")?,"started_at":row.try_get::<String,_>("started_at")?,"terminal_at":row.try_get::<Option<String>,_>("terminal_at")?,"own_run":row.try_get::<bool,_>("own_run")?});
+            let row_bytes = item.to_string().len() + usize::from(last.is_some());
+            if row_bytes > ToolResultText::MAX_UTF8_BYTES - encoded_bytes {
+                output["next_after"] = json!(last.ok_or(WorkflowToolError::ResultTooLarge)?);
+                return Ok(output);
+            }
+            encoded_bytes += row_bytes;
             output["runs"]
                 .as_array_mut()
                 .ok_or(WorkflowToolError::Contract)?
                 .push(item);
-            output["next_after"] = json!(run.to_string());
-            if !fits(&output) {
-                output["runs"]
-                    .as_array_mut()
-                    .ok_or(WorkflowToolError::Contract)?
-                    .pop();
-                output["next_after"] = json!(last.ok_or(WorkflowToolError::ResultTooLarge)?);
-                return Ok(output);
-            }
             last = Some(run.to_string());
         }
         output["next_after"] = Value::Null;

@@ -612,3 +612,141 @@ posture = "auto"
     assert_eq!(retained.for_session(created.session()).await?, replacement);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn workflow_list_pages_escaped_metadata_without_losing_runs() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::ToolResultText;
+    let (fixture, policy) =
+        workflow_fixture("[templates.workflow_tools.list]\nenabled = true").await?;
+    let (service, _runner) = WorkflowRuntime::new(fixture.pool.clone())?;
+    // Repeated escaped and multibyte text stays indexable while filling multiple result pages.
+    let name = "build-\\\"é".repeat(512);
+    let registration = ProgramRegistrationId::from_uuid(Uuid::now_v7());
+    service
+        .register_javascript(
+            registration,
+            ProgramRegistrationRequest {
+                name: name.clone(),
+                revision: "1".into(),
+                source: b"export default input => input;".to_vec(),
+                artifact: "export default input => input;".into(),
+                grants: ProgramGrants::new([]),
+            },
+        )
+        .await?;
+    let run_count = ToolResultText::MAX_UTF8_BYTES.div_ceil(name.len()) * 2;
+    let mut expected = Vec::new();
+    for _ in 0..run_count {
+        let run = ProgramRunId::from_uuid(Uuid::now_v7());
+        service.start(run, registration, &[]).await?;
+        expected.push(run.into_uuid().to_string());
+    }
+    expected.sort();
+    let mut port = DaemonWorkflowPort::new(policy.clone(), service, None);
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("workflow_list", "{}")]),
+            completion_script("listed"),
+        ],
+        signalbox_tools_workflows::catalog()?,
+        WorkflowExecutor(port.clone()),
+    );
+    execution
+        .with_workflow_tool_policy(policy)
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = retained_request(&fixture, fixture.request_ids().await?[0]).await?;
+    let mut page = continuation_result_json(&runtime)?;
+    let mut seen = Vec::new();
+    let mut pages = 0;
+    loop {
+        assert!(ToolResultText::try_new(page.to_string()).is_ok());
+        let runs = page["runs"].as_array().expect("page rows");
+        assert!(!runs.is_empty());
+        for run in runs {
+            assert_eq!(run["name"], name);
+            seen.push(run["run_id"].as_str().expect("run identity").to_owned());
+        }
+        assert!(
+            seen.len() <= expected.len(),
+            "pagination must make progress"
+        );
+        pages += 1;
+        let Some(cursor) = page["next_after"].as_str() else {
+            break;
+        };
+        assert_eq!(Some(cursor), seen.last().map(String::as_str));
+        let ToolExecutorEvidence::CompletedText(next) = port
+            .execute(
+                &request,
+                WorkflowRequest::List {
+                    after: Some(Uuid::parse_str(cursor)?),
+                },
+            )
+            .await?
+        else {
+            panic!("next page is a valid tool result")
+        };
+        let next: serde_json::Value = serde_json::from_str(&next)?;
+        let mut extended = page.clone();
+        extended["runs"]
+            .as_array_mut()
+            .expect("page rows")
+            .push(next["runs"][0].clone());
+        assert!(
+            ToolResultText::try_new(extended.to_string()).is_err(),
+            "the page accepts every row that fits with its cursor"
+        );
+        page = next;
+    }
+    assert!(pages > 1);
+    assert_eq!(seen, expected);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn workflow_judge_sees_an_explicit_absent_grant_and_cannot_widen_it()
+-> Result<(), Box<dyn Error>> {
+    let (fixture, policy) = workflow_fixture("").await?;
+    let (service, _runner) = WorkflowRuntime::new(fixture.pool.clone())?;
+    let (execution, runtime, judge) = fixture.execution_with_judge(
+        [
+            tool_use_script(&[(
+                "workflow_start",
+                r#"{"name":"build","revision":"1","input":[]}"#,
+            )]),
+            completion_script("denied"),
+        ],
+        approval_judge_script("approve", "Approval cannot supply the missing grant."),
+        signalbox_tools_workflows::catalog()?,
+        WorkflowExecutor(DaemonWorkflowPort::new(policy.clone(), service, None)),
+    );
+    execution
+        .with_workflow_tool_policy(policy)
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let operations = judge.received_operations();
+    assert_eq!(operations.len(), 1);
+    let input = operations[0]
+        .messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            MessagePart::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(input.contains("No grant configured; this operation is denied at execution."));
+    assert_eq!(
+        continuation_result_json(&runtime)?,
+        serde_json::json!({"error":{"kind":"execution_failed","detail":"workflow_grant_denied"}})
+    );
+    let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM program_run_registration")
+        .fetch_one(&fixture.pool)
+        .await?;
+    assert_eq!(runs, 0);
+    Ok(())
+}
