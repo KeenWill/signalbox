@@ -81,6 +81,9 @@ pub enum ProcessReadCorruption {
 /// PostgreSQL failure or fail-closed projection corruption.
 #[derive(Debug)]
 pub enum ProcessReadError {
+    #[error("transcript acknowledgement requires resynchronization")]
+    /// The acknowledged semantic frontier cannot prefix the current transcript.
+    ResyncRequired,
     #[error("process read database operation failed")]
     /// PostgreSQL could not complete the repeatable-read transaction.
     Database(#[source] sqlx::Error),

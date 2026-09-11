@@ -4002,7 +4002,14 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     let snapshot = |source: &str| -> Result<String, Box<dyn Error>> {
         let mut document = source.parse::<toml_edit::DocumentMut>()?;
         document.as_table_mut().retain(|key, _| {
-            ["models", "serving_targets", "aliases", "repository_watch"].contains(&key)
+            [
+                "models",
+                "serving_targets",
+                "aliases",
+                "repository_watch",
+                "credential_profiles",
+            ]
+            .contains(&key)
         });
         Ok(serde_json::json!({"model_catalog":document.to_string(), "session_templates":templates_source}).to_string())
     };

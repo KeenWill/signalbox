@@ -889,6 +889,7 @@ pub struct ProcessTranscriptSummary {
     pub(super) turn_count: u64,
     pub(super) model_call_count: u64,
     pub(super) entry_count: u64,
+    pub(super) frontier: Option<signalbox_domain::ContextFrontierId>,
 }
 
 impl ProcessTranscriptSummary {
@@ -915,5 +916,10 @@ impl ProcessTranscriptSummary {
     /// Returns the exact number of yielded semantic entries.
     pub const fn entry_count(&self) -> u64 {
         self.entry_count
+    }
+
+    /// Returns the completed semantic frontier, or none for an empty transcript.
+    pub const fn frontier(&self) -> Option<signalbox_domain::ContextFrontierId> {
+        self.frontier
     }
 }

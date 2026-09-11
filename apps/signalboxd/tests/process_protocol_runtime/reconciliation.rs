@@ -268,7 +268,10 @@ async fn reconcile_turn_releases_a_wedged_ambiguous_session() -> Result<(), Box<
         .request_version(
             ProtocolVersion::One,
             5,
-            ClientRequest::ReadTranscript { session_id },
+            ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
         )
         .await?;
     let start = response_within(&mut connection).await?;

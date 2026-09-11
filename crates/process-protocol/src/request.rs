@@ -340,10 +340,13 @@ pub enum ClientRequest {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         through_position: Option<CanonicalU64>,
     },
-    /// Read one durable transcript snapshot.
+    /// Read one durable transcript snapshot or the suffix after an acknowledged frontier.
     ReadTranscript {
         /// Target session.
         session_id: CanonicalUuid,
+        /// Exclusive semantic frontier of the last fully consumed transcript snapshot.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        after_frontier: Option<CanonicalUuid>,
     },
     /// Read a snapshot and follow later durable updates.
     FollowSession {

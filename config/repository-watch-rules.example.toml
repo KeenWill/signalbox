@@ -1,33 +1,32 @@
+# Agent pull requests enter repository watch without a label.
 [[repository_watch.rules]]
 id = "renovate-merge-forward"
-version = 5
+version = 6
 singleton_per = "pull_request"
-cooldown_seconds = 1800
+cooldown_seconds = 600
 [repository_watch.rules.matcher]
-event_kinds = ["mergeable_state_changed", "head_changed"]
+event_kinds = ["pull_request_opened", "mergeable_state_changed"]
 repo = "KeenWill/signalbox"
-base_branch = "main"
-author = "renovate[bot]"
-head_branch_regex = "^renovate/.+$"
+head_branch_regex = "^agent/.+$"
 draft = false
-[repository_watch.rules.matcher.mergeable_state]
-any_of = ["conflicting"]
+[repository_watch.rules.matcher.labels]
+none_of = ["no-auto"]
 [[repository_watch.rules.actions]]
 kind = "dispatch_session"
 template = "merge-forward"
-# Rule B: PRs the owner or coordinator labels `repo-watch` get one review-response session per PR when checks finish, the head moves or mergeability changes, at most every 30 min.
+
 [[repository_watch.rules]]
 id = "labeled-review-response"
-version = 6
+version = 7
 singleton_per = "pull_request"
-cooldown_seconds = 1800
+cooldown_seconds = 300
 [repository_watch.rules.matcher]
-event_kinds = ["checks_completed", "head_changed", "mergeable_state_changed"]
+event_kinds = ["pull_request_opened", "review_submitted", "checks_completed"]
 repo = "KeenWill/signalbox"
-base_branch = "main"
+head_branch_regex = "^agent/.+$"
 draft = false
 [repository_watch.rules.matcher.labels]
-all_of = ["repo-watch"]
+none_of = ["no-auto"]
 [[repository_watch.rules.actions]]
 kind = "dispatch_session"
 template = "review-response-sol"

@@ -182,6 +182,7 @@ const useCatalogFixture = async (page: Page) => {
     return route.fulfill({
       json: {
         session_id: sessionId,
+        supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
         sizes: {
