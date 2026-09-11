@@ -297,4 +297,5 @@ pre-call exhaustion state and live event.
 
 ## Planned
 
-None.
+Network-unavailable pool waits and existing observation wakes are designed in
+[network pool recovery](../design/network-pool-recovery.md).
