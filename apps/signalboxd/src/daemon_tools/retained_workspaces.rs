@@ -79,6 +79,17 @@ impl<Executors: Clone + RetainedInFlight> SessionWorkspaceState<Executors> {
         })
     }
 
+    pub(super) fn refuses_configured_workspace_sharing(
+        &self,
+        roots: &SessionWorkspaceRoots,
+        session: SessionId,
+        pinned: ComposedWorkspaceIdentity,
+        standing: ComposedWorkspaceIdentity,
+    ) -> bool {
+        self.refuses_shared_workspace(roots, session, pinned)
+            || self.refuses_shared_workspace(roots, session, standing)
+    }
+
     pub(super) const fn new() -> Self {
         Self {
             bindings: BTreeMap::new(),

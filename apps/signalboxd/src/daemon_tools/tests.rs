@@ -6486,16 +6486,21 @@ fn a_composition_nested_in_its_parent_is_admitted() {
 fn a_configured_request_refuses_a_derived_binding_reaching_the_configured_root() {
     let first = session(FIRST_SESSION_IDENTITY);
     let second = session(SECOND_SESSION_IDENTITY);
-    let bindings = BTreeMap::from([(
+    let parent = tempfile::tempdir().expect("fixture parent exists");
+    let configured = configured_workspace(parent.path());
+    let roots = derivation(&configured);
+    provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+    let mut state = retained_workspaces::SessionWorkspaceState::<RetainedFixture>::new();
+    state.bindings.insert(
         first,
         RecordedSessionBinding::DerivedRoot {
             identity: FIXTURE_SHARES_CONFIGURED_STANDING_IDENTITY,
             parent: FIXTURE_PARENT_IDENTITY,
         },
-    )]);
+    );
 
-    assert!(a_derived_binding_shares_the_configured_root(
-        &bindings,
+    assert!(state.refuses_configured_workspace_sharing(
+        &roots,
         second,
         FIXTURE_BOUND_IDENTITY,
         FIXTURE_CONFIGURED_STANDING_IDENTITY
@@ -6508,19 +6513,48 @@ fn a_configured_request_refuses_a_derived_binding_reaching_the_configured_root()
 fn a_configured_request_admits_an_isolated_derived_binding() {
     let first = session(FIRST_SESSION_IDENTITY);
     let second = session(SECOND_SESSION_IDENTITY);
-    let bindings = BTreeMap::from([(
+    let parent = tempfile::tempdir().expect("fixture parent exists");
+    let configured = configured_workspace(parent.path());
+    let roots = derivation(&configured);
+    provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+    let mut state = retained_workspaces::SessionWorkspaceState::<RetainedFixture>::new();
+    state.bindings.insert(
         first,
         RecordedSessionBinding::DerivedRoot {
             identity: FIXTURE_OTHER_IDENTITY,
             parent: FIXTURE_PARENT_IDENTITY,
         },
-    )]);
+    );
 
-    assert!(!a_derived_binding_shares_the_configured_root(
-        &bindings,
+    assert!(!state.refuses_configured_workspace_sharing(
+        &roots,
         second,
         FIXTURE_BOUND_IDENTITY,
         FIXTURE_CONFIGURED_STANDING_IDENTITY
+    ));
+}
+
+#[test]
+fn a_removed_workspace_does_not_reserve_a_recycled_configured_administration_inode() {
+    let parent = tempfile::tempdir().expect("fixture parent exists");
+    let configured = configured_workspace(parent.path());
+    let roots = derivation(&configured);
+    let previous = session(FIRST_SESSION_IDENTITY);
+    let configured_session = session(SECOND_SESSION_IDENTITY);
+    let mut state = retained_workspaces::SessionWorkspaceState::<RetainedFixture>::new();
+    state.bindings.insert(
+        previous,
+        RecordedSessionBinding::DerivedRoot {
+            identity: FIXTURE_SHARES_CONFIGURED_STANDING_IDENTITY,
+            parent: FIXTURE_PARENT_IDENTITY,
+        },
+    );
+
+    assert!(!state.refuses_configured_workspace_sharing(
+        &roots,
+        configured_session,
+        FIXTURE_BOUND_IDENTITY,
+        FIXTURE_CONFIGURED_STANDING_IDENTITY,
     ));
 }
 
