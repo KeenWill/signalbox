@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Exercise complete-inventory and independent judge-result admission."""
 
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from review_judge_eval import run_trials, validate_result
+from review_judge_eval import git, prepare_checkout, run_trials, validate_result
 
 
 class JudgmentResultTests(unittest.TestCase):
@@ -34,6 +38,50 @@ class JudgmentResultTests(unittest.TestCase):
         }]}
         with self.assertRaisesRegex(ValueError, "one through five"):
             validate_result(result, ["candidate"])
+
+
+class ScratchCheckoutTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        self.repository = root / "repository"
+        self.repository.mkdir()
+        self.workspace = root / "workspace"
+        git(self.repository, "init", "--initial-branch=main")
+        self.head = self.commit("first")
+
+    def commit(self, text):
+        (self.repository / "source.txt").write_text(text)
+        git(self.repository, "add", "source.txt")
+        git(self.repository, "-c", "user.name=Judge fixture", "-c",
+            "user.email=judge@example.com", "commit", "-m", text)
+        return git(self.repository, "rev-parse", "HEAD")
+
+    def test_concurrent_cases_and_later_runs_reuse_one_checkout(self):
+        with ThreadPoolExecutor(max_workers=4) as workers:
+            trees = list(workers.map(lambda _: prepare_checkout(
+                self.repository, self.workspace, self.head), range(8)))
+        later = prepare_checkout(self.repository, self.workspace, self.head)
+        self.assertEqual(set(trees), {later})
+        self.assertEqual((later / "source.txt").read_text(), "first")
+        registrations = git(self.repository, "worktree", "list", "--porcelain")
+        self.assertEqual(registrations.count("worktree "), 2)
+
+    def test_different_heads_preserve_their_own_source(self):
+        first = prepare_checkout(self.repository, self.workspace, self.head)
+        next_head = self.commit("second")
+        second = prepare_checkout(self.repository, self.workspace, next_head)
+        self.assertNotEqual(first, second)
+        self.assertEqual((first / "source.txt").read_text(), "first")
+        self.assertEqual((second / "source.txt").read_text(), "second")
+
+    def test_changed_shared_source_is_rejected_without_resetting_it(self):
+        tree = prepare_checkout(self.repository, self.workspace, self.head)
+        (tree / "source.txt").write_text("changed by a case")
+        with self.assertRaises(subprocess.CalledProcessError):
+            prepare_checkout(self.repository, self.workspace, self.head)
+        self.assertEqual((tree / "source.txt").read_text(), "changed by a case")
 
 
 class TrialAdmissionTests(unittest.TestCase):
