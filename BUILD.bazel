@@ -52,6 +52,18 @@ filegroup(
 )
 
 py_test(
+    name = "test_bazel_scratch",
+    size = "small",
+    srcs = ["tooling/test_bazel_scratch.py"],
+    data = [
+        ".github/actions/setup-bazel/action.yml",
+        ".github/actions/setup-bazel/prepare-scratch.sh",
+    ],
+    main = "tooling/test_bazel_scratch.py",
+    deps = [requirement("PyYAML")],
+)
+
+py_test(
     name = "test_supervise_lifecycle",
     size = "small",
     srcs = ["tooling/test_supervise_lifecycle.py"],
@@ -83,6 +95,7 @@ py_test(
 test_suite(
     name = "python_checker_tests",
     tests = [
+        ":test_bazel_scratch",
         ":test_summarize_coverage",
         ":test_supervise_lifecycle",
         ":test_sweep_test_containers",
