@@ -162,6 +162,10 @@ independently of web-egress and tool-mapping policies. Optional
 `RUSTUP_TOOLCHAIN`; automatic toolchain installation is disabled, `CARGO_HOME`
 stays private and writable, and `npm_config_cache` is `/workspace/.npm`.
 
+Loss of sandbox supervision retains a supervision failure even when the dispatch
+capture is lost; an unconfirmed dispatch does not prove that the command never
+started.
+
 The optional `[tool_proposals]` table sets `max_requests` and
 `max_argument_bytes` to nonnegative integers or `"none"`, with defaults of 32
 and 1048576. Exceeding either cap produces the per-request errors in
