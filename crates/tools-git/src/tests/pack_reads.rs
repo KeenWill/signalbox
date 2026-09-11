@@ -10,8 +10,8 @@ use sha2::Sha256;
 use crate::arguments::LocalOperation;
 use crate::diff::diff_object_buffer;
 use crate::failure::LocalGitFailure;
-use crate::limits::MAX_OBJECT_BYTES;
 use crate::pinning::{PinnedObjectDatabase, PinnedRepository};
+use crate::tests::support::TEST_OBJECT_BYTES as MAX_OBJECT_BYTES;
 use crate::tests::support::{Fixture, Sha256Fixture, execute};
 
 #[test]
@@ -224,5 +224,49 @@ fn selected_object_reads_keep_the_packed_delta_dependency_bound() {
 
         assert_eq!(failure, LocalGitFailure::Operation, "{encoding:?}");
         assert_eq!(content, b"xx", "{encoding:?}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn deep_delta_chains_read_under_a_small_descriptor_limit() {
+    const CHILD: &str = "SIGNALBOX_TEST_DEEP_DELTA_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new("sh")
+            .args(["-c", "ulimit -n 128 && exec \"$@\"", "deep-delta-child"])
+            .arg(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tests::pack_reads::deep_delta_chains_read_under_a_small_descriptor_limit",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("descriptor-limited child starts");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    // 512 distinct layers exceed the child's 128-descriptor limit for either encoding.
+    let sizes: Vec<_> = (1..=512).collect();
+    for encoding in [DeltaEncoding::Offset, DeltaEncoding::Reference] {
+        let fixture = Fixture::new();
+        let target = plant_delta_chain(fixture.root(), encoding, &sizes);
+        let executor = fixture.executor();
+        let authority = &executor.repository_authority;
+        let repository = authority.open_repository_shell().expect("private shell");
+        repository
+            .capture_objects_on_read(authority)
+            .expect("selected source");
+        let content = diff_object_buffer(&repository, target, 0o100644)
+            .expect("deep delta reads with bounded descriptors");
+        assert_eq!(content, vec![b'x'; 512], "{encoding:?}");
+        repository
+            .validate_selected_objects(authority)
+            .expect("pack remains bound");
     }
 }

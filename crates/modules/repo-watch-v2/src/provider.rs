@@ -17,8 +17,8 @@ use signalbox_session_ownership::{
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
     RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
-    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation, RepositorySlug, ReviewState,
+    ReviewThreadId, WorkflowName,
 };
 
 use crate::{
@@ -44,7 +44,12 @@ query RepositoryWatchReviewThreads($owner: String!, $name: String!, $number: Int
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
-        nodes { id isResolved }
+        nodes {
+          id
+          isResolved
+          resolvedBy { login }
+          comments(first: 1) { nodes { author { login } } }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -1021,14 +1026,33 @@ async fn fetch_threads(
         }
         let connection = &value["data"]["repository"]["pullRequest"]["reviewThreads"];
         for thread in value.admit(connection["nodes"].as_array())? {
-            threads.push(RepoWatchThreadObservation::new(
-                value.admit(ReviewThreadId::try_new(value.text(&thread["id"])?).ok())?,
-                if value.admit(thread["isResolved"].as_bool())? {
-                    RepoWatchThreadState::Resolved
+            let id = value.admit(ReviewThreadId::try_new(value.text(&thread["id"])?).ok())?;
+            let comments = value.admit(thread["comments"]["nodes"].as_array())?;
+            let comment = value.admit(comments.first())?;
+            let author = if comment["author"].is_null() {
+                None
+            } else {
+                Some(value.admit(
+                    RepoWatchAuthorLogin::try_new(value.text(&comment["author"]["login"])?).ok(),
+                )?)
+            };
+            threads.push(if value.admit(thread["isResolved"].as_bool())? {
+                let resolver = if thread["resolvedBy"].is_null() {
+                    None
                 } else {
-                    RepoWatchThreadState::Open
-                },
-            ));
+                    Some(
+                        value.admit(
+                            RepoWatchAuthorLogin::try_new(
+                                value.text(&thread["resolvedBy"]["login"])?,
+                            )
+                            .ok(),
+                        )?,
+                    )
+                };
+                RepoWatchThreadObservation::resolved(id, author, resolver)
+            } else {
+                RepoWatchThreadObservation::open(id, author)
+            });
         }
         if !value.admit(connection["pageInfo"]["hasNextPage"].as_bool())? {
             return Ok(threads);
@@ -1168,6 +1192,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use signalbox_session_ownership::RepoWatchThreadState;
 
     struct UnavailableClient;
     impl RepositoryClientLoader for UnavailableClient {
@@ -1317,7 +1342,12 @@ mod tests {
         Fixture {
             pages,
             threads: json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
-                "nodes": [{"id": "thread-one", "isResolved": true}],
+                "nodes": [{
+                    "id": "thread-one",
+                    "isResolved": true,
+                    "resolvedBy": {"login": "resolver"},
+                    "comments": {"nodes": [{"author": {"login": "thread-author"}}]}
+                }],
                 "pageInfo": {"hasNextPage": false, "endCursor": null}
             }}}}}),
         }
@@ -1590,6 +1620,20 @@ mod tests {
         );
         assert_eq!(pull.reviews()[0].state(), Some(ReviewState::Approved));
         assert_eq!(pull.threads()[0].state(), RepoWatchThreadState::Resolved);
+        assert_eq!(
+            pull.threads()[0]
+                .author()
+                .expect("thread retains its author")
+                .as_str(),
+            "thread-author"
+        );
+        assert_eq!(
+            pull.threads()[0]
+                .resolver()
+                .expect("resolved thread retains its resolver")
+                .as_str(),
+            "resolver"
+        );
         assert_eq!(pull.reactions().len(), 1);
         assert_eq!(pull.reactions()[0].reactor(), &reviewer);
         assert_eq!(
@@ -1598,6 +1642,42 @@ mod tests {
                 .as_str(),
             "CI"
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_opening_comment_author_does_not_reject_threads() {
+        let mut io = fixture();
+        let thread =
+            &mut io.threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0];
+        thread["isResolved"] = json!(false);
+        thread["comments"]["nodes"][0]["author"] = Value::Null;
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+
+        let observed = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect("unavailable thread author is accepted");
+        let thread = &observed.observation.state().pull_requests()[0].threads()[0];
+
+        assert_eq!(thread.state(), RepoWatchThreadState::Open);
+        assert_eq!(thread.author(), None);
+    }
+
+    #[tokio::test]
+    async fn unavailable_resolver_does_not_reject_resolved_threads() {
+        let mut io = fixture();
+        io.threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["resolvedBy"] =
+            Value::Null;
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+
+        let observed = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect("unavailable resolver is accepted");
+        let thread = &observed.observation.state().pull_requests()[0].threads()[0];
+
+        assert_eq!(thread.state(), RepoWatchThreadState::Resolved);
+        assert_eq!(thread.resolver(), None);
     }
 
     #[tokio::test]

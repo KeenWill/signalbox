@@ -17,8 +17,8 @@ use crate::bounded::{
 use crate::diff::read_worktree_symlink;
 use crate::failure::LocalGitFailure;
 use crate::limits::{
-    GITLINK_MODE, INDEX_ASSUME_VALID, INDEX_SKIP_WORKTREE, MAX_OBJECT_BYTES, MAX_STATUS_ENTRIES,
-    MAX_STATUS_PATH_BYTES, MAX_WORKTREE_TOTAL_BYTES,
+    GITLINK_MODE, INDEX_ASSUME_VALID, INDEX_SKIP_WORKTREE, MAX_STATUS_ENTRIES,
+    MAX_STATUS_PATH_BYTES,
 };
 use crate::pinning::{PinnedRepository, RepositoryShell, repository_filemode};
 use crate::result::{StatusEntry, StatusResult};
@@ -48,10 +48,11 @@ pub(super) fn status<FileSystem: WorkspaceFileSystem>(
         .diff_tree_to_index(head_tree.as_ref(), Some(&index), None)
         .map_err(|_| LocalGitFailure::Operation)?;
     staged
-        .find_similar(Some(DiffFindOptions::new().renames(true)))
+        .find_similar(Some(
+            DiffFindOptions::new().renames(true).exact_match_only(true),
+        ))
         .map_err(|_| LocalGitFailure::Operation)?;
     let filemode = repository_filemode(repository)?;
-    let mut worktree_bytes = 0_usize;
     let mut raw = BTreeMap::new();
     for delta in staged.deltas() {
         let path = delta
@@ -108,8 +109,11 @@ pub(super) fn status<FileSystem: WorkspaceFileSystem>(
                     WorkspacePathRejection::Symlink
                 ))
         ) {
-            let bytes = read_worktree_symlink(authority, path, MAX_OBJECT_BYTES)?;
-            charge_worktree_bytes(&mut worktree_bytes, bytes.len())?;
+            let bytes = read_worktree_symlink(
+                authority,
+                path,
+                repository.object_byte_limit(git2::ObjectType::Blob),
+            )?;
             if *mode != 0o120000 {
                 set_worktree_status(&mut raw, path, "type_changed");
             } else if blob_oid(&bytes, authority.object_format)? != *oid {
@@ -117,18 +121,21 @@ pub(super) fn status<FileSystem: WorkspaceFileSystem>(
             }
             continue;
         }
-        match filesystem.read_file_prefix(root, path, MAX_OBJECT_BYTES) {
-            Ok(read) => {
-                charge_worktree_bytes(&mut worktree_bytes, read.bytes.len())?;
-                let observed_mode = if read.mode & 0o111 == 0 {
+        match crate::streamed_object::worktree_content(
+            filesystem,
+            root,
+            path,
+            authority.max_object_bytes,
+        ) {
+            Ok((mut content, content_mode)) => {
+                let observed_mode = if content_mode & 0o111 == 0 {
                     0o100644
                 } else {
                     0o100755
                 };
                 if *mode == 0o120000 {
                     set_worktree_status(&mut raw, path, "type_changed");
-                } else if read.truncated
-                    || blob_oid(&read.bytes, authority.object_format)? != *oid
+                } else if content.oid(authority.object_format)? != *oid
                     || (filemode && observed_mode != *mode)
                 {
                     set_worktree_status(&mut raw, path, "modified");
@@ -155,17 +162,18 @@ pub(super) fn status<FileSystem: WorkspaceFileSystem>(
     for path in untracked {
         let rename = match filesystem.entry_kind(root, &path) {
             Ok(WorkspaceEntryKind::File) => {
-                match filesystem.read_file_prefix(root, &path, MAX_OBJECT_BYTES) {
-                    Ok(read) => {
-                        charge_worktree_bytes(&mut worktree_bytes, read.bytes.len())?;
-                        (!read.truncated)
-                            .then(|| blob_oid(&read.bytes, authority.object_format).ok())
-                            .flatten()
-                            .and_then(|oid| {
-                                deleted
-                                    .iter()
-                                    .position(|(_, deleted_oid)| *deleted_oid == oid)
-                            })
+                match crate::streamed_object::worktree_content(
+                    filesystem,
+                    root,
+                    &path,
+                    authority.max_object_bytes,
+                ) {
+                    Ok((mut content, _)) => {
+                        content.oid(authority.object_format).ok().and_then(|oid| {
+                            deleted
+                                .iter()
+                                .position(|(_, deleted_oid)| *deleted_oid == oid)
+                        })
                     }
                     Err(WorkspaceResolveError::Rejected(_)) => {
                         return Err(LocalGitFailure::Path);
@@ -332,17 +340,6 @@ pub(super) fn blob_oid(
 ) -> Result<git2::Oid, LocalGitFailure> {
     git2::Oid::hash_object_ext(ObjectType::Blob, bytes, object_format)
         .map_err(|_| LocalGitFailure::Operation)
-}
-
-pub(super) fn charge_worktree_bytes(
-    total: &mut usize,
-    bytes: usize,
-) -> Result<(), LocalGitFailure> {
-    *total = total
-        .checked_add(bytes)
-        .filter(|total| *total <= MAX_WORKTREE_TOTAL_BYTES)
-        .ok_or(LocalGitFailure::Operation)?;
-    Ok(())
 }
 
 pub(super) fn bounded_status_path(bytes: &[u8]) -> (String, bool) {

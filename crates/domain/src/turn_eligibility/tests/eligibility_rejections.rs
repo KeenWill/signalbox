@@ -170,6 +170,48 @@ fn in_flight_compaction_call_blocks_activation_after_reconstitution() {
     );
 }
 
+/// Active-turn compaction retains the turn while its dedicated call is pending.
+#[test]
+fn active_turn_reconstitutes_during_compaction() {
+    use super::fixtures::{ActiveReconstitutionFacts, matching_active_attempt};
+
+    for state in [
+        crate::ContextCompactionModelCallState::Prepared,
+        crate::ContextCompactionModelCallState::InFlight,
+    ] {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let source = ActiveReconstitutionFacts::matching_starting_frontier();
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts.replace_active_phase(ActiveTurnSchedulingReconstitutionInput::running(
+            active.turn(),
+            matching_active_attempt(),
+        ));
+        let input = facts.input().with_context_compaction_facts(
+            vec![crate::ContextCompactionModelCallReconstitutionInput::new(
+                model_call_id(702),
+                session.id(),
+                direct(703),
+                ResolvedProviderTarget::naming(provider_model_identity(704)),
+                source.id(),
+                state,
+                crate::ContextCompactionTokenUsage::unreported(),
+            )],
+            Vec::new(),
+        );
+        let projection = input
+            .reconstitute()
+            .expect("a pending summary call preserves its active turn");
+        assert_eq!(
+            projection
+                .active_turn()
+                .expect("the turn remains active")
+                .turn(),
+            active.turn(),
+        );
+    }
+}
+
 /// a terminal non-completed dedicated call is retained as
 /// historical recovery evidence without requiring a compaction result.
 #[test]

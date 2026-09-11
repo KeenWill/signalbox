@@ -113,7 +113,7 @@ pub(super) fn validate_revision(
 #[derive(Clone, Debug)]
 pub(super) struct GitArgumentValidator {
     pub(super) kind: LocalToolKind,
-    pub(super) object_format: ObjectFormat,
+    pub(super) object_format: Option<ObjectFormat>,
     pub(super) detail: ToolExecutionErrorDetail,
 }
 
@@ -122,8 +122,12 @@ impl ToolArgumentValidator for GitArgumentValidator {
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolExecutionErrorDetail> {
-        decode_operation(self.kind, arguments, self.object_format)
-            .map(|_| ())
-            .map_err(|_| self.detail.clone())
+        match self.object_format {
+            Some(format) => decode_operation(self.kind, arguments, format),
+            None => decode_operation(self.kind, arguments, ObjectFormat::Sha1)
+                .or_else(|_| decode_operation(self.kind, arguments, ObjectFormat::Sha256)),
+        }
+        .map(|_| ())
+        .map_err(|_| self.detail.clone())
     }
 }

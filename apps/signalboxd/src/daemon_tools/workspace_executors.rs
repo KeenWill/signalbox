@@ -47,20 +47,21 @@ pub(super) fn read_dispatch_marker(
     if (root_stat.st_dev as u64, root_stat.st_ino) != (identity.root.device, identity.root.inode) {
         return None;
     }
-    let administration = openat(
-        &root,
-        super::session_workspace_roots::GIT_ADMINISTRATION_DIRECTORY,
-        directory_flags,
-        Mode::empty(),
-    )
-    .ok()?;
+    let administration = signalbox_tools_git::open_repository_administration(path).ok()??;
+    let common = fstat(&administration.common).ok()?;
+    let expected_common = identity.common_administration?;
+    if (common.st_dev as u64, common.st_ino) != (expected_common.device, expected_common.inode) {
+        return None;
+    }
+    let administration = administration.worktree;
+    let expected_administration = identity.administration?;
     let administration_stat = fstat(&administration).ok()?;
     if (
         administration_stat.st_dev as u64,
         administration_stat.st_ino,
     ) != (
-        identity.administration.device,
-        identity.administration.inode,
+        expected_administration.device,
+        expected_administration.inode,
     ) {
         return None;
     }
@@ -104,6 +105,7 @@ pub(super) struct SessionWorkspaceExecutors<
     exec_runner: ExecRunner,
     cargo_registry_cache: Option<PathBuf>,
     sandbox: signalbox_tools_exec::SandboxConfiguration,
+    max_git_object_bytes: Option<usize>,
     sandboxed_exec_timeout_bound: Option<Duration>,
     configured: WorkspaceBoundExecutors<FileSystem, ExecRunner>,
     failure_details: SessionWorkspaceFailureDetails,
@@ -123,6 +125,7 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
             exec_runner: self.exec_runner.clone(),
             cargo_registry_cache: self.cargo_registry_cache.clone(),
             sandbox: self.sandbox.clone(),
+            max_git_object_bytes: self.max_git_object_bytes,
             sandboxed_exec_timeout_bound: self.sandboxed_exec_timeout_bound,
             configured: self.configured.clone(),
             failure_details: self.failure_details.clone(),
@@ -156,6 +159,7 @@ where
             exec_runner,
             cargo_registry_cache,
             sandbox,
+            max_git_object_bytes,
             sandboxed_exec_timeout_bound,
         } = composition;
         let failure_details = SessionWorkspaceFailureDetails::try_new()?;
@@ -168,6 +172,7 @@ where
             exec_runner,
             cargo_registry_cache,
             sandbox,
+            max_git_object_bytes,
             sandboxed_exec_timeout_bound,
             configured: families.executors,
             failure_details,
@@ -177,6 +182,19 @@ where
 
     pub(super) fn process_runner(&self) -> ExecRunner {
         self.exec_runner.clone()
+    }
+
+    fn standing_configured_identity(
+        &self,
+    ) -> Result<ComposedWorkspaceIdentity, SessionWorkspaceFailure> {
+        let identity = ComposedWorkspaceIdentity::capture(self.roots.configured())
+            .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
+        if self.configured.workspace_identity.administration.is_some()
+            && identity.administration.is_none()
+        {
+            return Err(SessionWorkspaceFailure::UnverifiableConfiguredRoot);
+        }
+        Ok(identity)
     }
 
     async fn resolve_workspace_instruction_root(
@@ -216,7 +234,7 @@ where
                 WorkspaceRootBinding::Derived {
                     dispatch_marker: read_dispatch_marker(
                         &self.roots.derived_path(session),
-                        *identity,
+                        identity.clone(),
                     ),
                 }
             }
@@ -248,20 +266,20 @@ where
         // deployment has already removed or replaced.
         let probed = self.roots.resolve(session);
         let mut state = self.state.lock().await;
-        let recorded = state.bindings.get(&session).copied();
+        let recorded = state.bindings.get(&session).cloned();
         // The probe above was taken before the lock, so a concurrent first
         // request for this session may have bound a derived root in between.
         // Retaking it under the lock is what distinguishes that from the
         // directory having been removed, which reads identically and must still
         // fail closed.
-        let derived = if probe_is_stale(recorded, &probed) {
+        let derived = if probe_is_stale(recorded.clone(), &probed) {
             self.roots.resolve(session)
         } else {
             probed
         };
         // The pathname to compose against, and the directory the derivation
         // walked through to reach it.
-        let (path, parent) = match decide_session_root(recorded, &derived) {
+        let (path, parent) = match decide_session_root(recorded.clone(), &derived) {
             SessionRootDecision::ConfiguredRoot => {
                 // Admission is not a durable answer for this branch either.
                 // The configured composition is never re-resolved, so what its
@@ -274,14 +292,12 @@ where
                 // comparison on every dispatch; remaking it only there would
                 // protect only the requests that take that branch.
                 if a_derived_binding_exists(&state.bindings, session) {
-                    let standing_configured =
-                        ComposedWorkspaceIdentity::capture(self.roots.configured())
-                            .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
+                    let standing_configured = self.standing_configured_identity()?;
                     if a_derived_binding_shares_the_configured_root(
                         &state.bindings,
                         session,
-                        self.configured.workspace_identity,
-                        standing_configured,
+                        self.configured.workspace_identity.clone(),
+                        standing_configured.clone(),
                     ) {
                         return Err(SessionWorkspaceFailure::SharedRootIdentity);
                     }
@@ -317,7 +333,10 @@ where
                 // is provisioning that replaces only a workspace's `.git`. A
                 // pathname whose pair can no longer be captured at all — a
                 // removed `.git`, say — fails for the same reason.
-                if let Some(bound) = recorded.and_then(RecordedSessionBinding::derived_identity) {
+                if let Some(bound) = recorded
+                    .as_ref()
+                    .and_then(RecordedSessionBinding::derived_identity)
+                {
                     let standing = ComposedWorkspaceIdentity::capture(path)
                         .map_err(|_| SessionWorkspaceFailure::ReplacedRootIdentity)?;
                     if standing != bound {
@@ -329,7 +348,11 @@ where
                     // replacement, leaves both bound directories intact at the
                     // same pathname. The component the classification accepted
                     // is therefore revalidated beside the pair it leads to.
-                    if recorded.and_then(RecordedSessionBinding::derived_parent) != Some(*parent) {
+                    if recorded
+                        .as_ref()
+                        .and_then(RecordedSessionBinding::derived_parent)
+                        != Some(*parent)
+                    {
                         return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
                     }
                     // The pair above was captured by walking the pathname
@@ -353,13 +376,11 @@ where
                     // under separate serialization domains. The comparison is
                     // therefore remade on every dispatch, before the retained
                     // set is consulted and before a recomposition begins.
-                    let standing_configured =
-                        ComposedWorkspaceIdentity::capture(self.roots.configured())
-                            .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
+                    let standing_configured = self.standing_configured_identity()?;
                     if shares_a_directory_with_the_configured_root(
-                        bound,
-                        self.configured.workspace_identity,
-                        standing_configured,
+                        bound.clone(),
+                        self.configured.workspace_identity.clone(),
+                        standing_configured.clone(),
                     ) {
                         return Err(SessionWorkspaceFailure::SharedRootIdentity);
                     }
@@ -369,8 +390,8 @@ where
                     // root.
                     if parent_aliases_the_configured_root(
                         *parent,
-                        self.configured.workspace_identity,
-                        standing_configured,
+                        self.configured.workspace_identity.clone(),
+                        standing_configured.clone(),
                     ) {
                         return Err(SessionWorkspaceFailure::SharedRootIdentity);
                     }
@@ -398,6 +419,7 @@ where
             self.exec_runner.clone(),
             self.cargo_registry_cache.as_deref(),
             &self.sandbox,
+            self.max_git_object_bytes,
             self.sandboxed_exec_timeout_bound,
         )
         .map_err(SessionWorkspaceFailure::Composition)?;
@@ -410,21 +432,23 @@ where
         if self.roots.standing_parent() != Some(parent) {
             return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
         }
-        if families.executors.git_object_format != self.configured.git_object_format {
+        if self.configured.git_object_format.is_some()
+            && families.executors.git_object_format.is_some()
+            && families.executors.git_object_format != self.configured.git_object_format
+        {
             return Err(SessionWorkspaceFailure::ObjectFormatDisagreement);
         }
-        let composed = families.executors.workspace_identity;
+        let composed = families.executors.workspace_identity.clone();
         // Two pathnames can name one workspace — a bind mount, a derived path
         // exposing the configured root, or two roots over one repository — and
         // each would pass composition on its own. The isolation this derivation
         // exists to establish is a property of the directories, not of the
         // pathname, so it is checked against what every other binding pinned.
-        let standing_configured = ComposedWorkspaceIdentity::capture(self.roots.configured())
-            .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
+        let standing_configured = self.standing_configured_identity()?;
         if shares_a_directory_with_the_configured_root(
-            composed,
-            self.configured.workspace_identity,
-            standing_configured,
+            composed.clone(),
+            self.configured.workspace_identity.clone(),
+            standing_configured.clone(),
         ) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
@@ -434,8 +458,8 @@ where
         // this workspace inside the tree the derivation exists to leave.
         if parent_aliases_the_configured_root(
             parent,
-            self.configured.workspace_identity,
-            standing_configured,
+            self.configured.workspace_identity.clone(),
+            standing_configured.clone(),
         ) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
@@ -444,7 +468,7 @@ where
         // was reached through — a session identifier directory bind-mounted
         // onto `<name>.sessions` itself — which makes this workspace the one
         // holding every sibling session's root.
-        if composition_aliases_its_own_parent(composed, parent) {
+        if composition_aliases_its_own_parent(composed.clone(), parent) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
         let mut state = self.state.lock().await;
@@ -453,14 +477,14 @@ where
         // fails that session closed rather than being reachable beside this
         // one; the pairs recorded here are the ones those sessions can still
         // use.
-        if another_session_bound(&state.bindings, session, composed) {
+        if another_session_bound(&state.bindings, session, composed.clone()) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
-        match *state
+        match state
             .bindings
             .entry(session)
             .or_insert(RecordedSessionBinding::DerivedRoot {
-                identity: composed,
+                identity: composed.clone(),
                 parent,
             }) {
             // A concurrent first request bound the configured root; its record
@@ -472,7 +496,7 @@ where
             RecordedSessionBinding::DerivedRoot {
                 identity,
                 parent: bound_parent,
-            } if identity != composed || bound_parent != parent => {
+            } if identity != &composed || *bound_parent != parent => {
                 return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
             }
             RecordedSessionBinding::DerivedRoot { .. } => {}
@@ -519,8 +543,19 @@ where
                 &repository,
                 branch,
                 commit,
-                self.exec_runner.clone(),
+                super::git_push::ProcessGitPushTransport {
+                    runner: self.exec_runner.clone(),
+                    credentials: crate::repo_watch_credentials::RepositoryWatchClientLoader::for_repository_push(&repository),
+                    credential_file: repository
+                        .push_credential_file()
+                        .map(std::path::Path::to_owned),
+                    ssh_agent_socket: std::env::var_os("SSH_AUTH_SOCK")
+                        .and_then(|path| crate::configuration::WatchedRepositoryConfiguration::absolute_ssh_agent_socket(std::path::Path::new(&path)))
+                        .map(std::path::PathBuf::into_os_string),
+                    sandbox: self.sandbox.clone(),
+                },
                 &filesystem,
+                self.max_git_object_bytes,
             )
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
             self.resolve_workspace_instruction_root(session)
@@ -555,11 +590,20 @@ where
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
-            name if LOCAL_GIT_TOOL_NAMES.contains(&name) => executors
-                .local_git
-                .execute(invocation)
-                .await
-                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            name if LOCAL_GIT_TOOL_NAMES.contains(&name) => {
+                let Some(git) = executors.local_git.as_mut() else {
+                    return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                        detail: signalbox_domain::ToolExecutionErrorDetail::try_new(
+                            "local Git is unavailable for this session".to_owned(),
+                        )
+                        .ok(),
+                    }));
+                };
+                git.execute(invocation)
+                    .await
+                    .map_err(|error| DaemonToolExecutorError::from_error(&error))
+            }
+
             SANDBOXED_EXEC_NAME => executors
                 .sandboxed_exec
                 .execute(invocation)

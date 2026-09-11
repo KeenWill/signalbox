@@ -204,8 +204,9 @@ use signalbox_process_protocol::{
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
     ModelSettingsSnapshot as WireModelSettingsSnapshot, OperatorStatusEndMessage,
     OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
-    OperatorStatusLifecycleWeekMessage, OperatorStatusMessage, PositiveCanonicalU64,
-    ProtocolVersion, ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
+    OperatorStatusLifecycleWeekMessage, OperatorStatusMessage,
+    OperatorStatusUnavailableComponentMessage, PositiveCanonicalU64, ProtocolVersion,
+    ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
     ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
     ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle, ReviewPassSnapshot,
@@ -329,6 +330,7 @@ struct ConnectionServices {
     snapshot_reader_budget: Arc<Semaphore>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     imported_conversations: ImportedConversationRepository,
+    unavailable_components: Vec<OperatorStatusUnavailableComponentMessage>,
 }
 
 #[derive(Clone, Debug)]

@@ -68,6 +68,7 @@ pub(super) async fn load_policy(
             credential_reference: member.profile.into(),
             priority: member.priority,
             headroom_reserve_percent: member.headroom_reserve_percent,
+            availability_probe: None,
         })
         .collect::<Vec<_>>();
     Ok(CredentialPoolRuntimePolicy::new(

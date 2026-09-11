@@ -402,26 +402,23 @@ fn explicit_loopback_deployment_configuration_is_admitted() {
 }
 
 #[test]
-fn non_loopback_bind_fails_closed() {
-    let error = WebHttpConfiguration::from_values(Some(OsString::from("0.0.0.0:8080")), None)
-        .expect_err("the unauthenticated browser surface remains loopback-only");
+fn non_loopback_bind_is_explicitly_configurable() {
+    let configuration =
+        WebHttpConfiguration::from_values(Some(OsString::from("0.0.0.0:8080")), None)
+            .expect("an explicit non-loopback bind is accepted");
 
-    assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindAddress);
-    assert_eq!(
-        error.to_string(),
-        "setting SIGNALBOX_WEB_BIND must use a loopback address"
-    );
+    assert_eq!(configuration.bind_address().to_string(), "0.0.0.0:8080");
 }
 
 #[test]
-fn explicit_constructor_rejects_non_loopback_bind() {
+fn explicit_constructor_accepts_non_loopback_bind() {
     let bind_address: SocketAddr = "0.0.0.0:8080"
         .parse()
         .expect("the fixture address is valid");
-    let error = WebHttpConfiguration::new(bind_address, None)
-        .expect_err("every production configuration path remains loopback-only");
+    let configuration = WebHttpConfiguration::new(bind_address, None)
+        .expect("an explicit non-loopback bind is accepted");
 
-    assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindAddress);
+    assert_eq!(configuration.bind_address(), bind_address);
 }
 
 #[test]
@@ -792,11 +789,11 @@ async fn production_router_rejects_non_loopback_hostnames() {
         serde_json::from_slice(&response_body(response).await).expect("the rejection is JSON");
 
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    assert_eq!(body["error"]["code"], "unadmitted_host_rejected");
 }
 
 #[test]
-fn loopback_host_accepts_localhost_and_uri_authority() {
+fn admitted_host_accepts_localhost_and_ip_authority() {
     let localhost = Request::get("/api/bootstrap")
         .header(header::HOST, "localhost:37231")
         .body(Body::empty())
@@ -804,15 +801,20 @@ fn loopback_host_accepts_localhost_and_uri_authority() {
     let authority = Request::get("http://127.0.0.1:37231/api/bootstrap")
         .body(Body::empty())
         .expect("the authority request is valid");
+    let lan = Request::get("/api/bootstrap")
+        .header(header::HOST, "192.168.1.20:37231")
+        .body(Body::empty())
+        .expect("the LAN request is valid");
 
-    assert!(super::has_loopback_host(
+    assert!(super::has_admitted_host(
         localhost.headers(),
         localhost.uri()
     ));
-    assert!(super::has_loopback_host(
+    assert!(super::has_admitted_host(
         authority.headers(),
         authority.uri()
     ));
+    assert!(super::has_admitted_host(lan.headers(), lan.uri()));
 }
 
 #[tokio::test]
@@ -1715,7 +1717,7 @@ async fn session_reads_reject_non_loopback_host_authorities() {
 
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"]["kind"], "transport");
-    assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    assert_eq!(body["error"]["code"], "unadmitted_host_rejected");
 }
 
 #[tokio::test]
@@ -1740,10 +1742,10 @@ async fn attention_snapshot_reads_reject_non_loopback_host_authorities() {
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "`/api/attention` must reject a non-loopback authority",
+        "`/api/attention` must reject an unadmitted authority",
     );
     assert_eq!(body["error"]["kind"], "transport");
-    assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    assert_eq!(body["error"]["code"], "unadmitted_host_rejected");
 }
 
 #[tokio::test]
@@ -1766,10 +1768,10 @@ async fn attention_follow_reads_reject_non_loopback_host_authorities() {
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "`/api/attention/follow` must reject a non-loopback authority",
+        "`/api/attention/follow` must reject an unadmitted authority",
     );
     assert_eq!(body["error"]["kind"], "transport");
-    assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    assert_eq!(body["error"]["code"], "unadmitted_host_rejected");
 }
 
 /// Drives one route with a rebound origin and returns what it answered.
@@ -1807,7 +1809,7 @@ async fn rebound_origin_response(path: &str) -> (StatusCode, serde_json::Value) 
 fn assert_rebound_origin_rejected(status: StatusCode, body: &serde_json::Value) {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"]["kind"], "transport");
-    assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    assert_eq!(body["error"]["code"], "unadmitted_host_rejected");
 }
 
 /// The bounded usage summary carries per-session spend and resolved model
@@ -1868,18 +1870,13 @@ async fn session_reads_admit_loopback_authorities_including_ip_literals() {
         assert_eq!(
             session_read_status_for_host(host).await,
             StatusCode::BAD_REQUEST,
-            "`{host}` is a loopback authority and must reach the handler",
+            "`{host}` is an admitted authority and must reach the handler",
         );
     }
 }
 
 #[tokio::test]
-async fn session_reads_reject_non_loopback_ip_literal_authorities() {
-    // Every authority here parses as an address, so `is_loopback` — not
-    // the `parse::<IpAddr>()` that already turns hostnames away — is what
-    // has to reject them. A regression that loosened the branch to accept
-    // any parseable address would expose session history to any host that
-    // can reach the port.
+async fn session_reads_accept_non_loopback_ip_literal_authorities() {
     for host in [
         "10.0.0.5",
         "10.0.0.5:37231",
@@ -1889,8 +1886,8 @@ async fn session_reads_reject_non_loopback_ip_literal_authorities() {
     ] {
         assert_eq!(
             session_read_status_for_host(host).await,
-            StatusCode::FORBIDDEN,
-            "`{host}` parses as a non-loopback address and must be rejected",
+            StatusCode::BAD_REQUEST,
+            "`{host}` is an admitted explicit IP authority and must reach the handler",
         );
     }
 }
@@ -1901,7 +1898,7 @@ async fn session_reads_reject_authorities_that_are_neither_localhost_nor_literal
         assert_eq!(
             session_read_status_for_host(host).await,
             StatusCode::FORBIDDEN,
-            "`{host}` is neither localhost nor a loopback literal",
+            "`{host}` is neither localhost nor an IP literal",
         );
     }
 }
@@ -1941,7 +1938,7 @@ async fn blob_reads_reject_non_loopback_host_authorities() {
         assert_eq!(
             blob_read_status_for_host(path, "attacker.example").await,
             StatusCode::FORBIDDEN,
-            "`{path}` must reject a non-loopback authority",
+            "`{path}` must reject an unadmitted authority",
         );
     }
 }
@@ -1956,7 +1953,7 @@ async fn blob_reads_admit_loopback_host_authorities() {
         assert_eq!(
             blob_read_status_for_host(path, "localhost").await,
             StatusCode::SERVICE_UNAVAILABLE,
-            "`{path}` is a loopback authority and must reach the handler",
+            "`{path}` is an admitted authority and must reach the handler",
         );
     }
 }
@@ -2019,7 +2016,7 @@ async fn cross_site_metadata_preserves_the_host_error_outside_api_routes() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let body: serde_json::Value =
         serde_json::from_slice(&response_body(response).await).expect("rejection is JSON");
-    assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    assert_eq!(body["error"]["code"], "unadmitted_host_rejected");
 }
 
 #[tokio::test]

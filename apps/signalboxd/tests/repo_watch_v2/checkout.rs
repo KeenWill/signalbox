@@ -979,9 +979,9 @@ async fn kickoff_with_unresolved_threads_requests_repair_and_thread_replies()
     let mut fixture = CheckoutFixture::with_threads(
         "checkout/project",
         "labeled-review-response",
-        vec![RepoWatchThreadObservation::new(
+        vec![RepoWatchThreadObservation::open(
             ReviewThreadId::try_new("fixture-thread".to_owned())?,
-            RepoWatchThreadState::Open,
+            Some(RepoWatchAuthorLogin::try_new("reviewer".to_owned())?),
         )],
     )
     .await?;
@@ -1029,9 +1029,9 @@ async fn kickoff_without_push_credentials_requests_a_reviewable_diff() -> Result
     let mut fixture = CheckoutFixture::with_threads(
         "checkout/project",
         "labeled-review-response",
-        vec![RepoWatchThreadObservation::new(
+        vec![RepoWatchThreadObservation::open(
             ReviewThreadId::try_new("fixture-thread".to_owned())?,
-            RepoWatchThreadState::Open,
+            Some(RepoWatchAuthorLogin::try_new("reviewer".to_owned())?),
         )],
     )
     .await?;
@@ -2131,6 +2131,7 @@ async fn assert_checkout_keeps_composed_runner(
         configuration.exec_supervisor_executable(),
         None,
         &Default::default(),
+        None,
         None,
         WebFetchEgressPolicy::deny_all(),
     )?;
@@ -3578,6 +3579,12 @@ impl CheckoutFixture {
             configuration.exec_supervisor_executable(),
             configuration.cargo_registry_cache(),
             configuration.sandbox(),
+            self.sink
+                .models
+                .numeric_bounds()
+                .integer("max_git_object_bytes")
+                .flatten()
+                .map(|bytes| bytes as usize),
             configuration.sandboxed_exec_timeout_bound(),
             self.sink.models.web_fetch_egress_policy(),
         )?;

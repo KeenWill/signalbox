@@ -1243,7 +1243,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       case .toolBatchTransition(_, _, let state):
         switch state {
-        case .proposed, .resultsProjected, .recoveryRequired, .unknown:
+        case .proposed, .resultsProjected, .recoveryRequired, .childWaitResumed, .unknown:
           return false
         }
       case .contextCompacted(_, let modelCallID, _, _, _):
@@ -1353,7 +1353,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return entryTurnID == turnID && entryModelCallID == modelCallID
       case .resultsProjected:
         return toolEntry(message, belongsTo: turnID, modelCallID: modelCallID)
-      case .recoveryRequired, .unknown:
+      case .recoveryRequired, .childWaitResumed, .unknown:
         return false
       }
     case .turnCompleted:
@@ -1766,7 +1766,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             }
           })
         return expectedCorrelations.isSubset(of: projectedCorrelations)
-      case .recoveryRequired, .unknown:
+      case .recoveryRequired, .childWaitResumed, .unknown:
         return true
       }
     case .contextCompacted(_, let modelCallID, _, let summaryEntryID, _):

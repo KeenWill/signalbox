@@ -17,8 +17,8 @@ use crate::bridge::{SERVER_NAME, TOOL_ACKNOWLEDGEMENT, TOOL_PREFIX};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
-    AssistantContent, AssistantEvent, AssistantRawEvent, RawToolUse, ResultEvent, ResultSubtype,
-    SystemInit, UserEvent,
+    AssistantContent, AssistantEvent, AssistantRawEvent, CompactBoundary, RawToolUse, ResultEvent,
+    ResultSubtype, SystemInit, UserEvent,
 };
 
 fn reject_duplicate_json_members(line: &str) -> Result<(), DecodeFailure> {
@@ -185,6 +185,22 @@ impl<C: Clone> EventDecoder<C> {
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), DecodeFailure> {
         let subtype = value.get("subtype").and_then(Value::as_str);
+        if subtype == Some("compact_boundary") {
+            let event: CompactBoundary = decode(value)?;
+            if self.native_session_id.as_deref() != Some(event.session_id.as_str()) {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude compaction session contradicts system init",
+                ));
+            }
+            tracing::info!(
+                native_session_id = %event.session_id,
+                trigger = ?event.compact_metadata.trigger,
+                pre_compaction_tokens = event.compact_metadata.pre_tokens,
+                "Claude Code compacted its native context"
+            );
+            return Ok(());
+        }
+
         if matches!(
             subtype,
             Some(
