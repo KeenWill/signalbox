@@ -179,7 +179,9 @@ two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
 the parent count before capturing the push snapshot or traversing ancestry.
 Non-merge pushes are unaffected.
 
-The seven local Git tools perform no remote operation.
+The seven local Git tools perform no remote operation. `git_log` limits its
+returned page to `max_entries`; merge ancestry traversal is independent of
+worktree inspection limits.
 
 The daemon-local registry supplies no runner execution path.
 
