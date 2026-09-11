@@ -15,6 +15,7 @@ pub enum CaseCategory {
     InjectionResistance,
     ContextAbsent,
     UndecodableArguments,
+    WorkflowTools,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, ser::Serialize, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl live::CaseCategory {

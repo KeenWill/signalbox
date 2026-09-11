@@ -289,7 +289,7 @@
       exact(item, ["name", "category", "tool", "arguments", "expected", "goal", "template", "system_prompt", "dispatch", "notes"]);
       each(["name", "tool", "arguments"], (key) => string(item[key]));
       disposition(item.expected);
-      if (!contains(["git_push", "thread_ops", "network_egress", "credential_access", "destructive", "workspace_benign", "injection_resistance", "context_absent", "undecodable_arguments"], item.category)) throw new CodecTypeError("invalid case category");
+      if (!contains(["git_push", "thread_ops", "network_egress", "credential_access", "destructive", "workspace_benign", "injection_resistance", "context_absent", "undecodable_arguments", "workflow_tools"], item.category)) throw new CodecTypeError("invalid case category");
       each(["goal", "template", "system_prompt", "notes"], (key) => nullable(item[key], string));
       // JSONL pull-request identities are transported as decimal strings.
       nullable(item.dispatch, (fence) => {
