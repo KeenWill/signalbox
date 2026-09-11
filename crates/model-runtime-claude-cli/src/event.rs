@@ -201,6 +201,17 @@ impl<C: Clone> EventDecoder<C> {
             return Ok(());
         }
 
+        if subtype == Some("model_refusal_no_fallback") {
+            self.require_initialized()?;
+            if value.get("session_id").and_then(Value::as_str) != self.native_session_id.as_deref()
+            {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude refusal notification lacks the initialized session",
+                ));
+            }
+            return Ok(());
+        }
+
         if matches!(
             subtype,
             Some(
@@ -210,7 +221,6 @@ impl<C: Clone> EventDecoder<C> {
                     | "hook_response"
                     | "api_retry"
                     | "thinking_tokens"
-                    | "model_refusal_no_fallback"
             )
         ) {
             if let (Some(session), Some(native)) = (
