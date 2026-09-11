@@ -42,10 +42,12 @@ result. A closed review library of prompt templates, resolved at startup under
 the catalog rules
 [configuration and credentials](configuration-and-credentials.md) states,
 supplies the session templates each stage uses. The example library uses
-`review-judge-strict-v1`: six acceptance categories, explicit decline classes,
-independent 1–5 verdict confidence, and a valid all-declined result. The
-[process protocol](process-protocol.md) and the terminal client expose the
-primitive and orchestration operations.
+`review-judge-strict-v2`: six acceptance categories, explicit decline classes,
+independent 1–5 verdict confidence, and a valid all-declined result. It asks the
+judge to distinguish representable inputs from inputs an existing producer and
+workload supply, while preserving validation and recovery boundaries the change
+commissions. The [process protocol](process-protocol.md) and the terminal client
+expose the primitive and orchestration operations.
 
 The PostgreSQL store in `crates/persistence/src/review_workflow.rs` and
 `crates/persistence/src/review_orchestration.rs` keeps append-only content and
