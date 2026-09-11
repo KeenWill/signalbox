@@ -2803,11 +2803,22 @@ fn reconstitute_inner(
                                         })
                                     });
                                 wait_proposed && terminal.ordered_entries().any(|entry| {
-                                    matches!(
-                                        semantic_entries.get(&entry).map(SemanticTranscriptEntry::payload),
-                                        Some(SemanticTranscriptEntryPayload::ToolClosed { request })
-                                            if *request == wait.request()
-                                    )
+                                    match semantic_entries.get(&entry).map(SemanticTranscriptEntry::payload) {
+                                        Some(SemanticTranscriptEntryPayload::ToolClosed { request }) =>
+                                            *request == wait.request(),
+                                        Some(SemanticTranscriptEntryPayload::DelegationResult {
+                                            awaiting_request,
+                                            spawning_request,
+                                            child,
+                                            mode: crate::DelegationWaitMode::Foreground,
+                                            ..
+                                        }) => *awaiting_request == wait.request()
+                                            && matches!(wait.end(), crate::ToolAttemptEnd::AwaitingChild {
+                                                spawning_request: expected_spawn,
+                                                child: expected_child,
+                                            } if spawning_request == expected_spawn && child == expected_child),
+                                        _ => false,
+                                    }
                                 })
                             },
                         );

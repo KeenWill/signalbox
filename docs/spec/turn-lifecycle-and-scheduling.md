@@ -413,9 +413,11 @@ terminal frontier extends the starting or call frontier by exactly the
 cancellation marker, preceded, when cancellation terminalized a tool round, by
 one result entry per request in proposal order. Cancellation of a pending
 foreground child wait instead names its already-yielded wait and applied
-interrupt, with that wait closed in the terminal tool-result suffix. A refused
-turn names its ended attempt and correlated terminal refused call, and its
-terminal frontier is an equal-content boundary over that call's frontier. A
+interrupt, with that wait closed in the terminal tool-result suffix by a
+turn-end closure or its available child result. Startup and terminal outbox
+delivery authenticate that wait without requiring a terminal turn attempt. A
+refused turn names its ended attempt and correlated terminal refused call, and
+its terminal frontier is an equal-content boundary over that call's frontier. A
 reconciliation-required turn names its ended attempt and exactly one terminal
 ambiguous model call or tool attempt; the attempt end is lost or ambiguous
 without a stop, with a later applied interrupt or a durable automatic recovery
