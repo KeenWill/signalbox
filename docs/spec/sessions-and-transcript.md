@@ -738,6 +738,8 @@ closed.
 
 ## Planned
 
+- Browser supervision evidence remains readable when transcript detail fails
+  ([design](../design/web-session-supervision.md)).
 - Instruction-aware defaults replacement, rejecting a model selection whose
   targets lack instruction transport or capacity for the session's admitted set
   ([design](../design/sessions-and-transcript.md)).
