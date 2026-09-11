@@ -1082,6 +1082,10 @@ pub(crate) const SEARCH_ARTIFACT_IDENTITY: &str = "SELECT pg_advisory_xact_lock(
 /// Capacity rows follow all credential action heads in profile byte order.
 pub(crate) const CREDENTIAL_INVOCATION_CAPACITY_LOCK: &str = "SELECT profile FROM credential_invocation_capacity WHERE profile = ANY($1) ORDER BY profile COLLATE \"C\" FOR UPDATE";
 
+/// Reload completion takes its command row before the outbox guard and credential action heads.
+pub(crate) const RELOAD_CONFIGURATION_COMMAND: &str =
+    "SELECT command_id FROM reload_configuration_command WHERE command_id = $1 FOR UPDATE";
+
 pub(crate) const OAUTH_CREDENTIAL_PROFILE_GENERATION: &str =
     "SELECT generation FROM oauth_credential_profile WHERE profile = $1 FOR UPDATE";
 
