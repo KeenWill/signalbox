@@ -143,6 +143,39 @@ async fn running_pass_admits_monotonic_terminal_turn_lag() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// a queued run and pass activate atomically when their canonical turn
+/// completed before the projection was committed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn queued_run_and_pass_activate_from_terminal_turn_evidence() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let turn = TurnId::from_uuid(uuid(0x203));
+    complete_review_turn(&pool, turn).await;
+
+    let (run, pass) = fixture
+        .store
+        .transition_run_and_pass(
+            fixture.run.run(),
+            fixture.pass.pass(),
+            ReviewRunState::Running {
+                active_pass: fixture.pass,
+            },
+            ReviewPassState::Running { turn },
+        )
+        .await?
+        .expect("queued run and pass exist");
+
+    assert_eq!(
+        run.state(),
+        ReviewRunState::Running {
+            active_pass: fixture.pass,
+        }
+    );
+    assert_eq!(pass.state(), &ReviewPassState::Running { turn });
+    Ok(())
+}
+
 /// terminal pass effects require their exact finding-event,
 /// attachment, or observation child row in the same transaction.
 #[tokio::test(flavor = "multi_thread")]

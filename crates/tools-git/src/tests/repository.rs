@@ -37,7 +37,7 @@ fn injected_root_symlink_is_rejected() {
 }
 
 #[test]
-fn gitdir_file_pointing_outside_root_is_rejected() {
+fn gitdir_file_pointing_to_a_bare_repository_is_rejected() {
     let root = tempfile::tempdir().expect("workspace root constructs");
     let outside = tempfile::tempdir().expect("outside repository constructs");
     Repository::init_bare(outside.path()).expect("outside repository initializes");
@@ -48,9 +48,62 @@ fn gitdir_file_pointing_outside_root_is_rejected() {
     .expect("gitdir indirection writes");
 
     let error = LocalGitTools::try_new(LocalWorkspaceFileSystem, root.path(), identity())
-        .expect_err("external gitdir rejects");
+        .expect_err("bare repository gitdir rejects");
 
     assert!(matches!(error, LocalGitToolsConstructionError::Repository));
+}
+
+#[test]
+fn relative_gitdir_marker_admits_an_empty_repository() {
+    let parent = tempfile::tempdir().expect("fixture parent");
+    let root = parent.path().join("workspace");
+    Repository::init(&root).expect("empty repository");
+    fs::rename(root.join(".git"), parent.path().join("administration"))
+        .expect("administration moves beside the root");
+    fs::write(root.join(".git"), b"gitdir: ../administration\n").expect("relative marker");
+    let (_, executor) = LocalGitTools::try_new(LocalWorkspaceFileSystem, &root, identity())
+        .expect("relative gitdir admits")
+        .into_parts();
+    let status = super::support::execute(&executor, LocalOperation::Status);
+    assert_eq!(status["entries"], serde_json::json!([]));
+}
+
+#[test]
+fn gitdir_resolution_rejects_an_intermediate_symlink() {
+    let parent = tempfile::tempdir().expect("fixture parent");
+    let root = parent.path().join("workspace");
+    Repository::init(&root).expect("empty repository");
+    fs::create_dir(parent.path().join("external")).expect("administration parent");
+    fs::rename(
+        root.join(".git"),
+        parent.path().join("external/administration"),
+    )
+    .expect("administration moves");
+    symlink("external", parent.path().join("alias")).expect("intermediate alias");
+    fs::write(root.join(".git"), b"gitdir: ../alias/administration\n").expect("gitdir marker");
+    assert!(LocalGitTools::try_new(LocalWorkspaceFileSystem, &root, identity()).is_err());
+}
+
+#[test]
+fn replacing_a_gitdir_marker_rejects_the_retained_authority() {
+    let fixture = Fixture::new();
+    let parent = tempfile::tempdir().expect("linked parent");
+    let root = parent.path().join("linked");
+    Repository::open(fixture.root())
+        .expect("fixture opens")
+        .worktree("linked", &root, None)
+        .expect("linked worktree");
+    let (_, executor) = LocalGitTools::try_new(LocalWorkspaceFileSystem, &root, identity())
+        .expect("linked authority")
+        .into_parts();
+    let marker = root.join(".git");
+    let bytes = fs::read(&marker).expect("marker reads");
+    fs::rename(&marker, root.join("retired-marker")).expect("marker retires");
+    fs::write(&marker, bytes).expect("same destination with a new marker identity");
+    assert_eq!(
+        executor.validate_current_repository_identity(),
+        Err(LocalGitFailure::Repository)
+    );
 }
 
 #[test]

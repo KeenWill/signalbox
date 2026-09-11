@@ -3155,12 +3155,6 @@ fn reconstitute_inner(
         },
     )?;
 
-    if let Some(call) = active_compaction_call
-        && active.is_some()
-    {
-        return Err(AcceptedInputSchedulingReconstitutionFailure::InvalidCompactionCall { call });
-    }
-
     Ok(AcceptedInputSchedulingProjection {
         runner_placement_frontier: input.runner_placement_frontiers.last().copied(),
         session: input.session.clone(),

@@ -150,8 +150,29 @@ impl RepositoryWatchClientLoader {
         if token.is_empty() {
             return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
         }
-        GitHubClient::try_new("signalbox-repository-watch", token)
-            .map_err(RepositoryWatchClientLoadError::from_construction)
+        let mut authorization = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+        authorization.set_sensitive(true);
+        GitHubClient::try_with_request_sender(
+            "signalbox-repository-watch",
+            std::sync::Arc::new(move |request, path| {
+                let authorization = authorization.clone();
+                Box::pin(async move {
+                    let response = request
+                        .header(reqwest::header::AUTHORIZATION, authorization)
+                        .send()
+                        .await
+                        .map_err(|source| GitHubClientError::Request {
+                            path,
+                            status: None,
+                            source,
+                        })?;
+                    observe_github_quota(&response);
+                    Ok(response)
+                })
+            }),
+        )
+        .map_err(RepositoryWatchClientLoadError::from_construction)
     }
 }
 
@@ -194,6 +215,12 @@ impl GitPushAuthentication {
         remote: &str,
         timeout: std::time::Duration,
     ) -> Result<Self, RepositoryWatchClientLoadError> {
+        if url::Url::parse(remote)
+            .ok()
+            .is_none_or(|url| url.scheme() != "https" || url.host_str() != Some("github.com"))
+        {
+            return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
+        }
         let token = app
             .token(Some(timeout))
             .await
@@ -212,11 +239,7 @@ fn authenticated_push_url(
     let unavailable = RepositoryWatchClientLoadError::CredentialUnavailable;
     let token = std::str::from_utf8(token).map_err(|_| unavailable)?;
     let mut url = url::Url::parse(remote).map_err(|_| unavailable)?;
-    if url.scheme() != "https"
-        || url.host_str() != Some("github.com")
-        || token.is_empty()
-        || token.contains(['\r', '\n', '\0'])
-    {
+    if url.scheme() != "https" || token.is_empty() || token.contains(['\r', '\n', '\0']) {
         return Err(unavailable);
     }
     url.set_username("x-access-token")
@@ -252,17 +275,35 @@ pub(crate) fn app_observation_client(
                 let credential = signalbox_github_transport::response_credential(&response)
                     .ok_or(GitHubClientError::InvalidCredential)?
                     .to_vec();
-                scrub_app_response(response, &path, &credential).await
+                observe_and_scrub_app_response(response, &path, &credential).await
             })
         }),
     )
 }
 
-async fn scrub_app_response(
+fn observe_github_quota(response: &reqwest::Response) {
+    let quota_header = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    };
+    tracing::info!(
+        api_resource = quota_header("x-ratelimit-resource"),
+        quota_limit = quota_header("x-ratelimit-limit"),
+        quota_used = quota_header("x-ratelimit-used"),
+        quota_remaining = quota_header("x-ratelimit-remaining"),
+        quota_reset = quota_header("x-ratelimit-reset"),
+        "repository-watch GitHub quota observed"
+    );
+}
+
+async fn observe_and_scrub_app_response(
     response: reqwest::Response,
     path: &str,
     credential: &[u8],
 ) -> Result<reqwest::Response, GitHubClientError> {
+    observe_github_quota(&response);
     let status = response.status();
     if !status.is_success() {
         return Ok(response);
@@ -473,8 +514,12 @@ mod tests {
                         .header("content-length", body.len())
                         .body(body)
                         .expect("fixture response");
-                    super::scrub_app_response(response.into(), &path, RESPONSE_TOKEN.as_bytes())
-                        .await
+                    super::observe_and_scrub_app_response(
+                        response.into(),
+                        &path,
+                        RESPONSE_TOKEN.as_bytes(),
+                    )
+                    .await
                 })
             }),
         )
@@ -573,29 +618,49 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn malformed_app_observations_fail_before_ingestion() {
-        let response = http::Response::new(format!("not JSON: {RESPONSE_TOKEN}"));
-        let failure =
-            super::scrub_app_response(response.into(), OBSERVATION_PATH, RESPONSE_TOKEN.as_bytes())
-                .await
+    #[test]
+    fn malformed_app_observations_record_consumed_quota_before_failing() {
+        const REMAINING_QUOTA: &str = "14987";
+        let response = http::Response::builder()
+            .header("x-ratelimit-remaining", REMAINING_QUOTA)
+            .body(format!("not JSON: {RESPONSE_TOKEN}"))
+            .expect("malformed body with quota headers");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let telemetry = crate::process_runtime::tests::capture_telemetry(|| {
+            let failure = runtime
+                .block_on(super::observe_and_scrub_app_response(
+                    response.into(),
+                    OBSERVATION_PATH,
+                    RESPONSE_TOKEN.as_bytes(),
+                ))
                 .expect_err("malformed observations cannot reach persistence");
-        assert!(matches!(
-            failure,
-            GitHubClientError::Request {
-                status: Some(reqwest::StatusCode::OK),
-                ..
-            }
-        ));
+            assert!(matches!(
+                failure,
+                GitHubClientError::Request {
+                    status: Some(reqwest::StatusCode::OK),
+                    ..
+                }
+            ));
+        });
+
+        assert!(telemetry.contains("repository-watch GitHub quota observed"));
+        assert!(telemetry.contains(&format!("quota_remaining=\"{REMAINING_QUOTA}\"")));
+        assert!(!telemetry.contains(RESPONSE_TOKEN));
     }
 
     #[tokio::test]
     async fn unchanged_app_pages_do_not_require_a_json_body() {
         let response = http::Response::builder().status(304).body("").unwrap();
-        let response =
-            super::scrub_app_response(response.into(), OBSERVATION_PATH, RESPONSE_TOKEN.as_bytes())
-                .await
-                .expect("unchanged responses retain their status");
+        let response = super::observe_and_scrub_app_response(
+            response.into(),
+            OBSERVATION_PATH,
+            RESPONSE_TOKEN.as_bytes(),
+        )
+        .await
+        .expect("unchanged responses retain their status");
         assert_eq!(response.status(), reqwest::StatusCode::NOT_MODIFIED);
     }
 
@@ -703,6 +768,17 @@ mod tests {
         assert_eq!(
             url.url,
             "https://x-access-token:synthetic-installation-token@github.com/fixture/project.git"
+        );
+        let custom = loader
+            .authenticated_push_url(
+                "https://git.example.test/fixture/project.git",
+                std::time::Duration::from_secs(300),
+            )
+            .await
+            .expect("configured HTTPS destination accepts its token file");
+        assert_eq!(
+            custom.url,
+            "https://x-access-token:synthetic-installation-token@git.example.test/fixture/project.git"
         );
         assert_eq!(
             loader

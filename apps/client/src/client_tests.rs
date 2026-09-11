@@ -6184,6 +6184,7 @@ async fn operator_status_counts_and_displays_supervision_and_repository_ingestio
 -> Result<(), Box<dyn Error>> {
     use signalbox_process_protocol::{
         OperatorStatusEndMessage, OperatorStatusMessage, OperatorStatusRepositoryIngestion,
+        OperatorStatusUnavailableComponentMessage,
     };
     let directory = tempfile::tempdir()?;
     let socket = directory.path().join("status.sock");
@@ -6198,6 +6199,12 @@ async fn operator_status_counts_and_displays_supervision_and_repository_ingestio
         assert_eq!(request.request(), &ClientRequest::ReadOperatorStatus {});
         for message in [
             OperatorStatusMessage::Start {},
+            OperatorStatusMessage::UnavailableComponent(Box::new(
+                OperatorStatusUnavailableComponentMessage {
+                    component: "blob_store:primary".to_owned(),
+                    cause: "filesystem_namespace_unavailable".to_owned(),
+                },
+            )),
             OperatorStatusMessage::SessionSupervision(Box::new(signalbox_process_protocol::OperatorStatusSessionSupervisionMessage {
                 session_id: CanonicalUuid::from_uuid(Uuid::from_u128(144)),
                 terminal: true,
@@ -6214,6 +6221,7 @@ async fn operator_status_counts_and_displays_supervision_and_repository_ingestio
                 },
             )),
             OperatorStatusMessage::End(Box::new(OperatorStatusEndMessage {
+                unavailable_component_count: CanonicalU64::new(1),
                 session_supervision_count: CanonicalU64::new(1),
                 repository_ingestion_count: CanonicalU64::new(1),
                 lifecycle_week_count: CanonicalU64::new(0),
@@ -6243,6 +6251,9 @@ async fn operator_status_counts_and_displays_supervision_and_repository_ingestio
     .await?;
     server.await??;
     let rendered = String::from_utf8(stdout)?;
+    assert!(rendered.contains(
+        "unavailable_component component=blob_store:primary cause=filesystem_namespace_unavailable"
+    ));
     let evidence = rendered
         .lines()
         .find_map(|line| line.strip_prefix("repository_ingestion "))

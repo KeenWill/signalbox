@@ -1,8 +1,8 @@
 use super::{
-    CredentialPoolRuntimeAction, CredentialPoolRuntimeCatalog, CredentialPoolRuntimeExhaustion,
-    CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy, CredentialPoolRuntimeTieBreak,
-    MODEL_CALL_OUTBOX_ORDER_GUARD, ModelCallCorruption, ModelCallOutboxOrderGuard,
-    ModelCallRepositoryError, ToolContinuationUsageLimit, ToolContinuationUsageLimitCatalog,
+    CredentialPoolRuntimeAction, CredentialPoolRuntimeCatalog, CredentialPoolRuntimeMember,
+    CredentialPoolRuntimePolicy, CredentialPoolRuntimeTieBreak, MODEL_CALL_OUTBOX_ORDER_GUARD,
+    ModelCallCorruption, ModelCallOutboxOrderGuard, ModelCallRepositoryError,
+    ToolContinuationUsageLimit, ToolContinuationUsageLimitCatalog,
 };
 use crate::mapping::{positive_u64_from_numeric, session_id_to_uuid, turn_id_to_uuid};
 use rust_decimal::Decimal;
@@ -15,7 +15,6 @@ use sqlx::postgres::PgRow;
 use sqlx::types::Uuid;
 use sqlx::{PgConnection, Row};
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -561,7 +560,7 @@ pub(super) async fn select_runtime_pool_credential(
             false,
         ),
     };
-    let Some(policy) = policy else {
+    let Some(mut policy) = policy else {
         return Ok(SelectedRuntimePoolCredential {
             wait: None,
             reference: Some(default_reference),
@@ -569,6 +568,25 @@ pub(super) async fn select_runtime_pool_credential(
             pending_consumed_actions: Vec::new(),
         });
     };
+    if let Some(live_policy) = policies.get(&serving_evidence.effective_target) {
+        for member in Arc::make_mut(&mut policy.members) {
+            member.availability_probe = live_policy
+                .members()
+                .iter()
+                .find(|live| live.credential_reference() == member.credential_reference())
+                .and_then(|live| live.availability_probe.clone());
+        }
+    }
+    // One admission uses one operational snapshot for selection, wait evidence,
+    // and exhaustion evidence. A later admission overlays and calls the live
+    // probes again.
+    for member in Arc::make_mut(&mut policy.members) {
+        member.availability_probe = if member.is_available() {
+            None
+        } else {
+            Some(Arc::new(|| false))
+        };
+    }
     let durable = load_durable_pool_exclusions(connection, session, turn, &policy).await?;
     let observed_at = durable.observed_at;
     let profiles = policy
@@ -576,10 +594,19 @@ pub(super) async fn select_runtime_pool_credential(
         .iter()
         .map(CredentialPoolRuntimeMember::credential_reference)
         .collect::<Vec<_>>();
+    let unavailable = policy
+        .members()
+        .iter()
+        .filter(|member| !member.is_available())
+        .map(|member| member.credential_reference().to_owned())
+        .collect::<HashSet<_>>();
     let mut bounded = crate::credential_invocations::bounded_members(connection, &profiles).await?;
-    bounded.retain(|member| !durable.excluded.contains(&member.profile));
+    bounded.retain(|member| {
+        !durable.excluded.contains(&member.profile) && !unavailable.contains(&member.profile)
+    });
     let mut excluded = durable.excluded.clone();
     excluded.extend(bounded.iter().map(|member| member.profile.clone()));
+    excluded.extend(unavailable);
     let headroom = &durable.headroom;
     let sticky_reference = match predecessor_reference {
         // An availability successor continues its predecessor's chain, so the
@@ -638,11 +665,13 @@ pub(super) async fn select_runtime_pool_credential(
                                 .flatten();
                             match policy.tie_break {
                                 CredentialPoolRuntimeTieBreak::FirstListed => {
-                                    (0, std::cmp::Reverse(None))
+                                    (0, false, std::cmp::Reverse(None))
                                 }
-                                CredentialPoolRuntimeTieBreak::LeastUsed => {
-                                    (member.priority().get(), std::cmp::Reverse(remaining))
-                                }
+                                CredentialPoolRuntimeTieBreak::LeastUsed => (
+                                    member.priority().get(),
+                                    remaining.is_some(),
+                                    std::cmp::Reverse(remaining),
+                                ),
                             }
                         })
                 })
@@ -708,12 +737,14 @@ pub(super) async fn persist_call_pool_policy(
     policy: &CredentialPoolRuntimePolicy,
 ) -> Result<(), ModelCallRepositoryError> {
     crate::oauth_credential::lock_pool_members(connection, policy).await?;
+    let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
     sqlx::query(
         "INSERT INTO model_call_credential_pool_policy
             (model_call_id, pool_name, on_pool_exhausted,
              on_quota_exhausted, on_rate_limited, on_overloaded,
-             on_credential_rejected, tie_break, headroom_reserve_percent, on_headroom_low)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             on_credential_rejected, tie_break, headroom_reserve_percent, on_headroom_low,
+             pool_policy_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(call.into_uuid())
     .bind(policy.name())
@@ -725,6 +756,7 @@ pub(super) async fn persist_call_pool_policy(
     .bind(policy.tie_break.as_str())
     .bind(policy.headroom_reserve_percent.map(i16::from))
     .bind(policy.headroom_low.as_str())
+    .bind(policy_id)
     .execute(&mut *connection)
     .await?;
     for (ordinal, member) in policy.members().iter().enumerate() {
@@ -744,14 +776,6 @@ pub(super) async fn persist_call_pool_policy(
         .execute(&mut *connection)
         .await?;
     }
-    let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
-    sqlx::query(
-        "UPDATE model_call_credential_pool_policy SET pool_policy_id = $2 WHERE model_call_id = $1",
-    )
-    .bind(call.into_uuid())
-    .bind(policy_id)
-    .execute(connection)
-    .await?;
     Ok(())
 }
 
@@ -799,69 +823,20 @@ pub(super) async fn load_call_pool_policy(
     connection: &mut PgConnection,
     call: Uuid,
 ) -> Result<Option<CredentialPoolRuntimePolicy>, ModelCallRepositoryError> {
-    let Some(row) = sqlx::query(
-        "SELECT pool_name, on_pool_exhausted,
-                on_quota_exhausted, on_rate_limited, on_overloaded,
-                on_credential_rejected, tie_break, headroom_reserve_percent, on_headroom_low
+    let policy_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT pool_policy_id
            FROM model_call_credential_pool_policy
           WHERE model_call_id = $1",
     )
     .bind(call)
     .fetch_optional(&mut *connection)
-    .await?
-    else {
-        return Ok(None);
-    };
-    let members = sqlx::query_as::<_, (String, i64, Option<i16>)>(
-        "SELECT credential_reference, priority, headroom_reserve_percent
-           FROM model_call_credential_pool_member
-          WHERE model_call_id = $1
-          ORDER BY member_ordinal",
-    )
-    .bind(call)
-    .fetch_all(&mut *connection)
-    .await?
-    .into_iter()
-    .map(|(reference, priority, reserve)| {
-        let priority = u32::try_from(priority)
-            .ok()
-            .and_then(NonZeroU32::new)
-            .ok_or(ModelCallCorruption::Inconsistent(
-                "credential pool member priority",
-            ))?;
-        Ok(CredentialPoolRuntimeMember::new(reference, priority)
-            .with_headroom_reserve(decode_headroom_reserve(reserve)?))
-    })
-    .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
-    Ok(Some(
-        CredentialPoolRuntimePolicy::new(
-            row.try_get::<String, _>("pool_name")?,
-            Arc::<[CredentialPoolRuntimeMember]>::from(members),
-            CredentialPoolRuntimeExhaustion::parse(row.try_get("on_pool_exhausted")?)?,
-            CredentialPoolRuntimeAction::parse(row.try_get("on_quota_exhausted")?)?,
-            CredentialPoolRuntimeAction::parse(row.try_get("on_rate_limited")?)?,
-            CredentialPoolRuntimeAction::parse(row.try_get("on_overloaded")?)?,
-            CredentialPoolRuntimeAction::parse(row.try_get("on_credential_rejected")?)?,
-        )
-        .with_capacity_policy(
-            CredentialPoolRuntimeTieBreak::parse(row.try_get("tie_break")?)?,
-            decode_headroom_reserve(row.try_get("headroom_reserve_percent")?)?,
-            CredentialPoolRuntimeAction::parse(row.try_get("on_headroom_low")?)?,
-        ),
-    ))
-}
-
-fn decode_headroom_reserve(value: Option<i16>) -> Result<Option<u8>, ModelCallRepositoryError> {
-    value
-        .map(|value| {
-            u8::try_from(value)
-                .ok()
-                .filter(|value| *value <= 99)
-                .ok_or_else(|| {
-                    ModelCallCorruption::Inconsistent("credential pool headroom reserve").into()
-                })
-        })
-        .transpose()
+    .await?;
+    match policy_id {
+        None => Ok(None),
+        Some(policy_id) => credential_pool_records::load_policy(connection, policy_id)
+            .await
+            .map(Some),
+    }
 }
 
 fn capacity_headroom(

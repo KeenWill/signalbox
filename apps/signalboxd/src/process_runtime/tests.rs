@@ -619,6 +619,46 @@ pub(crate) mod tests {
         assert_eq!(bounded.matches("compaction text truncated").count(), 2);
     }
 
+    #[tokio::test]
+    async fn bounded_compaction_preserves_content_before_identity_metadata() -> Result<(), Box<dyn Error>> {
+        use signalbox_persistence::{blob::BlobCatalogRepository, process_read::ProcessTranscriptEntry};
+
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+        let catalog = BlobCatalogRepository::new(pool);
+        let source_session = SessionId::from_uuid(Uuid::new_v4());
+        let turn = TurnId::from_uuid(Uuid::new_v4());
+        let model_call = ModelCallId::from_uuid(Uuid::new_v4());
+        let task = "Implement the durable frontier suffix regression.";
+        let arguments = r#"{"path":"crates/process-protocol/src/request.rs"}"#;
+        let entries = [
+            (ProcessTranscriptEntry::Assistant {
+                entry_index: 0, source_session,
+                entry: SemanticTranscriptEntryId::from_uuid(Uuid::new_v4()),
+                turn, model_call, content: task.to_owned(),
+            }, task),
+            (ProcessTranscriptEntry::AssistantToolUse {
+                entry_index: 1, source_session,
+                entry: SemanticTranscriptEntryId::from_uuid(Uuid::new_v4()),
+                turn, model_call, request: ToolRequestId::from_uuid(Uuid::new_v4()),
+                name: "read_file".to_owned(), arguments: arguments.to_owned(), approval: None,
+            }, "crates/process-protocol/src/request.rs"),
+        ];
+        // The metadata alone exceeds this entry's source allowance.
+        let entry_byte_budget = 220;
+        for (entry, expected_content) in entries {
+            let value = super::context_compaction_entry_value(&entry, &catalog)
+                .await
+                .expect("text and tool arguments need no blob lookup");
+            let source = serde_json::json!([value]).to_string();
+            let bounded = super::bounded_compaction_source(source, entry_byte_budget);
+            assert!(bounded.contains(expected_content), "content lost: {bounded}");
+            assert!(bounded.len() <= entry_byte_budget as usize);
+            assert!(bounded.contains("compaction text truncated"));
+        }
+        Ok(())
+    }
+
     #[test]
     fn snapshot_delta_boundary_consumes_only_the_queued_prefix() {
         let mut queued = 2;
@@ -1681,6 +1721,47 @@ pub(crate) mod tests {
                 .expect("terminal state retains the historical activation");
         assert_eq!(reconstructed_run, running_run);
         assert_eq!(reconstructed_pass, running_pass);
+    }
+
+    #[test]
+    fn terminal_turn_activates_a_queued_review_pass() {
+        let reference = ReviewRunRef::new(
+            ReviewTargetId::from_uuid(Uuid::from_u128(1)),
+            ReviewRunId::from_uuid(Uuid::from_u128(2)),
+        );
+        let pass_reference =
+            ReviewPassRef::new(reference, ReviewPassId::from_uuid(Uuid::from_u128(3)));
+        let session = SessionId::from_uuid(Uuid::from_u128(4));
+        let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(5));
+        let turn = TurnId::from_uuid(Uuid::from_u128(6));
+        let policy = ReviewPolicy::version_one();
+        let mut queued_run = ReviewRun::new(reference, ReviewWorkflowKind::ReadOnlyReview, policy);
+        let queued_pass = ReviewPass::try_new(
+            pass_reference,
+            ReviewPassKind::ReadOnlyReview,
+            &mut queued_run,
+            session,
+            ReviewPassAcceptedInputEvidence::new(accepted_input, session, Some(turn)),
+        )
+        .expect("the fixture pass owns its accepted input");
+
+        let (activated_run, activated_pass) = super::activate_queued_review_pass(
+            queued_run,
+            queued_pass,
+            turn,
+            signalbox_persistence::review_workflow::ReviewTurnLifecycleState::Terminal(
+                ReviewPassTurnOutcome::Completed,
+            ),
+        )
+        .expect("a terminal turn retains enough history to activate its queued pass");
+
+        assert_eq!(
+            activated_run.state(),
+            ReviewRunState::Running {
+                active_pass: pass_reference,
+            }
+        );
+        assert_eq!(activated_pass.state(), &ReviewPassState::Running { turn });
     }
 
     #[tokio::test]

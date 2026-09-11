@@ -27,7 +27,11 @@ orchestration; final `validate` stays on builds because it also executes two
 Cargo contract checks. The web job uses builds with declared browser runtimes
 and fonts. Report-tier jobs and Docker live smokes limit Cargo compilation to
 two jobs; the API digest also limits Bazel to two jobs. Docker sidecar CPU
-allowances are separate from runner compilation budgets.
+allowances are separate from runner compilation budgets. PostgreSQL partitions
+limit Bazel to four concurrent actions and four local CPU units, matching the
+integration runner CPU limit. The daemon partition has a 30-minute job deadline
+to accommodate cold compilation; other PostgreSQL partitions retain 15 minutes.
+The Bazel resource estimates do not enforce an operating-system memory ceiling.
 
 ## The routing rule
 
@@ -82,14 +86,14 @@ The runner image has no `sudo` (pods run with `no-new-privileges`), no Nix, no
 `gh` CLI, or host-provided Playwright system dependencies. Jobs needing host
 facilities stay hosted for now, although this may change over time.
 
-| Job                                               | Why                                                           |
-| ------------------------------------------------- | ------------------------------------------------------------- |
-| `bazel.yml` `bazel-host-integration`              | privileged cgroup delegation via `sudo`                       |
-| `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`                     |
-| `devenv-smoke.yml` `linux`                        | Nix; committed-lock evaluation and disposable script fixtures |
-| `devenv-lock.yml` `relock`                        | Nix                                                           |
-| `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix)         |
-| `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                         |
+| Job                                               | Why                                                                         |
+| ------------------------------------------------- | --------------------------------------------------------------------------- |
+| `bazel.yml` `bazel-host-integration`              | cgroup delegation and Bubblewrap namespaces, including SSH push trust tests |
+| `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`                                   |
+| `devenv-smoke.yml` `linux`                        | Nix; committed-lock evaluation and disposable script fixtures               |
+| `devenv-lock.yml` `relock`                        | Nix                                                                         |
+| `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix)                       |
+| `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                                       |
 
 The `bazel-postgres` job uses the canonical routing expression with
 `signalbox-integration-tests`, or `ubuntu-latest` for fork and named bot pull
@@ -127,6 +131,27 @@ fails matrix generation. Documentation prose, browser source and native client
 changes can bypass PostgreSQL through the coarse path gate; generated browser
 contracts keep the bar. API generation and API digest reports reuse the existing
 Rust scope, while documentation consistency checks still run.
+
+## Shared PostgreSQL fixtures
+
+Linux Bazel PostgreSQL selections enable `SIGNALBOX_TEST_SHARED_POSTGRES=1`.
+Each libtest process lazily starts a shared PostgreSQL server and clones the
+migration-set template into a separate database for each fixture. Every live
+fixture reserves its own bounded tablespace. A full server starts another server
+instead of blocking tests that need multiple fixtures. Slots become reusable
+only after a successful database drop; failed setup or cleanup retains the
+reservation until the process exits. `TESTCONTAINERS_COMMAND=keep` retains
+databases and servers.
+
+Bazel's runtime wrapper owns server cleanup and waits for it before returning to
+Bazel, which reaps detached descendants. A failed or killed test binary still
+triggers wrapper cleanup. Killing the entire wrapper or runner with `SIGKILL`
+can leave labeled containers holding host memory until the
+[existing sweeper](../../tooling/sweep-test-containers.sh) reclaims them. Cargo
+can opt in with the same variable and uses a pidfd guardian tied to the test
+process. Nextest retains its existing run-owned server path. Ordinary Bazel
+selections retain their existing fixture behavior. No suite filters or test
+concurrency settings change.
 
 ## PostgreSQL result reuse
 

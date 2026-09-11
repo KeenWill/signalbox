@@ -97,14 +97,7 @@ impl RepoWatchStore {
         effect: Uuid,
     ) -> Result<Transaction<'static, Postgres>, StoreError> {
         // Waiting observations must not occupy connections needed by frontier commits.
-        let locks = self
-            .pool
-            .options()
-            .clone()
-            .min_connections(0)
-            .max_connections(1)
-            .connect_lazy_with(self.pool.connect_options().as_ref().clone());
-        let mut transaction = locks.begin().await?;
+        let mut transaction = self.observation_locks.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('observation:' || $1, 0))")
             .bind(repository.as_str())
             .execute(&mut *transaction)

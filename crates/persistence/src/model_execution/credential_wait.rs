@@ -51,9 +51,11 @@ fn selects_wait(members: &[Vec<Candidate>], authentication: &HashSet<Uuid>) -> b
                     .iter()
                     .all(|exclusion| match &exclusion.exclusion {
                         CredentialPoolExclusion::ProfileQuarantine { record_generation }
-                        | CredentialPoolExclusion::MembershipExclusion { record_generation }
                         | CredentialPoolExclusion::SessionDisplacement { record_generation } => {
                             record_generation.unwrap_or(0) > 0
+                        }
+                        CredentialPoolExclusion::MembershipExclusion { record_generation } => {
+                            record_generation.unwrap_or(0) > 0 || exclusion.action.is_none()
                         }
                         CredentialPoolExclusion::ChainExclusion {
                             predecessor_model_call_id,
