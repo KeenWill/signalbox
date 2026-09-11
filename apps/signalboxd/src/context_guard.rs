@@ -1560,7 +1560,7 @@ mod tests {
                 "role": "user",
                 "content": [{
                     "type": "text",
-                    "text": &expected_cli[1..expected_cli.len() - 1],
+                    "text": r#"{"type":"tool_result","tool_call_id":"00000000-0000-0000-0000-000000000003","content":"{\"error\":{\"detail\":null,\"kind\":\"closed_by_turn_end\"}}","is_error":true}"#,
                 }],
             },
         });
