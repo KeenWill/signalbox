@@ -80,7 +80,7 @@ py_test(
 )
 
 py_test(
-    name = "test_postgres_test_container",
+    name = "test_test_database_lifecycle",
     size = "small",
     srcs = ["tooling/test_postgres_test_container.py"],
     data = [
@@ -93,10 +93,10 @@ py_test(
 test_suite(
     name = "python_checker_tests",
     tests = [
-        ":test_postgres_test_container",
         ":test_summarize_coverage",
         ":test_supervise_lifecycle",
         ":test_sweep_test_containers",
+        ":test_test_database_lifecycle",
         "//scripts:checker_tests",
     ],
 )
