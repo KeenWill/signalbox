@@ -691,9 +691,38 @@ async fn tool_acknowledgement_discards_thinking_before_its_text() {
 }
 
 #[tokio::test]
+async fn tool_acknowledgement_retries_thinking_only_messages_before_text() {
+    let result = execute_scenario(
+        "tool_acknowledgement_retries_thinking_only",
+        OperationShape::Tool,
+    )
+    .await;
+    let completion = completed(&result.evidence);
+    assert_eq!(completion.finish, CompletionFinish::ToolUse);
+    assert_eq!(completion.content.len(), 1);
+    assert_eq!(
+        tool_call(&completion.content).id.as_str(),
+        fixtures::TOOL_ID
+    );
+    assert_eq!(
+        completion.message_id.as_ref().map(|id| id.as_str()),
+        Some(fixtures::MESSAGE_ID)
+    );
+    assert!(!result.observations.iter().any(|observation| matches!(
+        observation.fact,
+        signalbox_model_runtime::ObservationFact::ThinkingDelta { .. }
+            | signalbox_model_runtime::ObservationFact::TextDelta { .. }
+    )));
+    assert_eq!(completion.usage, expected_usage());
+}
+
+#[tokio::test]
 async fn tool_acknowledgement_tail_rejects_incomplete_or_conflicting_evidence() {
     for scenario in [
         "tool_acknowledgement_thinking_only",
+        "tool_acknowledgement_retry_without_text",
+        "tool_acknowledgement_retry_reports_tool_use",
+        "tool_acknowledgement_changes_id_after_text",
         "tool_acknowledgement_tail_without_result",
         "tool_acknowledgement_tail_reports_tool_use",
         "tool_acknowledgement_tail_is_empty",

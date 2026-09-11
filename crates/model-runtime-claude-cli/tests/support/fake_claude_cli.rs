@@ -346,6 +346,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             success("end_turn", Some(fixtures::ANSWER))?;
         }
+        "tool_acknowledgement_retries_thinking_only"
+        | "tool_acknowledgement_retry_without_text"
+        | "tool_acknowledgement_retry_reports_tool_use" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            for message_id in [fixtures::OTHER_MESSAGE_ID, fixtures::RETRIED_MESSAGE_ID] {
+                emit_json(&serde_json::json!({
+                    "type": "assistant", "parent_tool_use_id": null,
+                    "message": {
+                        "id": message_id, "model": fixtures::MODEL,
+                        "role": "assistant", "content": [{
+                            "type": "thinking", "thinking": "",
+                            "signature": "synthetic-signature",
+                        }],
+                    },
+                }))?;
+            }
+            if scenario != "tool_acknowledgement_retry_without_text" {
+                assistant_text_with_id(fixtures::RETRIED_MESSAGE_ID, fixtures::ANSWER)?;
+            }
+            let stop_reason = if scenario == "tool_acknowledgement_retry_reports_tool_use" {
+                "tool_use"
+            } else {
+                "end_turn"
+            };
+            success(stop_reason, Some(fixtures::ANSWER))?;
+        }
+        "tool_acknowledgement_changes_id_after_text" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            assistant_text_with_id(fixtures::RETRIED_MESSAGE_ID, fixtures::ANSWER)?;
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
         "tool_acknowledgement_tail_reports_tool_use" => {
             assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
             tool_result(fixtures::TOOL_ID)?;
