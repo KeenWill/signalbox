@@ -144,11 +144,17 @@ async fn reload_migration_preserves_oauth_commands_when_applied_after_oauth()
         OauthCredentialOperation, OauthCredentialOutcome, OauthCredentialRepository,
     };
     let (_container, pool, _) = unmigrated_postgres().await?;
-    // Model an installed OAuth schema before either reload registry migration arrives.
+    // Historical OAuth administration precedes the reload command table. Later
+    // migrations can depend on that table and do not belong to this prefix.
+    const OAUTH_ADMINISTRATION: i64 = 202609071100;
+    const RELOAD_CONFIGURATION: i64 = 202609071000;
     let previous = sqlx::migrate::Migrator::with_migrations(
         signalbox_persistence::MIGRATOR
             .iter()
-            .filter(|migration| ![202609071000, 202609071600].contains(&migration.version))
+            .filter(|migration| {
+                migration.version <= OAUTH_ADMINISTRATION
+                    && migration.version != RELOAD_CONFIGURATION
+            })
             .cloned()
             .collect(),
     );
