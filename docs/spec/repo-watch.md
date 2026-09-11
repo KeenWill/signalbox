@@ -289,9 +289,9 @@ discovered terminal times on the dispatch ledger. A queued retirement whose
 session has ended is rejected locally as `session_already_terminal`. Reactions
 retain their original rule and action even after configuration removes the rule.
 The module commits lifecycle effects before advancing its application cursor;
-the daemon acknowledges the corresponding seam event afterward. Available
-lifecycle events are drained before replaying pending commands, so creation and
-terminal settlements reach the ledger before another submission pass.
+the daemon acknowledges the corresponding seam event afterward. Lifecycle events
+through the committed frontier captured at the start of each pass are drained
+before replaying pending commands; later events remain for the next pass.
 
 Pull-request dispatch atomically creates the session with a provisioning hold
 that public start and ownership releases cannot clear. Input accepted during
