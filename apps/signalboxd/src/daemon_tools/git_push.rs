@@ -517,7 +517,7 @@ fn push_rejection_reason(result: &ProcessRunResult) -> &'static str {
         "non_fast_forward"
     } else if output.contains("protected branch") || error.contains("protected branch") {
         "protected_branch"
-    } else if git_authentication_rejected(result) {
+    } else if git_authentication_rejected(result) || error.contains("authentication failed") {
         "authentication"
     } else if error.contains("permission denied")
         || error.contains("requested url returned error: 403")
@@ -1012,6 +1012,12 @@ mod tests {
                 "!\tcommit:refs/heads/review\t[rejected] (non-fast-forward)\n",
                 "fatal: https://fixture-secret@github.com/fixture/project.git",
                 "non_fast_forward",
+            ),
+            (
+                "authentication without fatal prefix",
+                "",
+                "Authentication failed for https://fixture-secret@github.com/fixture/project.git",
+                "authentication",
             ),
             (
                 "unknown remote reason",
