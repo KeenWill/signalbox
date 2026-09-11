@@ -353,6 +353,13 @@ rejection of the refreshed token. HTTP statuses carried by Codex connection and
 stream errors classify 401 as credential rejection, 429 as rate limit, 500 as
 provider internal failure, and 503 or 529 as overload.
 
+A failed Codex turn whose final error is `other` retains the latest correlated
+retry error's typed classification. A specific terminal error takes precedence;
+retry telemetry alone proves neither terminal failure nor non-acceptance, and a
+successful turn discards it. Codex connection and stream-disconnection errors
+without an HTTP status retain transport loss and whether response content was
+observed.
+
 A success-status response whose body is not valid completion material is
 boundary loss, never completion, and an unrecognized finish token is boundary
 loss in both HTTP adapters. An Anthropic stop-sequence finish naming a sequence

@@ -470,10 +470,13 @@ its claim.
 
 Success returns `configuration_reloaded { command_id, reloaded_sections }`, with
 exactly `model_catalog`, `session_templates`, and `repo_watch` in that order.
-Failure returns `configuration_reload_failed { command_id, phase, reason }`;
-`phase` is `read`, `validate`, `activate`, `reconcile`, or `install`, and
-`reason` is sanitized as startup logs are, with 1 through 1,024 UTF-8 bytes and
-no control characters. A pending reload returns `unavailable` with the message
+The model catalog includes reloadable Codex-home profile paths. Successful
+reload receipts atomically grant eligibility to authentication waits whose
+profiles changed, without preparing calls or changing terminal turns. Failure
+returns `configuration_reload_failed { command_id, phase, reason }`; `phase` is
+`read`, `validate`, `activate`, `reconcile`, or `install`, and `reason` is
+sanitized as startup logs are, with 1 through 1,024 UTF-8 bytes and no control
+characters. A pending reload returns `unavailable` with the message
 `configuration reload is busy`. The terminal client exposes
 `reload-configuration` with optional `--command-id` for retries and prints the
 installed sections or failure phase and reason.
