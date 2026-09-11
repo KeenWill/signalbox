@@ -457,9 +457,9 @@ fn repository_projection_error(error: SessionTimelineRepositoryError) -> Respons
         SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Database(_)) => {
             "infrastructure"
         }
-        SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Corruption(_)) => {
-            "fail_closed_corruption"
-        }
+        SessionTimelineRepositoryError::Outbox(
+            OutboxDispatchError::CursorCorruption(_) | OutboxDispatchError::RowCorruption(_),
+        ) => "fail_closed_corruption",
     };
     tracing::error!(
         failure_class,
@@ -761,6 +761,11 @@ fn detail_body_dto(
                 }
                 TimelineToolBatchState::RecoveryRequired { attempt_id } => {
                     WebTimelineToolBatchState::RecoveryRequired {
+                        tool_attempt_id: web_uuid(attempt_id.into_uuid()),
+                    }
+                }
+                TimelineToolBatchState::ChildWaitResumed { attempt_id } => {
+                    WebTimelineToolBatchState::ChildWaitResumed {
                         tool_attempt_id: web_uuid(attempt_id.into_uuid()),
                     }
                 }

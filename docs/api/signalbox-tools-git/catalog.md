@@ -18,8 +18,16 @@ pub enum GitObjectFormat {
 pub struct PinnedRepositoryDirectories {
     pub root: signalbox_tools_workspace::WorkspaceRootIdentity,
     pub administration: signalbox_tools_workspace::WorkspaceRootIdentity,
+    pub common_administration: signalbox_tools_workspace::WorkspaceRootIdentity,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## local_git_catalog
+
+```rust
+pub fn local_git_catalog(
+) -> result::Result<signalbox_application::CompiledToolCatalog, LocalGitToolsConstructionError>;
 ```
 
 ## LocalGitTools
@@ -33,6 +41,7 @@ impl<FileSystem: signalbox_tools_workspace::WorkspaceFileSystem> LocalGitTools<F
         root_path: impl convert::AsRef<path::Path>,
         identity: GitIdentity,
     ) -> result::Result<Self, LocalGitToolsConstructionError>;
+    pub fn with_max_object_bytes(self, max_bytes: option::Option<usize>) -> Self;
     pub const fn object_format(&self) -> GitObjectFormat;
     pub const fn pinned_directories(&self) -> PinnedRepositoryDirectories;
     pub fn into_parts(

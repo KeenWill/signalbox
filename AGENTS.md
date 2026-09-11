@@ -199,8 +199,13 @@ a commit can move another worktree's HEAD. Use
 
 On Linux, ordinary nextest PostgreSQL fixtures share a run-owned container; each
 test owns a database clone and a guardian removes the container when the runner
-exits. Fixtures using testcontainers, including ordinary Cargo/Bazel runs, rely
-on `ContainerAsync` drop to remove their containers; a test process that dies
+exits. Linux Bazel PostgreSQL selections share process-owned servers with
+exclusive storage slots per live database; Cargo enables this path with
+`SIGNALBOX_TEST_SHARED_POSTGRES=1`. Bazel's runtime wrapper removes its servers
+before returning; Cargo's pidfd guardian follows its owning test process.
+Untrappable wrapper or runner termination can leave shared containers holding
+host memory for the sweep below. Fixtures using testcontainers rely on
+`ContainerAsync` drop to remove their containers; a test process that dies
 without unwinding can leave those containers holding host memory. Test harnesses
 attach the disposable label selected by the sweep, using
 `signalbox_persistence::disposable_test_container_labels` for testcontainers.

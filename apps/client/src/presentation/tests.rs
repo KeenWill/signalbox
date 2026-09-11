@@ -15,8 +15,9 @@ use signalbox_process_protocol::{
     MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDollarCost, ModelCallState,
     ModelCallTokenUsage, OperatorStatusLifecycleDeadlineViolationMessage,
     OperatorStatusLifecycleState, OperatorStatusLifecycleWeekMessage, OperatorStatusMessage,
-    ReviewDiffSide, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
-    ReviewTargetSnapshot, ReviewTargetSubject, RunnerCapabilityClass, RunnerConnectionHealth,
+    OperatorStatusUnavailableComponentMessage, ReviewDiffSide, ReviewFindingInput,
+    ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity, ReviewTargetSnapshot,
+    ReviewTargetSubject, RunnerCapabilityClass, RunnerConnectionHealth,
     RunnerCredentialProfileName, RunnerPlacementRevision, RunnerProjection,
     RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey, RunnerSandboxProfile,
     RunnerStateTransitionState, RunnerWorkingDirectory, ServerMessage, SessionEvent,
@@ -167,6 +168,16 @@ fn operator_status_renders_all_sections_and_explains_omitted_usage() {
             .expect("in-memory output cannot fail");
         output
             .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
+                OperatorStatusMessage::UnavailableComponent(Box::new(
+                    OperatorStatusUnavailableComponentMessage {
+                        component: "adapter:codex_cli".to_owned(),
+                        cause: "codex_cli_pin_mismatch".to_owned(),
+                    },
+                )),
+            )))
+            .expect("in-memory output cannot fail");
+        output
+            .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
                 OperatorStatusMessage::LifecycleWeek(Box::new(
                     OperatorStatusLifecycleWeekMessage {
                         week_start_date: String::from("2026-08-31"),
@@ -217,6 +228,7 @@ fn operator_status_renders_all_sections_and_explains_omitted_usage() {
     let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
     expect![[r#"
         status lifecycle_weeks=1 nonterminal_past_deadline=1 session_supervision=1 outbox_quarantine=2
+        unavailable_component component=adapter:codex_cli cause=codex_cli_pin_mismatch
         lifecycle_week week=2026-08-31 completion_failure=3/40@75000ppm failed_unknown=1/40@25000ppm overflow=5/44@113636ppm finish_given_overflow=4/5@800000ppm wall=0/38@0ppm wall_occurrences=0 turn_cause_completeness=980/985@994923ppm model_call_cause_completeness=91/95@957894ppm
         nonterminal_past_deadline session=00000000-0000-0000-0000-000000000006 state=parked deadline=armed expired=1m30s
         session_supervision {"session_id":"00000000-0000-0000-0000-000000000007","terminal":true,"failure_class":"corruption","cause_code":"durable_state_corruption"}

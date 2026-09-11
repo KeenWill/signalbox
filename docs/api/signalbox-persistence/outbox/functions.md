@@ -7,7 +7,7 @@
 ```rust
 pub fn decode_delegation_update_kind(
     value: &str,
-) -> result::Result<mapping::DelegationUpdateStorageKind, outbox::OutboxCorruption>;
+) -> result::Result<mapping::DelegationUpdateStorageKind, outbox::OutboxRowCorruption>;
 ```
 
 ## decode_delegation_policy_kind
@@ -15,7 +15,7 @@ pub fn decode_delegation_update_kind(
 ```rust
 pub fn decode_delegation_policy_kind(
     value: &str,
-) -> result::Result<mapping::DelegationPolicyStorageKind, outbox::OutboxCorruption>;
+) -> result::Result<mapping::DelegationPolicyStorageKind, outbox::OutboxRowCorruption>;
 ```
 
 ## decode_delegation_wake_subject
@@ -23,7 +23,7 @@ pub fn decode_delegation_policy_kind(
 ```rust
 pub fn decode_delegation_wake_subject(
     value: &str,
-) -> result::Result<mapping::DelegationWakeStorageKind, outbox::OutboxCorruption>;
+) -> result::Result<mapping::DelegationWakeStorageKind, outbox::OutboxRowCorruption>;
 ```
 
 ## decode_bound_action
@@ -31,7 +31,7 @@ pub fn decode_delegation_wake_subject(
 ```rust
 pub fn decode_bound_action(
     value: &str,
-) -> result::Result<outbox::DispatchedBoundChildAction, outbox::OutboxCorruption>;
+) -> result::Result<outbox::DispatchedBoundChildAction, outbox::OutboxRowCorruption>;
 ```
 
 ## decode_wait_mode
@@ -39,7 +39,7 @@ pub fn decode_bound_action(
 ```rust
 pub fn decode_wait_mode(
     value: &str,
-) -> result::Result<outbox::DispatchedDelegationWaitMode, outbox::OutboxCorruption>;
+) -> result::Result<outbox::DispatchedDelegationWaitMode, outbox::OutboxRowCorruption>;
 ```
 
 ## decode_delegation_outcome
@@ -47,7 +47,7 @@ pub fn decode_wait_mode(
 ```rust
 pub fn decode_delegation_outcome(
     value: &str,
-) -> result::Result<outbox::DispatchedDelegationOutcome, outbox::OutboxCorruption>;
+) -> result::Result<outbox::DispatchedDelegationOutcome, outbox::OutboxRowCorruption>;
 ```
 
 ## decode_delegation_reason
@@ -55,5 +55,5 @@ pub fn decode_delegation_outcome(
 ```rust
 pub fn decode_delegation_reason(
     value: &str,
-) -> result::Result<outbox::DispatchedDelegationReason, outbox::OutboxCorruption>;
+) -> result::Result<outbox::DispatchedDelegationReason, outbox::OutboxRowCorruption>;
 ```

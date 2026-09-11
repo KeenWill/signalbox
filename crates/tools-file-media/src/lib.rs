@@ -18,9 +18,9 @@ use signalbox_domain::{
     ToolResultText,
 };
 use signalbox_file_media_runtime::{
-    AttachmentKind, CanonicalMediaType, FileDigest, FileInspection, FileMediaFailure,
-    FileReadInput, FileReadResult, MAX_PROCESSOR_FRAME_BYTES, ReadContinuationCursor,
-    ReadOutputKind, ReadViewName, VisiblePartSelector,
+    AttachmentKind, FileDigest, FileInspection, FileMediaFailure, FileReadInput, FileReadResult,
+    MAX_PROCESSOR_FRAME_BYTES, ReadContinuationCursor, ReadOutputKind, ReadViewName,
+    VisiblePartSelector,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
@@ -566,7 +566,6 @@ fn inspection_evidence(inspection: FileInspection) -> ToolExecutorEvidence {
             "media_type": media_type.as_str(),
             "reason_code": reason_code.as_str(),
         })),
-        FileInspection::Ambiguous { media_types, .. } => ambiguous_failure(&media_types),
         FileInspection::DeclaredMismatch {
             declared, detected, ..
         } => known_failure(json!({
@@ -579,30 +578,6 @@ fn inspection_evidence(inspection: FileInspection) -> ToolExecutorEvidence {
             "media_type": media_type.as_str(),
         })),
     }
-}
-
-fn ambiguous_failure(media_types: &[CanonicalMediaType]) -> ToolExecutorEvidence {
-    let mut projected = Vec::new();
-    for media_type in media_types {
-        projected.push(media_type.as_str());
-        let candidate = json!({
-            "status": "ambiguous",
-            "media_types": &projected,
-            "truncated": true,
-        });
-        if ToolExecutionErrorDetail::try_new(candidate.to_string()).is_err() {
-            projected.pop();
-            return known_failure(json!({
-                "status": "ambiguous",
-                "media_types": projected,
-                "truncated": true,
-            }));
-        }
-    }
-    known_failure(json!({
-        "status": "ambiguous",
-        "media_types": projected,
-    }))
 }
 
 fn read_evidence(result: FileReadResult) -> Result<ToolExecutorEvidence, FileMediaExecutorError> {
@@ -692,7 +667,6 @@ fn failure_evidence(
         FileMediaFailure::BlobCorrupt => json!({"status": "blob_corrupt"}),
         FileMediaFailure::BlobUnavailable => json!({"status": "blob_unavailable"}),
         FileMediaFailure::UnknownType => json!({"status": "unknown_type"}),
-        FileMediaFailure::AmbiguousType => json!({"status": "ambiguous_type"}),
         FileMediaFailure::DeclaredTypeMismatch { declared, detected } => json!({
             "status": "declared_type_mismatch",
             "declared": declared.as_str(),
@@ -868,16 +842,6 @@ mod tests {
         )
     }
 
-    fn many_long_media_types() -> Vec<CanonicalMediaType> {
-        (0..32)
-            .map(|index| {
-                format!("application/x-{index:02}-{}", "a".repeat(110))
-                    .parse()
-                    .expect("fixture media type is canonical")
-            })
-            .collect()
-    }
-
     #[test]
     fn stable_catalog_exposes_exact_inspect_and_read_names() {
         let (catalog, _executor) = FileMediaTools::try_new(UnusedService)
@@ -977,24 +941,6 @@ mod tests {
         let outcome = decode_read(&arguments(&supplied));
 
         assert_eq!(outcome, Err(InvalidFileMediaArguments));
-    }
-
-    #[test]
-    fn oversized_ambiguity_inventory_preserves_ambiguous_status() {
-        let media_types = many_long_media_types();
-
-        let evidence = ambiguous_failure(&media_types);
-
-        let ToolExecutorEvidence::KnownFailed {
-            detail: Some(detail),
-        } = evidence
-        else {
-            panic!("ambiguous evidence remains a typed known failure");
-        };
-        let projected: Value =
-            serde_json::from_str(detail.as_str()).expect("bounded ambiguity detail remains JSON");
-        assert_eq!(projected["status"], "ambiguous");
-        assert_eq!(projected["truncated"], true);
     }
 
     #[test]

@@ -822,7 +822,6 @@ fn malformed_reason(inspection: &FileInspection) -> Result<&str, Box<dyn Error>>
         FileInspection::Malformed { reason_code, .. } => Ok(reason_code.as_str()),
         FileInspection::Validated(_)
         | FileInspection::Unknown { .. }
-        | FileInspection::Ambiguous { .. }
         | FileInspection::DeclaredMismatch { .. }
         | FileInspection::EncryptedOrLocked { .. } => Err("expected malformed archive".into()),
     }

@@ -121,7 +121,7 @@ pub(crate) async fn assert_outbox_truncate_rejected(
 
 pub(crate) async fn assert_next_outbox_event_quarantined(
     pool: &PgPool,
-    expected: OutboxCorruption,
+    expected: OutboxRowCorruption,
 ) -> Result<(), Box<dyn Error>> {
     let outcome = OutboxDispatcher::new(pool.clone())
         .dispatch_next(|_| OutboxDeliveryDecision::Delivered)

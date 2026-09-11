@@ -54,6 +54,9 @@ mapped composition
 blob-read is composed only when blob storage is configured. Each family's crate
 or daemon module documents its tools.
 
+`cargo_diagnostics` resolves dependencies under the configured sandbox network
+policy without forcing Cargo offline.
+
 Each approved request that reaches execution runs as one physical attempt
 through staged transactions. A prepare transaction mints the attempt and commits
 a `Prepared` row that fixes the request, owning turn, issuing turn attempt,
@@ -112,7 +115,9 @@ not a blanket but a distinct decider that can still deny or escalate.
 Every decision records its source, so unattended operation is inspectable
 without presenting policy as human consent, and only an explicit user, delegate,
 or consumed-override decision emits an approval-decided event naming its
-decider, its decision, and, for a delegate, its rationale.
+decider, its decision, and, for a delegate, its rationale; a delivered
+foreground child wait emits a child-wait-resumed tool-batch event naming the
+awaited attempt in the commit that reopens the parent turn.
 
 A denial reason is at most 4,096 UTF-8 bytes, admits internal U+000A, and is
 free of other control characters and surrounding POSIX whitespace. An oversized
@@ -155,15 +160,17 @@ refuses every exchange; a root-level union in a schema is a family-wide outage,
 not a per-tool cost.
 
 The daemon registers `git_push_configured` when mapped workspace tools are
-composed and a watched repository configures `push_credential_file`; execution
-resolves the session's retained commissioned or repository-dispatched branch and
-head fences and current repository configuration on every call; the judge or CLI
-approval authorizes execution. The transport pushes without force to the
-configured repository URL and confirms the remote branch equals the resolved
-commit before acknowledging success. For a two-parent merge, exactly one parent
-must equal or descend from the retained-head fence; it is the branch parent,
-regardless of parent order. A missing or ambiguous fence binding refuses the
-push with `UnprovenMergeParents`. Multiple merge bases refuse it with
+composed and a watched repository configures `push_credential_file`, a GitHub
+HTTPS destination with a `github_app` credential profile, or an SSH
+`push_remote_url` with an available host agent on Linux; execution resolves the
+session's retained commissioned or repository-dispatched branch and head fences
+and current repository configuration on every call; the judge or CLI approval
+authorizes execution. The transport pushes without force to the configured
+repository URL and confirms the remote branch equals the resolved commit before
+acknowledging success. For a two-parent merge, exactly one parent must equal or
+descend from the retained-head fence; it is the branch parent, regardless of
+parent order. A missing or ambiguous fence binding refuses the push with
+`UnprovenMergeParents`. Multiple merge bases refuse it with
 `AmbiguousMergeBases`, listing base object IDs and an omitted count when the
 detail cannot fit them all; verification does not construct a virtual merge
 base. Before pushing a merge, the executor compares the base parent's additions
@@ -184,7 +191,13 @@ detail lists filenames before hunk previews, marks each shortened preview with
 cannot fit. Filenames use bytewise Git path quoting. Verification supports
 two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
 the parent count before capturing the push snapshot or traversing ancestry. It
-retains only the first dropped hunk per file. Non-merge pushes are unaffected.
+retains only the first dropped hunk per file. Merge comparison streams content
+into file-backed line indexes, diff scratch data, and effect counts; retained
+hunk previews remain bounded. Rename similarity uses fixed-size signatures of
+streamed content. Comparison checks the push-preparation deadline between I/O
+pages and matching steps. Fixed spans use streamed literal comparison; candidate
+comparisons share a bounded work budget, and an unproven span refuses the push.
+Non-merge pushes are unaffected.
 
 Before constructing merge diffs, verification counts tree-entry occurrences
 across the four compared trees against `MAX_REPOSITORY_INSPECTIONS`, including
@@ -381,8 +394,12 @@ retained set a request still holds is never released. Every declaration a
 workspace-root-bound family advertises is a property of the family's code, not
 of the repository it binds. Local Git is the exception: it compiles the pinned
 repository's object format into its argument validators, and session composition
-refuses an object-format disagreement. Configured pushes use the same bound
-workspace.
+refuses an object-format disagreement when both configured and derived roots
+have Git. A plain configured root registers local Git declarations admitting
+either supported object-ID width so it can bind a repository-backed derived
+session; its Git executor enforces the bound repository's format. Local Git
+requests for a plain bound root return a known tool failure. Configured pushes
+use the same bound workspace.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
@@ -414,8 +431,8 @@ effect-class crash-loss transition. A committed classification carrying an
 infrastructure or identity-collision failure fails or parks the affected turn
 without failing unrelated session execution. A fail-closed corruption or
 caller-or-hub bug remains an error after classification closes the attempt, so
-the execution supervisor parks that session with its cause;
-[runtime-substrate](runtime-substrate.md) owns the failure classes. If
+the execution supervisor parks that session with its cause without stopping the
+daemon; [runtime-substrate](runtime-substrate.md) owns the failure classes. If
 trustworthy evidence returns but its commit fails, the service retains that
 exact correlated observation as an opaque linear same-incarnation value and
 never downgrades still-owned evidence to restart crash loss.
