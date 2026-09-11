@@ -5645,36 +5645,163 @@ async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
--> Result<(), Box<dyn Error>> {
-    assert_next_batch_reservation(Some(32), 32, false).await
+async fn zero_tool_result_admission_requires_compaction() -> Result<(), Box<dyn Error>> {
+    const FIXTURE_SEED: u128 = 0x269_2000;
+    const RESULT: &str = "the focused test passed";
+    let (container, pool, _) = migrated_postgres().await?;
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+        FIXTURE_SEED + 6,
+    )));
+    let limits = ToolContinuationUsageLimit::new(target, FastMode::Disabled, 8_192, 258_400);
+    let fixture = checkpoint_restart_model_call_with_limits(
+        &pool,
+        FIXTURE_SEED,
+        false,
+        None,
+        std::slice::from_ref(&limits),
+    )
+    .await?;
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_SEED + 5)),
+        target,
+    )])
+    .expect("fixture target is unique");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([limits]);
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(fixture.session, fixture.call)
+        .await?
+    else {
+        panic!("fixture call authorizes");
+    };
+    let (fixture, repository, _, _) = commit_authorized_tool_batch(
+        FIXTURE_SEED,
+        (fixture, repository, *authorized),
+        &[("current_time", "{}")],
+        InitialToolApproval::PolicyAuto,
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(240_000))
+            .with_output_tokens(Some(117)),
+        None,
+    )
+    .await?;
+    let tools = repository.tool_loop_repository();
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    tools
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tools
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    tools
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(RESULT.to_owned())
+                            .expect("fixture result is valid"),
+                    ),
+                }),
+        )
+        .await?;
+    let stored = sqlx::query(
+        "SELECT context_result_byte_limit, result_text, context_result_text
+           FROM tool_attempt WHERE attempt_id = $1",
+    )
+    .bind(attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored.try_get::<i64, _>("context_result_byte_limit")?, 0);
+    assert_eq!(stored.try_get::<String, _>("result_text")?, RESULT);
+    assert_eq!(
+        stored.try_get::<String, _>("context_result_text")?,
+        format!(
+            "\n[tool result truncated: retained 0 bytes; dropped {} bytes]",
+            RESULT.len()
+        )
+    );
+    let continuation = ModelCallId::from_uuid(Uuid::now_v7());
+    let frontier = ContextFrontierId::from_uuid(Uuid::now_v7());
+    let outcome = tools
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                frontier,
+                continuation,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("fixture has no steering"),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(_)
+    ));
+    let checkpoint = sqlx::query(
+        "SELECT state_kind, compaction_frontier_id,
+                EXISTS (SELECT 1 FROM model_call WHERE model_call_id = $2) AS call_prepared
+           FROM turn_lifecycle WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(continuation.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(checkpoint.try_get::<String, _>("state_kind")?, "active");
+    assert_eq!(
+        checkpoint.try_get::<Uuid, _>("compaction_frontier_id")?,
+        frontier.into_uuid()
+    );
+    assert!(!checkpoint.try_get::<bool, _>("call_prepared")?);
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn unbounded_proposals_reserve_headroom_for_a_subsequent_tool_response()
+async fn a_bounded_result_compacts_when_the_following_batch_has_no_admission()
 -> Result<(), Box<dyn Error>> {
-    assert_next_batch_reservation(None, 32, false).await
+    assert_next_batch_reservation(Some(32), 32).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn rejected_proposals_continue_when_their_result_envelopes_fit() -> Result<(), Box<dyn Error>>
-{
-    assert_next_batch_reservation(Some(32), 40, false).await
+async fn unbounded_proposals_compact_when_the_following_batch_has_no_admission()
+-> Result<(), Box<dyn Error>> {
+    assert_next_batch_reservation(None, 32).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn rejected_proposals_compact_when_admitted_results_have_no_budget()
+-> Result<(), Box<dyn Error>> {
+    assert_next_batch_reservation(Some(32), 40).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn rejected_proposals_exceeding_the_finite_allowance_require_compaction()
 -> Result<(), Box<dyn Error>> {
-    assert_next_batch_reservation(Some(1), 40, true).await
+    assert_next_batch_reservation(Some(1), 40).await
 }
 
 async fn assert_next_batch_reservation(
     max_requests: Option<u64>,
     next_tool_count: usize,
-    expect_compaction: bool,
 ) -> Result<(), Box<dyn Error>> {
     // Only supplies distinct identities for the two model responses.
     const FIXTURE_SEED: u128 = 0x269_1000;
@@ -5947,17 +6074,10 @@ async fn assert_next_batch_reservation(
             |_| panic!("fixture has no steering"),
         )
         .await?;
-    assert_eq!(
+    assert!(matches!(
         checkpointed,
-        if expect_compaction {
-            signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(
-                fixture.turn,
-            )
-        } else {
-            signalbox_application::PrepareToolContinuationOutcome::Checkpointed(following_call)
-        },
-        "the finite allowance admits fitting results and compacts larger batches"
-    );
+        signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(_)
+    ));
     let rejected_results: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM semantic_transcript_entry entry
            JOIN tool_request request ON request.request_id = entry.tool_result_request_id
@@ -5970,23 +6090,6 @@ async fn assert_next_batch_reservation(
         rejected_results,
         i64::try_from(next_tool_count - admitted_count)?
     );
-    if rejected_results > 0 && !expect_compaction {
-        assert_rejected_process_reads(
-            &pool,
-            fixture.session,
-            &vec![
-                serde_json::json!({"error": {
-                    "kind": "execution_failed",
-                    "detail": format!(
-                        "proposal_limit_exceeded: maximum {} proposals per response",
-                        max_requests.expect("count-rejected proposals have a finite cap"),
-                    ),
-                }});
-                usize::try_from(rejected_results)?
-            ],
-        )
-        .await?;
-    }
     pool.close().await;
     drop(container);
     Ok(())
