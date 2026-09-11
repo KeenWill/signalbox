@@ -63,7 +63,7 @@ pub struct LocalGitExecutor<FileSystem> {
     pub(super) filesystem: FileSystem,
     pub(super) root: WorkspaceRoot,
     pub(super) root_path: PathBuf,
-    pub(super) repository_identity: RepositoryIdentity,
+    pub(super) repository_identity: Box<RepositoryIdentity>,
     pub(super) repository_authority: PinnedRepository,
     pub(super) identity: GitIdentity,
     pub(super) repository_detail: ToolExecutionErrorDetail,
@@ -459,7 +459,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         // each operation separately snapshots and revalidates the references it
         // reads before returning.
         if observed.root == self.repository_identity.root
-            && observed.git_directory == self.repository_identity.git_directory
+            && observed.administration == self.repository_identity.administration
             && observed.refs == self.repository_identity.refs
             && observed.config == self.repository_identity.config
         {
@@ -1348,6 +1348,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         {
             return Err(LocalGitFailure::Operation);
         }
+        crate::repository_directories::require_branch_unoccupied(
+            &self.repository_authority,
+            &reference_name,
+        )?;
         let (current_chain, initial_current) =
             resolve_pinned_reference_chain_from(&self.repository_authority, "HEAD", None)?;
         let (reference_chain, initial_target) =
@@ -1756,6 +1760,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 &signature,
                 || {
                     before_head_publish();
+                    crate::repository_directories::require_branch_unoccupied(
+                        &self.repository_authority,
+                        &reference_name,
+                    )?;
                     operation_state.validate(&self.repository_authority)?;
                     published_index.validate()?;
                     let (target_chain, target_now) = resolve_pinned_reference_chain_from(
@@ -1819,7 +1827,7 @@ impl LocalGitExecutor<LocalWorkspaceFileSystem> {
             filesystem,
             root,
             root_path,
-            repository_identity,
+            repository_identity: Box::new(repository_identity),
             repository_authority,
             identity,
             repository_detail: detail(),

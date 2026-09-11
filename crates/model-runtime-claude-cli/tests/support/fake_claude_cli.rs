@@ -64,6 +64,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         return Ok(());
     }
+    if scenario.starts_with("native_compaction") {
+        system_init(&arguments)?;
+        let session = if scenario == "native_compaction_wrong_session" {
+            fixtures::OTHER_SESSION_ID
+        } else {
+            fixtures::SESSION_ID
+        };
+        // The SDK reports the input occupancy before its native compaction.
+        const PRE_COMPACTION_TOKENS: u64 = 170_000;
+        emit_json(&serde_json::json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "session_id": session,
+            "compact_metadata": { "trigger": "auto", "pre_tokens": PRE_COMPACTION_TOKENS }
+        }))?;
+        assistant_text(fixtures::ANSWER)?;
+        success("end_turn", Some(fixtures::ANSWER))?;
+        return Ok(());
+    }
+
     if scenario == "nonterminal_system_events" {
         system_event("hook_started")?;
         system_status(None)?;
@@ -95,6 +115,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     system_init(&arguments)?;
     match scenario.as_str() {
+        "session_window_status"
+        | "session_window_without_status"
+        | "request_size_status"
+        | "native_budget_subtype"
+        | "unknown_error_subtype" => {
+            let (subtype, status, message) = match scenario.as_str() {
+                "session_window_status" => ("success", Some(429), "You've hit your session limit"),
+                "session_window_without_status" => {
+                    ("success", None, "You've hit your session limit")
+                }
+                "request_size_status" => ("success", Some(413), "Prompt is too long"),
+                "native_budget_subtype" => {
+                    ("error_max_budget_usd", None, "synthetic budget detail")
+                }
+                _ => (
+                    "synthetic_unknown_error",
+                    None,
+                    "authentication failed; rate limit; request too large",
+                ),
+            };
+            emit_json(&serde_json::json!({
+                "type": "result", "subtype": subtype, "is_error": true,
+                "session_id": fixtures::SESSION_ID, "api_error_status": status,
+                "result": message
+            }))?;
+        }
         "native_prompt_too_large" => {
             emit_json(&serde_json::json!({
                 "type": "result", "subtype": "success", "is_error": true,

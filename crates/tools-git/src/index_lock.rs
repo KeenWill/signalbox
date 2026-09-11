@@ -80,7 +80,7 @@ impl IndexSnapshot {
     pub(super) fn acquire_for_repository(
         authority: &PinnedRepository,
     ) -> Result<(Self, Index), LocalGitFailure> {
-        let parent = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+        let parent = dup(&authority.worktree_directory).map_err(|_| LocalGitFailure::Operation)?;
         let index_name = OsString::from("index");
         let mut file = tempfile::tempfile().map_err(|_| LocalGitFailure::Operation)?;
         let (expected, _) = copy_index_snapshot_at(
@@ -140,7 +140,7 @@ impl IndexLock {
         authority.validate_supported_layout()?;
         let operation_guard = authority.operation_guard()?;
         let (mut lock, index) = Self::acquire_at_with_private_directory_and_mode(
-            dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?,
+            dup(&authority.worktree_directory).map_err(|_| LocalGitFailure::Operation)?,
             OsString::from("index"),
             OsString::from("index.lock"),
             index_installation_mode(authority)?,
@@ -912,7 +912,7 @@ pub(super) fn index_installation_mode(
     authority: &PinnedRepository,
 ) -> Result<Mode, LocalGitFailure> {
     let metadata =
-        fs::File::from(dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?)
+        fs::File::from(dup(&authority.worktree_directory).map_err(|_| LocalGitFailure::Operation)?)
             .metadata()
             .map_err(|_| LocalGitFailure::Operation)?;
     Ok(mode_from_metadata_bits((metadata.mode() & 0o666) | 0o600))

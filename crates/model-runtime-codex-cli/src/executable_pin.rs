@@ -7,11 +7,23 @@ use tokio::io::AsyncReadExt as _;
 
 use crate::runtime::CodexCliVersionProbeError;
 
+#[cfg(test)]
 pub(crate) async fn verify_executable_digest(
     executable: &Path,
     expected: &str,
     deadline: tokio::time::Instant,
 ) -> Result<(), CodexCliVersionProbeError> {
+    let observed = executable_digest(executable, deadline).await?;
+    if observed != expected {
+        return Err(CodexCliVersionProbeError::VersionMismatch);
+    }
+    Ok(())
+}
+
+pub(crate) async fn executable_digest(
+    executable: &Path,
+    deadline: tokio::time::Instant,
+) -> Result<String, CodexCliVersionProbeError> {
     tokio::time::timeout_at(deadline, async {
         let mut file = tokio::fs::File::open(executable)
             .await
@@ -29,10 +41,7 @@ pub(crate) async fn verify_executable_digest(
             }
             digest.update(&buffer[..read]);
         }
-        if hex::encode(digest.finalize()) != expected {
-            return Err(CodexCliVersionProbeError::VersionMismatch);
-        }
-        Ok(())
+        Ok(hex::encode(digest.finalize()))
     })
     .await
     .map_err(|_| CodexCliVersionProbeError::TimedOut)?

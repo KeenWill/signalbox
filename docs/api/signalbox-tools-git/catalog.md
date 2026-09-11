@@ -18,8 +18,16 @@ pub enum GitObjectFormat {
 pub struct PinnedRepositoryDirectories {
     pub root: signalbox_tools_workspace::WorkspaceRootIdentity,
     pub administration: signalbox_tools_workspace::WorkspaceRootIdentity,
+    pub common_administration: signalbox_tools_workspace::WorkspaceRootIdentity,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## local_git_catalog
+
+```rust
+pub fn local_git_catalog(
+) -> result::Result<signalbox_application::CompiledToolCatalog, LocalGitToolsConstructionError>;
 ```
 
 ## LocalGitTools

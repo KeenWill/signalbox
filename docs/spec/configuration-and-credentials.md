@@ -10,7 +10,7 @@ Configuration is loaded at startup from the process environment and two
 versioned TOML documents: the model catalog and the session-template catalog.
 The parser in `apps/signalboxd/src/configuration/mod.rs` and
 `apps/signalboxd/src/credential_pools.rs` admits a document fail-closed. The
-subsystem also owns the runner's startup configuration, the refusals that keep
+subsystem also owns the runner's startup configuration, the isolation that keeps
 ambient settings away from the production database channel, and the bridge that
 carries a credential value from its file or login directory to the adapter that
 uses it.
@@ -22,27 +22,34 @@ and the telemetry settings. An absent `SIGNALBOX_RUNNER_SOCKET_PATH` derives the
 runner socket by replacing the process socket path's final extension with
 `.runner.sock`, and the runner's `daemon_socket_path` dials that path.
 `DATABASE_URL` is the whole database channel: a deployment carries every
-connection parameter in the URL, and whatever TLS mode the URL states, the
-production connection verifies the server certificate and hostname in full.
-Model-provider credential paths come from `file` profiles in the catalog;
-`ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read. An absent
-`SIGNALBOX_WEB_BIND` binds a loopback default, and an explicit socket must be a
-loopback address or configuration fails. The daemon's browser listener serves
-the `/api` routes on that bind and, when `SIGNALBOX_WEB_ASSET_ROOT` names a
-production web build, the static files under that root; an empty root fails
-configuration and an absent one answers every other path 404. The DTOs and
-schemas under `crates/web-contract` are the authority for that surface, and the
-checked-in JavaScript decoders and TypeScript declarations are generated from
-them. `RUST_LOG` admits one log level and nothing else; an empty or whitespace
-value selects the INFO default silently, as absence does, and any other value
-warns and falls back to it.
+connection parameter, including an explicit password, in the URL. Before the
+asynchronous runtime starts, the daemon replaces itself with the libpq and
+certificate-store variables removed; it retains their names only for startup
+warnings. The explicit password prevents SQLx from reading a password file.
+Whatever TLS mode the URL states, the production connection verifies the server
+certificate and hostname in full. Model-provider credential paths come from
+`file` profiles in the catalog; `ANTHROPIC_API_KEY_FILE` and
+`OPENAI_API_KEY_FILE` are not read. An absent `SIGNALBOX_WEB_BIND` binds a
+loopback default, and an explicit socket may use any IP address; the daemon logs
+a warning before admitting an explicit non-loopback bind. The daemon's browser
+listener serves the `/api` routes on that bind and, when
+`SIGNALBOX_WEB_ASSET_ROOT` names a production web build, the static files under
+that root; an empty root fails configuration and an absent one answers every
+other path 404. The DTOs and schemas under `crates/web-contract` are the
+authority for that surface, and the checked-in JavaScript decoders and
+TypeScript declarations are generated from them. `RUST_LOG` admits one log level
+and nothing else; an empty or whitespace value selects the INFO default
+silently, as absence does, and any other value warns and falls back to it.
 
 `SIGNALBOX_OTLP_ENDPOINT`, a base URL to whose path `http/protobuf` export
 appends `/v1/traces`, enables span export; its absence disables OTLP and makes
-every other OTLP setting inert. With the endpoint set, a general or
-trace-specific `OTEL_EXPORTER_OTLP_*` endpoint, headers, timeout, protocol, or
-compression variable in the environment fails startup. `SIGNALBOX_OTLP_PROTOCOL`
-selects `grpc` or `http/protobuf`, `SIGNALBOX_OTLP_HEADERS_FILE` names a
+every other OTLP setting inert. Before starting the asynchronous runtime, the
+daemon removes general and trace-specific `OTEL_EXPORTER_OTLP_*` endpoint,
+headers, timeout, protocol, and compression variables, and warns when any was
+present. When export is enabled, both exporters receive the configured headers
+explicitly and select gzip compression explicitly, so the exporter library
+cannot merge ambient headers or compression. `SIGNALBOX_OTLP_PROTOCOL` selects
+`grpc` or `http/protobuf`, `SIGNALBOX_OTLP_HEADERS_FILE` names a
 collector-header file read once at startup, `SIGNALBOX_OTLP_SAMPLING_RATIO` sets
 the parent-based trace-id sampling ratio from 0 through 1, and
 `SIGNALBOX_OTLP_SERVICE_NAME` sets the service name.
@@ -110,9 +117,11 @@ is rejected by the closed top-level schema. `repository_watch_webhook_retention`
 must be positive and finite and governs authenticated webhook `expires_at` and
 merged-pull-request baseline retention as described in
 [repository watch](repo-watch.md). `codex_cli_version_probe_bound` bounds a
-credential-free startup probe of the configured Codex executable, and a missing,
-malformed, zero, unsuccessful, or mismatched probe fails configuration before
-the socket opens. The same bound limits each read-only Codex capacity probe for
+credential-free startup probe of the configured Codex executable. A missing or
+zero bound fails configuration before the socket opens. An unsuccessful or
+malformed probe, or an installed version outside the configured pin, leaves the
+Codex adapter unavailable while the daemon continues startup. The same bound
+limits each read-only Codex capacity probe for
 [parked credential waits](credential-availability.md). One valid document yields
 correlated immutable in-memory catalogs: the domain `ModelTargetCatalog` for
 execution-time target resolution and the `RuntimeModelCatalog` for the provider
@@ -145,12 +154,17 @@ at least one second or `"none"` and bounds the timeout requested from
 `"none"`, or `"host"`), `sandbox_read_only_binds` (default `[]`), and
 `sandbox_path_prepend` (default `[]`) select networking, absolute host paths
 bound read-only at the same paths, and absolute directories prepended to `PATH`.
-Host networking shares the daemon's network namespace and DNS configuration
-without destination filtering, independently of web-egress and tool-mapping
-policies. Optional `sandbox_rustup_home` and `sandbox_rustup_toolchain` set
-`RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; automatic toolchain installation is
-disabled, `CARGO_HOME` stays private and writable, and `npm_config_cache` is
-`/workspace/.npm`.
+Programmatic read-only mounts at explicit destinations overlay the workspace,
+worktree, and working-directory binds. Host networking shares the daemon's
+network namespace and DNS configuration without destination filtering,
+independently of web-egress and tool-mapping policies. Optional
+`sandbox_rustup_home` and `sandbox_rustup_toolchain` set `RUSTUP_HOME` and
+`RUSTUP_TOOLCHAIN`; automatic toolchain installation is disabled, `CARGO_HOME`
+stays private and writable, and `npm_config_cache` is `/workspace/.npm`.
+
+Loss of sandbox supervision retains a supervision failure even when the dispatch
+capture is lost; an unconfirmed dispatch does not prove that the command never
+started.
 
 The optional `[tool_proposals]` table sets `max_requests` and
 `max_argument_bytes` to nonnegative integers or `"none"`, with defaults of 32
@@ -188,10 +202,10 @@ rejects `env_key` because it uses no child environment. Each
 `FileCredentialAccess` instance binds one consumer-scoped map of references to
 deployment paths, and a model adapter receives the complete file-profile catalog
 declared for it. `ambient` leaves login resolution to a CLI. `codex_home` names
-the Codex login directory; a configured home is admitted only as an existing,
-readable, nonempty directory, and startup fails otherwise. Delivery links the
-selected profile's `auth.json` into a private per-operation `CODEX_HOME` with an
-empty `config.toml`.
+the Codex login directory; a configured home is an existing readable directory.
+An empty home makes that pool member unavailable. Delivery links the selected
+profile's `auth.json` into a private per-operation `CODEX_HOME` with an empty
+`config.toml`.
 
 GitHub integration profiles declare `adapter = "github"` without model billing
 or pool membership. `delivery = "file"` requires `file`;
@@ -218,7 +232,10 @@ independently metered account, then lists those profile names as pool members.
 Equal member priorities let `least_used` compare their headroom under the pool's
 reserve and headroom action;
 [the configuration example](../../config/signalboxd.example.toml) provides a
-three-home pool that replaces its ambient profile and pool.
+three-home pool that replaces its ambient profile and pool. Pool selection
+rechecks each home and skips a member while its home is empty. If every member
+is skipped, the pool applies its configured exhaustion policy before any adapter
+preparation; a parked wait retries the live check after provisioning can change.
 
 A credential pool is the set of profiles that may substitute for one another for
 one model family. An `[[adapter_mappings]]` entry maps each family to exactly
@@ -245,9 +262,9 @@ reported duration and reset instant. The latest observation time wins across
 calls; an absent snapshot preserves the retained evidence.
 
 A member's headroom is the minimum of its primary and secondary windows. An
-expired or missing reset means unknown capacity. `least_used` prefers members
-with known capacity. Ties break by configured order. Within an equal priority,
-`least_used` prefers greater headroom. A member's `headroom_reserve_percent`
+expired or missing reset means unknown capacity. Within an equal priority,
+`least_used` samples members with unknown capacity in configured order before
+preferring greater known headroom. A member's `headroom_reserve_percent`
 overrides the pool reserve; a known headroom at or below the reserve excludes
 that member from selection. A retained observation at or below the reserve fires
 `on_headroom_low` under the call's frozen policy; with no reserve, the trigger
@@ -286,23 +303,21 @@ production injects `SessionPlanRepository`.
 Model-provider credential paths live in catalog profiles rather than environment
 variables, because one variable cannot name several accounts.
 
-The production connection path refuses to parse while one of the libpq
-connection variables it inspects, `SSL_CERT_FILE`, or `SSL_CERT_DIR` is present
-or a default password file exists. Why: the driver would seed whatever the URL
-omits from those channels, and the TLS backend takes its roots only from those
-two variables and adds a URL `sslrootcert` to that set rather than replacing it.
+The production connection path requires the host, user, and password in the URL.
+It removes libpq connection variables, `SSL_CERT_FILE`, and `SSL_CERT_DIR`
+before starting the asynchronous runtime, logs each removed variable, and logs
+the presence of the default password file. The URL's explicit password keeps
+that file unread.
 
 The local test connection path keeps SQLx's behavior and no check confines its
-URL to a local cluster; the production refusals, not that path's name, protect
-production.
+URL to a local cluster.
 
 A failed migration is the one startup failure that records the database's own
 rejection text in a structured field, because the phase alone cannot separate a
 rejected constraint from an unreachable database.
 
 The browser listener emits no permissive CORS headers and adds no account,
-login, bearer-token, TLS, proxy, VPN, or ingress machinery, so it binds only a
-loopback address.
+login, bearer-token, TLS, proxy, VPN, or ingress machinery.
 
 The daemon supplies no Anthropic or OpenAI endpoint or per-adapter timeout
 setting and constructs each adapter with its defaults. The whole-exchange
@@ -424,9 +439,9 @@ not wait for the capacity read; a rejected or unanswered read supplies no new
 evidence. A notification carrying a window supersedes an outstanding read, whose
 reply is consumed without emitting evidence. A read reply received after turn
 completion still supplies capacity evidence unless superseded. Members without
-retained evidence have unknown capacity: `least_used` falls back to configured
-order within equal priorities, reserves do not exclude them, and headroom
-actions do not fire.
+retained evidence have unknown capacity: `least_used` samples them in configured
+order before members with retained evidence, reserves do not exclude them, and
+headroom actions do not fire.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under
@@ -530,8 +545,8 @@ evidence.
 
 `HOME` locates the default PostgreSQL password file and must be a nonempty
 absolute path when a template uses a `$HOME/` prompt reference. The
-database-channel refusal names the offending channel, never its contents, and
-happens before any database contact.
+database-channel warning names the ignored channel, never its contents, and is
+logged before database contact.
 
 Missing required values, unreadable model catalogs, and invalid startup-only
 sections fail startup in the Configuration phase before database contact.
@@ -549,20 +564,21 @@ The deployment paths are accepted without I/O at environment parsing; the
 selected catalogs and template prompt contents are validated during startup. At
 startup, reload, and each resolution, model-provider and integration credential
 files, including repository polling, push, and webhook secrets, must resolve to
-regular files owned by the daemon's effective user, with no group or other
-permission bits and at most 64 KiB, or fail with a typed error naming the
-credential reference and failed check without secret contents. The credential of
-a currently routed S3 blob store is read after the recovery scan and before
-socket admission, as [blob storage](blob-storage.md) requires.
+regular files owned by the daemon's effective user and at most 64 KiB. Group or
+other permission bits produce a warning and the file is read. Other failures use
+a typed error naming the credential reference and failed check without secret
+contents. The credential of a currently routed S3 blob store is read after the
+recovery scan and before socket admission, as [blob storage](blob-storage.md)
+requires.
 
-Unauthenticated session, search, usage, attention, and blob reads require a
-loopback `Host` authority; another authority receives a 403
-`non_loopback_host_rejected` before data is read. No process-protocol frame is a
+Unauthenticated session, search, usage, attention, and blob reads require an IP
+or `localhost` `Host` authority; another authority receives a 403
+`unadmitted_host_rejected` before data is read. No process-protocol frame is a
 browser DTO. Application errors are a separate error kind and are never inferred
 from HTTP status alone.
 
 Every `/api` route rejects `Sec-Fetch-Site: cross-site` with a 403
-`cross_site_api_request_rejected` before the loopback authority check or storage
+`cross_site_api_request_rejected` before the admitted-authority check or storage
 access, while other or absent fetch-site values pass this gate.
 
 Browser mutation routes use POST, require `application/json`, and when `Origin`
@@ -644,9 +660,11 @@ against the configured `ModelTargetCatalog` and fails closed as
 `CallTargetMismatch` corruption when they differ.
 
 The configured root is opened once during tool construction and its pinned
-authority is cloned into the workspace, Git, and execution suites. A
-nonexistent, non-directory, final-symlink, non-repository, linked, or externally
-administered configured root fails startup for the complete mapped composition.
+authority is cloned into the workspace and execution suites. Repository roots,
+including empty repositories and linked worktrees, also compose the Git suite; a
+plain directory has no Git executor but registers Git declarations for
+repository-backed derived sessions. A nonexistent, non-directory, final-symlink,
+or malformed repository root fails startup.
 
 Repository-watch pull-request dispatch provisions its derived directory; other
 derived directories are provisioned by deployment. Only a reported absence at
@@ -656,11 +674,16 @@ misprovisioned and fails closed. Which root a session bound is recorded on its
 first workspace-root-bound tool invocation and does not change for the process's
 lifetime; the first record written wins, so two concurrent first requests
 converge on one root. Isolation is checked against directory identities rather
-than pathnames: a composed root sharing either its worktree or its `.git`
-directory with the configured root or with another bound session is refused.
-Failure to compose or bind a derived root closes that tool request as a known
-failure whose sanitized detail names the closed reason, and it never falls back
-to another root.
+than pathnames: a composed root sharing its worktree, worktree administration,
+or common administration directory with the configured root or with another
+bound session is refused. Linked worktrees sharing common references and objects
+cannot bind separate session serialization domains. Administration directories
+nested under another bound workspace or its Git administration are refused by
+comparing captured ancestry with all three bound directory identities. Ancestry
+capture needs only search permission on ancestor directories and refuses device
+boundaries or Linux mount-ID boundaries. Failure to compose or bind a derived
+root closes that tool request as a known failure whose sanitized detail names
+the closed reason, and it never falls back to another root.
 
 The secret reaches the provider through the profile's delivery, never through a
 process environment variable of the daemon. Two families of one adapter may
@@ -709,11 +732,13 @@ select before reading any exclusion state and holds those locks through the
 A historical read resolves a call's billing kind and rates from the reference
 the call pinned, so a pool edited across a restart cannot relabel a stored call.
 
-Loading a review library generates exactly nine resolved templates whose names
-are reserved even when no library is configured, so an ordinary entry cannot
-shadow one. Creation by template name first consults the durable command
-registry, and an equal replay returns its stored session even when the name is
-absent or changed in the current catalog; the claim protocol is owned by
+Loading a review library generates four stage templates and one template for
+each configured concern. The concern inventory is a nonempty subset of the five
+closed concern keys and retains their closed order. All nine possible names are
+reserved even when no library is configured, so an ordinary entry cannot shadow
+one. Creation by template name first consults the durable command registry, and
+an equal replay returns its stored session even when the name is absent or
+changed in the current catalog; the claim protocol is owned by
 [identity and commands](identity-and-commands.md). Only an unclaimed command
 identity resolves against the loaded catalog and copies the complete bundle into
 the session's immutable defaults version one. The session records the template
@@ -792,15 +817,24 @@ credential needs read access for polling and checkout provisioning. Classic
 `repo` is broader than read-only access, so a fine-grained read credential
 limits that role to the watched repositories. An optional absolute
 `push_credential_file` on `[[repository_watch.repositories]]` supplies a
-deployment-owned token with push authority. An App-backed repository uses its
-installation token for pushes when no separate push file is configured. Git
-receives an `https://x-access-token:<token>@github.com/` URL rewrite only
-through the child environment; command arguments retain the public destination.
+deployment-owned HTTPS token or SSH private key. Optional `push_remote_url`
+selects an exact HTTPS, `ssh://`, or `git@host:` destination; its default is the
+watched repository's GitHub HTTPS URL. HTTPS uses the push token, or the
+installation token for an App-backed repository targeting GitHub when no
+separate push file is configured. SSH uses the configured key when present, or,
+on Linux, the host SSH agent exposed through `SSH_AUTH_SOCK` in the sandbox.
+Agent-backed push authority is derived only when that socket accepts a
+connection. Each configured credential file is reread through
+`FileCredentialAccess` on every push; HTTPS passes an authenticated URL rewrite
+in the child environment, and SSH retains a private temporary key file through
+push and remote confirmation. GitHub HTTPS destination matching uses the parsed,
+normalized hostname.
+
 Push credential files participate in the repository-watch credential isolation
 checks, including symlink and hard-link aliases of polling, push, and webhook
 credentials. The push family is registered from the configuration installed by
-durable reload recovery at startup; a repository-watch reload that adds or
-removes `push_credential_file` takes effect for registration at the next boot.
+durable reload recovery at startup; a repository-watch reload that changes push
+registration takes effect at the next boot.
 
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
