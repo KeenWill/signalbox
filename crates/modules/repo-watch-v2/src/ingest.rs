@@ -429,7 +429,7 @@ async fn initial_facts_baseline(
     // Facts committed after this baseline belong to a retry, not its comparison history.
     let observed_numbers: Vec<Decimal> = sqlx::query_scalar(
         "SELECT number FROM unnest($3::numeric[]) AS candidate(number)
-         WHERE EXISTS (SELECT 1 FROM gh_event WHERE repository=$1
+         WHERE EXISTS (SELECT 1 FROM gh_readable_event WHERE repository=$1
              AND pull_request_number=candidate.number AND frontier_generation <= $2)",
     )
     .bind(repository.as_str())

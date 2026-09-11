@@ -31,7 +31,9 @@ Provider-keyed `ChecksCompleted`, `CheckRunCompleted`, and `ReviewSubmitted`
 identities frame the repository, pull-request number and head SHA, event kind,
 and provider suite or run ID with completion generation, or review ID; mutable
 pull-request presentation and payload fields are excluded. Check-run occurrence
-sequences distinguish later conclusion changes.
+sequences distinguish later conclusion changes. `ThreadOpened` carries the
+thread author's GitHub login when GitHub reports it, and `ThreadResolved`
+carries the resolver's when GitHub reports it.
 
 Rules are versioned `RepoWatchRule` values. Fields within one matcher are
 conjunctive and rules are evaluated independently. The checked matcher owns the
@@ -60,8 +62,11 @@ The module schema contains seventeen tables:
   DELETE.
 - `gh_event` retains the complete immutable matcher payload, content identity,
   closed producer discriminator, per-repository event ordinal, frontier
-  generation, batch ordinal, and recording time. Accepted facts are never
-  updated or deleted.
+  generation, batch ordinal, recording time, and any decode error. Accepted
+  payloads are never updated or deleted. An event that does not decode records
+  the error, logs once, and leaves the database view used by event consumers;
+  the underlying table remains the source for event identity and ordinal
+  bookkeeping.
 - `rule` holds the active checked revision and content digest, while
   `rule_revision` retains revision history needed by module dispatch records;
   `rule_field_fingerprint` binds each identity field to its checked digest. One
@@ -169,7 +174,8 @@ observation, last poll start and outcome, last newly accepted webhook delivery,
 and events recorded in the current process. Poll evidence includes
 webhook-triggered fetches. These measurements reset at process startup and
 survive configuration reloads; replayed events and deliveries do not advance
-their counts or delivery timestamp.
+their counts or delivery timestamp. Daemon tracing records available GitHub
+quota response headers: resource, limit, used, remaining and reset time.
 
 The module's repository task serializes polling and webhook wakes. Poll
 intervals are start-to-start; a wake received during an attempt waits for that
@@ -339,11 +345,15 @@ rejected for authentication refreshes the retained token generation and retries
 once; bounded Git failure output is inspected only for that decision and is not
 persisted.
 
-Dispatched pull-request sessions whose watched repository configures
-`push_credential_file` or a `github_app` credential profile can use
-`git_push_configured` for their retained head branch on `origin` at
-`https://github.com/<owner>/<repo>.git`; fork heads are unavailable because that
-destination is the watched repository.
+Dispatched pull-request sessions can use `git_push_configured` for their
+retained head branch when the watched repository configures
+`push_credential_file`, a GitHub HTTPS destination with a `github_app`
+credential profile, or an SSH `push_remote_url` with an available host SSH
+agent. The destination is `push_remote_url` when configured, otherwise `origin`
+at `https://github.com/<owner>/<repo>.git`. SSH destinations accept a configured
+key file or, on Linux, the host agent exposed to the push sandbox. Fork heads
+are unavailable because push authority requires a head in the watched
+repository.
 
 App credential preparation, push attempts, refresh, and remote confirmation
 share one 300-second deadline. An explicit Git authentication rejection
@@ -375,14 +385,16 @@ retains its stable effect identity, exact request and accepted event range on
 `repository_state`, including unchanged observations. The receipt accumulates
 completed stages and records the attempt's success, partial or failure outcome;
 interruption between stages retains a partial result. Observation execution and
-adoption serialize per repository. A successor adopts the receipt before
-provider configuration or another fetch, and exact durable journal delivery
-moves its binding to `workflow_effect_result` before releasing the pending slot
-for the next observation in either mode. Completed observation bindings remain
-recoverable after later observations; changed input conflicts. A finalized
-attempt with no committed frontier stage retains its result there directly. An
-unanswered effect without a receipt is ambiguous. Shutdown cancels admitted
-observation runs and drains their provider work.
+adoption serialize per repository. Observation leases share one
+single-connection pool across store clones, separate from the pool used by
+frontier commits. A successor adopts the receipt before provider configuration
+or another fetch, and exact durable journal delivery moves its binding to
+`workflow_effect_result` before releasing the pending slot for the next
+observation in either mode. Completed observation bindings remain recoverable
+after later observations; changed input conflicts. A finalized attempt with no
+committed frontier stage retains its result there directly. An unanswered effect
+without a receipt is ambiguous. Shutdown cancels admitted observation runs and
+drains their provider work.
 
 The v2 crate depends on the session ownership crate as its only Signalbox
 dependency. It consumes the seam's lifecycle events and emits only the seam's
@@ -473,11 +485,13 @@ instead requests a one-turn mergeability and gating-check convergence check, a
 plain pull request reply, and a clean finish. `renovate-merge-forward` requests
 merging the base forward, resolving only conflicts, validating, committing,
 pushing, and reporting the result. Push instructions require the same configured
-authority as `git_push_configured`: a push credential and a head in the watched
-repository. Without that authority, kickoff states that push is unavailable and
-requests a reviewable diff in a plain pull request reply, leaving unresolved
-threads open for the owner to apply the diff. The publication instruction is
-retained with the kickoff command identity and remains unchanged on replay.
+authority as `git_push_configured`: a configured push credential file, a GitHub
+HTTPS destination with a `github_app` credential profile, or an SSH destination
+with an available host agent on Linux, and a head in the watched repository.
+Without that authority, kickoff states that push is unavailable and requests a
+reviewable diff in a plain pull request reply, leaving unresolved threads open
+for the owner to apply the diff. The publication instruction is retained with
+the kickoff command identity and remains unchanged on replay.
 
 During checkout provisioning, non-repository-watch input admission is deferred
 without claiming its command identity, so the kickoff is the first queued input.

@@ -18,6 +18,7 @@
 | provider_json | 2 | 0 | 2 | [provider_json](provider_json.md) |
 | provider_support | 1 | 0 | 8 | [provider_support](provider_support.md) |
 | redaction | 1 | 0 | 2 | [redaction](redaction.md) |
+| redaction_predicate | 0 | 0 | 1 | [redaction_predicate](redaction_predicate.md) |
 | runtime | 1 | 1 | 0 | [runtime](runtime.md) |
 | scripted | 3 | 0 | 0 | [scripted](scripted.md) |
 | settings | 7 | 0 | 0 | [settings](settings.md) |

@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde_json::value::{RawValue, to_raw_value};
 
 /// The name a tool is declared and proposed under.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct ToolName(String);
 
 impl ToolName {
@@ -27,7 +27,7 @@ impl ToolName {
 
 /// The provider-issued identifier correlating a tool proposal with its
 /// eventual result message.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct ToolCallId(String);
 
 impl ToolCallId {
@@ -108,7 +108,7 @@ impl ToolDefinition {
 /// The arguments stay as the raw JSON text the provider produced;
 /// [`decode_tool_arguments`] turns them into a typed value. Executing the
 /// proposal is never this layer's work.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ToolCallProposal {
     /// Provider-issued identifier for this proposal.
     pub id: ToolCallId,

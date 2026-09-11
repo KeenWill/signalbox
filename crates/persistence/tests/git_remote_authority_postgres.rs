@@ -1020,6 +1020,24 @@ async fn the_destination_predicate_agrees_with_the_domain_newtype() -> Result<()
     assert_url_predicate_agrees(&pool, "https://").await?;
     assert_url_predicate_agrees(&pool, "http://example.test/project.git").await?;
     assert_url_predicate_agrees(&pool, "git@example.test:namespace/project.git").await?;
+    for destination in [
+        "ssh://git@example.test/project.git",
+        "ssh://example.test:2222/project.git",
+        "ssh://git@example.test:65535/project.git",
+        "git@fixture:/tmp/remote.git",
+        "ssh://host:0/project",
+        "ssh://host:65536/project",
+        "ssh://host:000001/project",
+        "ssh://-option@host/project",
+        "ssh://git:secret@host/project",
+        "ssh://host/",
+        "git@host:",
+        "ssh://host/project?query",
+        "git@host:project#fragment",
+    ] {
+        assert_url_predicate_agrees(&pool, destination).await?;
+    }
+
     assert_url_predicate_agrees(&pool, "https://example.test/a project.git").await?;
     assert_url_predicate_agrees(&pool, "https://example.test/a\u{00a0}project.git").await?;
     Ok(())

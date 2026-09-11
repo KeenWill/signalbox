@@ -647,7 +647,8 @@ its dedicated prepared call, then changes exactly once to applied or failed; its
 request fields never change. Both compaction paths use the deployment-configured
 compaction prompt and the session's current direct selection, and automatic
 compaction selects a bounded safe prefix so its own summary request does not
-repeat the complete oversized input.
+repeat the complete oversized input. Truncatable source entries prioritize text
+and tool arguments over identity metadata.
 
 Compactions in one session form a forward-only chain, and a successor's source
 retains its predecessor's complete result frontier as a semantic prefix. For

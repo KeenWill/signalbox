@@ -54,35 +54,39 @@ pub(super) fn validate_repository_layout(
     if root_identity.device != injected_root.device || root_identity.inode != injected_root.inode {
         return Err(LocalGitToolsConstructionError::Repository);
     }
-    let dot_git = root.join(".git");
-    let metadata =
-        fs::symlink_metadata(&dot_git).map_err(|_| LocalGitToolsConstructionError::Repository)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(LocalGitToolsConstructionError::Repository);
-    }
-    let git_directory_identity = file_identity(&metadata);
-    let git_directory = fs::File::from(
+    let root_directory = fs::File::from(
         openat(
             CWD,
-            &dot_git,
+            root,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(|_| LocalGitToolsConstructionError::Repository)?,
     );
+    let directories =
+        crate::repository_directories::AdministrationDirectories::open(&root_directory)
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let administration = directories.binding;
+    let git_directory = directories.common;
+    let worktree_directory = directories.worktree;
     unsupported_control_files_are_absent(git_directory.as_fd())
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-    let config = open_repository_config_at(&git_directory)?;
-    let head = open_repository_head_at(&git_directory, config.object_format)?;
+    let config = open_repository_config_at(
+        &git_directory,
+        administration.worktree != administration.common,
+    )?;
+    let head = open_repository_head_at(&worktree_directory, config.object_format)?;
     let refs = open_repository_refs_at(&git_directory)?;
     reject_administrative_symlinks_for_format(&git_directory, config.object_format)?;
+    crate::repository_directories::validate_binding(&root_directory, administration)
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
     let config_metadata = config
         .source
         .metadata()
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
     Ok(RepositoryIdentity {
         root: root_identity,
-        git_directory: git_directory_identity,
+        administration,
         refs: file_identity(
             &refs
                 .metadata()
@@ -238,6 +242,16 @@ where
     reject_administrative_symlinks_for_format_with_observer(&git_directory, object_format, observer)
 }
 
+#[cfg(test)]
+thread_local! {
+    static ADMINISTRATION_INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_administration_inspections() -> usize {
+    ADMINISTRATION_INSPECTIONS.with(|count| count.replace(0))
+}
+
 fn reject_administrative_symlinks_for_format_with_observer<Observer>(
     git_directory: &fs::File,
     object_format: ObjectFormat,
@@ -262,6 +276,8 @@ where
                     continue;
                 }
                 inspected = inspected.saturating_add(1);
+                #[cfg(test)]
+                ADMINISTRATION_INSPECTIONS.with(|count| count.set(count.get() + 1));
                 if inspected > MAX_REPOSITORY_INSPECTIONS {
                     return Err(LocalGitToolsConstructionError::Repository);
                 }
@@ -506,6 +522,7 @@ fn validate_shallow_file_at_with_hook<AfterRead: FnOnce()>(
 
 pub(super) fn open_repository_config_at(
     git_directory: &fs::File,
+    linked_checkout: bool,
 ) -> Result<RepositoryConfig, LocalGitToolsConstructionError> {
     let descriptor = openat(
         git_directory,
@@ -514,11 +531,12 @@ pub(super) fn open_repository_config_at(
         Mode::empty(),
     )
     .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-    validate_repository_config_descriptor(descriptor)
+    validate_repository_config_descriptor(descriptor, linked_checkout)
 }
 
 fn validate_repository_config_descriptor(
     descriptor: OwnedFd,
+    linked_checkout: bool,
 ) -> Result<RepositoryConfig, LocalGitToolsConstructionError> {
     let mut file = fs::File::from(descriptor);
     let metadata = file
@@ -647,7 +665,7 @@ fn validate_repository_config_descriptor(
         && parsed
             .get_bool("core.bare")
             .ok()
-            .filter(|value| !value)
+            .filter(|value| !value || linked_checkout)
             .is_none()
     {
         return Err(LocalGitToolsConstructionError::Repository);

@@ -5,6 +5,8 @@
 
 use std::collections::VecDeque;
 
+use crate::redaction_predicate::{ObservationPredicate, record_disagreement};
+
 use crate::{
     AssistantPart, CompletionFinish, CredentialValue, ExchangeFacts, FinishReason, LossCause,
     NativeErrorFacts, Observation, ObservationFact, ObservationSink, ProvenUnsentEvidence,
@@ -23,6 +25,7 @@ pub struct CredentialRedactingSink<'a, C> {
     credential_text: &'a str,
     pending_stream_text: Option<PendingStreamText<C>>,
     pending_tool_arguments: Option<PendingToolArguments<C>>,
+    predicate: ObservationPredicate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -56,6 +59,7 @@ impl<'a, C: Clone> CredentialRedactingSink<'a, C> {
             credential_text: std::str::from_utf8(credential.expose_bytes()).unwrap_or_default(),
             pending_stream_text: None,
             pending_tool_arguments: None,
+            predicate: ObservationPredicate::default(),
         }
     }
 
@@ -85,6 +89,16 @@ impl<'a, C: Clone> CredentialRedactingSink<'a, C> {
         self.flush_tool_arguments();
     }
 
+    fn forward(&mut self, observation: Observation<C>) {
+        if self
+            .predicate
+            .inspect(&observation.fact, self.credential.expose_bytes())
+        {
+            record_disagreement();
+        }
+        self.inner.observe(observation);
+    }
+
     fn emit_stream_text(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
         if text.is_empty() {
             return;
@@ -93,12 +107,12 @@ impl<'a, C: Clone> CredentialRedactingSink<'a, C> {
             StreamField::Text => ObservationFact::TextDelta { index, text },
             StreamField::Thinking => ObservationFact::ThinkingDelta { index, text },
         };
-        self.inner.observe(Observation { correlation, fact });
+        self.forward(Observation { correlation, fact });
     }
 
     fn emit_tool_arguments(&mut self, index: u32, correlation: C, fragment: String) {
         if !fragment.is_empty() {
-            self.inner.observe(Observation {
+            self.forward(Observation {
                 correlation,
                 fact: ObservationFact::ToolArgumentsDelta { index, fragment },
             });
@@ -193,7 +207,7 @@ impl<C: Clone> ObservationSink<C> for CredentialRedactingSink<'_, C> {
             }
             ObservationFact::ToolCallProposed(proposal) => {
                 self.flush();
-                self.inner.observe(Observation {
+                self.forward(Observation {
                     correlation: observation.correlation,
                     fact: ObservationFact::ToolCallProposed(redact_tool_proposal(
                         proposal,
@@ -203,7 +217,7 @@ impl<C: Clone> ObservationSink<C> for CredentialRedactingSink<'_, C> {
             }
             fact => {
                 self.flush();
-                self.inner.observe(Observation {
+                self.forward(Observation {
                     correlation: observation.correlation,
                     fact: redact_observation_fact(fact, self.credential),
                 });
@@ -1169,6 +1183,56 @@ mod tests {
 
     fn credential(value: &str) -> CredentialValue {
         CredentialValue::new(value.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn predicate_catches_tool_identifier_name_split_left_by_field_redaction() {
+        let key = credential("fixture_secret");
+        let proposal = ToolCallProposal {
+            id: ToolCallId::new("fixture_"),
+            name: ToolName::new("secret"),
+            arguments_json: "{}".to_owned(),
+        };
+        assert_eq!(
+            super::redact_tool_proposal(proposal.clone(), &key),
+            proposal
+        );
+        assert!(
+            crate::redaction_predicate::ObservationPredicate::default().inspect(
+                &ObservationFact::ToolCallProposed(proposal),
+                key.expose_bytes(),
+            )
+        );
+    }
+
+    #[test]
+    fn predicate_catches_model_identifier_split_left_by_field_redaction() {
+        let key = credential("fixture_secret");
+        let mut predicate = crate::redaction_predicate::ObservationPredicate::default();
+        let prefix = ObservationFact::ProviderModelReported(ProviderReportedModel::new("fixture_"));
+        let suffix = ObservationFact::ProviderModelReported(ProviderReportedModel::new("secret"));
+        assert_eq!(super::redact_observation_fact(prefix.clone(), &key), prefix);
+        assert_eq!(super::redact_observation_fact(suffix.clone(), &key), suffix);
+        assert!(!predicate.inspect(&prefix, key.expose_bytes()));
+        assert!(predicate.inspect(&suffix, key.expose_bytes()));
+    }
+
+    #[test]
+    fn shadow_disagreement_increments_counter_and_fails_the_test() {
+        let before = crate::credential_redaction_disagreements();
+        let result = std::panic::catch_unwind(|| {
+            let key = credential("fixture_secret");
+            let mut observed = Vec::new();
+            let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+            for value in ["fixture_", "secret"] {
+                sink.observe(Observation {
+                    correlation: (),
+                    fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(value)),
+                });
+            }
+        });
+        assert!(result.is_err());
+        assert!(crate::credential_redaction_disagreements() > before);
     }
 
     #[test]
