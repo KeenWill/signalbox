@@ -132,6 +132,27 @@ changes can bypass PostgreSQL through the coarse path gate; generated browser
 contracts keep the bar. API generation and API digest reports reuse the existing
 Rust scope, while documentation consistency checks still run.
 
+## Shared PostgreSQL fixtures
+
+Linux Bazel PostgreSQL selections enable `SIGNALBOX_TEST_SHARED_POSTGRES=1`.
+Each libtest process lazily starts a shared PostgreSQL server and clones the
+migration-set template into a separate database for each fixture. Every live
+fixture reserves its own bounded tablespace. A full server starts another server
+instead of blocking tests that need multiple fixtures. Slots become reusable
+only after a successful database drop; failed setup or cleanup retains the
+reservation until the process exits. `TESTCONTAINERS_COMMAND=keep` retains
+databases and servers.
+
+Bazel's runtime wrapper owns server cleanup and waits for it before returning to
+Bazel, which reaps detached descendants. A failed or killed test binary still
+triggers wrapper cleanup. Killing the entire wrapper or runner with `SIGKILL`
+can leave labeled containers holding host memory until the
+[existing sweeper](../../tooling/sweep-test-containers.sh) reclaims them. Cargo
+can opt in with the same variable and uses a pidfd guardian tied to the test
+process. Nextest retains its existing run-owned server path. Ordinary Bazel
+selections retain their existing fixture behavior. No suite filters or test
+concurrency settings change.
+
 ## PostgreSQL result reuse
 
 Cacheable PostgreSQL test selections use the shared Bazel action cache. Explicit

@@ -3528,21 +3528,21 @@ mod tests {
 
     use super::{
         AnthropicConstructionError, BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT,
-        FENCED_POOL_MAX_CONNECTIONS, FencedPoolFloorReconciliationPolicy,
-        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError,
-        HubConfigurationValues, HubRuntimeError, MODEL_CONFIGURATION_FILE_ENVIRONMENT,
-        OpenAiConstructionError, OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT,
-        ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RequiredSettingFailure,
-        RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
-        RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
-        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, WebHttpConfiguration,
-        ambient_database_environment, ambient_otlp_environment, combine_runtime_stop_cause,
-        completed_runtime_outcome, credential_files_conflict, database_close_failure_outcome,
-        drain_runtime_tasks, erase_startup_cause, fenced_pool_floor_reconciliation_policy,
-        graceful_shutdown_window, migrate_scan_then_schedule, operator_filter,
-        process_runtime_failure_class, report_database_close_failure, report_non_loopback_web_bind,
-        run_scheduler_until_shutdown, runner_lifecycle_failure_class, should_close_pool,
-        staging_sweep_failure_outcome, validate_fenced_pool_min_connections,
+        FENCED_POOL_MAX_CONNECTIONS, FencedPoolFloorReconciliationPolicy, HubConfiguration,
+        HubConfigurationError, HubConfigurationValues, HubRuntimeError,
+        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OpenAiConstructionError, OperatorFilterDisposition,
+        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
+        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
+        RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
+        ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
+        WebHttpConfiguration, ambient_database_environment, ambient_otlp_environment,
+        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
+        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
+        fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
+        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
+        report_database_close_failure, report_non_loopback_web_bind, run_scheduler_until_shutdown,
+        runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
+        validate_fenced_pool_min_connections,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
@@ -4539,7 +4539,6 @@ mod tests {
         use signalboxd::guard_recovery::GuardedIncarnationOutcome;
         for failure in [
             BlobStoreRegistryError::ConfigurationRequired,
-            BlobStoreRegistryError::S3StartupDeadline,
             BlobStoreRegistryError::Catalog(BlobCatalogRepositoryError::Corruption(
                 BlobCatalogCorruption::InvalidDigest,
             )),

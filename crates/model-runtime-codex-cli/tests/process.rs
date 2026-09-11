@@ -1810,6 +1810,58 @@ async fn availability_classification_survives_retry_and_assistant_activity() {
 }
 
 #[tokio::test]
+async fn generic_terminal_failure_retains_the_latest_typed_retry_cause() {
+    for scenario in [
+        "retry_auth_generic",
+        "retry_network_generic",
+        "retry_network_content",
+    ] {
+        let result = execute_scenario(
+            scenario,
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        if scenario == "retry_auth_generic" {
+            let error = provider_error(&result.evidence);
+            assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
+            assert!(
+                !error.non_acceptance_proven,
+                "retry is not non-acceptance proof"
+            );
+        } else {
+            let lost = boundary_loss(&result.evidence);
+            assert!(matches!(lost.cause, LossCause::TransportFailed(_)));
+            assert_eq!(
+                lost.response_content_observed,
+                scenario == "retry_network_content"
+            );
+        }
+        assert_eq!(result.spawns, 1);
+    }
+}
+
+#[tokio::test]
+async fn retry_diagnostics_do_not_override_completion_or_prove_terminal_failure() {
+    for scenario in ["retry_auth_completed", "retry_auth_lost"] {
+        let result = execute_scenario(
+            scenario,
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        if scenario == "retry_auth_completed" {
+            assert!(matches!(result.evidence, TerminalEvidence::Completed(_)));
+        } else {
+            assert!(matches!(result.evidence, TerminalEvidence::BoundaryLoss(_)));
+        }
+        assert_eq!(result.spawns, 1);
+    }
+}
+
+#[tokio::test]
 async fn interrupted_turn_is_boundary_loss_without_cancellation_proof() {
     let result = execute_scenario(
         "interrupted",
