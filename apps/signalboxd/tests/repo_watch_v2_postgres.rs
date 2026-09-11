@@ -4443,6 +4443,61 @@ async fn poll_cursor_attribution_migration_invalidates_parent_version_snapshots(
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn rejected_legacy_thread_snapshot_clears_durable_cursor() -> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::{poll_cache::poll_with_cache, provider::ObservationError};
+    let (container, core_pool, database_url) = unmigrated_postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let poll_pool = module_pool(&database_url).await?;
+    let store = RepoWatchStore::new(poll_pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    sqlx::query(
+        "INSERT INTO poll_cursor (repository, cursor)
+         VALUES ($1, '{
+           \"pulls\": [1],
+           \"pages\": {},
+           \"threads\": {
+             \"legacy-page\": {
+               \"nodes\": [{\"id\": \"thread-1\", \"isResolved\": false}],
+               \"pageInfo\": {\"hasNextPage\": false, \"endCursor\": null}
+             }
+           },
+           \"retained\": []
+         }'::jsonb)",
+    )
+    .bind(repository.as_str())
+    .execute(&poll_pool)
+    .await?;
+
+    assert!(matches!(
+        poll_with_cache(
+            &ConditionalPollFixture::new(),
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(1000).expect("poll budget")
+        )
+        .await,
+        Err(ObservationError::Cache(StoreError::InvalidPollCache))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cursor")
+            .fetch_one(&poll_pool)
+            .await?,
+        0
+    );
+    poll_pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the_cache()
 -> Result<(), Box<dyn Error>> {
     use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
