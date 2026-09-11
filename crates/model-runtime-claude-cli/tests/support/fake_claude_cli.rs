@@ -57,6 +57,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "session_id": session,
             "compact_metadata": { "trigger": "auto", "pre_tokens": PRE_COMPACTION_TOKENS }
         }))?;
+        if scenario.starts_with("native_compaction_summary") {
+            let session = if scenario == "native_compaction_summary_wrong_session" {
+                fixtures::OTHER_SESSION_ID
+            } else {
+                fixtures::SESSION_ID
+            };
+            // Arbitrary summary text must not appear as assistant output.
+            const NATIVE_SUMMARY: &str = "A native summary of earlier scratch edits.";
+            let content = if scenario == "native_compaction_summary_tool_result" {
+                assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+                serde_json::json!([{ "type": "tool_result", "tool_use_id": fixtures::TOOL_ID,
+                    "content": "Signalbox recorded this tool proposal for external execution." }])
+            } else {
+                serde_json::json!([{ "type": "text", "text": NATIVE_SUMMARY }])
+            };
+            emit_json(&serde_json::json!({
+                "type": "user", "session_id": session,
+                "isSynthetic": scenario != "native_compaction_summary_not_synthetic",
+                "message": { "role": "user", "content": content }
+            }))?;
+            if scenario == "native_compaction_summary_without_result" {
+                return Ok(());
+            }
+            if scenario == "native_compaction_summary_tool_result" {
+                success("tool_use", None)?;
+                return Ok(());
+            }
+        }
         assistant_text(fixtures::ANSWER)?;
         success("end_turn", Some(fixtures::ANSWER))?;
         return Ok(());

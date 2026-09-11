@@ -420,6 +420,10 @@ acknowledge the batch. Its content is discarded; the reported finish must be
 `end_turn`, while the effective completion of the original batch is `ToolUse`. A
 different message id outside that acknowledgement is a protocol violation.
 
+Claude CLI synthetic text-only user-role events must name the initialized
+session. Their native context summaries do not become canonical assistant
+content, tool acknowledgements, or terminal evidence.
+
 Claude CLI native compaction boundaries must name the initialized session. The
 adapter logs the reported trigger and pre-compaction token count; the boundary
 does not replace the daemon's canonical transcript.
