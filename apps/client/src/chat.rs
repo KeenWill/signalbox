@@ -28,7 +28,7 @@ use crate::{
     child_lifecycle_terminalization, command_identity,
     connection::ProcessClient,
     error::ClientError,
-    follow_status::refresh_transcript,
+    follow_status::{refresh_terminal_transcript, refresh_transcript},
     presentation::{ChatTurnStatus, Output},
     read_session_defaults, read_session_summaries, read_snapshot, selection_display, stop_turn,
     submit_input, terminal_snapshot_selection,
@@ -656,7 +656,7 @@ where
                                     &mut interrupts,
                                     turns.status(),
                                     RequestKind::ReadOnly,
-                                    refresh_transcript(client, session_id, &mut snapshot),
+                                    refresh_terminal_transcript(client, session_id, &mut snapshot),
                                 )
                                 .await?
                                 {

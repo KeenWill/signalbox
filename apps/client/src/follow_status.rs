@@ -20,6 +20,15 @@ pub(crate) async fn transcript(
     read_snapshot(client, &mut connection, session_id).await
 }
 
+pub(crate) async fn refresh_terminal_transcript(
+    client: &mut ProcessClient,
+    session_id: CanonicalUuid,
+    snapshot: &mut TranscriptSnapshot,
+) -> Result<(), ClientError> {
+    *snapshot = transcript(client, session_id).await?;
+    Ok(())
+}
+
 pub(crate) async fn refresh_transcript(
     client: &mut ProcessClient,
     session_id: CanonicalUuid,
@@ -84,7 +93,7 @@ pub(crate) async fn follow(
                         observed_cursor = cursor.value();
                         output.event(observed_cursor, session_id, &event)?;
                         if let Some(selection) = terminal_snapshot_selection(&event, session_id) {
-                            refresh_transcript(client, session_id, &mut snapshot).await?;
+                            refresh_terminal_transcript(client, session_id, &mut snapshot).await?;
                             output.terminal_material(
                                 &mut snapshot,
                                 &mut displayed_entries,

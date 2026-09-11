@@ -5951,6 +5951,158 @@ async fn reload_configuration_reuses_the_supplied_command_id() -> Result<(), Box
 }
 
 #[tokio::test]
+async fn follow_terminal_event_rereads_the_full_snapshot_before_rendering_refused_material()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+    let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let model_call_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+    let attempt_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+    let acknowledged_frontier = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+    let terminal_frontier = CanonicalUuid::from_uuid(Uuid::from_u128(6));
+    let accepted_input_id = CanonicalUuid::from_uuid(Uuid::from_u128(7));
+    let server = tokio::spawn(async move {
+        let (stream, mut follow_writer) = listener.accept().await?.0.into_split();
+        let mut follow_reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        follow_reader.read_until(b'\n', &mut line).await?;
+        let follow_request = decode_client_line(&line).map_err(io::Error::other)?;
+        assert_eq!(
+            follow_request.request(),
+            &ClientRequest::FollowSession { session_id }
+        );
+        let mut initial = transcript_snapshot_messages(
+            session_id,
+            1,
+            None,
+            vec![ServerMessage::TranscriptTurn {
+                turn_id,
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::ActiveRunning {
+                    current_attempt_id: attempt_id,
+                    current_model_call: None,
+                },
+            }],
+            vec![ServerMessage::TranscriptUserEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: session_id,
+                entry_id: acknowledged_frontier,
+                accepted_input_id,
+                turn_id,
+                content: UserInputContent::text(String::from("refuse this input")),
+            }],
+            1,
+            1,
+            Some(acknowledged_frontier),
+        );
+        initial.push(ServerMessage::SessionEvent {
+            cursor: CanonicalU64::new(2),
+            session_id,
+            event: SessionEvent::TurnRefused {
+                turn_id,
+                model_call_id,
+                terminal_frontier_id: terminal_frontier,
+            },
+        });
+        for message in initial {
+            let frame = ServerFrame::try_new_for_version(
+                follow_request.version(),
+                follow_request.request_id(),
+                message,
+            )
+            .map_err(io::Error::other)?;
+            follow_writer
+                .write_all(&encode_server_line(&frame).map_err(io::Error::other)?)
+                .await?;
+        }
+
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
+            transcript_snapshot_messages(
+                session_id,
+                2,
+                None,
+                vec![ServerMessage::TranscriptTurn {
+                    turn_id,
+                    acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
+                    state: TurnState::Refused {
+                        terminal_frontier_id: terminal_frontier,
+                        terminal_attempt_id: attempt_id,
+                        terminal_model_call_id: model_call_id,
+                    },
+                }],
+                vec![
+                    ServerMessage::TranscriptUserEntry {
+                        entry_index: CanonicalU64::new(0),
+                        source_session_id: session_id,
+                        entry_id: acknowledged_frontier,
+                        accepted_input_id,
+                        turn_id,
+                        content: UserInputContent::text(String::from("refuse this input")),
+                    },
+                    ServerMessage::TranscriptEntry {
+                        entry_index: CanonicalU64::new(1),
+                        source_session_id: session_id,
+                        entry_id: terminal_frontier,
+                        entry: TranscriptEntry::ProviderCompaction {
+                            turn_id,
+                            model_call_id,
+                        },
+                    },
+                ],
+                1,
+                2,
+                Some(terminal_frontier),
+            ),
+        )
+        .await?;
+
+        let unexpected = ServerFrame::try_new_for_version(
+            follow_request.version(),
+            follow_request.request_id(),
+            ServerMessage::SessionsStart {},
+        )
+        .map_err(io::Error::other)?;
+        follow_writer
+            .write_all(&encode_server_line(&unexpected).map_err(io::Error::other)?)
+            .await
+    });
+
+    let mut client = ProcessClient::new(socket);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = {
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        crate::follow_status::follow(&mut client, &mut output, session_id).await
+    };
+
+    assert!(matches!(
+        result,
+        Err(ClientError::Protocol(
+            "follow returned an unexpected response"
+        ))
+    ));
+    let rendered = String::from_utf8(stdout)?;
+    assert!(rendered.contains(&format!(
+        "turn_refused turn={turn_id} call={model_call_id} frontier={terminal_frontier}"
+    )));
+    assert!(rendered.contains(&format!(
+        "provider_compaction turn={turn_id} call={model_call_id}"
+    )));
+    assert!(stderr.is_empty());
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn truncated_transcript_suffix_leaves_acknowledgement_unchanged() -> Result<(), Box<dyn Error>>
 {
     let directory = tempfile::tempdir()?;
