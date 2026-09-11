@@ -6,13 +6,13 @@ use crate::*;
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn long_compaction_suffix_validates_without_repeated_history_walks()
 -> Result<(), Box<dyn Error>> {
-    const RETAINED_SUMMARIES: usize = 512;
+    const RETAINED_SUMMARIES: usize = 256;
     let (_container, pool, fixture, summaries) =
         failed_tool_turn_with_summaries(RETAINED_SUMMARIES).await?;
     assert_eq!(summaries.len(), RETAINED_SUMMARIES);
     let mut transaction = pool.begin().await?;
     flatten_terminal_frontier(&mut transaction, fixture).await?;
-    sqlx::query("SET LOCAL statement_timeout = '8s'")
+    sqlx::query("SET LOCAL statement_timeout = '1s'")
         .execute(&mut *transaction)
         .await?;
     sqlx::query("SELECT assert_tool_loop_turn_final_state($1)")
