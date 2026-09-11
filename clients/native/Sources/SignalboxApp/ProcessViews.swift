@@ -2598,6 +2598,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           mutationBlocksByTurnID.removeValue(forKey: turnID)
         }
         applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
+      case .childWaitResumed:
+        if mutationBlocksByTurnID[turnID] == .unknownNestedState {
+          mutationBlocksByTurnID.removeValue(forKey: turnID)
+        }
+        applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
       case .recoveryRequired:
         if mutationBlocksByTurnID[turnID] == .unknownNestedState {
           mutationBlocksByTurnID.removeValue(forKey: turnID)

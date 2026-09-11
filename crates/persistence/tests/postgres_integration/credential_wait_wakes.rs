@@ -186,3 +186,116 @@ async fn credential_pool_wait_deadline_reconciles_without_a_delivered_wake()
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_capacity_probe_releases_a_headroom_wait_before_its_old_reset()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ProviderRateLimitSnapshot, ProviderRateLimitWindow};
+    use signalbox_persistence::credential_capacity::{
+        retain_credential_capacity_probe, waiting_capacity_profiles,
+    };
+    use signalbox_persistence::model_execution::CredentialPoolRuntimeTieBreak;
+    use std::time::{Duration, SystemTime};
+    const WAITER: u128 = 0x6001_9000; // arbitrary session fixture identity
+    const POOL: &str = "externally-reset-pool";
+    const MEMBER: &str = "externally-reset-member";
+    let (container, pool, _) = migrated_postgres().await?;
+    let observed_at = SystemTime::now();
+    let old_reset = observed_at + Duration::from_secs(604800);
+    retain_credential_capacity_probe(
+        &pool,
+        MEMBER,
+        &ProviderRateLimitSnapshot::new(
+            observed_at,
+            vec![ProviderRateLimitWindow::new(0, None, Some(old_reset))],
+        ),
+    )
+    .await?;
+    let (session, turn, repository) = active_credential_pool_fixture(
+        &pool,
+        WAITER,
+        POOL,
+        &[MEMBER],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .await?;
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+        WAITER + 4,
+    )));
+    let repository = repository.with_credential_pools(HashMap::from([(
+        target,
+        park_policy(POOL, &[MEMBER]).with_capacity_policy(
+            CredentialPoolRuntimeTieBreak::LeastUsed,
+            Some(0),
+            CredentialPoolRuntimeAction::Stay,
+        ),
+    )]));
+    let PrepareInitialModelCallOutcome::CredentialWait(wait) =
+        prepare_wait_admission(&repository, session, WAITER + 100).await?
+    else {
+        panic!("zero headroom parks the turn without a model call")
+    };
+    assert_eq!(
+        waiting_capacity_profiles(&pool, &[MEMBER.to_owned()]).await?,
+        vec![MEMBER.to_owned()]
+    );
+    assert!(
+        waiting_capacity_profiles(&pool, &[]).await?.is_empty(),
+        "unconfigured credentials must never be probed"
+    );
+    let eligible: bool = sqlx::query_scalar("SELECT credential_wait_is_eligible($1)")
+        .bind(wait.attempt().into_uuid())
+        .fetch_one(&pool)
+        .await?;
+    assert!(!eligible, "the weekly reset is still in the future");
+    retain_credential_capacity_probe(
+        &pool,
+        MEMBER,
+        &ProviderRateLimitSnapshot::new(
+            observed_at + Duration::from_secs(1),
+            vec![ProviderRateLimitWindow::new(100, None, Some(old_reset))],
+        ),
+    )
+    .await?;
+    let eligible: bool = sqlx::query_scalar("SELECT credential_wait_is_eligible($1)")
+        .bind(wait.attempt().into_uuid())
+        .fetch_one(&pool)
+        .await?;
+    assert!(
+        eligible,
+        "a fresh read observes the external reset without waiting for the old deadline"
+    );
+    let calls: i64 = sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+        .bind(turn.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        calls, 0,
+        "the capacity observation itself must not dispatch a model call"
+    );
+    assert!(
+        PostgresEligibilitySweep::new(pool.clone())
+            .find_sessions()
+            .await?
+            .into_parts()
+            .0
+            .contains(&session)
+    );
+    assert!(matches!(
+        prepare_wait_admission(&repository, session, WAITER + 200).await?,
+        PrepareInitialModelCallOutcome::Checkpointed(_)
+    ));
+    let released: Option<Uuid> = sqlx::query_scalar("SELECT consumed_by_attempt_id FROM credential_availability_wait WHERE wait_attempt_id = $1").bind(wait.attempt().into_uuid()).fetch_one(&pool).await?;
+    assert!(released.is_some());
+    assert!(
+        waiting_capacity_profiles(&pool, &[MEMBER.to_owned()])
+            .await?
+            .is_empty(),
+        "consumed waits must not keep probing"
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

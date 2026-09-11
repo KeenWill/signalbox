@@ -2644,3 +2644,225 @@ async fn push_refuses_unsupported_merge_shape_before_an_oversized_parent_snapsho
     );
     assert!(!transport.has_request());
 }
+
+#[tokio::test]
+async fn merge_verification_rejects_a_dropped_nearly_disjoint_large_replacement() {
+    use std::io::{Seek, Write};
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let commit = |prefix: &str, parents: &[git2::Oid]| {
+        let mut file = std::io::BufWriter::new(tempfile::tempfile().expect("generated blob"));
+        for line in 0..100_000 {
+            if line == 50_000 {
+                writeln!(file, "shared middle line").expect("shared line");
+            } else {
+                writeln!(file, "{prefix}-{line:08}").expect("distinct line");
+            }
+        }
+        let mut file = file.into_inner().expect("flush");
+        let size = file.metadata().expect("metadata").len() as usize;
+        assert!(size > crate::limits::MAX_DIFF_BYTES);
+        file.rewind().expect("rewind");
+        let mut content = crate::streamed_object::ObjectContent {
+            file,
+            size,
+            kind: git2::ObjectType::Blob,
+        };
+        let oid = content
+            .store(
+                &fixture.root().join(".git/objects"),
+                git2::ObjectFormat::Sha1,
+                None,
+            )
+            .expect("publish blob");
+        let mut tree = repository.treebuilder(None).expect("tree");
+        tree.insert("shared.txt", oid, 0o100644).expect("file");
+        merge_test_commit_tree(&repository, tree.write().expect("tree id"), parents)
+    };
+    let ancestor = commit("old", &[]);
+    let branch = commit("old", &[ancestor]);
+    let base = commit("new", &[ancestor]);
+    let preserved = commit("new", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, preserved, branch, transport.clone());
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("base replacement survives");
+    assert!(transport.has_request());
+    let dropped = commit("old", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, dropped, branch, transport.clone());
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+    let Err(GitPushFailure::MergeDroppedBaseChanges(details)) = result else {
+        panic!("whole-object replacement must refuse: {result:?}");
+    };
+    assert_eq!(details.len(), 1);
+    assert!(details[0].first_dropped_hunk.starts_with("object "));
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn merge_verification_keeps_newline_heavy_replacements_atomic() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let old = "\n".repeat(256 * 1024);
+    let new = format!("{old}base change\n");
+    let ancestor = merge_test_commit(&repository, &old, &[]);
+    let branch = merge_test_commit(&repository, &old, &[ancestor]);
+    let base = merge_test_commit(&repository, &new, &[ancestor]);
+    let preserved = merge_test_commit(&repository, &new, &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, preserved, branch, transport.clone());
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("base replacement survives");
+    assert!(transport.has_request());
+
+    let dropped = merge_test_commit(&repository, &old, &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, dropped, branch, transport.clone());
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+    let Err(GitPushFailure::MergeDroppedBaseChanges(details)) = result else {
+        panic!("whole-object replacement must refuse: {result:?}");
+    };
+    assert_eq!(details.len(), 1);
+    assert!(details[0].first_dropped_hunk.starts_with("object "));
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn merge_verification_streams_long_lines_and_rejects_dropped_base_content() {
+    exercise_streamed_merge(256 * 1024).await;
+}
+
+#[tokio::test]
+#[ignore = "generates five 1 GB text blobs and verifies conflict regions and base-line preservation"]
+async fn merge_verification_streams_generated_gigabyte_text_blobs() {
+    exercise_streamed_merge(1_000_000_000).await;
+}
+
+async fn exercise_streamed_merge(bytes: u64) {
+    use std::io::Read;
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let commit = |prefix: &str, suffix: &str, parents: &[git2::Oid]| {
+        let mut reader = prefix
+            .as_bytes()
+            .chain(std::io::repeat(b'x').take(bytes))
+            .chain(suffix.as_bytes());
+        let mut content = crate::streamed_object::ObjectContent::decode(
+            &mut reader,
+            bytes as usize + prefix.len() + suffix.len(),
+            git2::ObjectType::Blob,
+            None,
+        )
+        .expect("streamed fixture blob");
+        let oid = content
+            .store(
+                &fixture.root().join(".git/objects"),
+                git2::ObjectFormat::Sha1,
+                None,
+            )
+            .expect("fixture blob publication");
+        let mut builder = repository.treebuilder(None).expect("tree builder");
+        builder
+            .insert("shared.txt", oid, 0o100644)
+            .expect("large text entry");
+        merge_test_commit_tree(&repository, builder.write().expect("tree"), parents)
+    };
+    let started = std::time::Instant::now();
+    let ancestor = commit(
+        "shared\nconflict old\nanchor one\nanchor two\n",
+        "ancestor\n",
+        &[],
+    );
+    let branch = commit(
+        "shared\nbranch original\nanchor one\nanchor two\n",
+        "ancestor\n",
+        &[ancestor],
+    );
+    let base = commit(
+        "shared\nbase conflict\nanchor one\nanchor two\n",
+        "base\n",
+        &[ancestor],
+    );
+    let merge = commit(
+        "shared\nbase conflict\nbranch regrouped\nanchor one\nanchor two\n",
+        "base\n",
+        &[branch, base],
+    );
+    eprintln!("merge scale elapsed {:?}", started.elapsed());
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("large base line survives and branch text is regrouped only inside the conflict");
+    assert_eq!(transport.request().commit(), merge.to_string());
+    let dropped = commit(
+        "shared\nbase conflict\nbranch regrouped\nanchor one\nanchor two\n",
+        "ancestor\n",
+        &[branch, base],
+    );
+    eprintln!("merge scale elapsed {:?}", started.elapsed());
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, dropped, branch, transport.clone());
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+    let Err(GitPushFailure::MergeDroppedBaseChanges(details)) = result else {
+        panic!("dropped large base line must refuse: {result:?}");
+    };
+    assert_eq!(details.len(), 1);
+    assert!(details[0].truncated);
+    assert!(details[0].first_dropped_hunk.len() <= crate::push_executor::MAX_MERGE_DETAIL_BYTES);
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn push_accepts_a_branch_rename_and_mode_change_carrying_both_edits() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit_files(
+        &repository,
+        &[(b"old.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")],
+        &[],
+    );
+    let commit = |path, content: &[u8], mode, parents: &[git2::Oid]| {
+        let mut tree = repository.treebuilder(None).expect("tree builder");
+        tree.insert(path, repository.blob(content).expect("blob"), mode)
+            .expect("file mode");
+        merge_test_commit_tree(&repository, tree.write().expect("tree"), parents)
+    };
+    let branch = commit(
+        "new.txt",
+        b"one\ntwo\nthree\nfour\nfive\nsix\nbranch\n",
+        0o100755,
+        &[ancestor],
+    );
+    let base = commit(
+        "old.txt",
+        b"one\ntwo\nthree\nfour\nfive\nsix\nbase\n",
+        0o100644,
+        &[ancestor],
+    );
+    let merge = commit(
+        "new.txt",
+        b"one\ntwo\nthree\nfour\nfive\nsix\nbase\nbranch\n",
+        0o100755,
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("rename, mode, and both edits survive");
+    assert_eq!(transport.request().commit(), merge.to_string());
+}

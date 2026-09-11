@@ -66,7 +66,8 @@ pub(super) fn diff<FileSystem: WorkspaceFileSystem>(
                 let (size, _) = repository
                     .read_object_header(file.id())
                     .map_err(|_| LocalGitFailure::Operation)?;
-                truncated |= size > MAX_DIFF_BYTES;
+                truncated |=
+                    delta.old_file().id() != delta.new_file().id() && size > MAX_DIFF_BYTES;
             }
             buffers.push(content);
         }
@@ -158,6 +159,13 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
             None => None,
         };
         let new_buffer = if let Some((oid, mode)) = index_backed_worktree_files.get(&path) {
+            if *mode != GITLINK_MODE {
+                content_truncated |= repository
+                    .read_object_header(*oid)
+                    .map_err(|_| LocalGitFailure::Operation)?
+                    .0
+                    > MAX_DIFF_BYTES;
+            }
             Some((diff_object_buffer(repository, *oid, *mode)?, *mode))
         } else if index_files.contains_key(&path)
             || conflicted_paths.contains(&path)
@@ -175,8 +183,11 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
                 }
                 Ok(WorkspaceEntryKind::Symlink)
                 | Err(WorkspaceResolveError::Rejected(WorkspacePathRejection::Symlink)) => {
-                    let bytes =
-                        read_worktree_symlink(authority, &path, repository.object_byte_limit())?;
+                    let bytes = read_worktree_symlink(
+                        authority,
+                        &path,
+                        repository.object_byte_limit(git2::ObjectType::Blob),
+                    )?;
                     Some((bytes, 0o120000))
                 }
                 Ok(WorkspaceEntryKind::Other) => return Err(LocalGitFailure::Path),
@@ -221,17 +232,20 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
         } else {
             None
         };
-        if let (Some((old_oid, old_mode)), Some((_, new_mode))) =
-            (head_files.get(&path), new_buffer.as_ref())
-            && *old_mode == *new_mode
-            && (worktree_oid == Some(*old_oid)
+        let content_unchanged = head_files.get(&path).is_some_and(|(old_oid, _)| {
+            worktree_oid == Some(*old_oid)
                 || index_backed_worktree_files
                     .get(&path)
-                    .is_some_and(|(oid, _)| oid == old_oid))
+                    .is_some_and(|(oid, _)| oid == old_oid)
+        });
+        if let (Some((_, old_mode)), Some((_, new_mode))) =
+            (head_files.get(&path), new_buffer.as_ref())
+            && *old_mode == *new_mode
+            && content_unchanged
         {
             continue;
         }
-        truncated |= content_truncated;
+        truncated |= content_truncated && !content_unchanged;
         let mut options = DiffOptions::new();
         options.force_text(true);
         let patch = match (old_buffer.as_ref(), new_buffer.as_ref()) {

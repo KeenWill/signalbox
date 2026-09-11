@@ -37,7 +37,7 @@ pub(super) fn persist_objects(
         let (size, kind) = repository
             .read_object_header(oid)
             .map_err(|_| LocalGitFailure::Operation)?;
-        if size > repository.object_byte_limit() {
+        if size > repository.object_byte_limit(kind) {
             return Err(LocalGitFailure::Operation);
         }
         match kind {
@@ -72,6 +72,7 @@ pub(super) fn persist_objects(
         |oid| repository.object_content(oid),
         authority.object_format,
         directory.path(),
+        None,
     )?;
     pinned_objects.validate_live(authority)?;
     let publication = ObjectPublicationLock::acquire(pinned_objects)?;

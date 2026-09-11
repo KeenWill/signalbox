@@ -71,17 +71,15 @@ pub(super) struct PinnedObjectDatabase {
 }
 
 impl RepositoryShell {
-    pub(super) fn object_byte_limit(&self) -> usize {
-        self.max_object_bytes.unwrap_or(usize::MAX)
+    pub(super) fn object_byte_limit(&self, kind: git2::ObjectType) -> usize {
+        crate::limits::object_byte_limit(self.max_object_bytes, kind)
     }
     pub(super) fn capture_objects_on_read(
         &self,
         authority: &PinnedRepository,
     ) -> Result<(), LocalGitFailure> {
-        *self.selected_objects.borrow_mut() = Some(Arc::new(Mutex::new(ObjectSource::open(
-            authority,
-            std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT,
-        )?)));
+        *self.selected_objects.borrow_mut() =
+            Some(Arc::new(Mutex::new(ObjectSource::open(authority, None)?)));
         Ok(())
     }
 
@@ -152,24 +150,54 @@ impl RepositoryShell {
             &mut object.data(),
             object.len(),
             object.kind(),
+            None,
         )
+    }
+
+    fn require_object_kind(
+        &self,
+        oid: git2::Oid,
+        expected: git2::ObjectType,
+    ) -> Result<(), git2::Error> {
+        if self.read_object_header(oid)?.1 != expected {
+            return Err(git2::Error::from_str("unexpected object kind"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn find_commit(&self, oid: git2::Oid) -> Result<git2::Commit<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Commit)?;
+        self.repository.find_commit(oid)
+    }
+
+    pub(super) fn find_tree(&self, oid: git2::Oid) -> Result<git2::Tree<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Tree)?;
+        self.repository.find_tree(oid)
+    }
+
+    pub(super) fn find_tag(&self, oid: git2::Oid) -> Result<git2::Tag<'_>, git2::Error> {
+        self.require_object_kind(oid, git2::ObjectType::Tag)?;
+        self.repository.find_tag(oid)
     }
 
     pub(super) fn read_object_header(
         &self,
         oid: git2::Oid,
     ) -> Result<(usize, git2::ObjectType), git2::Error> {
+        let database = self.repository.odb()?;
         if let Some(source) = self.selected_objects.borrow().as_ref() {
             let mut source = source
                 .lock()
                 .map_err(|_| git2::Error::from_str("object source lock failed"))?;
-            let database = self.repository.odb()?;
             source.capture(&database, oid).map_err(|_| {
                 git2::Error::from_str("object read exceeds captured content bounds")
             })?;
-            return database.read_header(oid);
         }
-        self.repository.odb()?.read_header(oid)
+        let (size, kind) = database.read_header(oid)?;
+        if size > self.object_byte_limit(kind) {
+            return Err(git2::Error::from_str("object read exceeds content bounds"));
+        }
+        Ok((size, kind))
     }
 }
 
@@ -517,10 +545,7 @@ fn config_snapshot_bytes(file: &fs::File) -> Result<Vec<u8>, LocalGitFailure> {
 
 impl PinnedObjectDatabase {
     pub(super) fn capture(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
-        let source = ObjectSource::open(
-            authority,
-            std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT,
-        )?;
+        let source = ObjectSource::open(authority, None)?;
         let pack = openat(
             &authority.git_directory,
             "objects/pack",
@@ -625,5 +650,53 @@ pub(super) fn repository_ignorecase(repository: &Repository) -> Result<bool, Loc
         Ok(ignorecase) => Ok(ignorecase),
         Err(error) if error.code() == ErrorCode::NotFound => Ok(false),
         Err(_) => Err(LocalGitFailure::Repository),
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::{ObjectSource, PinnedObjectDatabase};
+
+    #[test]
+    fn local_snapshots_outlive_the_push_preparation_deadline() {
+        let root = tempfile::tempdir().expect("repository root");
+        git2::Repository::init(root.path()).expect("repository");
+        let (_, executor) = crate::LocalGitTools::try_new(
+            signalbox_tools_workspace::LocalWorkspaceFileSystem,
+            root.path(),
+            crate::GitIdentity::try_new("Deadline fixture", "deadline@example.test")
+                .expect("identity"),
+        )
+        .expect("local tools")
+        .into_parts();
+        let authority = &executor.repository_authority;
+        let deadline = std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT;
+        let later = deadline + std::time::Duration::from_secs(1);
+        let snapshot = PinnedObjectDatabase::capture(authority).expect("local snapshot");
+        assert!(
+            snapshot
+                .source
+                .lock()
+                .expect("snapshot lock")
+                .check_deadline_at(later)
+                .is_ok()
+        );
+        let repository = authority.open_repository_shell().expect("repository shell");
+        repository
+            .capture_objects_on_read(authority)
+            .expect("local read snapshot");
+        assert!(
+            repository
+                .selected_objects
+                .borrow()
+                .as_ref()
+                .expect("selected snapshot")
+                .lock()
+                .expect("selected lock")
+                .check_deadline_at(later)
+                .is_ok()
+        );
+        let push = ObjectSource::open(authority, Some(deadline)).expect("push snapshot");
+        assert!(push.check_deadline_at(later).is_err());
     }
 }

@@ -764,6 +764,11 @@ fn detail_body_dto(
                         tool_attempt_id: web_uuid(attempt_id.into_uuid()),
                     }
                 }
+                TimelineToolBatchState::ChildWaitResumed { attempt_id } => {
+                    WebTimelineToolBatchState::ChildWaitResumed {
+                        tool_attempt_id: web_uuid(attempt_id.into_uuid()),
+                    }
+                }
             },
             projected_member_index,
             tools: tools

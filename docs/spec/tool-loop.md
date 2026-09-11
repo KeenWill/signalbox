@@ -112,7 +112,9 @@ not a blanket but a distinct decider that can still deny or escalate.
 Every decision records its source, so unattended operation is inspectable
 without presenting policy as human consent, and only an explicit user, delegate,
 or consumed-override decision emits an approval-decided event naming its
-decider, its decision, and, for a delegate, its rationale.
+decider, its decision, and, for a delegate, its rationale; a delivered
+foreground child wait emits a child-wait-resumed tool-batch event naming the
+awaited attempt in the commit that reopens the parent turn.
 
 A denial reason is at most 4,096 UTF-8 bytes, admits internal U+000A, and is
 free of other control characters and surrounding POSIX whitespace. An oversized
@@ -184,7 +186,13 @@ detail lists filenames before hunk previews, marks each shortened preview with
 cannot fit. Filenames use bytewise Git path quoting. Verification supports
 two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
 the parent count before capturing the push snapshot or traversing ancestry. It
-retains only the first dropped hunk per file. Non-merge pushes are unaffected.
+retains only the first dropped hunk per file. Merge comparison streams content
+into file-backed line indexes, diff scratch data, and effect counts; retained
+hunk previews remain bounded. Rename similarity uses fixed-size signatures of
+streamed content. Comparison checks the push-preparation deadline between I/O
+pages and matching steps. Fixed spans use streamed literal comparison; candidate
+comparisons share a bounded work budget, and an unproven span refuses the push.
+Non-merge pushes are unaffected.
 
 Before constructing merge diffs, verification counts tree-entry occurrences
 across the four compared trees against `MAX_REPOSITORY_INSPECTIONS`, including

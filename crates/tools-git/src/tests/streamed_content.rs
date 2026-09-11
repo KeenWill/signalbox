@@ -114,3 +114,82 @@ fn repeated_stage_batches_remain_usable_with_1024_descriptors() {
     );
     println!("{EVIDENCE}");
 }
+
+#[test]
+fn metadata_is_bounded_with_unbounded_blob_configuration() {
+    for packed in [false, true] {
+        exercise_metadata_bound(2 * crate::limits::MAX_METADATA_OBJECT_BYTES, packed);
+    }
+}
+
+#[test]
+#[ignore = "generates gigabyte metadata objects and a streamed blob"]
+fn metadata_bound_rejects_generated_gigabyte_objects_without_materializing_them() {
+    exercise_metadata_bound(1_000_000_000, false);
+}
+
+fn exercise_metadata_bound(size: usize, packed: bool) {
+    use crate::streamed_object::ObjectContent;
+    use git2::{ObjectFormat, ObjectType};
+    let fixture = Fixture::new();
+    for kind in [
+        ObjectType::Commit,
+        ObjectType::Tree,
+        ObjectType::Tag,
+        ObjectType::Blob,
+    ] {
+        // Sparse content is a complete decoded payload, not a header-only refusal.
+        let file = tempfile::tempfile().expect("generated payload");
+        file.set_len(size as u64).expect("sparse payload size");
+        let mut content = ObjectContent { file, size, kind };
+        let oid = if packed {
+            let oid = content.oid(ObjectFormat::Sha1).expect("object id");
+            let mut once = Some(content);
+            crate::streamed_object::write_pack(
+                &[oid],
+                |_| Ok(once.take().expect("one object")),
+                ObjectFormat::Sha1,
+                &fixture.root().join(".git/objects/pack"),
+                None,
+            )
+            .expect("generated packed object");
+            oid
+        } else {
+            content
+                .store(
+                    &fixture.root().join(".git/objects"),
+                    ObjectFormat::Sha1,
+                    None,
+                )
+                .expect("generated loose object")
+        };
+        let (_, executor) = crate::LocalGitTools::try_new(
+            LocalWorkspaceFileSystem,
+            fixture.root(),
+            super::support::identity(),
+        )
+        .expect("default unbounded configuration")
+        .into_parts();
+        let authority = &executor.repository_authority;
+        let repository = authority.open_repository_shell().expect("private shell");
+        repository
+            .capture_objects_on_read(authority)
+            .expect("streamed capture");
+        assert_eq!(repository.max_object_bytes, None);
+        let result = repository.read_object_header(oid);
+        if kind == ObjectType::Blob {
+            assert_eq!(
+                result.expect("unbounded blob remains readable"),
+                (size, kind)
+            );
+            assert!(repository.find_commit(oid).is_err());
+            assert!(repository.find_tree(oid).is_err());
+            assert!(repository.find_tag(oid).is_err());
+        } else {
+            assert!(
+                result.is_err(),
+                "{kind:?} must be refused before libgit2 materialization"
+            );
+        }
+    }
+}

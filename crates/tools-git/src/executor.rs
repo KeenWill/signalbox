@@ -1086,6 +1086,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
         let database = Odb::new_ext(self.repository_authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
+        pinned_objects.add_to(&database)?;
         repository
             .set_odb(&database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -1442,7 +1443,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             })
             .collect::<Vec<_>>();
         let filemode = repository_filemode(repository)?;
+        let mut checkout_identities = crate::streamed_object::CheckoutIdentities::new();
         for path in &checkout_paths {
+            let identity = crate::streamed_object::capture_checkout_identity(
+                &self.repository_authority.root,
+                path,
+            )?;
             validate_checkout_path(
                 &self.filesystem,
                 &self.root,
@@ -1451,6 +1457,14 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 &target_tree,
             )?;
             self.validate_clean_checkout_path(path, &current_index, filemode, &checkout_paths)?;
+            if crate::streamed_object::capture_checkout_identity(
+                &self.repository_authority.root,
+                path,
+            )? != identity
+            {
+                return Err(LocalGitFailure::Operation);
+            }
+            checkout_identities.insert(path.clone(), identity);
         }
         let mut next_index = Index::new_ext(self.repository_authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -1541,10 +1555,9 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &target_tree,
                     &streamed_paths,
                     &descriptor_path(&self.repository_authority.root),
-                    |path| {
+                    Some(&checkout_identities),
+                    |path, identity| {
                         updated_paths.borrow_mut().insert(path.to_owned());
-                        let identity =
-                            capture_rollback_identity(&self.repository_authority.root, path)?;
                         updated_identities
                             .borrow_mut()
                             .insert(path.to_owned(), identity);
@@ -1656,7 +1669,20 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 return Err(failure);
             }
         };
-        if checkout_identities != before_checkout_capture {
+        let target_directories = tracked_directories(&next_index);
+        let content_matches_target = checkout_state.iter().all(|(path, observed)| {
+            let entry = next_index.get_path(path, 0);
+            match observed {
+                WorktreeRollbackEntry::File { hashes, mode } => entry.is_some_and(|entry| {
+                    hashes.contains(&entry.id) && mode & 0o111 == entry.mode & 0o111
+                }),
+                WorktreeRollbackEntry::Directory => target_directories.contains(path),
+                WorktreeRollbackEntry::Missing => {
+                    entry.is_none() && !target_directories.contains(path)
+                }
+            }
+        });
+        if checkout_identities != before_checkout_capture || !content_matches_target {
             rollback_checkout_atomically(
                 repository,
                 current_tree.as_ref(),

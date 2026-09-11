@@ -977,7 +977,7 @@ fn sha256_status_recognizes_an_unchanged_worktree_blob() {
 }
 
 #[test]
-fn real_git_sha256_pack_index_resolves_each_fixture_object() {
+fn sha256_pack_index_hits_require_valid_live_content() {
     use std::io::{Seek, SeekFrom, Write};
     let fixture = Sha256Fixture::new();
     let index = real_git_sha256_pack_index();
@@ -992,19 +992,22 @@ fn real_git_sha256_pack_index_resolves_each_fixture_object() {
         .expect("pack header writes");
     pack.write_all(&(expected.len() as u32).to_be_bytes())
         .expect("object count writes");
-    // Index lookups need the header and trailer, not decoded object content.
+    // The real index points at absent content inside this sparse pack.
     pack.seek(SeekFrom::Start(1024 * 1024))
         .expect("sparse pack seeks");
     pack.write_all(checksum.as_bytes())
         .expect("pack trailer writes");
     let executor = fixture.executor();
-    let source = crate::push_objects::ObjectSource::open(
+    let mut source = crate::push_objects::ObjectSource::open(
         &executor.repository_authority,
-        std::time::Instant::now() + std::time::Duration::from_secs(60),
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
     )
     .expect("source opens");
     for oid in expected {
-        assert!(source.contains(oid).expect("index lookup succeeds"));
+        assert!(
+            source.contains(oid).is_err(),
+            "a pack index hit must not prove content availability"
+        );
     }
 }
 
@@ -1411,4 +1414,216 @@ fn install_gitlink_index_entry(fixture: &Fixture) {
     index.add(&entry).expect("gitlink index entry adds");
     index.write().expect("gitlink index publishes");
     fs::create_dir(fixture.root().join("submodule")).expect("gitlink worktree directory creates");
+}
+
+#[test]
+fn streamed_checkout_rejects_non_regular_entries_before_touching_selected_paths() {
+    for mode in [0o120000, GITLINK_MODE] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository");
+        let oid = if mode == GITLINK_MODE {
+            fixture.initial
+        } else {
+            repository.blob(b"../outside").expect("symlink blob")
+        };
+        let mut builder = repository.treebuilder(None).expect("tree builder");
+        builder
+            .insert("unsupported", oid, mode as i32)
+            .expect("non-regular entry");
+        let tree = builder.write().expect("tree");
+        let tree = repository.find_tree(tree).expect("target tree");
+        let destination = tempfile::tempdir().expect("checkout destination");
+        fs::write(
+            destination.path().join("removed"),
+            b"retain until preflight succeeds",
+        )
+        .expect("existing file");
+        let executor = fixture.executor();
+        let shell = executor
+            .repository_authority
+            .repository()
+            .expect("pinned repository");
+        let mut touched = false;
+        let result = crate::streamed_object::checkout_paths(
+            &shell,
+            &tree,
+            &BTreeSet::from(["removed".into(), "unsupported".into()]),
+            destination.path(),
+            None,
+            |_, _| {
+                touched = true;
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(LocalGitFailure::Operation));
+        assert!(!touched);
+        assert_eq!(
+            fs::read(destination.path().join("removed")).expect("preserved file"),
+            b"retain until preflight succeeds"
+        );
+        assert!(!destination.path().join("unsupported").exists());
+    }
+}
+
+#[test]
+fn streamed_checkout_rejects_edits_and_replacements_between_copy_pages() {
+    use std::os::unix::fs::FileExt;
+    for replace in [false, true] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository");
+        // More than two pages leaves bytes already copied when the concurrent write occurs.
+        let bytes = vec![b'x'; 2 * crate::streamed_object::IO_BYTES + 1];
+        let oid = repository.blob(&bytes).expect("target blob");
+        let mut builder = repository.treebuilder(None).expect("target builder");
+        builder
+            .insert(TRACKED_PATH, oid, 0o100644)
+            .expect("target entry");
+        let tree = repository
+            .find_tree(builder.write().expect("target tree writes"))
+            .expect("target tree");
+        let executor = fixture.executor();
+        let shell = executor
+            .repository_authority
+            .open_repository_shell()
+            .expect("private shell");
+        shell
+            .capture_objects_on_read(&executor.repository_authority)
+            .expect("pinned objects");
+        let destination = tempfile::tempdir().expect("checkout destination");
+        let output = destination.path().join(TRACKED_PATH);
+        let mut notifications = Vec::new();
+        let mut injected = false;
+        let result = crate::streamed_object::checkout_paths_with_copy_hook(
+            &shell,
+            &tree,
+            &BTreeSet::from([TRACKED_PATH.into()]),
+            destination.path(),
+            None,
+            |_, identity| {
+                notifications.push(identity);
+                Ok(())
+            },
+            |_, _| {
+                if injected {
+                    return;
+                }
+                injected = true;
+                if replace {
+                    let foreign = destination.path().join("foreign");
+                    fs::write(&foreign, b"race").expect("foreign file");
+                    fs::rename(foreign, &output).expect("concurrent replacement");
+                } else {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&output)
+                        .expect("concurrent descriptor")
+                        .write_all_at(b"race", 0)
+                        .expect("concurrent edit");
+                }
+            },
+        );
+        assert_eq!(result, Err(LocalGitFailure::Operation));
+        assert!(injected);
+        assert_eq!(
+            notifications.len(),
+            1,
+            "only the opened descriptor grants rollback ownership"
+        );
+        let observed = file_identity(&fs::metadata(&output).expect("remaining output"));
+        assert_eq!(notifications[0] == Some(observed), !replace);
+        let remaining = fs::read(&output).expect("concurrent bytes remain");
+        assert_eq!(&remaining[..4], b"race");
+        assert_eq!(remaining.len(), if replace { 4 } else { bytes.len() });
+    }
+}
+
+#[test]
+fn branch_switch_rejects_changed_content_before_checkout_capture() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    repository
+        .branch(
+            FIX_BRANCH,
+            &repository
+                .find_commit(fixture.initial)
+                .expect("initial commit"),
+            false,
+        )
+        .expect("target branch");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("current content");
+    let current = commit_all(&repository, MODEL_MESSAGE);
+    let index = fs::read(fixture.root().join(".git/index")).expect("current index");
+    let result = fixture.executor().branch_switch_with_hook(
+        GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        },
+        || {
+            fs::write(fixture.root().join(TRACKED_PATH), b"concurrent content")
+                .expect("concurrent write")
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(repository.head().expect("HEAD").target(), Some(current));
+    assert_eq!(
+        fs::read(fixture.root().join(".git/index")).expect("index remains"),
+        index
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("edit remains"),
+        b"concurrent content"
+    );
+}
+
+#[test]
+fn staging_does_not_publish_an_index_over_corrupt_live_object_content() {
+    for wrong_hash in [false, true] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository");
+        let content = b"generated staging content";
+        let oid = repository.blob(content).expect("live loose object");
+        let hex = oid.to_string();
+        let object_path = fixture
+            .root()
+            .join(".git/objects")
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        fs::set_permissions(&object_path, fs::Permissions::from_mode(0o600))
+            .expect("writable object");
+        if wrong_hash {
+            let other = repository
+                .blob(b"different decoded content")
+                .expect("different valid object")
+                .to_string();
+            let other_path = fixture
+                .root()
+                .join(".git/objects")
+                .join(&other[..2])
+                .join(&other[2..]);
+            fs::copy(other_path, &object_path).expect("valid zlib with wrong object hash");
+        } else {
+            fs::write(&object_path, b"corrupt loose object").expect("corrupt compressed bytes");
+        }
+        let path = "new-staged.txt";
+        fs::write(fixture.root().join(path), content).expect("staging input");
+        let index_before =
+            fs::read(fixture.root().join(ADMINISTRATION_INDEX_PATH)).expect("index before");
+        let head_before = repository.head().expect("HEAD before").target();
+        let executor = fixture.executor();
+        assert!(
+            executor
+                .execute_operation(LocalOperation::Stage(GitStageArguments {
+                    paths: vec![path.to_owned()]
+                }))
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(fixture.root().join(ADMINISTRATION_INDEX_PATH)).expect("index after"),
+            index_before
+        );
+        assert_eq!(repository.head().expect("HEAD after").target(), head_before);
+        assert_eq!(
+            fs::read(fixture.root().join(path)).expect("staging input survives"),
+            content
+        );
+    }
 }

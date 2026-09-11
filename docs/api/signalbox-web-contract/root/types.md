@@ -850,6 +850,7 @@ pub enum WebTimelineToolBatchState {
     Proposed { frontier_id: WebSessionId },
     ResultsProjected { frontier_id: WebSessionId },
     RecoveryRequired { tool_attempt_id: WebSessionId },
+    ChildWaitResumed { tool_attempt_id: WebSessionId },
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

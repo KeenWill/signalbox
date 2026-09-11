@@ -6283,6 +6283,30 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
 }
 
 #[test]
+fn checked_in_example_parses_unbounded_git_object_content() {
+    let configuration =
+        super::checked_in_example_configuration().expect("checked-in example parses");
+    assert_eq!(
+        configuration
+            .numeric_bounds()
+            .integer("max_git_object_bytes"),
+        Some(None)
+    );
+    let configured = CONFIGURATION.replace(
+        "max_git_object_bytes = \"none\"",
+        "max_git_object_bytes = 1048576",
+    );
+    let configuration =
+        HubModelConfiguration::parse(&configured).expect("finite Git object policy parses");
+    assert_eq!(
+        configuration
+            .numeric_bounds()
+            .integer("max_git_object_bytes"),
+        Some(Some(1048576))
+    );
+}
+
+#[test]
 fn repository_watch_and_tools_share_the_configured_app_cache() {
     let source = configuration_with_repository_watch().replace(
         &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
@@ -6348,30 +6372,6 @@ fn file_media_requires_blob_storage_before_worker_startup() {
         !HubModelConfiguration::parse(&disabled)
             .expect("disabled file tools require no store")
             .file_media()
-    );
-}
-
-#[test]
-fn checked_in_example_parses_unbounded_git_object_content() {
-    let configuration =
-        super::checked_in_example_configuration().expect("checked-in example parses");
-    assert_eq!(
-        configuration
-            .numeric_bounds()
-            .integer("max_git_object_bytes"),
-        Some(None)
-    );
-    let configured = CONFIGURATION.replace(
-        "max_git_object_bytes = \"none\"",
-        "max_git_object_bytes = 1048576",
-    );
-    let configuration =
-        HubModelConfiguration::parse(&configured).expect("finite Git object policy parses");
-    assert_eq!(
-        configuration
-            .numeric_bounds()
-            .integer("max_git_object_bytes"),
-        Some(Some(1048576))
     );
 }
 

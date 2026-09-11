@@ -152,7 +152,7 @@ pub(crate) fn terminal_snapshot_selection(
             model_call_id: *model_call_id,
         }),
         SessionEvent::ToolBatchTransition {
-            state: ToolBatchState::RecoveryRequired { .. },
+            state: ToolBatchState::RecoveryRequired { .. } | ToolBatchState::ChildWaitResumed { .. },
             ..
         } => None,
         SessionEvent::TurnToolReconciliationRequired {

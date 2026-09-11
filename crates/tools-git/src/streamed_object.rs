@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
+    time::Instant,
 };
 
 pub(super) const IO_BYTES: usize = 64 * 1024;
@@ -23,10 +24,24 @@ impl ObjectContent {
         reader: &mut impl Read,
         size: usize,
         kind: ObjectType,
+        deadline: Option<Instant>,
     ) -> Result<Self, LocalGitFailure> {
         let mut file = tempfile::tempfile().map_err(failed)?;
-        let copied = std::io::copy(&mut reader.take((size as u64).saturating_add(1)), &mut file)
-            .map_err(failed)?;
+        let mut reader = reader.take((size as u64).saturating_add(1));
+        let mut buffer = [0; IO_BYTES];
+        let mut copied = 0u64;
+        loop {
+            check_deadline(deadline)?;
+            let count = reader.read(&mut buffer).map_err(failed)?;
+            if count == 0 {
+                break;
+            }
+            copied += count as u64;
+            if copied > size as u64 {
+                return Err(LocalGitFailure::Repository);
+            }
+            file.write_all(&buffer[..count]).map_err(failed)?;
+        }
         if copied != size as u64 {
             return Err(LocalGitFailure::Repository);
         }
@@ -38,6 +53,7 @@ impl ObjectContent {
         mut self,
         mut delta: File,
         limit: Option<usize>,
+        deadline: Option<Instant>,
     ) -> Result<Self, LocalGitFailure> {
         delta.rewind().map_err(failed)?;
         let mut delta = std::io::BufReader::new(delta);
@@ -51,6 +67,7 @@ impl ObjectContent {
         let mut buffer = [0u8; IO_BYTES];
         let mut opcode = [0u8; 1];
         while delta.read(&mut opcode).map_err(failed)? != 0 {
+            check_deadline(deadline)?;
             let opcode = opcode[0];
             let (offset, length) = if opcode & 128 != 0 {
                 let mut offset = 0usize;
@@ -92,6 +109,7 @@ impl ObjectContent {
             };
             let mut remaining = length;
             while remaining != 0 {
+                check_deadline(deadline)?;
                 let length = remaining.min(buffer.len());
                 reader.read_exact(&mut buffer[..length]).map_err(failed)?;
                 file.write_all(&buffer[..length]).map_err(failed)?;
@@ -113,6 +131,7 @@ impl ObjectContent {
         &mut self,
         directory: &std::path::Path,
         format: ObjectFormat,
+        deadline: Option<Instant>,
     ) -> Result<Oid, LocalGitFailure> {
         let header = format!("{} {}\0", self.kind.str(), self.size);
         self.file.rewind().map_err(failed)?;
@@ -123,6 +142,7 @@ impl ObjectContent {
         hash.update(header.as_bytes());
         let mut buffer = [0u8; IO_BYTES];
         loop {
+            check_deadline(deadline)?;
             let count = self.file.read(&mut buffer).map_err(failed)?;
             if count == 0 {
                 break;
@@ -216,6 +236,7 @@ pub(super) fn write_pack(
     mut content_for: impl FnMut(Oid) -> Result<ObjectContent, LocalGitFailure>,
     format: ObjectFormat,
     directory: &std::path::Path,
+    deadline: Option<Instant>,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), LocalGitFailure> {
     // Git pack-format and index-format v2. One publication batch owns one pair.
     if objects.len() > crate::limits::MAX_REPOSITORY_INSPECTIONS {
@@ -237,7 +258,14 @@ pub(super) fn write_pack(
         let offset = writer.file.stream_position().map_err(failed)?;
         let mut content = content_for(oid)?;
         let mut size = content.size;
-        let mut first = (content.kind as u8) << 4 | (size & 15) as u8;
+        let kind = match content.kind {
+            ObjectType::Commit => 1u8,
+            ObjectType::Tree => 2,
+            ObjectType::Blob => 3,
+            ObjectType::Tag => 4,
+            ObjectType::Any => return Err(LocalGitFailure::Repository),
+        };
+        let mut first = kind << 4 | (size & 15) as u8;
         size >>= 4;
         if size != 0 {
             first |= 128;
@@ -253,7 +281,7 @@ pub(super) fn write_pack(
         }
         let mut encoder = ZlibEncoder::new(writer, Compression::default());
         content.file.rewind().map_err(failed)?;
-        std::io::copy(&mut content.file, &mut encoder).map_err(failed)?;
+        copy_pack_pages(&mut content.file, &mut encoder, || check_deadline(deadline))?;
         writer = encoder.finish().map_err(failed)?;
         let crc = std::mem::replace(&mut writer.crc, crc32fast::Hasher::new()).finalize();
         entries.push((oid, crc, offset));
@@ -376,14 +404,81 @@ impl ObjectContent {
     }
 }
 
+pub(super) type CheckoutIdentities =
+    std::collections::BTreeMap<std::path::PathBuf, Option<crate::descriptor::FileSnapshotIdentity>>;
+
+pub(super) fn capture_checkout_identity(
+    root: &File,
+    path: &std::path::Path,
+) -> Result<Option<crate::descriptor::FileSnapshotIdentity>, LocalGitFailure> {
+    use rustix::fs::{Mode, OFlags, openat};
+    use std::path::{Component, Path};
+    let mut parent = rustix::io::dup(root).map_err(failed)?;
+    for component in path.parent().unwrap_or_else(|| Path::new("")).components() {
+        let Component::Normal(name) = component else {
+            return Err(LocalGitFailure::Path);
+        };
+        parent = match openat(
+            &parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(parent) => parent,
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return Ok(None),
+            Err(error) => return Err(failed(error)),
+        };
+    }
+    let leaf = path.file_name().ok_or(LocalGitFailure::Path)?;
+    let descriptor = match openat(
+        &parent,
+        leaf,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(failed(error)),
+    };
+    let metadata = File::from(descriptor).metadata().map_err(failed)?;
+    Ok(Some(crate::descriptor::file_snapshot_identity(&metadata)))
+}
+
 pub(super) fn checkout_paths(
     repository: &crate::pinning::RepositoryShell,
     tree: &git2::Tree<'_>,
     paths: &std::collections::BTreeSet<std::path::PathBuf>,
     destination: &std::path::Path,
-    mut updated: impl FnMut(&std::path::Path) -> Result<(), LocalGitFailure>,
+    expected: Option<&CheckoutIdentities>,
+    updated: impl FnMut(
+        &std::path::Path,
+        Option<crate::descriptor::FileIdentity>,
+    ) -> Result<(), LocalGitFailure>,
 ) -> Result<(), LocalGitFailure> {
-    use rustix::fs::{AtFlags, Mode, OFlags, mkdirat, openat, unlinkat};
+    checkout_paths_with_copy_hook(
+        repository,
+        tree,
+        paths,
+        destination,
+        expected,
+        updated,
+        |_, _| {},
+    )
+}
+
+pub(super) fn checkout_paths_with_copy_hook(
+    repository: &crate::pinning::RepositoryShell,
+    tree: &git2::Tree<'_>,
+    paths: &std::collections::BTreeSet<std::path::PathBuf>,
+    destination: &std::path::Path,
+    expected: Option<&CheckoutIdentities>,
+    mut updated: impl FnMut(
+        &std::path::Path,
+        Option<crate::descriptor::FileIdentity>,
+    ) -> Result<(), LocalGitFailure>,
+    mut after_page: impl FnMut(&std::path::Path, usize),
+) -> Result<(), LocalGitFailure> {
+    use rustix::fs::{Mode, OFlags, mkdirat, openat};
     use std::{
         ffi::OsStr,
         os::unix::fs::PermissionsExt,
@@ -391,19 +486,31 @@ pub(super) fn checkout_paths(
     };
     let root = File::open(destination).map_err(failed)?;
     let files = crate::bounded::tree_files(repository, tree)?;
+    for (path, (_, mode)) in &files {
+        if paths
+            .iter()
+            .any(|selected| path == selected || path.starts_with(selected))
+            && !matches!(mode, 0o100644 | 0o100755)
+        {
+            return Err(LocalGitFailure::Operation);
+        }
+    }
     for path in paths {
         if !files.contains_key(path) {
-            match crate::rollback::open_worktree_parent(&root, path) {
-                Ok((parent, leaf)) => match unlinkat(&parent, &leaf, AtFlags::empty()) {
-                    Ok(()) => updated(path)?,
-                    Err(rustix::io::Errno::NOENT) => {}
-                    Err(_) => return Err(LocalGitFailure::Operation),
-                },
-                Err(_) if !destination.join(path).exists() => {}
-                Err(error) => return Err(error),
+            let identity = capture_checkout_identity(&root, path)?;
+            if let Some(expected) = expected
+                && identity != *expected.get(path).ok_or(LocalGitFailure::Operation)?
+            {
+                return Err(LocalGitFailure::Operation);
+            }
+            if let Some(identity) = identity {
+                let (parent, leaf) = crate::rollback::open_worktree_parent(&root, path)?;
+                crate::descriptor::remove_file_if_snapshot_identity(&parent, &leaf, identity)?;
+                updated(path, None)?;
             }
         }
     }
+
     for (path, (oid, mode)) in files {
         if !paths
             .iter()
@@ -411,6 +518,10 @@ pub(super) fn checkout_paths(
         {
             continue;
         }
+        let identity = match expected {
+            Some(expected) => *expected.get(&path).ok_or(LocalGitFailure::Operation)?,
+            None => capture_checkout_identity(&root, &path)?,
+        };
         let mut parent = rustix::io::dup(&root).map_err(failed)?;
         for component in path.parent().unwrap_or_else(|| Path::new("")).components() {
             let Component::Normal(name) = component else {
@@ -433,18 +544,144 @@ pub(super) fn checkout_paths(
         let descriptor = openat(
             &parent,
             leaf,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDWR
+                | OFlags::NONBLOCK
+                | OFlags::NOFOLLOW
+                | OFlags::CLOEXEC
+                | if identity.is_none() {
+                    OFlags::CREATE | OFlags::EXCL
+                } else {
+                    OFlags::empty()
+                },
             crate::descriptor::mode_from_metadata_bits(mode & 0o777),
         )
         .map_err(failed)?;
         let mut target = File::from(descriptor);
+        if let Some(identity) = identity {
+            let metadata = target.metadata().map_err(failed)?;
+            if !metadata.is_file()
+                || crate::descriptor::file_snapshot_identity(&metadata) != identity
+                || capture_checkout_identity(&root, &path)? != Some(identity)
+            {
+                return Err(LocalGitFailure::Operation);
+            }
+            target.set_len(0).map_err(failed)?;
+        }
         // Record each touched path even when a later write fails, for rollback ownership.
-        updated(&path)?;
-        std::io::copy(&mut content.file, &mut target).map_err(failed)?;
+        let owned = crate::descriptor::file_identity(&target.metadata().map_err(failed)?);
+        updated(&path, Some(owned))?;
+        let mut buffer = [0; IO_BYTES];
+        let mut written = 0;
+        loop {
+            if capture_checkout_identity(&root, &path)?.map(|identity| identity.file) != Some(owned)
+            {
+                return Err(LocalGitFailure::Operation);
+            }
+            let count = content.file.read(&mut buffer).map_err(failed)?;
+            if count == 0 {
+                break;
+            }
+            target.write_all(&buffer[..count]).map_err(failed)?;
+            written += count;
+            after_page(&path, written);
+        }
         target
             .set_permissions(std::fs::Permissions::from_mode(mode & 0o777))
             .map_err(failed)?;
-        updated(&path)?;
+        verify_checkout_output(&root, &path, &mut target, content.size, oid)?;
     }
     Ok(())
+}
+
+fn verify_checkout_output(
+    root: &File,
+    path: &std::path::Path,
+    target: &mut File,
+    size: usize,
+    expected: Oid,
+) -> Result<(), LocalGitFailure> {
+    let identity = crate::descriptor::file_snapshot_identity(&target.metadata().map_err(failed)?);
+    if identity.length != size as u64 {
+        return Err(LocalGitFailure::Operation);
+    }
+    let validate = |target: &File| {
+        if crate::descriptor::file_snapshot_identity(&target.metadata().map_err(failed)?)
+            != identity
+            || capture_checkout_identity(root, path)? != Some(identity)
+        {
+            return Err(LocalGitFailure::Operation);
+        }
+        Ok(())
+    };
+    let mut hash = ObjectHash::new(expected.object_format());
+    hash.update(format!("blob {size}\0").as_bytes());
+    target.rewind().map_err(failed)?;
+    let mut buffer = [0; IO_BYTES];
+    loop {
+        validate(target)?;
+        let count = target.read(&mut buffer).map_err(failed)?;
+        validate(target)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    if hash.finish()? != expected {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(())
+}
+
+fn check_deadline(deadline: Option<Instant>) -> Result<(), LocalGitFailure> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        Err(LocalGitFailure::Repository)
+    } else {
+        Ok(())
+    }
+}
+
+fn copy_pack_pages(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    mut check: impl FnMut() -> Result<(), LocalGitFailure>,
+) -> Result<(), LocalGitFailure> {
+    let mut buffer = [0; IO_BYTES];
+    loop {
+        check()?;
+        let count = reader.read(&mut buffer).map_err(failed)?;
+        if count == 0 {
+            return Ok(());
+        }
+        writer.write_all(&buffer[..count]).map_err(failed)?;
+    }
+}
+
+#[cfg(test)]
+mod pack_deadline_tests {
+    use super::*;
+    #[test]
+    fn private_pack_copy_checks_deadline_between_pages() {
+        let mut checks = 0;
+        let mut copied = 0;
+        struct Counter<'a>(&'a mut usize);
+        impl Write for Counter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                *self.0 += bytes.len();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let result = copy_pack_pages(&mut std::io::repeat(1), &mut Counter(&mut copied), || {
+            checks += 1;
+            if checks == 2 {
+                Err(LocalGitFailure::Repository)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(copied, IO_BYTES);
+    }
 }
