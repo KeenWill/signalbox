@@ -111,7 +111,7 @@ describe('SameOriginProductTransport', () => {
     expect(bootstrap).toEqual(webContractBootstrapFixture)
   })
 
-  it('rejects bootstrap facts that contradict the fixed v2 contract', async () => {
+  it('rejects bootstrap facts that contradict the fixed v3 contract', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(

@@ -101,6 +101,12 @@ impl<'a> Output<'a> {
                      turn={turn_id} call={model_call_id} state=recovery_required \
                      tool_attempt={tool_attempt_id}"
                 ),
+                ToolBatchState::ChildWaitResumed { tool_attempt_id } => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} tool_batch_transition \
+                     turn={turn_id} call={model_call_id} state=child_wait_resumed \
+                     tool_attempt={tool_attempt_id}"
+                ),
             },
             SessionEvent::RunnerStateTransition {
                 runner_id,
