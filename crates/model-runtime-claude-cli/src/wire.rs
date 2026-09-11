@@ -116,9 +116,49 @@ pub(crate) struct UserContent {
     pub(crate) content: serde_json::Value,
 }
 
+// Native result vocabulary: https://code.claude.com/docs/en/agent-sdk/typescript#sdkresultmessage
+#[derive(Debug, Deserialize)]
+#[serde(from = "String")]
+pub(crate) enum ResultSubtype {
+    Success,
+    ErrorDuringExecution,
+    ErrorMaxTurns,
+    ErrorMaxBudgetUsd,
+    ErrorMaxStructuredOutputRetries,
+    Unknown(String),
+}
+
+impl From<String> for ResultSubtype {
+    fn from(token: String) -> Self {
+        match token.as_str() {
+            "success" => Self::Success,
+            "error_during_execution" => Self::ErrorDuringExecution,
+            "error_max_turns" => Self::ErrorMaxTurns,
+            "error_max_budget_usd" => Self::ErrorMaxBudgetUsd,
+            "error_max_structured_output_retries" => Self::ErrorMaxStructuredOutputRetries,
+            _ => Self::Unknown(token),
+        }
+    }
+}
+
+impl ResultSubtype {
+    pub(crate) fn into_token(self) -> String {
+        match self {
+            Self::Success => "success".to_string(),
+            Self::ErrorDuringExecution => "error_during_execution".to_string(),
+            Self::ErrorMaxTurns => "error_max_turns".to_string(),
+            Self::ErrorMaxBudgetUsd => "error_max_budget_usd".to_string(),
+            Self::ErrorMaxStructuredOutputRetries => {
+                "error_max_structured_output_retries".to_string()
+            }
+            Self::Unknown(token) => token,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ResultEvent {
-    pub(crate) subtype: String,
+    pub(crate) subtype: ResultSubtype,
     pub(crate) is_error: bool,
     pub(crate) session_id: String,
     #[serde(default)]

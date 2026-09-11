@@ -31,7 +31,6 @@ mod push_arguments;
 mod push_catalog;
 mod push_executor;
 mod push_merge;
-mod push_merge_stream;
 mod push_objects;
 mod push_transport;
 mod reference_lock;

@@ -138,6 +138,11 @@ direct request.
 Quota exhaustion is a distinct error kind from rate limiting, so a billing
 condition is never treated as retry-later backoff.
 
+Claude Code failures classify from the closed native result subtype and reported
+HTTP status, which takes precedence. Generic or unknown subtypes without a
+classifiable status remain unrecognized; result text and stderr do not classify
+failures.
+
 The confirmed-cancellation variant exists to keep the evidence vocabulary total;
 no adapter in the repository constructs it.
 
@@ -152,9 +157,7 @@ carries a validated provider-compaction block with non-null replacement content
 and retained input and output counts; otherwise execute returns an unrecognized
 provider error.
 
-The Claude Code CLI never supplies the non-acceptance proof. A reported 401
-status takes precedence over rendered failure text; other failures use its
-rendered-prose classification and status fallback.
+The Claude Code CLI never supplies the non-acceptance proof.
 
 SSE id and retry fields are parsed and dropped, because they exist for stream
 resumption and resuming would be a second request.
@@ -361,21 +364,22 @@ way other than its protocol's terminal marker is incomplete-stream evidence,
 never silent success: a Codex CLI stream without `turn/completed` is boundary
 loss, and under the Claude Code CLI only a terminal result event establishes
 success or refusal, never prose; in the Claude Code adapter that loss follows a
-zero exit while a nonzero exit is provider-error evidence classified from
-bounded stderr. The Codex process exit carries no failure classification. A
-Codex `interrupted` turn is boundary loss whose transport detail names that
-status, without cancellation or non-acceptance proof. A Codex turn that
-completes without a streamed agent message takes its response from the
-agent-message item in its `turn/completed` summary under the same size and
-redaction checks, and a streamed message outranks it. A finish reason observed
-before a stream loss is retained as a reported finish but is not completion or
-refusal evidence; an unrecognized finish reported before the envelope is
-validated is an envelope violation instead, and no finish is retained. Within
-one adapter the buffered and streamed decoders never disagree about an
-output-ceiling finish inside accumulated tool content, which is an observed fact
-in both and not an envelope defect; an unrequested Anthropic fallback block is
-the exception, unintelligible-response loss in the buffered decoder and a stream
-protocol violation in the streamed one.
+zero exit while a nonzero exit is provider-error evidence classified from the
+terminal subtype and HTTP status. Stderr remains native detail. The Codex
+process exit carries no failure classification. A Codex `interrupted` turn is
+boundary loss whose transport detail names that status, without cancellation or
+non-acceptance proof. A Codex turn that completes without a streamed agent
+message takes its response from the agent-message item in its `turn/completed`
+summary under the same size and redaction checks, and a streamed message
+outranks it. A finish reason observed before a stream loss is retained as a
+reported finish but is not completion or refusal evidence; an unrecognized
+finish reported before the envelope is validated is an envelope violation
+instead, and no finish is retained. Within one adapter the buffered and streamed
+decoders never disagree about an output-ceiling finish inside accumulated tool
+content, which is an observed fact in both and not an envelope defect; an
+unrequested Anthropic fallback block is the exception, unintelligible-response
+loss in the buffered decoder and a stream protocol violation in the streamed
+one.
 
 The tool-calls-at-loss fact reports the decoded prefix and nothing beyond it:
 none-opened says no tool call opened in what the adapter decoded, never that the
