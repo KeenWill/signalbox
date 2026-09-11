@@ -501,6 +501,34 @@ async fn push_with_refresh<
     Ok(first)
 }
 
+// Only fixed labels leave the transport; Git output can contain authenticated URLs.
+fn push_rejection_reason(result: &ProcessRunResult) -> &'static str {
+    let output = String::from_utf8_lossy(&result.stdout.bytes).to_ascii_lowercase();
+    let error = String::from_utf8_lossy(&result.stderr.bytes).to_ascii_lowercase();
+    if (output.contains("refusing to allow") && output.contains("workflow"))
+        || (error.contains("refusing to allow") && error.contains("workflow"))
+    {
+        "workflow_permission"
+    } else if output.contains("shallow update not allowed")
+        || error.contains("shallow update not allowed")
+    {
+        "shallow_update"
+    } else if output.contains("non-fast-forward") || output.contains("fetch first") {
+        "non_fast_forward"
+    } else if output.contains("protected branch") || error.contains("protected branch") {
+        "protected_branch"
+    } else if git_authentication_rejected(result) {
+        "authentication"
+    } else if error.contains("permission denied")
+        || error.contains("requested url returned error: 403")
+        || error.contains("permission to ") && error.contains(" denied to ")
+    {
+        "permission"
+    } else {
+        "other"
+    }
+}
+
 fn classify_push(result: &ProcessRunResult) -> Result<(), GitPushTransportFailure> {
     match result.outcome {
         ProcessOutcome::Exited { code: Some(0) } => Ok(()),
@@ -518,6 +546,10 @@ fn classify_push(result: &ProcessRunResult) -> Result<(), GitPushTransportFailur
                 || error.contains("protected branch")
                 || error.contains("permission to ") && error.contains(" denied to ")
             {
+                tracing::warn!(
+                    rejection_reason = push_rejection_reason(result),
+                    "configured Git push rejected"
+                );
                 Err(GitPushTransportFailure::Rejected)
             } else {
                 Err(GitPushTransportFailure::DispatchUnknown)
@@ -958,6 +990,45 @@ mod tests {
             Some(GitPushTransportFailure::PreDispatchInfrastructure)
         );
         assert_eq!(runner.requests.len(), 1);
+    }
+
+    #[test]
+    fn rejection_diagnostic_distinguishes_remote_causes_without_echoing_output() {
+        let cases = [
+            (
+                "workflow authorization",
+                "!\tcommit:refs/heads/review\t[remote rejected] (refusing to allow a Personal Access Token to create or update workflow `.github/workflows/fixture.yml` without `workflow` scope)\n",
+                "fatal: https://fixture-secret@github.com/fixture/project.git",
+                "workflow_permission",
+            ),
+            (
+                "omitted shallow history",
+                "!\tcommit:refs/heads/review\t[remote rejected] (shallow update not allowed)\n",
+                "fatal: https://fixture-secret@github.com/fixture/project.git",
+                "shallow_update",
+            ),
+            (
+                "advanced remote branch",
+                "!\tcommit:refs/heads/review\t[rejected] (non-fast-forward)\n",
+                "fatal: https://fixture-secret@github.com/fixture/project.git",
+                "non_fast_forward",
+            ),
+            (
+                "unknown remote reason",
+                "!\tcommit:refs/heads/review\t[remote rejected] (fixture-secret)\n",
+                "fatal: https://fixture-secret@github.com/fixture/project.git",
+                "other",
+            ),
+        ];
+        for (case, stdout, stderr, expected) in cases {
+            let response = result(ProcessOutcome::Exited { code: Some(1) }, stdout, stderr);
+            assert_eq!(
+                classify_push(&response),
+                Err(GitPushTransportFailure::Rejected),
+                "{case}"
+            );
+            assert_eq!(push_rejection_reason(&response), expected, "{case}");
+        }
     }
 
     #[test]
