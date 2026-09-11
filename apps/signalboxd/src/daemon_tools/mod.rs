@@ -10,6 +10,7 @@ mod composed_identity;
 mod executor;
 mod families;
 mod file_media;
+pub mod workflows;
 pub use file_media::DaemonFileMediaExecutor;
 mod git_push;
 mod pinned_file_system;
@@ -480,6 +481,7 @@ where
                 goal: goal.map(|(_, executor)| executor),
                 blob: None,
                 file_media: None,
+                workflows: None,
             },
         })
     }

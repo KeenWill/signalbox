@@ -34,6 +34,25 @@ pub(super) async fn handle_register_program<Writer: AsyncWrite + Unpin>(
     registration: ProgramRegistrationInput,
     services: &ConnectionServices,
 ) -> std::result::Result<(), ProcessConnectionError> {
+    match register_program(services.workflows.as_ref(), registration_id, registration).await {
+        Ok(()) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::ProgramRegistered { registration_id },
+            )
+            .await
+        }
+        Err(error) => write_error(writer, version, request_id, error).await,
+    }
+}
+
+pub(crate) async fn register_program(
+    workflows: Option<&crate::workflows::WorkflowService>,
+    registration_id: CanonicalUuid,
+    registration: ProgramRegistrationInput,
+) -> std::result::Result<(), ProtocolError> {
     let executable_has_nul = match &registration.executable {
         ProgramExecutableInput::JavaScript { artifact, .. } => artifact.contains('\0'),
         ProgramExecutableInput::Native { entry, revision } => {
@@ -44,19 +63,10 @@ pub(super) async fn handle_register_program<Writer: AsyncWrite + Unpin>(
         || registration.revision.contains('\0')
         || executable_has_nul
     {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
+        return Err(ProtocolError::without_detail(ErrorCode::InvalidRequest));
     }
     let result = async {
-        let service = services
-            .workflows
-            .as_ref()
-            .ok_or(WorkflowRuntimeError::Stopped)?;
+        let service = workflows.ok_or(WorkflowRuntimeError::Stopped)?;
         let id = ProgramRegistrationId::from_uuid(registration_id.into_uuid());
         let grants = ProgramGrants::new(registration.grants.into_iter().map(domain_grant));
         match registration.executable {
@@ -98,16 +108,7 @@ pub(super) async fn handle_register_program<Writer: AsyncWrite + Unpin>(
         Ok(())
     }
     .await;
-    if let Err(error) = result {
-        return write_error(writer, version, request_id, workflow_error(error)).await;
-    }
-    write_message(
-        writer,
-        version,
-        request_id,
-        ServerMessage::ProgramRegistered { registration_id },
-    )
-    .await
+    result.map_err(workflow_error)
 }
 
 pub(super) async fn handle_start_program<Writer: AsyncWrite + Unpin>(
@@ -119,39 +120,42 @@ pub(super) async fn handle_start_program<Writer: AsyncWrite + Unpin>(
     input: Vec<u8>,
     services: &ConnectionServices,
 ) -> std::result::Result<(), ProcessConnectionError> {
-    let Some(service) = services.workflows.as_ref() else {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::Unavailable),
-        )
-        .await;
-    };
-    let result = service
+    match start_program(services.workflows.as_ref(), run_id, registration_id, input).await {
+        Ok(()) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::ProgramRunStarted {
+                    run_id,
+                    registration_id,
+                },
+            )
+            .await
+        }
+        Err(error) => write_error(writer, version, request_id, error).await,
+    }
+}
+
+pub(crate) async fn start_program(
+    workflows: Option<&crate::workflows::WorkflowService>,
+    run_id: CanonicalUuid,
+    registration_id: CanonicalUuid,
+    input: Vec<u8>,
+) -> std::result::Result<(), ProtocolError> {
+    let service = workflows.ok_or_else(|| ProtocolError::without_detail(ErrorCode::Unavailable))?;
+    service
         .start(
             ProgramRunId::from_uuid(run_id.into_uuid()),
             ProgramRegistrationId::from_uuid(registration_id.into_uuid()),
             &input,
         )
-        .await;
-    if let Err(error) = result {
-        let error = match error {
+        .await
+        .map(|_| ())
+        .map_err(|error| match error {
             WorkflowRuntimeError::Stopped => ProtocolError::mutation_commit_ambiguous(),
             error => workflow_error(error),
-        };
-        return write_error(writer, version, request_id, error).await;
-    }
-    write_message(
-        writer,
-        version,
-        request_id,
-        ServerMessage::ProgramRunStarted {
-            run_id,
-            registration_id,
-        },
-    )
-    .await
+        })
 }
 
 pub(super) async fn handle_read_program<Writer: AsyncWrite + Unpin>(
@@ -176,7 +180,7 @@ pub(super) async fn handle_read_program<Writer: AsyncWrite + Unpin>(
     }
 }
 
-async fn read_program(
+pub(crate) async fn read_program(
     pool: &PgPool,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -293,7 +297,7 @@ pub(super) fn program_byte_prefix(
     (bytes[..length].to_vec(), extent)
 }
 
-pub(super) fn workflow_error(error: WorkflowRuntimeError) -> ProtocolError {
+pub(crate) fn workflow_error(error: WorkflowRuntimeError) -> ProtocolError {
     tracing::warn!(cause = error.cause_code(), "program command failed");
     let code = match error {
         WorkflowRuntimeError::Registration(
@@ -354,15 +358,48 @@ pub(super) async fn handle_cancel_program_run<Writer: AsyncWrite + Unpin>(
     run_id: CanonicalUuid,
     services: &ConnectionServices,
 ) -> std::result::Result<(), ProcessConnectionError> {
+    match cancel_program(
+        &services.pool,
+        services.workflows.as_ref(),
+        version,
+        request_id,
+        command_id,
+        run_id,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::ProgramRunCancellationReceipt {
+                    command_id,
+                    run_id,
+                    outcome,
+                },
+            )
+            .await
+        }
+        Err(error) => write_error(writer, version, request_id, error).await,
+    }
+}
+
+pub(crate) async fn cancel_program(
+    pool: &PgPool,
+    workflows: Option<&crate::workflows::WorkflowService>,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: signalbox_process_protocol::CommandId,
+    run_id: CanonicalUuid,
+) -> std::result::Result<WireOutcome, ProtocolError> {
     let command = store::CancelProgramRun {
         command_id: DurableCommandId::from_uuid(command_id.into_uuid()),
         run_id: ProgramRunId::from_uuid(run_id.into_uuid()),
     };
-    let mut result = store::cancel(&services.pool, command.clone()).await;
-    if let Some(workflows) = &services.workflows {
-        result = workflows
-            .complete_cancellation(&services.pool, command, result)
-            .await;
+    let mut result = store::cancel(pool, command.clone()).await;
+    if let Some(workflows) = workflows {
+        result = workflows.complete_cancellation(pool, command, result).await;
     }
     let outcome = match result {
         Ok(Result::Recorded(Outcome::Applied)) => WireOutcome::Applied {
@@ -390,8 +427,9 @@ pub(super) async fn handle_cancel_program_run<Writer: AsyncWrite + Unpin>(
                             outcome: WireOutcome::AlreadyTerminal(empty),
                         },
                     )
-                    .map_err(FrameEncodeError::Validation)?;
-                    let envelope = encode_server_line(&frame)?;
+                    .map_err(|_| ProtocolError::without_detail(ErrorCode::Internal))?;
+                    let envelope = encode_server_line(&frame)
+                        .map_err(|_| ProtocolError::without_detail(ErrorCode::Internal))?;
                     // Reserve the longest correlation ID so command retries return the same prefix.
                     let correlation_reserve =
                         u64::MAX.to_string().len() - request_id.value().to_string().len();
@@ -406,13 +444,7 @@ pub(super) async fn handle_cancel_program_run<Writer: AsyncWrite + Unpin>(
             })
         }
         Ok(Result::ConflictingReuse) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
-            )
-            .await;
+            return Err(ProtocolError::without_detail(ErrorCode::ConflictingReuse));
         }
         Err(error) => {
             let protocol = match error {
@@ -421,18 +453,8 @@ pub(super) async fn handle_cancel_program_run<Writer: AsyncWrite + Unpin>(
                 store::ProgramCancellationError::Journal(signalbox_persistence::program_journal::ProgramJournalRepositoryError::Database { .. }) => unavailable_protocol_error(InternalDiagnostic::ProgramCancellationDatabase),
                 store::ProgramCancellationError::Journal(_) | store::ProgramCancellationError::Corruption => internal_protocol_error(None, InternalDiagnostic::ProgramCancellationCorruption),
             };
-            return write_error(writer, version, request_id, protocol).await;
+            return Err(protocol);
         }
     };
-    write_message(
-        writer,
-        version,
-        request_id,
-        ServerMessage::ProgramRunCancellationReceipt {
-            command_id,
-            run_id,
-            outcome,
-        },
-    )
-    .await
+    Ok(outcome)
 }
