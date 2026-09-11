@@ -53,6 +53,8 @@ use testcontainers_modules::{
 };
 use uuid::Uuid;
 
+#[path = "repo_watch_v2/activation.rs"]
+mod activation;
 #[path = "repo_watch_v2/checkout.rs"]
 mod checkout;
 #[path = "repo_watch_v2/observations.rs"]
@@ -61,6 +63,7 @@ mod observations;
 mod provider_identity;
 #[path = "repo_watch_v2/retirement.rs"]
 mod retirement;
+
 #[path = "repo_watch_v2/retry.rs"]
 mod retry;
 #[path = "repo_watch_v2/workflows.rs"]

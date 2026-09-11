@@ -868,3 +868,86 @@ fn branch_conclusion_qualifier_matches_without_pull_request_fields() -> Result<(
     assert!(matcher.matches(&event));
     Ok(())
 }
+
+#[test]
+fn activation_matching_uses_current_labels_and_mergeability() -> Result<(), Box<dyn Error>> {
+    let repository = RepositorySlug::try_new(String::from("namespace/repo"))?;
+    let excluded = LabelName::try_new(String::from("no-auto"))?;
+    let context = pull_request_context(
+        CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+        BranchName::try_new(String::from("main"))?,
+        Vec::new(),
+    )?;
+    let excluded_context = pull_request_context(
+        context.head_sha().clone(),
+        context.base_branch().clone(),
+        vec![excluded.clone()],
+    )?;
+    let matcher = RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+        event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+        mergeable_state: vec![MergeableState::Conflicting],
+        labels: RepoWatchLabelMatcher::new(RepoWatchLabelMatcherInput {
+            none_of: vec![excluded],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    assert!(matcher.matches_activation(
+        &repository,
+        &context,
+        MergeableState::Conflicting,
+        std::iter::empty()
+    ));
+    assert!(!matcher.matches_activation(
+        &repository,
+        &excluded_context,
+        MergeableState::Conflicting,
+        std::iter::empty()
+    ));
+    assert!(!matcher.matches_activation(
+        &repository,
+        &context,
+        MergeableState::Mergeable,
+        std::iter::empty()
+    ));
+    Ok(())
+}
+
+#[test]
+fn activation_matching_uses_check_conclusions_and_excludes_branch_only_rules()
+-> Result<(), Box<dyn Error>> {
+    let repository = RepositorySlug::try_new(String::from("namespace/repo"))?;
+    let context = pull_request_context(
+        CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+        BranchName::try_new(String::from("main"))?,
+        Vec::new(),
+    )?;
+    let matcher = RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+        event_kinds: vec![RepoWatchEventKindNameV1::CheckRunCompleted],
+        conclusion: vec![CheckConclusion::Failure],
+        ..Default::default()
+    });
+    assert!(matcher.matches_activation(
+        &repository,
+        &context,
+        MergeableState::Mergeable,
+        [CheckConclusion::Failure].into_iter()
+    ));
+    assert!(!matcher.matches_activation(
+        &repository,
+        &context,
+        MergeableState::Mergeable,
+        [CheckConclusion::Success].into_iter()
+    ));
+    let branch_only = RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+        event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+        ..Default::default()
+    });
+    assert!(!branch_only.matches_activation(
+        &repository,
+        &context,
+        MergeableState::Conflicting,
+        [CheckConclusion::Failure].into_iter()
+    ));
+    Ok(())
+}

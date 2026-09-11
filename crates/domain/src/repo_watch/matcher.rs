@@ -204,6 +204,26 @@ impl RepoWatchMatcherV1 {
         }
     }
 
+    /// Matches a current pull-request observation when a rule revision activates.
+    /// Event kinds select live triggers; activation uses the observed field predicates.
+    pub fn matches_activation(
+        &self,
+        repository: &RepositorySlug,
+        context: &PullRequestEventContext,
+        mergeable_state: MergeableState,
+        mut conclusions: impl Iterator<Item = CheckConclusion>,
+    ) -> bool {
+        self.produces_context_shape(RepoWatchDispatchContextShape::PullRequest)
+            && self
+                .repository
+                .as_ref()
+                .is_none_or(|selected| selected == repository)
+            && self.pull_request_fields_match(context)
+            && (self.mergeable_state.is_empty() || self.mergeable_state.contains(&mergeable_state))
+            && (self.conclusion.is_empty()
+                || conclusions.any(|value| self.conclusion.contains(&value)))
+    }
+
     fn has_no_pull_request_fields(&self) -> bool {
         self.base_branch.is_none()
             && self.head_branch.is_none()
