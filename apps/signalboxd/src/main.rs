@@ -3505,8 +3505,8 @@ mod tests {
     use super::{
         AnthropicConstructionError, BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT,
         FENCED_POOL_MAX_CONNECTIONS, FencedPoolFloorReconciliationPolicy,
-        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError,
-        HubConfigurationValues, HubRuntimeError, MODEL_CONFIGURATION_FILE_ENVIRONMENT,
+        HubConfiguration, HubConfigurationError, HubConfigurationValues, HubRuntimeError,
+        MODEL_CONFIGURATION_FILE_ENVIRONMENT,
         OpenAiConstructionError, OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT,
         ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RequiredSettingFailure,
         RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
@@ -4515,7 +4515,6 @@ mod tests {
         use signalboxd::guard_recovery::GuardedIncarnationOutcome;
         for failure in [
             BlobStoreRegistryError::ConfigurationRequired,
-            BlobStoreRegistryError::S3StartupDeadline,
             BlobStoreRegistryError::Catalog(BlobCatalogRepositoryError::Corruption(
                 BlobCatalogCorruption::InvalidDigest,
             )),
