@@ -2726,3 +2726,125 @@ async fn lifecycle_stop_settles_a_delegated_foreground_child_wait() -> Result<()
     drop(container);
     Ok(())
 }
+
+/// Stopping a foreground wait preserves a cancelled accepted-input turn that startup can read.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn lifecycle_stop_of_foreground_child_wait_reconstitutes_on_startup()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x11ff_a000;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "foreground").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Foreground,
+    )?;
+    SessionDelegationRepository::new(pool.clone())
+        .record_wait(request, &dispatch)
+        .await?;
+    let committed = recorded(
+        &pool,
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(next_test_submit_uuid()),
+            fixture.parent,
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Redispatchable,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        ),
+    )
+    .await?;
+    assert_eq!(
+        committed,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable
+            },
+            live_turn: fixture.parent_turn,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+        })
+    );
+    let successor = TurnId::from_uuid(next_test_submit_uuid());
+    let interrupted = SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates_alias_resolver_as(
+            SubmitInput::new_core_interrupt(
+                DurableCommandId::from_uuid(next_test_submit_uuid()),
+                fixture.parent,
+                UserContent::try_text("settle the stopped child wait".into())
+                    .expect("fixture content"),
+                fixture.parent_turn,
+                DescendantTerminationScope::ParentAlone,
+                input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            ),
+            CommandPrincipal::Core,
+            ParentTerminationKind::Stopped,
+            AcceptedInputId::from_uuid(next_test_submit_uuid()),
+            Some(successor),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                ContextFrontierId::from_uuid(next_test_submit_uuid()),
+            ),
+            |_| successor,
+            |requests| {
+                assert_eq!(
+                    requests,
+                    [
+                        fixture.spawning_request,
+                        fixture.awaiting_request,
+                        fixture.message_request
+                    ]
+                );
+                (
+                    vec![
+                        SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                        SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                        SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                    ],
+                    ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                )
+            },
+            || panic!("the wait has no approval decision"),
+            || panic!("the wait has no approval attempt"),
+            |_| None,
+        )
+        .await?;
+    assert!(matches!(
+        interrupted,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let lifecycle = SessionLifecycleRepository::new(pool.clone())
+        .load(fixture.parent)
+        .await?
+        .expect("retained session");
+    assert_eq!(
+        lifecycle.state(),
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable
+            },
+        }
+    );
+    let terminal_attempt: Option<Uuid> =
+        sqlx::query_scalar("SELECT terminal_attempt_id FROM turn_lifecycle WHERE turn_id=$1")
+            .bind(fixture.parent_turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(terminal_attempt, None);
+    let mut ids = FixedStartupScanIds::new([], []);
+    let recovered = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.parent,
+            AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                ContextFrontierId::from_uuid(next_test_submit_uuid()),
+            ),
+            &mut ids,
+        )
+        .await?;
+    assert!(matches!(recovered, StartupScanSessionOutcome::NoActiveTurn));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
