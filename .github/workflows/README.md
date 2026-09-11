@@ -163,3 +163,13 @@ inactive file cache. Short-lived containers and peaks between samples can be
 missed, and sampling failures are reported as gaps. Sampling errors do not
 change the suite command's exit status. Interrupted collection is unmeasured.
 Per-shard JSON sample artifacts are retained for seven days.
+
+## Bazel scratch
+
+The shared setup action allocates a unique directory under `RUNNER_TEMP` for
+Bazel outputs, the output user root (including the install base), repository
+downloads, and Bazelisk downloads. On self-hosted runners this is the mounted
+workspace scratch volume. GitHub-hosted jobs use their runner temporary storage.
+The runner clears temporary storage between jobs; these directories are not
+shared between jobs. Remote action and download caching still use the configured
+endpoint. The change applies to every caller of the action, including coverage.
