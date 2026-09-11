@@ -6,48 +6,53 @@ use super::*;
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn definite_commit_failure_rolls_back_claim_and_effect() -> Result<(), Box<dyn Error>> {
-    const PARENT_IDENTITY: u128 = 0x74d;
     const TARGET_IDENTITY: u128 = 0x74e;
     const COMMAND_IDENTITY: u128 = 0x74f;
 
     let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
-    let store = ReviewWorkflowStore::new(pool);
-    let parent = ReviewTarget::try_new(
-        ReviewTargetId::from_uuid(uuid(PARENT_IDENTITY)),
-        key("provider"),
-        key("repository"),
-        ReviewTargetSubject::Commit,
-        key("parent-head"),
-        None,
-        None,
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_review_target_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected deferred commit failure' USING ERRCODE = '23514';
+         END $$;
+         CREATE CONSTRAINT TRIGGER reject_review_target_at_commit
+         AFTER INSERT ON review_target
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW EXECUTE FUNCTION reject_review_target_at_commit();",
     )
-    .expect("parent fixture is admitted");
+    .execute(&pool)
+    .await?;
+    let store = ReviewWorkflowStore::new(pool.clone());
     let target = ReviewTarget::try_new(
         ReviewTargetId::from_uuid(uuid(TARGET_IDENTITY)),
         key("provider"),
         key("repository"),
         ReviewTargetSubject::Commit,
-        key("child-head"),
-        Some(key("parent-head")),
-        Some(&parent),
+        key("head"),
+        None,
+        None,
     )
-    .expect("child fixture is admitted");
+    .expect("target fixture is admitted");
     let command_id = DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY));
     let command = ReviewWorkflowCommand::new(
         command_id,
         [4; 32],
         ReviewWorkflowOperation::CreateTarget(target.clone()),
     );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::TargetCreated {
+            target: target.id(),
+        });
     let mut service = ReviewWorkflowCommandService::new(store.clone());
 
     let error = service
-        .execute(command)
+        .execute(command.clone())
         .await
-        .expect_err("missing deferred stack parent rejects commit");
+        .expect_err("deferred constraint rejects commit");
     let ReviewWorkflowStoreError::Database(error) = error else {
-        panic!("deferred foreign-key failure must be an ordinary database error");
+        panic!("definite commit failure must be an ordinary database error");
     };
-    assert_sqlstate(&error, "23503");
+    assert_sqlstate(&error, "23514");
     assert_eq!(store.load_target(target.id()).await?, None);
     assert_eq!(
         store
@@ -58,6 +63,25 @@ async fn definite_commit_failure_rolls_back_claim_and_effect() -> Result<(), Box
             )
             .await?,
         None,
+    );
+
+    sqlx::raw_sql(
+        "DROP TRIGGER reject_review_target_at_commit ON review_target;
+         DROP FUNCTION reject_review_target_at_commit();",
+    )
+    .execute(&pool)
+    .await?;
+    assert_eq!(service.execute(command).await?, expected);
+    assert_eq!(store.load_target(target.id()).await?, Some(target));
+    assert_eq!(
+        store
+            .load_command_outcome(
+                command_id,
+                [4; 32],
+                ReviewWorkflowOperationKind::CreateTarget,
+            )
+            .await?,
+        Some(expected),
     );
     Ok(())
 }
