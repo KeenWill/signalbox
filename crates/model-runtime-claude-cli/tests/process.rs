@@ -274,8 +274,12 @@ async fn native_history_restores_distinct_assistant_groups_without_replaying_too
     .expect("canonical result is JSON");
     assert_eq!(prior_result["tool_call_id"], fixtures::TOOL_ID);
     assert_eq!(prior_result["content"], fixtures::ANSWER);
+    let (_, request_json) = result
+        .prompt
+        .split_once('\n')
+        .expect("response request precedes the controls");
     let controls: serde_json::Value =
-        serde_json::from_str(&result.prompt).expect("controls are JSON");
+        serde_json::from_str(request_json).expect("controls are JSON");
     assert!(
         controls.get("messages").is_none(),
         "history is not duplicated in the control prompt"
@@ -319,8 +323,12 @@ async fn system_only_request_starts_without_an_empty_resume_file() {
     let result = execute_operation(request).await;
     assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
     assert!(!result.argv.lines().any(|argument| argument == "--resume"));
+    let (_, request_json) = result
+        .prompt
+        .split_once('\n')
+        .expect("response request precedes the controls");
     let controls: serde_json::Value =
-        serde_json::from_str(&result.prompt).expect("controls are JSON");
+        serde_json::from_str(request_json).expect("controls are JSON");
     assert!(controls.get("system").is_none());
 }
 
