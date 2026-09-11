@@ -201,6 +201,17 @@ impl<C: Clone> EventDecoder<C> {
             return Ok(());
         }
 
+        if subtype == Some("model_refusal_no_fallback") {
+            self.require_initialized()?;
+            if value.get("session_id").and_then(Value::as_str) != self.native_session_id.as_deref()
+            {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude refusal notification lacks the initialized session",
+                ));
+            }
+            return Ok(());
+        }
+
         if matches!(
             subtype,
             Some(
@@ -323,6 +334,22 @@ impl<C: Clone> EventDecoder<C> {
             return Err(DecodeFailure::stream_protocol(
                 "Claude assistant event has invalid identity or nesting",
             ));
+        }
+        if event.is_api_error_message {
+            if event.session_id.as_deref() != self.native_session_id.as_deref()
+                || event.message.model != "<synthetic>"
+                || event.message.content.is_empty()
+                || !event
+                    .message
+                    .content
+                    .iter()
+                    .all(|block| matches!(block, AssistantContent::Text { .. }))
+            {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude API error diagnostic has invalid session, model, or content",
+                ));
+            }
+            return Ok(());
         }
         if self.acknowledgement_message(&event)? {
             return Ok(());

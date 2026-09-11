@@ -112,6 +112,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if matches!(
+        scenario.as_str(),
+        "refusal_notice_before_init" | "refusal_notice_missing_session"
+    ) {
+        let mut notice = serde_json::json!({
+            "type": "system", "subtype": "model_refusal_no_fallback"
+        });
+        if scenario == "refusal_notice_before_init" {
+            notice["session_id"] = serde_json::json!(fixtures::SESSION_ID);
+            emit_json(&notice)?;
+            system_init(&arguments)?;
+        } else {
+            system_init(&arguments)?;
+            emit_json(&notice)?;
+        }
+        assistant_text(fixtures::REFUSAL)?;
+        success("refusal", Some(fixtures::REFUSAL))?;
+        return Ok(());
+    }
+
     if scenario == "nonterminal_system_events" {
         system_event("hook_started")?;
         system_status(None)?;
@@ -143,6 +163,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     system_init(&arguments)?;
     match scenario.as_str() {
+        "api_error_diagnostic"
+        | "api_error_diagnostic_without_result"
+        | "api_error_diagnostic_wrong_session" => {
+            assistant_text(fixtures::REFUSAL)?;
+            let session = if scenario == "api_error_diagnostic_wrong_session" {
+                fixtures::OTHER_SESSION_ID
+            } else {
+                fixtures::SESSION_ID
+            };
+            emit_json(&serde_json::json!({
+                "type": "assistant", "session_id": session,
+                "is_api_error_message": true, "error": "invalid_request",
+                "message": { "id": fixtures::OTHER_MESSAGE_ID, "model": "<synthetic>",
+                    "role": "assistant", "stop_reason": "refusal",
+                    "content": [{ "type": "text", "text": fixtures::ANSWER }] }
+            }))?;
+            if scenario != "api_error_diagnostic_without_result" {
+                success("refusal", Some(fixtures::REFUSAL))?;
+            }
+        }
+        "refusal_notice" | "refusal_notice_without_result" | "refusal_notice_wrong_session" => {
+            let session = if scenario == "refusal_notice_wrong_session" {
+                fixtures::OTHER_SESSION_ID
+            } else {
+                fixtures::SESSION_ID
+            };
+            emit_json(&serde_json::json!({
+                "type": "system", "subtype": "model_refusal_no_fallback",
+                "session_id": session, "original_model": fixtures::MODEL,
+                "request_id": null, "content": "",
+                "api_refusal_category": "synthetic_refusal"
+            }))?;
+            if scenario != "refusal_notice_without_result" {
+                assistant_text(fixtures::REFUSAL)?;
+                success("refusal", Some(fixtures::REFUSAL))?;
+            }
+        }
         "session_window_status"
         | "session_window_without_status"
         | "request_size_status"

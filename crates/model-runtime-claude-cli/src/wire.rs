@@ -46,6 +46,10 @@ pub(crate) struct McpServerStatus {
 pub(crate) struct AssistantEvent {
     pub(crate) message: AssistantMessage,
     #[serde(default)]
+    pub(crate) session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) is_api_error_message: bool,
+    #[serde(default)]
     pub(crate) parent_tool_use_id: Option<String>,
 }
 
