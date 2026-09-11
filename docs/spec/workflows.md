@@ -306,5 +306,7 @@ authority.
 
 ## Planned
 
+- Session workflow tools: [design](../design/session-workflow-tools.md).
+
 - Payload offload to SHA-256 blobs under the `program_journal` storage class;
   every payload is inline today ([design](../design/workflows.md)).

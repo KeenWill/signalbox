@@ -640,14 +640,19 @@ receipts.
 
 ## Planned
 
+- Session workflow tools: [design](../design/session-workflow-tools.md).
+
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
+
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a `ToolInadmissible`
   result entry; see [tool-loop design](../design/tool-loop.md).
+
 - Instruction admission: the commit-result and continuation transactions append
   an `InstructionAdmission` and a successor instruction manifest for a
   successful `instructions_read`; see
   [tool-loop design](../design/tool-loop.md).
+
 - Runner-locus execution rules: the lost-lease retry exception and the runner
   approval ladder; see [runner protocol design](../design/runner-protocol.md).
 
