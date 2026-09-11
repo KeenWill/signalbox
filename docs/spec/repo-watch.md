@@ -60,8 +60,11 @@ The module schema contains seventeen tables:
   DELETE.
 - `gh_event` retains the complete immutable matcher payload, content identity,
   closed producer discriminator, per-repository event ordinal, frontier
-  generation, batch ordinal, and recording time. Accepted facts are never
-  updated or deleted.
+  generation, batch ordinal, recording time, and any decode error. Accepted
+  payloads are never updated or deleted. An event that does not decode records
+  the error, logs once, and leaves the database view used by event consumers;
+  the underlying table remains the source for event identity and ordinal
+  bookkeeping.
 - `rule` holds the active checked revision and content digest, while
   `rule_revision` retains revision history needed by module dispatch records;
   `rule_field_fingerprint` binds each identity field to its checked digest. One

@@ -2698,6 +2698,101 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn undecodable_event_is_quarantined_and_next_event_is_evaluated() -> Result<(), Box<dyn Error>>
+{
+    let (_container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("dispatch/project"))?;
+    let now = OffsetDateTime::now_utc();
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &dispatch_observation(&repository, 1, now),
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("ci"))?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+            repository: Some(repository.clone()),
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(String::from("watch"))?,
+        }],
+        RepoWatchSingletonScope::Repository,
+        Duration::ZERO,
+    )?;
+    store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                &repository,
+                std::slice::from_ref(&rule),
+            )],
+            now,
+        )
+        .await?;
+    for run in [2, 3] {
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &dispatch_observation(&repository, run, now),
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+    }
+    let poisoned: Uuid = sqlx::query_scalar(
+        "SELECT event_id FROM gh_event WHERE repository = $1
+         ORDER BY repository_event_ordinal DESC OFFSET 1 LIMIT 1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query("UPDATE gh_event SET normalized_payload = $2 WHERE event_id = $1")
+        .bind(poisoned)
+        .bind(b"not json".as_slice())
+        .execute(&pool)
+        .await?;
+    let mut ids = FixedDispatchIds {
+        value: 10001,
+        calls: 0,
+    };
+    let mut factory = FixtureSessionFactory {
+        next_command: 20001,
+        model: 30001,
+    };
+    let mut codec = FixtureCommandCodec;
+    assert!(
+        store
+            .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, now)
+            .await
+            .expect("next event evaluates")
+    );
+    let decode_error: Option<String> =
+        sqlx::query_scalar("SELECT decode_error FROM gh_event WHERE event_id = $1")
+            .bind(poisoned)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        decode_error.as_deref(),
+        Some("repository-watch retained event is invalid")
+    );
+    assert_eq!(store.recover_pending_commands(&mut codec).await?.len(), 1);
+    assert!(store.next_rule_event(&repository, &rule).await?.is_none());
+    Ok(())
+}
+
 struct SettlingThenFailingSink {
     store: RepoWatchStore,
     fail: bool,

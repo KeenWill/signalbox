@@ -2275,7 +2275,7 @@ impl RepoWatchStore {
                      ON revision.repository = active.repository
                     AND revision.rule_id = active.rule_id
                     AND revision.revision = active.active_revision
-                   JOIN gh_event AS event
+                   JOIN gh_readable_event AS event
                      ON event.event_id = $3
                   WHERE active.repository = $1 AND active.rule_id = $2
                     AND event.repository_event_ordinal
@@ -2323,7 +2323,7 @@ impl RepoWatchStore {
             let kickoff = if command.command().kind() == SessionCommandKind::CreateSession {
                 let (event_payload, baseline): (Vec<u8>, Option<Value>) = sqlx::query_as(
                     "SELECT event.normalized_payload, repository.comparison_baseline
-                     FROM gh_event AS event LEFT JOIN repository_state AS repository
+                     FROM gh_readable_event AS event LEFT JOIN repository_state AS repository
                        ON repository.repository = event.repository WHERE event.event_id = $1",
                 )
                 .bind(command.event_id().into_uuid())
@@ -2940,7 +2940,7 @@ async fn advance_evaluation(
 ) -> Result<(), StoreError> {
     sqlx::query(
         "INSERT INTO rule_evaluation_cursor(repository, rule_id, rule_revision, event_ordinal)
-        SELECT $1,$2,$3,repository_event_ordinal FROM gh_event WHERE event_id = $4
+        SELECT $1,$2,$3,repository_event_ordinal FROM gh_readable_event WHERE event_id = $4
         ON CONFLICT (repository, rule_id, rule_revision) DO UPDATE
         SET event_ordinal = GREATEST(rule_evaluation_cursor.event_ordinal, EXCLUDED.event_ordinal)",
     )

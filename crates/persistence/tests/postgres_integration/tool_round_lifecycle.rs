@@ -5252,8 +5252,11 @@ async fn completed_cancellation_requires_closed_tool_round() -> Result<(), Box<d
         .await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
-        .await?;
+    assert_next_outbox_event_quarantined(
+        &pool,
+        OutboxRowCorruption::InvalidTerminalEventCorrelation,
+    )
+    .await?;
 
     pool.close().await;
     drop(container);
