@@ -39,6 +39,8 @@
 //!   `runner_connection_authority_head`, both by enrollment `FOR SHARE`.
 //! - `context_compaction::complete`: source `context_frontier` `FOR SHARE` after the lifecycle
 //!   session lock.
+//! - `reload_configuration::finish_with_profiles`: `reload_configuration_command FOR UPDATE`
+//!   before credential and outbox locks.
 //!
 //! Advisory-lock protocols:
 //! - `oauth_credential`: the `oauth-registration-catalog` transaction advisory lock is
@@ -1071,6 +1073,9 @@ pub(crate) const TEST_DATABASE_TEMPLATE: &str = "SELECT pg_advisory_lock($1)";
 
 pub(crate) const HASHED_TRANSACTION_ADVISORY_LOCK: &str =
     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))";
+
+pub(crate) const RELOAD_CONFIGURATION_COMMAND: &str =
+    "SELECT command_id FROM reload_configuration_command WHERE command_id = $1 FOR UPDATE";
 
 pub(crate) const SEARCH_ARTIFACT_IDENTITY: &str = "SELECT pg_advisory_xact_lock(
                  hashtextextended(
