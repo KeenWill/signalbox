@@ -344,7 +344,6 @@ fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> Ex
     let arguments = match command {
         CargoDiagnosticsCommand::Check => [
             "check",
-            "--offline",
             "--workspace",
             "--all-targets",
             "--all-features",
@@ -354,7 +353,6 @@ fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> Ex
         .to_vec(),
         CargoDiagnosticsCommand::Clippy => [
             "clippy",
-            "--offline",
             "--workspace",
             "--all-targets",
             "--all-features",
@@ -367,7 +365,6 @@ fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> Ex
         .to_vec(),
         CargoDiagnosticsCommand::Test => [
             "test",
-            "--offline",
             "--config",
             "term.quiet=false",
             "--no-fail-fast",
@@ -1284,20 +1281,75 @@ mod tests {
     }
 
     #[test]
-    fn all_cargo_diagnostics_resolve_dependencies_offline() {
-        for command in [
-            CargoDiagnosticsCommand::Check,
-            CargoDiagnosticsCommand::Clippy,
-            CargoDiagnosticsCommand::Test,
+    fn diagnostics_resolve_an_uncached_git_dependency() {
+        use std::{fs, process::Command};
+
+        let directory = tempfile::tempdir().expect("fixture workspace");
+        let dependency = directory.path().join("dependency");
+        let workspace = directory.path().join("workspace");
+        let cargo_home = directory.path().join("cargo-home");
+        for root in [&dependency, &workspace] {
+            fs::create_dir_all(root.join("src")).expect("fixture source directory");
+        }
+        // Package names and source contents are arbitrary; resolution requires an uncached Git dependency.
+        fs::write(
+            dependency.join("Cargo.toml"),
+            "[package]\nname = \"fixture-dependency\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .expect("dependency manifest");
+        fs::write(dependency.join("src/lib.rs"), "pub fn available() {}\n")
+            .expect("dependency source");
+        for arguments in [
+            vec!["init", "--quiet"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "Fixture dependency",
+            ],
         ] {
-            let arguments = cargo_arguments(command, 30);
+            let result = Command::new("git")
+                .args(["-c", "core.hooksPath=/dev/null"])
+                .args(arguments)
+                .current_dir(&dependency)
+                .output()
+                .expect("fixture Git command");
             assert!(
-                arguments
-                    .arguments
-                    .iter()
-                    .any(|argument| argument == "--offline")
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
             );
         }
+        fs::write(workspace.join("Cargo.toml"), format!("[package]\nname = \"fixture-workspace\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[dependencies]\nfixture-dependency = {{ git = \"file://{}\" }}\n", dependency.display())).expect("workspace manifest");
+        fs::write(
+            workspace.join("src/lib.rs"),
+            "pub fn check() { fixture_dependency::available(); }\n",
+        )
+        .expect("workspace source");
+        let arguments = cargo_arguments(CargoDiagnosticsCommand::Check, DEFAULT_TIMEOUT_SECONDS);
+
+        let result = Command::new(&arguments.program)
+            .args(&arguments.arguments)
+            .current_dir(&workspace)
+            .env("CARGO_HOME", &cargo_home)
+            .env("CARGO_TARGET_DIR", workspace.join("target"))
+            .env_remove("RUSTC_WRAPPER")
+            .output()
+            .expect("Cargo diagnostics check");
+
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(cargo_home.join("git/checkouts").is_dir());
     }
 
     #[test]
@@ -1308,7 +1360,6 @@ mod tests {
             arguments.arguments,
             [
                 "test",
-                "--offline",
                 "--config",
                 "term.quiet=false",
                 "--no-fail-fast",
