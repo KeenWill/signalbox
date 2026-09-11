@@ -198,7 +198,10 @@ pub(crate) fn translate<C>(
     )
     .into_bytes();
 
-    let prompt = format!("{request_json}\n").into_bytes();
+    let prompt = format!(
+        "Produce the next assistant response to the canonical conversation under these request controls:\n{request_json}\n"
+    )
+    .into_bytes();
 
     if image_limit.is_some_and(|limit| {
         prompt

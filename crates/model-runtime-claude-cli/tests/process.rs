@@ -130,8 +130,11 @@ async fn trusted_instructions_reach_the_native_system_prompt_without_promoting_h
     );
     let prompt = std::fs::read_to_string(temporary.path().join("fake-claude-prompt"))
         .expect("the fake CLI records its stdin");
+    let (_, request_json) = prompt
+        .split_once('\n')
+        .expect("stdin requests a response before the request JSON");
     let request: serde_json::Value =
-        serde_json::from_str(&prompt).expect("stdin contains only the request JSON");
+        serde_json::from_str(request_json).expect("request controls remain JSON");
     assert!(
         request.get("system").is_none(),
         "system instructions are not duplicated as user input"
