@@ -287,4 +287,4 @@ pre-call exhaustion state and live event.
 
 ## Planned
 
-None.
+[Authentication recovery after profile changes](../design/auth-profile-recovery.md).
