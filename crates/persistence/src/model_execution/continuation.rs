@@ -449,6 +449,12 @@ async fn load_tool_continuation_headroom_evidence(
                 retained_input_tokens,
                 retained_output_tokens,
                 EXISTS (
+                    SELECT 1 FROM tool_request request
+                      JOIN tool_attempt attempt USING (request_id)
+                     WHERE request.producing_model_call_id = model_call.model_call_id
+                       AND attempt.context_result_byte_limit = 0
+                ) AS result_admission_exhausted,
+                EXISTS (
                     SELECT 1
                       FROM semantic_transcript_entry AS compacted
                      WHERE compacted.source_session_id = model_call.session_id
@@ -611,6 +617,9 @@ async fn load_tool_continuation_headroom_evidence(
             .saturating_add(steering_bytes)
             .saturating_add(limit.max_output_tokens())
             > limit.context_window_tokens());
+    }
+    if row.try_get::<bool, _>("result_admission_exhausted")? {
+        return Ok(true);
     }
     let Some(input_tokens) = usage.input_tokens() else {
         return Ok(false);

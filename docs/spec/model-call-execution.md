@@ -75,6 +75,8 @@ half its bytes. If the one-byte summary still leaves insufficient headroom, the
 queued turn closes without another compaction call. A failed provider compaction
 closes the queued turn without preparing an ordinary call.
 
+A zero tool-result admission budget also requires a compaction checkpoint.
+
 A tool-result continuation exceeding reserved headroom commits its results and a
 compaction checkpoint while retaining the active turn. The daemon summarizes the
 checkpoint through its last safe boundary, then prepares the continuation from
