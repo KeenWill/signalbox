@@ -46,6 +46,7 @@ match reviews, completed checks and mergeability changes. The example
 `merge-forward` template instructs the session to reply without editing unless
 the metadata tool reports `mergeable: false`.
 
+
 The module schema contains seventeen tables:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A
