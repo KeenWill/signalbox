@@ -430,9 +430,11 @@ and every later non-diagnostic assistant event must repeat that value, and a
 result carrying a different session id is a protocol violation. Assistant
 content retains its first message id. After every proposed tool has its bridge
 acknowledgement, one message with a distinct id, text and optional thinking
-blocks, and at least one text block may acknowledge the batch. Its content is
+blocks, and at least one text block may acknowledge the batch. Thinking-only
+attempts may change message identity before the first text block. Its content is
 discarded; the reported finish must be `end_turn`, while the effective
-completion of the original batch is `ToolUse`.
+completion of the original batch is `ToolUse`. A different message id outside
+that acknowledgement is a protocol violation.
 
 Claude native refusal notifications and text-only API-error diagnostics stay
 bound to the initialized session and are nonterminal. Diagnostics report the
