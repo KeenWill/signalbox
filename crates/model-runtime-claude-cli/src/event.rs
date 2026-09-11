@@ -382,7 +382,7 @@ impl<C: Clone> EventDecoder<C> {
             || self
                 .acknowledgement_message_id
                 .as_ref()
-                .is_some_and(|id| id != &message.id)
+                .is_some_and(|id| id != &message.id && self.acknowledgement_text_seen)
             || message.content.is_empty()
             || !message.content.iter().all(|block| {
                 matches!(
