@@ -386,7 +386,9 @@ membership matches the selected prefix.
 
 Active-turn compaction retains the active turn while its dedicated call is
 prepared or in flight. Consumed steering after completion extends the validated
-compaction result by exactly the consumed entries in acceptance order.
+compaction result by exactly the consumed entries in acceptance order. Startup
+recovery classifies an abandoned compaction for that active turn without
+discarding its checkpoint or repeating its tool results.
 
 Stored active phases are conclusions derived from complete owner facts, never
 trusted discriminators. A recovery-decision wait reconstitutes from an ambiguous

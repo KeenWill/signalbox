@@ -1044,7 +1044,7 @@ async fn recover_context_compaction(
 ) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError> {
     let rows = sqlx::query(
         "SELECT call.model_call_id, call.state_kind,
-                command.command_id, command.result_kind
+                command.command_id, command.result_kind, command.automatic_for_turn_id
            FROM context_compaction_model_call AS call
            FULL OUTER JOIN compact_session_command AS command
              ON command.session_id = call.session_id
@@ -1066,7 +1066,7 @@ async fn recover_context_compaction(
     if rows.is_empty() {
         return Ok(None);
     }
-    if rows.len() != 1 || active_turn.is_some() {
+    if rows.len() != 1 {
         return Err(StartupScanCorruption::Inconsistent("compaction recovery inventory").into());
     }
     let row = &rows[0];
@@ -1074,6 +1074,10 @@ async fn recover_context_compaction(
     let call_state: Option<String> = row.try_get("state_kind")?;
     let command_id: Option<Uuid> = row.try_get("command_id")?;
     let command_state: Option<String> = row.try_get("result_kind")?;
+    let automatic_turn: Option<Uuid> = row.try_get("automatic_for_turn_id")?;
+    if active_turn.is_some() && automatic_turn != active_turn {
+        return Err(StartupScanCorruption::Inconsistent("compaction recovery active turn").into());
+    }
     let (Some(call_id), Some(call_state), Some(command_id)) = (call_id, call_state, command_id)
     else {
         return Err(StartupScanCorruption::Inconsistent("compaction recovery correlation").into());
