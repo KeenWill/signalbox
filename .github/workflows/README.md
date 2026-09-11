@@ -128,6 +128,22 @@ changes can bypass PostgreSQL through the coarse path gate; generated browser
 contracts keep the bar. API generation and API digest reports reuse the existing
 Rust scope, while documentation consistency checks still run.
 
+## Shared PostgreSQL fixtures
+
+Linux Bazel PostgreSQL selections enable `SIGNALBOX_TEST_SHARED_POSTGRES=1`.
+Each libtest process lazily starts a shared PostgreSQL server and clones the
+migration-set template into a separate database for each fixture. Every live
+fixture reserves its own bounded tablespace. A full server starts another server
+instead of blocking tests that need multiple fixtures. Slots become reusable
+only after a successful database drop; failed setup or cleanup retains the
+reservation until the process exits. `TESTCONTAINERS_COMMAND=keep` retains
+databases and servers. A pidfd guardian removes each server when its owning test
+process exits, including process death. Nextest retains its existing run-owned
+server path. These selections run outside the Bazel sandbox so its teardown
+cannot kill the guardian before it removes Docker containers. Cargo can opt in
+with the same variable. Ordinary tests retain their existing fixture behavior.
+No suite filters or test concurrency settings change.
+
 ## PostgreSQL result reuse
 
 Cacheable PostgreSQL test selections use the shared Bazel action cache. Explicit
@@ -147,19 +163,3 @@ inactive file cache. Short-lived containers and peaks between samples can be
 missed, and sampling failures are reported as gaps. Sampling errors do not
 change the suite command's exit status. Interrupted collection is unmeasured.
 Per-shard JSON sample artifacts are retained for seven days.
-
-## Shared PostgreSQL fixtures
-
-Linux Bazel PostgreSQL selections enable `SIGNALBOX_TEST_SHARED_POSTGRES=1`.
-Each libtest process lazily starts a shared PostgreSQL server and clones the
-migration-set template into a separate database for each fixture. Every live
-fixture reserves its own bounded tablespace. A full server starts another server
-instead of blocking tests that need multiple fixtures. Slots become reusable
-only after a successful database drop; failed setup or cleanup retains the
-reservation until the process exits. `TESTCONTAINERS_COMMAND=keep` retains
-databases and servers. A pidfd guardian removes each server when its owning test
-process exits, including process death. Nextest retains its existing run-owned
-server path. These selections run outside the Bazel sandbox so its teardown
-cannot kill the guardian before it removes Docker containers. Cargo can opt in
-with the same variable. Ordinary tests retain their existing fixture behavior.
-No suite filters or test concurrency settings change.
