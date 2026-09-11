@@ -168,6 +168,12 @@ Finding events and external-link attachments bind their exact pass result in the
 transaction that appends or attaches the effect, so every committed point is an
 aggregate the loaders can reconstitute.
 
+Each primitive review mutation performs its command claim, aggregate recovery or
+effect, and receipt in one transaction on one database connection. Exact receipt
+replay still precedes aggregate validation. A failure before commit rolls back
+the claim, effect, and receipt and is definite; a failure while committing
+remains ambiguous.
+
 How the terminal prints a review mutation's command identity for exact retry
 belongs to [process protocol](process-protocol.md).
 

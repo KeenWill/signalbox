@@ -1035,6 +1035,12 @@ pub(crate) const REVIEW_TARGET_FINDINGS_TRANSITION: &str = "SELECT finding_id
                   ORDER BY finding_id
                   FOR NO KEY UPDATE";
 
+pub(crate) const REVIEW_TARGET_FINDINGS_BY_TARGET_TRANSITION: &str = "SELECT finding_id
+                   FROM review_finding
+                  WHERE target_id = $1
+                  ORDER BY finding_id
+                  FOR NO KEY UPDATE";
+
 pub(crate) const RUNNER_ENROLLMENT_REQUEST_FACTS: &str =
     "SELECT enrollment_id, runner_id, authentication_reference_id,
                 registration_revision
