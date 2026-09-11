@@ -1105,7 +1105,7 @@ async fn kickoff_for_renovate_requests_the_template_merge_forward() -> Result<()
             .fetch_one(&fixture.module)
             .await?;
     assert!(
-        text.contains("base branch forward into its head branch, resolve only merge conflicts")
+        text.contains("base branch forward into its head branch, resolve conflicts and integration errors caused by combining the branches")
     );
     assert!(text.contains("push with git_push_configured to the head branch"));
     assert!(text.contains("intended change survives the merge"));
@@ -1177,7 +1177,7 @@ async fn kickoff_for_a_fork_head_requests_a_diff_despite_configured_push_credent
             .fetch_one(&fixture.module)
             .await?;
     assert!(
-        text.contains("base branch forward into its head branch, resolve only merge conflicts")
+        text.contains("base branch forward into its head branch, resolve conflicts and integration errors caused by combining the branches")
     );
     assert!(text.contains("This session has no Git push authority. Do not push."));
     assert!(text.contains(
