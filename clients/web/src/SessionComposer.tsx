@@ -140,16 +140,16 @@ export function SessionComposer({
               : 'Retry message'}
         </button>
         <span role="status">
-          {newInputBlocked
-            ? capacityNotice
-            : pending?.phase === 'unconfirmed'
-              ? 'Delivery unconfirmed'
-              : pending?.phase === 'sending'
-                ? 'Sending…'
-                : notice ||
-                  (supervision?.pending
-                    ? 'Session recovery required'
-                    : stateUnavailable
+          {supervision?.pending
+            ? 'Session recovery required'
+            : newInputBlocked
+              ? capacityNotice
+              : pending?.phase === 'unconfirmed'
+                ? 'Delivery unconfirmed'
+                : pending?.phase === 'sending'
+                  ? 'Sending…'
+                  : notice ||
+                    (stateUnavailable
                       ? 'Session unavailable'
                       : activeState === undefined
                         ? 'Connecting…'
