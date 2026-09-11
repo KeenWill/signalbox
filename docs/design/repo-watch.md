@@ -165,15 +165,9 @@ listener and one pending-command executor, with no shadow ledger, second cursor,
 data copy or backfill.
 
 Named parity fixtures use the exact checked rule definitions in
-[repository-watch-rules.example.toml](../../config/repository-watch-rules.example.toml):
-rule A `renovate-merge-forward` version 5 and rule B `labeled-review-response`
-version 6. The fixture pins every matcher, event kind, ordered action, singleton
-scope, cooldown and template.
-
-Rule A's mergeable-state qualifier accepts only `mergeable_state_changed`
-payloads (`crates/domain/src/repo_watch/matcher.rs:259`). Its retained
-`head_changed` event kind therefore does not fire the rule; parity tests expect
-a nonmatch and no dispatch for that event.
+[repository-watch-rules.example.toml](../../config/repository-watch-rules.example.toml).
+The fixture pins every matcher, event kind, ordered action, singleton scope,
+cooldown and template.
 
 Parity tests load those definitions unchanged and compare held commands,
 checkout and retirement across equivalent disposable databases. Both use
