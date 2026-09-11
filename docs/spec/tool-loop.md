@@ -54,6 +54,9 @@ mapped composition
 blob-read is composed only when blob storage is configured. Each family's crate
 or daemon module documents its tools.
 
+`cargo_diagnostics` resolves dependencies under the configured sandbox network
+policy without forcing Cargo offline.
+
 Each approved request that reaches execution runs as one physical attempt
 through staged transactions. A prepare transaction mints the attempt and commits
 a `Prepared` row that fixes the request, owning turn, issuing turn attempt,
