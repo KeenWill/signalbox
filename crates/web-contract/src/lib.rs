@@ -1822,6 +1822,15 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
+/// Closed credential-admission reason shown for an active waiting turn.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebCredentialAvailabilityWaitCause {
+    Contended,
+    Exhausted,
+    NetworkUnavailable,
+}
+
 /// Current durable state of one active turn.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1830,6 +1839,10 @@ pub enum WebSessionLiveActiveState {
         #[serde(deserialize_with = "deserialize_present_option")]
         #[schemars(required)]
         model_call_id: Option<WebLiveResourceId>,
+    },
+    AwaitingCredentialAvailability {
+        wait_attempt_id: WebLiveResourceId,
+        cause: WebCredentialAvailabilityWaitCause,
     },
     AwaitingModelCallRecovery {
         model_call_id: WebLiveResourceId,

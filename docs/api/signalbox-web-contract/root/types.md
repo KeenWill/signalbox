@@ -1575,12 +1575,27 @@ pub struct WebSessionTimelineDetailPage {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebCredentialAvailabilityWaitCause
+
+```rust
+pub enum WebCredentialAvailabilityWaitCause {
+    Contended,
+    Exhausted,
+    NetworkUnavailable,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebSessionLiveActiveState
 
 ```rust
 pub enum WebSessionLiveActiveState {
     Running {
         model_call_id: option::Option<WebLiveResourceId>,
+    },
+    AwaitingCredentialAvailability {
+        wait_attempt_id: WebLiveResourceId,
+        cause: WebCredentialAvailabilityWaitCause,
     },
     AwaitingModelCallRecovery {
         model_call_id: WebLiveResourceId,

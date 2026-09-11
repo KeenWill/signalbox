@@ -607,6 +607,11 @@ export function SessionWorkspaceSurface({
               'Connecting…'
             )}
           </p>
+          {live?.active?.state.kind === 'awaiting_credential_availability' && (
+            <p role="status" className="availability-tag">
+              Waiting for credentials · {enumLabel(live.active.state.cause)}
+            </p>
+          )}
           {(live?.reconciliation || live?.runner) && (
             <div className="session-live-facts">
               {live.reconciliation && (

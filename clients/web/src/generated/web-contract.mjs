@@ -2618,6 +2618,15 @@ const schemas = {
   },
   "WebSessionLiveSnapshot": {
     "$defs": {
+      "WebCredentialAvailabilityWaitCause": {
+        "description": "Closed credential-admission reason shown for an active waiting turn.",
+        "enum": [
+          "contended",
+          "exhausted",
+          "network_unavailable"
+        ],
+        "type": "string"
+      },
       "WebLiveResourceId": {
         "description": "Checked canonical UUID used for browser-visible live resource identities.",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -2659,6 +2668,27 @@ const schemas = {
             "required": [
               "kind",
               "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause": {
+                "$ref": "#/$defs/WebCredentialAvailabilityWaitCause"
+              },
+              "kind": {
+                "const": "awaiting_credential_availability",
+                "type": "string"
+              },
+              "wait_attempt_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "wait_attempt_id",
+              "cause"
             ],
             "type": "object"
           },
@@ -3004,6 +3034,15 @@ const schemas = {
   },
   "WebSessionLiveStreamEvent": {
     "$defs": {
+      "WebCredentialAvailabilityWaitCause": {
+        "description": "Closed credential-admission reason shown for an active waiting turn.",
+        "enum": [
+          "contended",
+          "exhausted",
+          "network_unavailable"
+        ],
+        "type": "string"
+      },
       "WebLiveResourceId": {
         "description": "Checked canonical UUID used for browser-visible live resource identities.",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -3045,6 +3084,27 @@ const schemas = {
             "required": [
               "kind",
               "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause": {
+                "$ref": "#/$defs/WebCredentialAvailabilityWaitCause"
+              },
+              "kind": {
+                "const": "awaiting_credential_availability",
+                "type": "string"
+              },
+              "wait_attempt_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "wait_attempt_id",
+              "cause"
             ],
             "type": "object"
           },

@@ -710,8 +710,8 @@ state only after those checks pass.
 
 Credential admission waits project the active turn state
 `active_awaiting_credential_availability`, carrying the call-free ended
-`wait_attempt_id` and the closed `contended` or `exhausted` cause. The terminal
-client keeps following that turn.
+`wait_attempt_id` and the closed `contended`, `exhausted`, or
+`network_unavailable` cause. The terminal client keeps following that turn.
 
 A terminal credential wait release after a provider call projects
 `failed_after_credential_wait`, naming the fresh call-free terminal attempt and

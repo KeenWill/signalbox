@@ -1,4 +1,5 @@
 import type {
+  WebSessionLiveActiveState,
   WebSessionTimelineDescriptor,
   WebSessionTimelineDetail,
 } from '../src/generated/web-contract.mjs'
@@ -26,6 +27,7 @@ async function sessionApi(
 ) {
   const state = {
     active: busy,
+    activeState: { kind: 'running', model_call_id: null } as WebSessionLiveActiveState,
     grown: false,
     observed: false,
     historyReads: [] as string[],
@@ -39,9 +41,7 @@ async function sessionApi(
   const snapshot = () => ({
     session_id: selectedSessionId,
     observed_through: state.grown || state.observed ? '44' : '43',
-    active: state.active
-      ? { turn_id: turnId, state: { kind: 'running', model_call_id: null } }
-      : null,
+    active: state.active ? { turn_id: turnId, state: state.activeState } : null,
     queued_turn_count: '0',
     queued_turn_ids: [],
     reconciliation: null,
@@ -791,3 +791,31 @@ test('replaces the sent notice when followed work starts', async ({ page }) => {
   await expect(composer.getByRole('status')).toHaveText('Turn: Running')
   await expect(composer.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
 })
+
+for (const viewport of [
+  { name: 'desktop', width: 1440, height: 1000 },
+  { name: 'phone', width: 390, height: 844 },
+]) {
+  test(`shows the stored network wait on ${viewport.name}`, async ({ page, browserName }) => {
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.setViewportSize(viewport)
+    const api = await sessionApi(page, true)
+    api.state.activeState = {
+      kind: 'awaiting_credential_availability',
+      wait_attempt_id: turnId,
+      cause: 'network_unavailable',
+    }
+    await page.goto(`/sessions?session=${sessionId}&workspace=true`)
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Waiting for credentials' }),
+    ).toHaveText('Waiting for credentials · Network unavailable')
+    await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
+    await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+    expect(api.state.submissions).toEqual([])
+    expect(errors).toEqual([])
+    if (browserName === 'chromium') {
+      await expect(page).toHaveScreenshot(`network-wait-${viewport.name}.png`)
+    }
+  })
+}
