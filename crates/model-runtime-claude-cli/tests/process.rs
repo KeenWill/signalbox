@@ -513,6 +513,24 @@ async fn a_native_api_error_diagnostic_rejects_a_different_session() {
 }
 
 #[tokio::test]
+async fn a_native_refusal_notice_requires_prior_initialization() {
+    let result = execute_scenario("refusal_notice_before_init", OperationShape::Text).await;
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_native_refusal_notice_requires_its_session_id() {
+    let result = execute_scenario("refusal_notice_missing_session", OperationShape::Text).await;
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
 async fn a_native_refusal_notice_allows_the_terminal_refusal() {
     let result = execute_scenario("refusal_notice", OperationShape::Text).await;
     let refusal = refused(&result.evidence);

@@ -62,6 +62,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if matches!(
+        scenario.as_str(),
+        "refusal_notice_before_init" | "refusal_notice_missing_session"
+    ) {
+        let mut notice = serde_json::json!({
+            "type": "system", "subtype": "model_refusal_no_fallback"
+        });
+        if scenario == "refusal_notice_before_init" {
+            notice["session_id"] = serde_json::json!(fixtures::SESSION_ID);
+            emit_json(&notice)?;
+            system_init(&arguments)?;
+        } else {
+            system_init(&arguments)?;
+            emit_json(&notice)?;
+        }
+        assistant_text(fixtures::REFUSAL)?;
+        success("refusal", Some(fixtures::REFUSAL))?;
+        return Ok(());
+    }
+
     if scenario == "nonterminal_system_events" {
         system_event("hook_started")?;
         system_status(None)?;
