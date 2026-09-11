@@ -526,6 +526,48 @@ impl ActivatedTurn {
         )
     }
 
+    /// Reconciles this turn's exact ambiguous physical tool attempt.
+    pub fn apply_automatic_tool_reconciliation(
+        self,
+        wait: crate::AwaitingToolRecovery,
+        tool_attempt: crate::EndedToolAttempt,
+        attempt: EndedTurnAttempt,
+        result_projection: crate::PreparedToolResultProjection,
+        recovery_attempt: std::num::NonZeroU32,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredToolTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_automatic_tool_reconciliation(
+            self,
+            wait,
+            tool_attempt,
+            attempt,
+            result_projection,
+            recovery_attempt,
+            identities,
+        )
+    }
+
+    /// Interrupts this turn's exact tool recovery wait while retaining ambiguity.
+    pub fn apply_interrupt_to_tool_recovery(
+        self,
+        wait: crate::AwaitingToolRecovery,
+        tool_attempt: crate::EndedToolAttempt,
+        attempt: EndedTurnAttempt,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredToolTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_interrupt_to_tool_recovery_wait(
+            self,
+            wait,
+            tool_attempt,
+            attempt,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
     /// Cancels this turn's executing tool batch or foreground child wait.
     pub fn apply_interrupt_to_tool_batch(
         self,
