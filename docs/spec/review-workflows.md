@@ -104,10 +104,12 @@ The posted event is the one finding event committed by an attachment result
 rather than a finding-event result, because its pass is also the attachment
 producer.
 
-Accepted and posted transitions compare only is-real confidence against the
-frozen policy minimums; severity-label confidence is never a filter and no
-override exists. Why: uncertainty about whether a real issue is high or medium
-must not suppress the issue.
+Accepted events carry an independent judge confidence from 1 through 5. Accepted
+and posted transitions compare that score, multiplied by 2,000 to express it on
+the policy's basis-point scale, against the frozen policy minimums. Publication
+reads the score retained on the accepted event. Neither producer confidence axis
+is a filter, and no override exists. Why: the judge decides whether a proposed
+finding qualifies; producer scores remain immutable provenance.
 
 Publication admission is bound to the immutable target head: a moved change
 request is another target and does not authorize posting results produced
@@ -226,6 +228,20 @@ inventory included. The orchestrator may retry only the failed member, against
 the same target, policy, concern-set version, and template digests. One judgment
 analysis pass consumes the sealed inventories of all fan-out members, never a
 concern subset.
+
+Every judgment-plan member carries a categorical verdict, independent confidence
+from 1 through 5, and a reason. Acceptance names one of `false-statement`,
+`broken-reference`, `contradiction`, `undecided-as-committed`, `failing-gate`,
+or `own-behavior-defect`. A `none` verdict instead names a decline class:
+`hypothetical-hardening`, `inventory-restoration`, `scope-expansion`,
+`pre-existing-out-of-scope`, `design-document-demand`, `style-or-prose`,
+`spec-sentence-wrong`, `duplicate`, or `other`. The accepted disposition
+requires an acceptance category and every other disposition requires `none`. An
+inventory with every finding declined is valid. Accepted effect confidence must
+equal the sealed member's confidence. On the process protocol, the required
+nested `judgment` object contains `bar_category`, nullable `decline_class`,
+canonical decimal-string `confidence`, and nonempty `reason`; accepted primitive
+events also require that confidence.
 
 The orchestrator seals the complete judgment plan before admitting its
 per-finding judgment and deduplication events through the single-effect pass

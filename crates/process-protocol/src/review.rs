@@ -273,7 +273,9 @@ pub struct ReviewFindingSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReviewFindingEvent {
-    Accepted {},
+    Accepted {
+        confidence: CanonicalU64,
+    },
     Rejected {
         reason: String,
     },
@@ -347,6 +349,23 @@ pub enum ReviewJudgmentDisposition {
 pub struct ReviewJudgmentPlanMember {
     pub finding_id: CanonicalUuid,
     pub disposition: ReviewJudgmentDisposition,
+    /// Independent categorical result supporting the disposition.
+    pub judgment: ReviewJudgmentResult,
+}
+
+/// Categorical judgment returned independently of producer confidence.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewJudgmentResult {
+    /// Acceptance category, or `none` for a declined candidate.
+    pub bar_category: String,
+    /// Required decline class for `none`, otherwise null.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub decline_class: Option<String>,
+    /// Independent verdict confidence from one through five.
+    pub confidence: CanonicalU64,
+    /// Explanation of the decisive evidence.
+    pub reason: String,
 }
 
 /// Terminal result of applying one judgment-plan member.

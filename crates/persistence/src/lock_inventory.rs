@@ -954,8 +954,8 @@ pub(crate) const REVIEW_RUN_TRANSITION: &str = "SELECT
                 AS evidence_pass_result_event_ordinal,
             canonical_pass.result_event_kind
                 AS evidence_pass_result_event_kind,
-            canonical_pass.result_reason
-                AS evidence_pass_result_reason,
+            canonical_pass.result_reason AS evidence_pass_result_reason,
+            canonical_pass.result_judge_confidence AS evidence_pass_result_judge_confidence,
             canonical_pass.result_referenced_finding_id
                 AS evidence_pass_result_referenced_finding_id,
             canonical_pass.result_referenced_finding_run_id
@@ -992,6 +992,7 @@ pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
             workflow_pass.result_event_ordinal,
             workflow_pass.result_event_kind,
             workflow_pass.result_reason,
+            workflow_pass.result_judge_confidence,
             workflow_pass.result_referenced_finding_id,
             workflow_pass.result_referenced_finding_run_id,
             workflow_pass.result_referenced_finding_pass_id,

@@ -270,7 +270,10 @@ async fn event_sequence_admits_committed_predecessor_after_wait() -> Result<(), 
         finding_ref,
         ReviewEventOrdinal::one(),
         evidence[1].clone(),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                .expect("judge confidence"),
+        },
     );
     let accepted = open
         .clone()
@@ -294,7 +297,8 @@ async fn event_sequence_admits_committed_predecessor_after_wait() -> Result<(), 
                 result_finding_run_id = $3,
                 result_finding_pass_id = $4,
                 result_event_ordinal = $5,
-                result_event_kind = 'accepted'
+                result_event_kind = 'accepted',
+                result_judge_confidence = 5
           WHERE pass_id = $1",
     )
     .bind(accepted_event.pass().pass().into_uuid())
@@ -311,11 +315,10 @@ async fn event_sequence_admits_committed_predecessor_after_wait() -> Result<(), 
              referenced_finding_id, referenced_finding_run_id,
              referenced_finding_target_id, referenced_finding_pass_id,
              referenced_finding_status, external_link_id,
-             external_link_association_kind)
+             external_link_association_kind, judge_confidence)
          VALUES (
              $1, $2, $3, $4, $5, $6, 'accepted', NULL,
-             NULL, NULL, NULL, NULL, NULL, NULL, NULL
-         )",
+             NULL, NULL, NULL, NULL, NULL, NULL, NULL, 5)",
     )
     .bind(accepted_event.finding().finding().into_uuid())
     .bind(i64::from(accepted_event.ordinal().get()))
@@ -385,8 +388,7 @@ async fn event_sequence_admits_committed_predecessor_after_wait() -> Result<(), 
     Ok(())
 }
 
-/// direct SQL cannot admit a judgment below the finding producer's
-/// frozen minimum confidence threshold.
+/// Direct SQL cannot admit an independent judge score below the frozen threshold.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn schema_enforces_judge_confidence_threshold() -> Result<(), Box<dyn Error>> {
@@ -402,7 +404,7 @@ async fn schema_enforces_judge_confidence_threshold() -> Result<(), Box<dyn Erro
             finding_ref,
             review_evidence,
             &fixture.target_snapshot,
-            6_999,
+            9_999,
         ))
         .await?;
     let mut transaction = pool.begin().await?;
@@ -413,7 +415,8 @@ async fn schema_enforces_judge_confidence_threshold() -> Result<(), Box<dyn Erro
                 result_finding_run_id = $3,
                 result_finding_pass_id = $4,
                 result_event_ordinal = 1,
-                result_event_kind = 'accepted'
+                result_event_kind = 'accepted',
+                result_judge_confidence = 3
           WHERE pass_id = $1",
     )
     .bind(judge_pass.pass().into_uuid())
@@ -427,9 +430,9 @@ async fn schema_enforces_judge_confidence_threshold() -> Result<(), Box<dyn Erro
             (finding_id, event_ordinal, finding_run_id, target_id,
              event_pass_id, event_pass_run_id, event_kind, reason,
              referenced_finding_id, referenced_finding_status,
-             external_link_id, external_link_association_kind)
+             external_link_id, external_link_association_kind, judge_confidence)
          VALUES ($1, 1, $2, $3, $4, $5, 'accepted',
-                 NULL, NULL, NULL, NULL, NULL)",
+                 NULL, NULL, NULL, NULL, NULL, 3)",
     )
     .bind(finding_ref.finding().into_uuid())
     .bind(finding_ref.run().run().into_uuid())
@@ -444,11 +447,10 @@ async fn schema_enforces_judge_confidence_threshold() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// direct SQL cannot publish a finding below the producer's
-/// frozen publication threshold, even with matching attachment evidence.
+/// Publication uses the judge score even when the producer score is low.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn schema_enforces_publication_confidence_threshold() -> Result<(), Box<dyn Error>> {
+async fn schema_publication_uses_judge_confidence() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x34a, ReviewPassKind::Judge).await;
@@ -467,7 +469,7 @@ async fn schema_enforces_publication_confidence_threshold() -> Result<(), Box<dy
             finding_ref,
             review_evidence,
             &fixture.target_snapshot,
-            7_999,
+            1_000,
         ))
         .await?;
     fixture
@@ -478,7 +480,10 @@ async fn schema_enforces_publication_confidence_threshold() -> Result<(), Box<dy
                 finding_ref,
                 ReviewEventOrdinal::one(),
                 evidence[1].clone(),
-                ReviewFindingEventKind::Accepted,
+                ReviewFindingEventKind::Accepted {
+                    confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                        .expect("judge confidence"),
+                },
             ),
         )
         .await?;
@@ -605,14 +610,14 @@ async fn schema_enforces_publication_confidence_threshold() -> Result<(), Box<dy
     .bind(link.into_uuid())
     .execute(&mut *transaction)
     .await
-    .expect_err("below-threshold publication cannot bypass the domain through SQL");
-    assert_sqlstate(&posted, "23514");
-    transaction.rollback().await?;
+    .expect("judge confidence permits publication despite the producer score");
+    assert_eq!(posted.rows_affected(), 1);
+    transaction.commit().await?;
     Ok(())
 }
 
-/// severity-label uncertainty cannot suppress a finding
-/// whose is-real confidence clears both frozen policy thresholds.
+/// Producer severity-label uncertainty cannot suppress a finding whose
+/// independent judge confidence clears both frozen policy thresholds.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn schema_thresholds_ignore_severity_label_confidence() -> Result<(), Box<dyn Error>> {
@@ -647,7 +652,10 @@ async fn schema_thresholds_ignore_severity_label_confidence() -> Result<(), Box<
                 finding_ref,
                 ReviewEventOrdinal::one(),
                 evidence[1].clone(),
-                ReviewFindingEventKind::Accepted,
+                ReviewFindingEventKind::Accepted {
+                    confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                        .expect("judge confidence"),
+                },
             ),
         )
         .await?;
@@ -718,7 +726,10 @@ async fn canonical_pass_kind_rejects_misclassified_event() -> Result<(), Box<dyn
                     evidence[1].clone().policy(),
                     evidence[1].state().clone(),
                 ),
-                ReviewFindingEventKind::Accepted,
+                ReviewFindingEventKind::Accepted {
+                    confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                        .expect("judge confidence"),
+                },
             ),
         )
         .await
@@ -767,7 +778,10 @@ async fn bound_pass_result_is_immutable() -> Result<(), Box<dyn Error>> {
                 finding_ref,
                 ReviewEventOrdinal::one(),
                 evidence[1].clone(),
-                ReviewFindingEventKind::Accepted,
+                ReviewFindingEventKind::Accepted {
+                    confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                        .expect("judge confidence"),
+                },
             ),
         )
         .await?;

@@ -30,6 +30,7 @@ pub(super) struct EncodedPassResult<'a> {
     pub(super) ordinal: Option<ReviewEventOrdinal>,
     pub(super) event_kind: Option<&'static str>,
     pub(super) reason: Option<&'a str>,
+    pub(super) judge_confidence: Option<i16>,
     pub(super) referenced: Option<ReviewReferencedFindingEvidence>,
     pub(super) external_link: Option<ReviewExternalLinkId>,
     pub(super) external_object: Option<&'a str>,
@@ -107,6 +108,7 @@ pub(super) fn encode_pass_state(state: &ReviewPassState) -> EncodedPassState<'_>
 fn encode_pass_result(result: &ReviewPassResult) -> EncodedPassResult<'_> {
     let empty = |kind| EncodedPassResult {
         kind,
+        judge_confidence: None,
         finding: None,
         ordinal: None,
         event_kind: None,
@@ -161,7 +163,7 @@ fn encode_pass_finding_event<'a>(
     external_object: Option<&'a str>,
 ) -> EncodedPassResult<'a> {
     let (event_kind, reason, referenced, event_link) = match event.kind() {
-        ReviewFindingEventResultKind::Accepted => ("accepted", None, None, None),
+        ReviewFindingEventResultKind::Accepted { .. } => ("accepted", None, None, None),
         ReviewFindingEventResultKind::Rejected { reason } => {
             ("rejected", Some(reason.as_str()), None, None)
         }
@@ -180,6 +182,12 @@ fn encode_pass_finding_event<'a>(
     };
     EncodedPassResult {
         kind: result_kind,
+        judge_confidence: match event.kind() {
+            ReviewFindingEventResultKind::Accepted { confidence } => {
+                Some(i16::from(confidence.get()))
+            }
+            _ => None,
+        },
         finding: Some(event.finding()),
         ordinal: Some(event.ordinal()),
         event_kind: Some(event_kind),
@@ -200,6 +208,7 @@ pub(super) struct StoredPassResult {
     ordinal: Option<i64>,
     event_kind: Option<String>,
     reason: Option<String>,
+    judge_confidence: Option<i16>,
     referenced_finding: Option<Uuid>,
     referenced_run: Option<Uuid>,
     referenced_target: Option<Uuid>,
@@ -233,6 +242,7 @@ pub(super) fn stored_pass_result(
         ordinal: row.try_get(column("result_event_ordinal").as_str())?,
         event_kind: row.try_get(column("result_event_kind").as_str())?,
         reason: row.try_get(column("result_reason").as_str())?,
+        judge_confidence: row.try_get(column("result_judge_confidence").as_str())?,
         referenced_finding,
         referenced_run: row.try_get(column("result_referenced_finding_run_id").as_str())?,
         referenced_target,
@@ -285,12 +295,19 @@ fn decode_pass_result(
     produced_findings: Vec<ReviewFindingRef>,
     referenced_producer: Option<&LoadedReviewPass>,
 ) -> Result<Option<ReviewPassResult>, ReviewWorkflowStoreError> {
+    if stored.event_kind.as_deref() != Some("accepted") && stored.judge_confidence.is_some() {
+        return Err(corruption(
+            "review_pass",
+            String::from("non-accepted result has judge confidence"),
+        ));
+    }
     let scalar_empty = stored.finding.is_none()
         && stored.finding_run.is_none()
         && stored.finding_pass.is_none()
         && stored.ordinal.is_none()
         && stored.event_kind.is_none()
         && stored.reason.is_none()
+        && stored.judge_confidence.is_none()
         && stored.referenced_finding.is_none()
         && stored.referenced_run.is_none()
         && stored.referenced_target.is_none()
@@ -483,7 +500,15 @@ fn decode_stored_finding_event(
         )
     })?;
     let kind = match event_kind {
-        "accepted" => ReviewFindingEventResultKind::Accepted,
+        "accepted" => ReviewFindingEventResultKind::Accepted {
+            confidence: stored
+                .judge_confidence
+                .and_then(|value| u8::try_from(value).ok())
+                .and_then(signalbox_domain::ReviewJudgeConfidence::try_new)
+                .ok_or_else(|| {
+                    corruption("review_pass", String::from("invalid judge confidence"))
+                })?,
+        },
         "rejected" => ReviewFindingEventResultKind::Rejected {
             reason: review_text(
                 stored.reason.clone().ok_or_else(|| {
