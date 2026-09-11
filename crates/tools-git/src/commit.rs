@@ -94,7 +94,7 @@ impl RepositoryOperationState {
     fn cleanup(&self, authority: &PinnedRepository) -> Result<(), LocalGitFailure> {
         self.validate(authority)?;
         let git_directory =
-            dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+            dup(&authority.worktree_directory).map_err(|_| LocalGitFailure::Operation)?;
         for file in [
             self.merge_head.as_ref(),
             self.merge_message.as_ref(),
@@ -120,7 +120,7 @@ fn pin_state_file(
     max_bytes: usize,
 ) -> Result<Option<PinnedStateFile>, LocalGitFailure> {
     let descriptor = match openat(
-        &authority.git_directory,
+        &authority.worktree_directory,
         name,
         OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
@@ -177,7 +177,8 @@ fn validate_state_file(
 }
 
 fn reject_other_operation_states(authority: &PinnedRepository) -> Result<(), LocalGitFailure> {
-    let git_directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Repository)?;
+    let git_directory =
+        dup(&authority.worktree_directory).map_err(|_| LocalGitFailure::Repository)?;
     for name in OTHER_OPERATION_STATE_ENTRIES {
         if descriptor_entry_exists(&git_directory, OsStr::new(name))? {
             return Err(LocalGitFailure::Operation);

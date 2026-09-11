@@ -59,7 +59,7 @@ pub(super) fn mode_from_metadata_bits(bits: u32) -> Mode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RepositoryIdentity {
     pub(super) root: FileIdentity,
-    pub(super) git_directory: FileIdentity,
+    pub(super) administration: crate::repository_directories::AdministrationBinding,
     pub(super) refs: FileIdentity,
     pub(super) config: FileIdentity,
     pub(super) head: FileIdentity,

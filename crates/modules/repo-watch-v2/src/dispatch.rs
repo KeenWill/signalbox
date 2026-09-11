@@ -67,29 +67,51 @@ impl RepoWatchStore {
         repository: &RepositorySlug,
         rule: &RepoWatchRule,
     ) -> Result<Option<RuleEvent>, StoreError> {
-        let row: Option<(Decimal, Uuid, Vec<u8>)> = sqlx::query_as(
-            "SELECT event.repository_event_ordinal, event.event_id, event.normalized_payload
-             FROM rule AS active JOIN rule_revision AS revision
-               ON revision.repository = active.repository AND revision.rule_id = active.rule_id
-                AND revision.revision = active.active_revision
-             LEFT JOIN rule_evaluation_cursor AS cursor
-               ON cursor.repository = active.repository AND cursor.rule_id = active.rule_id
-                AND cursor.rule_revision = active.active_revision
-             JOIN gh_event AS event ON event.repository = active.repository
-              AND event.repository_event_ordinal > GREATEST(revision.activated_after_event_ordinal, COALESCE(cursor.event_ordinal, 0))
-             WHERE active.repository = $1 AND active.rule_id = $2 AND active.active_revision = $3
-               AND cursor.effect_id IS NULL
-             ORDER BY event.repository_event_ordinal LIMIT 1")
-            .bind(repository.as_str()).bind(rule.id().as_str()).bind(Decimal::from(rule.version().get()))
-            .fetch_optional(&self.pool).await?;
-        row.map(|(ordinal, id, payload)| {
-            Ok(RuleEvent {
-                ordinal: ordinal.to_u64().ok_or(StoreError::InvalidRetainedEvent)?,
-                event: crate::event_decode::event(RepoWatchEventId::from_uuid(id), &payload)
-                    .ok_or(StoreError::InvalidRetainedEvent)?,
-            })
-        })
-        .transpose()
+        loop {
+            let row: Option<(Decimal, Uuid, Vec<u8>)> = sqlx::query_as(
+                "SELECT event.repository_event_ordinal, event.event_id, event.normalized_payload
+                 FROM rule AS active JOIN rule_revision AS revision
+                   ON revision.repository = active.repository AND revision.rule_id = active.rule_id
+                    AND revision.revision = active.active_revision
+                 LEFT JOIN rule_evaluation_cursor AS cursor
+                   ON cursor.repository = active.repository AND cursor.rule_id = active.rule_id
+                    AND cursor.rule_revision = active.active_revision
+                 JOIN gh_readable_event AS event ON event.repository = active.repository
+                  AND event.repository_event_ordinal > GREATEST(revision.activated_after_event_ordinal, COALESCE(cursor.event_ordinal, 0))
+                 WHERE active.repository = $1 AND active.rule_id = $2 AND active.active_revision = $3
+                   AND cursor.effect_id IS NULL
+                 ORDER BY event.repository_event_ordinal LIMIT 1")
+                .bind(repository.as_str()).bind(rule.id().as_str()).bind(Decimal::from(rule.version().get()))
+                .fetch_optional(&self.pool).await?;
+            let Some((ordinal, id, payload)) = row else {
+                return Ok(None);
+            };
+            let ordinal = ordinal.to_u64().ok_or(StoreError::InvalidRetainedEvent)?;
+            if let Some(event) =
+                crate::event_decode::event(RepoWatchEventId::from_uuid(id), &payload)
+            {
+                return Ok(Some(RuleEvent { ordinal, event }));
+            }
+            let error = StoreError::InvalidRetainedEvent.to_string();
+            let marked = sqlx::query(
+                "UPDATE gh_event SET decode_error = $2
+                 WHERE event_id = $1 AND decode_error IS NULL",
+            )
+            .bind(id)
+            .bind(&error)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+                == 1;
+            if marked {
+                tracing::warn!(
+                    repository = repository.as_str(),
+                    event_id = %id,
+                    %error,
+                    "repository-watch event quarantined"
+                );
+            }
+        }
     }
 
     /// Evaluates a fact, durably records commands or suppression, then advances this revision.
@@ -243,7 +265,7 @@ impl RepoWatchStore {
              JOIN gh_event AS dispatched ON dispatched.event_id = origin.event_id
              JOIN LATERAL (
                  SELECT fact.event_id, fact.event_kind, fact.recorded_at
-                 FROM gh_event AS fact
+                 FROM gh_readable_event AS fact
                  WHERE fact.repository = dispatched.repository
                    AND fact.pull_request_number = dispatched.pull_request_number
                    AND fact.repository_event_ordinal > dispatched.repository_event_ordinal

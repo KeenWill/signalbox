@@ -202,6 +202,7 @@ it.each(['describe', 'load'] as const)(
       observed_through: '42',
       first_address: { event_sequence: '40' },
       latest_address: { event_sequence: '42' },
+      supervision: null,
       repository_watch: null,
       workspace_root_kind: null,
       sizes: {
@@ -240,6 +241,7 @@ it.each(['describe', 'load'] as const)(
         ...descriptor,
         observed_through: '40',
         latest_address: { event_sequence: '40' },
+        supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
         sizes: { ...descriptor.sizes, item_count: '1', projected_structured_bytes: '78' },
@@ -558,6 +560,7 @@ it.each([
       observed_through: String(observed),
       first_address: { event_sequence: '40' },
       latest_address: { event_sequence: String(through) },
+      supervision: null,
       repository_watch: null,
       workspace_root_kind: null,
       sizes: {

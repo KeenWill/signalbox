@@ -222,6 +222,7 @@ pub use telemetry::{
     OTLP_SERVICE_NAME_ENVIRONMENT, OtlpRuntime, PROMETHEUS_BIND_ENVIRONMENT, PrometheusServer,
     TelemetryConfiguration, TelemetryConfigurationError, TelemetryConfigurationFailure,
     TelemetryExportFilter, TelemetryExportLayer, TelemetryMetrics,
+    ambient_otlp_environment_variables,
 };
 pub use turn_liveness_runtime::{TurnLivenessNumericBounds, TurnLivenessRuntime};
 pub use web_blob_runtime::{

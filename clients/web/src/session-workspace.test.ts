@@ -18,6 +18,7 @@ const descriptor = (count: number) => ({
   observed_through: String(count),
   first_address: { event_sequence: '1' },
   latest_address: { event_sequence: String(count) },
+  supervision: null,
   repository_watch: null,
   workspace_root_kind: null,
   sizes: {

@@ -164,7 +164,7 @@ async fn observe_capacity(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn credential_capacity_policy_ranks_known_binding_windows_then_configured_order()
+async fn credential_capacity_policy_samples_unknown_then_ranks_known_binding_windows()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _) = migrated_postgres().await?;
     let unknown = || ProviderRateLimitSnapshot::new(SystemTime::now(), Vec::new());
@@ -180,11 +180,11 @@ async fn credential_capacity_policy_ranks_known_binding_windows_then_configured_
     };
     let cases = [
         (
-            "known beats unknown",
+            "unknown is sampled before known",
             unknown(),
             snapshot(30, 60),
             1,
-            SECOND,
+            FIRST,
         ),
         (
             "secondary window binds",
@@ -205,7 +205,7 @@ async fn credential_capacity_policy_ranks_known_binding_windows_then_configured_
             expired(),
             snapshot(30, 60),
             1,
-            SECOND,
+            FIRST,
         ),
         (
             "unknown ties use configured order",

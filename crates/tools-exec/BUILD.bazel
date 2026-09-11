@@ -34,6 +34,15 @@ rust_binary(
 rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_tools_exec",
+    data = [
+        "@rules_rust//rust/toolchain:current_cargo_files",
+        "@rules_rust//rust/toolchain:current_rustc_files",
+        "@rules_rust//rust/toolchain:current_rust_stdlib_files",
+    ],
+    env = {
+        "SIGNALBOX_TEST_CARGO": "$(rootpath @rules_rust//rust/toolchain:current_cargo_files)",
+        "SIGNALBOX_TEST_RUSTC": "$(rootpath @rules_rust//rust/toolchain:current_rustc_files)",
+    },
     deps = TEST_DEPS,
 )
 

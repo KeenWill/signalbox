@@ -971,8 +971,18 @@ impl HubModelConfiguration {
                 let members = members
                     .into_iter()
                     .map(|member| {
-                        CredentialPoolRuntimeMember::new(member.profile(), member.priority())
-                            .with_headroom_reserve(member.headroom_reserve_percent())
+                        let runtime =
+                            CredentialPoolRuntimeMember::new(member.profile(), member.priority())
+                                .with_headroom_reserve(member.headroom_reserve_percent());
+                        let Some(CredentialDelivery::CodexHome { path, .. }) = self
+                            .credential_profiles
+                            .get(member.profile())
+                            .map(CredentialProfile::delivery)
+                        else {
+                            return runtime;
+                        };
+                        let path = path.clone();
+                        runtime.with_availability_probe(move || codex_home_is_available(&path))
                     })
                     .collect::<Vec<_>>();
                 Some((
@@ -1146,6 +1156,20 @@ impl HubModelConfiguration {
                     ..
                 } => Some((profile.name().to_owned(), *max_concurrent_invocations)),
                 _ => None,
+            })
+            .collect()
+    }
+
+    /// Lists configured Codex homes that currently contain no login material.
+    pub fn empty_codex_home_profiles(&self) -> Vec<String> {
+        self.credential_profiles
+            .values()
+            .filter_map(|profile| {
+                let CredentialDelivery::CodexHome { path, .. } = profile.delivery() else {
+                    return None;
+                };
+                let empty = !codex_home_is_available(path);
+                empty.then(|| profile.name().to_owned())
             })
             .collect()
     }
@@ -1388,6 +1412,13 @@ impl HubModelConfiguration {
             .iter()
             .map(|(alias, definition)| (*alias, definition.selected()))
     }
+}
+
+fn codex_home_is_available(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .is_some()
 }
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+pub(super) const MAX_SYMBOLIC_REFERENCE_DEPTH: usize = 16;
+
 use std::{
     ffi::OsStr,
     fs,
@@ -25,8 +27,10 @@ use crate::reference_lock::{
 pub(super) fn open_git_directory_path(
     authority: &PinnedRepository,
     relative: &Path,
+    reference: &str,
 ) -> Result<OwnedFd, LocalGitFailure> {
-    let mut directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+    let mut directory =
+        dup(authority.administration_for(reference)).map_err(|_| LocalGitFailure::Operation)?;
     for component in relative.components() {
         let Component::Normal(component) = component else {
             return Err(LocalGitFailure::Operation);
@@ -104,7 +108,8 @@ pub(super) fn loose_reference_parent_is_missing(
     authority: &PinnedRepository,
     name: &str,
 ) -> Result<bool, LocalGitFailure> {
-    let mut directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+    let mut directory =
+        dup(authority.administration_for(name)).map_err(|_| LocalGitFailure::Operation)?;
     for component in Path::new(name)
         .parent()
         .unwrap_or_else(|| Path::new(""))
@@ -287,7 +292,6 @@ fn resolve_pinned_reference_chain_from_with_hook<AfterFirstRead: FnOnce()>(
     locks: Option<&[ReferenceLock]>,
     after_first_read: AfterFirstRead,
 ) -> Result<(Vec<String>, Option<git2::Oid>), LocalGitFailure> {
-    const MAX_SYMBOLIC_REFERENCE_DEPTH: usize = 16;
     let operation_guard = locks
         .is_none()
         .then(|| authority.operation_guard())

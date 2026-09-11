@@ -5,7 +5,7 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | arguments | 8 | 0 | 0 | [arguments](arguments.md) |
-| catalog | 3 | 0 | 0 | [catalog](catalog.md) |
+| catalog | 3 | 0 | 1 | [catalog](catalog.md) |
 | construction | 1 | 0 | 0 | [construction](construction.md) |
 | executor | 2 | 0 | 0 | [executor](executor.md) |
 | identity | 2 | 0 | 0 | [identity](identity.md) |
@@ -15,3 +15,4 @@
 | push_catalog | 2 | 0 | 1 | [push_catalog](push_catalog.md) |
 | push_executor | 2 | 0 | 0 | [push_executor](push_executor.md) |
 | push_transport | 6 | 1 | 0 | [push_transport](push_transport.md) |
+| repository_directories | 1 | 0 | 1 | [repository_directories](repository_directories.md) |

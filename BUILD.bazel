@@ -92,6 +92,17 @@ py_test(
     tags = ["external"],
 )
 
+py_test(
+    name = "test_test_database_lifecycle",
+    size = "small",
+    srcs = ["tooling/test_postgres_test_container.py"],
+    data = [
+        "config/signalboxd.example.toml",
+        "tooling/postgres_test_container.py",
+    ],
+    main = "tooling/test_postgres_test_container.py",
+)
+
 test_suite(
     name = "python_checker_tests",
     tests = [
@@ -99,6 +110,7 @@ test_suite(
         ":test_summarize_coverage",
         ":test_supervise_lifecycle",
         ":test_sweep_test_containers",
+        ":test_test_database_lifecycle",
         "//scripts:checker_tests",
     ],
 )
@@ -693,12 +705,44 @@ rust_selection_test(
     test = "//crates/file-media-adapters-text:adapters",
 )
 
+rust_selection_test(
+    name = "git_push_agent_sandbox",
+    args = [
+        "daemon_tools::git_push::ssh_tests::ssh_push_uses_agent_and_account_trust_files_inside_sandbox_for_both_destination_forms",
+        "--exact",
+        "--ignored",
+    ],
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+    test = "//apps/signalboxd:unit_tests",
+)
+
+rust_selection_test(
+    name = "git_push_workspace_trust_sandbox",
+    args = [
+        "daemon_tools::git_push::ssh_tests::ssh_push_keeps_account_trust_visible_under_workspace",
+        "--exact",
+        "--ignored",
+    ],
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+    test = "//apps/signalboxd:unit_tests",
+)
+
 test_suite(
     name = "host_integration_tests",
     tags = ["manual"],
     tests = [
         ":file_media_daemon_sandbox",
         ":file_media_text_sandbox",
+        ":git_push_agent_sandbox",
+        ":git_push_workspace_trust_sandbox",
         "//crates/file-media-adapters-audio:adapters",
         "//crates/file-media-processor-runtime:isolation",
         "//crates/tools-exec:bwrap",

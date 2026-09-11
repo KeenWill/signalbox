@@ -4,7 +4,7 @@
 ///
 /// Usage is evidence for the caller's budget accounting; this layer only
 /// records what the provider stated and never estimates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct TokenUsage {
     /// Input tokens billed for the request.
     pub input_tokens: Option<u64>,

@@ -27,9 +27,6 @@ impl S3BlobStore {
         &self,
         state: S3NamespaceBindingState,
     ) -> result::Result<(), signalbox_blob_store::BlobStoreError>;
-    pub async fn verify_multipart_lifecycle(
-        &self,
-    ) -> result::Result<(), signalbox_blob_store::BlobStoreError>;
     #[cfg(feature = "test-support")]
     pub async fn delete_for_conformance(
         &self,

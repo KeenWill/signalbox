@@ -186,7 +186,7 @@ impl RepoWatchStore {
     ) -> Result<Option<DispatchCheckout>, StoreError> {
         let row: Option<CheckoutRow> = sqlx::query_as(
             "SELECT ledger.dispatch_ref, event.event_id, COALESCE(ledger.retry_event, event.normalized_payload) AS normalized_payload, ledger.checkout_head_sha, ledger.checkout_removed, ledger.checkout_stop_command_id, ledger.checkout_retired_reason, ledger.checkout_workspace_root, ledger.checkout_session_id
-             FROM dispatch_ledger AS ledger JOIN gh_event AS event ON event.event_id = ledger.event_id
+             FROM dispatch_ledger AS ledger JOIN gh_readable_event AS event ON event.event_id = ledger.event_id
              WHERE ledger.command_id = $1 AND ledger.command_kind = 'create_session'")
             .bind(command.into_uuid()).fetch_optional(&self.pool).await?;
         row.map(|row| {

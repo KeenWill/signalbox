@@ -249,6 +249,7 @@ async function openDetails(
         first_address: { event_sequence: '1' },
         latest_address: { event_sequence: '5' },
         observed_through: '5',
+        supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
         sizes: {

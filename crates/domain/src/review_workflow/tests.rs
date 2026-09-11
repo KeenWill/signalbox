@@ -858,10 +858,9 @@ fn running_pass_admits_terminal_turn_projection_lag() {
     );
 }
 
-/// a queued pass starts only while its canonical turn is active; terminal outcomes cannot lead
-/// an unprojected start.
+/// a queued pass may start from terminal evidence when its turn completed before projection.
 #[test]
-fn queued_pass_start_requires_active_turn() {
+fn queued_pass_start_accepts_terminal_turn_evidence() {
     let mut run = ReviewRun::new(
         run_ref(),
         ReviewWorkflowKind::ReadOnlyReview,
@@ -875,7 +874,7 @@ fn queued_pass_start_requires_active_turn() {
         ReviewPassAcceptedInputEvidence::new(accepted_input_id(5), session_id(4), Some(turn_id(6))),
     )
     .expect("accepted input belongs to the pass session");
-    let error = queued
+    let running = queued
         .transition(
             ReviewPassState::Running { turn: turn_id(6) },
             Some(ReviewPassTurnEvidence::new(
@@ -886,8 +885,11 @@ fn queued_pass_start_requires_active_turn() {
                 Some(frontier_id(8)),
             )),
         )
-        .expect_err("a finished turn cannot lead an unprojected start");
-    assert_eq!(error.failure(), ReviewPassTransitionFailure::TurnNotActive);
+        .expect("terminal history authenticates the matching pass activation");
+    assert_eq!(
+        running.state(),
+        &ReviewPassState::Running { turn: turn_id(6) }
+    );
 }
 
 /// run reconstitution accepts its exact canonical pass outcome.

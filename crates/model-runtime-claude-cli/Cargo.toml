@@ -14,6 +14,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.140", features = ["arbitrary_precision", "raw_value"] }
 signalbox-model-runtime = { path = "../model-runtime", features = ["cli-process"] }
 tempfile = "3.27.0"
+tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 tokio = { version = "1.53.0", default-features = false, features = [
     "io-util",
     "macros",

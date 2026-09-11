@@ -2,17 +2,31 @@
 
 # outbox: types-2
 
-## OutboxCorruption
+## OutboxCursorCorruption
 
 ```rust
-pub enum OutboxCorruption {
+pub enum OutboxCursorCorruption {
     MissingDeliveryState,
     DeliveryStateChanged,
     MissingSequenceState,
     DeliveryBeyondAllocatedSequence,
     EventBeyondAllocatedSequence,
-    MissingCommittedEventHeader,
     InvalidSequence,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl fmt::Display for outbox::OutboxCursorCorruption {
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for outbox::OutboxCursorCorruption {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+```
+
+## OutboxRowCorruption
+
+```rust
+pub enum OutboxRowCorruption {
+    MissingCommittedEventHeader,
     InvalidAcceptancePosition,
     InvalidAcceptedInputContent,
     UnsupportedStorageVersion,
@@ -28,10 +42,10 @@ pub enum OutboxCorruption {
     InvalidSettlementEvent,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for outbox::OutboxCorruption {
+impl fmt::Display for outbox::OutboxRowCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for outbox::OutboxCorruption {
+impl error::Error for outbox::OutboxRowCorruption {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
@@ -41,7 +55,8 @@ impl error::Error for outbox::OutboxCorruption {
 ```rust
 pub enum OutboxDispatchError {
     Database(error::Error),
-    Corruption(outbox::OutboxCorruption),
+    CursorCorruption(outbox::OutboxCursorCorruption),
+    RowCorruption(outbox::OutboxRowCorruption),
 }
 // derives: fmt::Debug
 impl fmt::Display for outbox::OutboxDispatchError {
@@ -53,8 +68,11 @@ impl error::Error for outbox::OutboxDispatchError {
 impl convert::From<error::Error> for outbox::OutboxDispatchError {
     fn from(error: error::Error) -> Self;
 }
-impl convert::From<outbox::OutboxCorruption> for outbox::OutboxDispatchError {
-    fn from(error: outbox::OutboxCorruption) -> Self;
+impl convert::From<outbox::OutboxCursorCorruption> for outbox::OutboxDispatchError {
+    fn from(error: outbox::OutboxCursorCorruption) -> Self;
+}
+impl convert::From<outbox::OutboxRowCorruption> for outbox::OutboxDispatchError {
+    fn from(error: outbox::OutboxRowCorruption) -> Self;
 }
 ```
 

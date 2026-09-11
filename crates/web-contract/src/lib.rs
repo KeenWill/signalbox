@@ -911,10 +911,33 @@ pub struct WebSessionWorkFacts {
     pub queued_turn_count: WebU64,
 }
 
+/// Closed class of a retained session supervision failure.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionSupervisionClass {
+    Infrastructure,
+    CommitAmbiguous,
+    Corruption,
+    IdentityCollision,
+    Bug,
+}
+
+/// Session supervision evidence independent of transcript detail reads.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionSupervision {
+    pub class: WebSessionSupervisionClass,
+    pub cause_code: String,
+    pub pending: bool,
+}
+
 /// Browser descriptor for one authoritative bounded session projection.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDescriptor {
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub supervision: Option<WebSessionSupervision>,
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub workspace_root_kind: Option<WebSessionWorkspaceRootKind>,
@@ -2796,6 +2819,7 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
         "/properties/repository_watch/properties/pull_request",
     )?;
     make_property_nullable(&mut descriptor_schema, "repository_watch")?;
+    make_property_nullable(&mut descriptor_schema, "supervision")?;
     make_property_nullable(&mut descriptor_schema, "workspace_root_kind")?;
     let mut timeline_window_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());

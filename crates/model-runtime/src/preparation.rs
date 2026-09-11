@@ -36,6 +36,11 @@ pub enum PreparationOutcome<C, P> {
 /// A trustworthy ordinary failure discovered before send authorization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreparationFailure {
+    /// Startup proved that the selected adapter is unavailable.
+    AdapterUnavailable {
+        /// Stable, content-free cause code.
+        cause: &'static str,
+    },
     /// The operation asks for something this adapter does not support.
     UnsupportedOperation {
         /// What the adapter does not support.

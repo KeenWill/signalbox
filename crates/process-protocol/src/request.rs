@@ -55,7 +55,7 @@ pub enum ClientRequest {
     },
     /// Register a directory resolved by the daemon operator boundary.
     RegisterWorkspace { command_id: CommandId, root: String },
-    /// Mint an HTTPS Git remote for a registered workspace.
+    /// Mint an HTTPS or SSH Git remote for a registered workspace.
     MintGitRemote {
         command_id: CommandId,
         workspace_id: CanonicalUuid,

@@ -21,9 +21,8 @@ A withdrawal and the replacement mint may commit in one transaction.
 
 Push by name. `GitPushArguments` gains the remote name beside the branch, and no
 caller supplies a URL. The executor resolves the name to the live mint for the
-session's workspace and fails with a typed error when none stands. A destination
-stays `https` only, and the transport compiles no SSH support, so the store and
-the transport refuse the same set.
+session's workspace and fails with a typed error when none stands. The store and
+transport use the same destination type for HTTPS and SSH.
 
 Relocation. A relocation is a durable fact that binds an existing workspace
 identity to a new canonical root; the identity and its grants stand. Registering

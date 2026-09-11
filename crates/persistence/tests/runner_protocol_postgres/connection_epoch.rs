@@ -1129,7 +1129,7 @@ async fn reconnect_dispatch_quarantines_corrupted_predecessor() -> Result<(), Bo
     sqlx::query("ALTER TABLE runner_connection_event ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidRunnerEvent).await?;
+    assert_next_outbox_event_quarantined(&pool, OutboxRowCorruption::InvalidRunnerEvent).await?;
     drop(pool);
     Ok(())
 }

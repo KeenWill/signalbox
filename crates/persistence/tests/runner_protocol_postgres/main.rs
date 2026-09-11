@@ -42,8 +42,8 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository,
     local_test_connection_options,
     outbox::{
-        DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState, OutboxCorruption,
-        OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState,
+        OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher, OutboxRowCorruption,
         RunnerStateTransitionOutboxTestEvent, RunnerStateTransitionOutboxTestSource,
         append_runner_state_transition_for_test,
     },

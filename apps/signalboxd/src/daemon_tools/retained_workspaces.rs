@@ -27,7 +27,11 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Retaine
         // composition could duplicate. The read and execution families hold no
         // lock: a read observes a pinned descriptor, and every execution
         // revalidates the root's identity around its own launch.
-        !self.workspace_mutation.is_sole_handle() || !self.local_git.is_sole_handle()
+        !self.workspace_mutation.is_sole_handle()
+            || self
+                .local_git
+                .as_ref()
+                .is_some_and(|git| !git.is_sole_handle())
     }
 }
 

@@ -676,6 +676,15 @@ impl<'a> Output<'a> {
             ));
         };
         match message.as_ref() {
+            OperatorStatusMessage::UnavailableComponent(item) => {
+                writeln!(
+                    self.stdout,
+                    "unavailable_component component={} cause={}",
+                    self.render_field(&item.component, TextField::DelimitedOnLine),
+                    item.cause
+                )?;
+                Ok(())
+            }
             OperatorStatusMessage::SessionSupervision(item) => {
                 writeln!(
                     self.stdout,

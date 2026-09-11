@@ -60,7 +60,7 @@ pub struct ExchangeFacts {
     pub http_status: option::Option<u16>,
     pub retry_after: option::Option<time::Duration>,
 }
-// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, default::Default
+// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, default::Default, ser::Serialize
 ```
 
 ## parse_retry_after
@@ -73,7 +73,7 @@ pub fn parse_retry_after(value: &str, now: time::SystemTime) -> option::Option<t
 
 ```rust
 pub struct ProviderRequestId(/* private */);
-// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
+// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, ser::Serialize
 impl ProviderRequestId {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;
@@ -107,7 +107,7 @@ pub enum FinishReason {
         provider_token: string::String,
     },
 }
-// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
+// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, ser::Serialize
 impl FinishReason {
     pub fn completion_finish(self) -> option::Option<CompletionFinish>;
 }

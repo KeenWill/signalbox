@@ -22,12 +22,24 @@ pub async fn connect_production(
 ) -> result::Result<sqlx_postgres::PgPool, error::Error>;
 ```
 
+## production_connection_environment_variables
+
+```rust
+pub fn production_connection_environment_variables() -> impl iterator::Iterator<Item = &'static str>;
+```
+
 ## production_connection_options
 
 ```rust
 pub fn production_connection_options(
     database_url: &str,
 ) -> result::Result<options::PgConnectOptions, error::Error>;
+```
+
+## production_connection_ambient_warnings
+
+```rust
+pub fn production_connection_ambient_warnings() -> vec::Vec<&'static str>;
 ```
 
 ## local_test_connection_options

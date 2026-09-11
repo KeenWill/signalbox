@@ -273,11 +273,13 @@ operation.
 Startup acquires the single-daemon guard, fences the prior pool incarnation once
 the fence migration has run, runs the remaining migrations, marks prior-process
 runner connections lost and propagates their loss before the generic scan,
-initializes every configured blob store, binds the runner socket, binds the
-process socket, and then starts enrollment, admission, dispatch, and scheduling
-concurrently. No request, dispatch cursor advance, scheduler pass, or runner
-admission occurs before recovery completes. Any phase failure is a failed
-startup with a classified, key-bearing log line and a failure exit code.
+initializes every available configured blob store, binds the runner socket,
+binds the process socket, and then starts enrollment, admission, dispatch, and
+scheduling concurrently. No request, dispatch cursor advance, scheduler pass, or
+runner admission occurs before recovery completes. A blob-store initialization
+failure makes that store unavailable and does not fail the phase. Any other
+phase failure is a failed startup with a classified, key-bearing log line and a
+failure exit code.
 
 Each scan transaction classifies the lost tenure by its durable evidence and
 never fabricates a live end. A running turn with no model call ends its attempt
@@ -381,6 +383,9 @@ compaction result when it preserves the applicable seed or predecessor terminal
 prefix. Imported ancestry resolves only through the checked session-creation
 producer, and its one-to-one seed must name the exact stored frontier whose
 membership matches the selected prefix.
+
+Active-turn compaction retains the active turn while its dedicated call is
+prepared or in flight.
 
 Stored active phases are conclusions derived from complete owner facts, never
 trusted discriminators. A recovery-decision wait reconstitutes from an ambiguous

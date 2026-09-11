@@ -3,12 +3,12 @@ use super::{
     Request, Response, StatusCode, Url, transport_error,
 };
 
-pub(super) async fn validate_loopback_host(request: Request, next: Next) -> Response {
-    if !has_loopback_host(request.headers(), request.uri()) {
+pub(super) async fn validate_admitted_host(request: Request, next: Next) -> Response {
+    if !has_admitted_host(request.headers(), request.uri()) {
         return transport_error(
             StatusCode::FORBIDDEN,
-            "non_loopback_host_rejected",
-            "browser requests require a loopback request authority",
+            "unadmitted_host_rejected",
+            "browser requests require an IP or localhost request authority",
         );
     }
     next.run(request).await
@@ -30,21 +30,18 @@ pub(super) async fn validate_api_fetch_site(request: Request, next: Next) -> Res
     next.run(request).await
 }
 
-pub(super) fn has_loopback_host(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
+pub(super) fn has_admitted_host(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
     headers
         .get(HOST)
         .and_then(|host| host.to_str().ok())
         .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
         .or_else(|| uri.authority().cloned())
-        .is_some_and(|authority| is_loopback_authority(&authority))
+        .is_some_and(|authority| is_admitted_authority(&authority))
 }
 
-fn is_loopback_authority(authority: &axum::http::uri::Authority) -> bool {
+fn is_admitted_authority(authority: &axum::http::uri::Authority) -> bool {
     let host = normalized_authority_host(authority);
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
+    host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok()
 }
 
 fn normalized_authority_host(authority: &axum::http::uri::Authority) -> &str {

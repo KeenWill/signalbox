@@ -6,7 +6,7 @@
 
 ```rust
 pub struct ToolName(/* private */);
-// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, hash::Hash
+// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, hash::Hash, ser::Serialize
 impl ToolName {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;
@@ -17,7 +17,7 @@ impl ToolName {
 
 ```rust
 pub struct ToolCallId(/* private */);
-// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, hash::Hash
+// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, hash::Hash, ser::Serialize
 impl ToolCallId {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;
@@ -62,7 +62,7 @@ pub struct ToolCallProposal {
     pub name: ToolName,
     pub arguments_json: string::String,
 }
-// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
+// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, ser::Serialize
 ```
 
 ## ToolDecodeFailure

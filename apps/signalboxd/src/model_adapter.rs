@@ -106,6 +106,7 @@ pub struct ConfiguredModelRuntime<A, O> {
     openai: Option<Arc<O>>,
     claude_cli: Option<Arc<ClaudeCliRuntime>>,
     codex_cli: Option<Arc<CodexCliRuntime>>,
+    codex_cli_unavailable_cause: Option<&'static str>,
     routes: HashMap<String, ModelAdapter>,
     capabilities: ModelCapabilityCatalog,
     media: Option<crate::media_preparation::MediaPreparation>,
@@ -118,6 +119,7 @@ impl<A, O> Clone for ConfiguredModelRuntime<A, O> {
             openai: self.openai.clone(),
             claude_cli: self.claude_cli.clone(),
             codex_cli: self.codex_cli.clone(),
+            codex_cli_unavailable_cause: self.codex_cli_unavailable_cause,
             routes: self.routes.clone(),
             capabilities: self.capabilities.clone(),
             media: self.media.clone(),
@@ -126,6 +128,13 @@ impl<A, O> Clone for ConfiguredModelRuntime<A, O> {
 }
 
 impl<A, O> ConfiguredModelRuntime<A, O> {
+    /// Removes the Codex adapter while retaining its startup failure cause.
+    pub fn with_codex_cli_unavailable(mut self, cause: &'static str) -> Self {
+        self.codex_cli = None;
+        self.codex_cli_unavailable_cause = Some(cause);
+        self
+    }
+
     /// Authenticates durable image results and materializes only admitted bounded views.
     pub fn with_media_preparation(
         mut self,
@@ -173,6 +182,7 @@ impl<A, O> ConfiguredModelRuntime<A, O> {
                 .codex_cli_runtime(model_exchange_timeout, post_kill_reap_bound)
                 .map_err(ConfiguredAdapterConstructionError::CodexCli)?
                 .map(Arc::new),
+            codex_cli_unavailable_cause: None,
             routes: configuration.adapter_routes(),
             capabilities: configuration.runtime_model_capability_catalog(),
             media: None,
@@ -463,10 +473,18 @@ where
                         prepared: Box::new(prepared),
                     })
                 }
-                None => PreparationOutcome::Defect {
-                    correlation: operation.correlation,
-                    defect: PreparationDefect::RequestConstructionFailed {
-                        detail: String::from("configured Codex CLI adapter is unavailable"),
+                None => match self.codex_cli_unavailable_cause {
+                    Some(cause) => PreparationOutcome::Failed {
+                        correlation: operation.correlation,
+                        failure: signalbox_model_runtime::PreparationFailure::AdapterUnavailable {
+                            cause,
+                        },
+                    },
+                    None => PreparationOutcome::Defect {
+                        correlation: operation.correlation,
+                        defect: PreparationDefect::RequestConstructionFailed {
+                            detail: String::from("configured Codex CLI adapter is unavailable"),
+                        },
                     },
                 },
             },
@@ -1061,6 +1079,7 @@ service_tiers = ["priority"]
             capabilities: ModelCapabilityCatalog::empty(),
             claude_cli: None,
             codex_cli: None,
+            codex_cli_unavailable_cause: None,
             routes: HashMap::from([
                 (String::from("claude-example"), ModelAdapter::Anthropic),
                 (String::from("gpt-example"), ModelAdapter::OpenAi),
@@ -1090,6 +1109,36 @@ service_tiers = ["priority"]
             }
         );
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unavailable_codex_adapter_is_a_typed_preparation_failure() {
+        let runtime = ConfiguredModelRuntime {
+            anthropic: None::<Arc<ScriptedModel<String>>>,
+            openai: None::<Arc<ScriptedModel<String>>>,
+            capabilities: ModelCapabilityCatalog::empty(),
+            claude_cli: None,
+            codex_cli: None,
+            codex_cli_unavailable_cause: Some("codex_cli_pin_mismatch"),
+            routes: HashMap::from([(String::from("codex-example"), ModelAdapter::CodexCli)]),
+            media: None,
+        };
+        let mut operation = openai_operation();
+        operation.resolved_target = ResolvedTarget::new("codex-example");
+
+        let outcome = runtime
+            .prepare(operation, CancellationSignal::never())
+            .await;
+
+        assert!(matches!(
+            outcome,
+            PreparationOutcome::Failed {
+                failure: signalbox_model_runtime::PreparationFailure::AdapterUnavailable {
+                    cause: "codex_cli_pin_mismatch"
+                },
+                ..
+            }
+        ));
     }
 
     /// The OpenAI slot mirrors the Anthropic one: a configured route reaches

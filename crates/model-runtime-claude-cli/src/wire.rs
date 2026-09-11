@@ -18,6 +18,25 @@ pub(crate) struct SystemInit {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct CompactBoundary {
+    pub(crate) session_id: String,
+    pub(crate) compact_metadata: CompactMetadata,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CompactMetadata {
+    pub(crate) trigger: CompactTrigger,
+    pub(crate) pre_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CompactTrigger {
+    Manual,
+    Auto,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct McpServerStatus {
     pub(crate) name: String,
     pub(crate) status: String,

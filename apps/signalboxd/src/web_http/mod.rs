@@ -172,7 +172,6 @@ impl WebHttpConfiguration {
                 .parse()
                 .map_err(|_| WebHttpConfigurationError::InvalidBindAddress)?,
         };
-        validate_loopback_bind_address(bind_address)?;
         let asset_root = match asset_root {
             None => None,
             Some(value) if value.is_empty() => {
@@ -186,12 +185,11 @@ impl WebHttpConfiguration {
         })
     }
 
-    /// Creates explicit loopback-only configuration for a deterministic or embedded server.
+    /// Creates explicit configuration for a deterministic or embedded server.
     pub fn new(
         bind_address: SocketAddr,
         asset_root: Option<PathBuf>,
     ) -> Result<Self, WebHttpConfigurationError> {
-        validate_loopback_bind_address(bind_address)?;
         Ok(Self {
             bind_address,
             asset_root,
@@ -211,16 +209,6 @@ impl WebHttpConfiguration {
     }
 }
 
-fn validate_loopback_bind_address(
-    bind_address: SocketAddr,
-) -> Result<(), WebHttpConfigurationError> {
-    if bind_address.ip().is_loopback() {
-        Ok(())
-    } else {
-        Err(WebHttpConfigurationError::NonLoopbackBindAddress)
-    }
-}
-
 /// Closed configuration failures that never expose rejected values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebHttpConfigurationError {
@@ -228,8 +216,6 @@ pub enum WebHttpConfigurationError {
     BindAddressNotUnicode,
     /// Explicit listener setting was not a socket address.
     InvalidBindAddress,
-    /// Explicit listener setting would expose unauthenticated routes off-host.
-    NonLoopbackBindAddress,
     /// Explicit production asset root was empty.
     EmptyAssetRoot,
 }
@@ -249,10 +235,6 @@ impl fmt::Display for WebHttpConfigurationError {
                     "setting {WEB_BIND_ENVIRONMENT} is not a socket address"
                 )
             }
-            Self::NonLoopbackBindAddress => write!(
-                formatter,
-                "setting {WEB_BIND_ENVIRONMENT} must use a loopback address"
-            ),
             Self::EmptyAssetRoot => {
                 write!(formatter, "setting {WEB_ASSET_ROOT_ENVIRONMENT} is empty")
             }
@@ -570,7 +552,7 @@ fn production_router_with_budget(
         monitor: read_runtime.monitor,
         eligibility_nudge,
     };
-    // Every route that reads session data sits behind the loopback authority
+    // Every route that reads session data sits behind the admitted authority
     // gate. The attention projection returns session identities, goal-need
     // summaries, and operator state, so it belongs here for the same reason the
     // descriptor and timeline reads do: the listener is unauthenticated, and a
@@ -580,7 +562,7 @@ fn production_router_with_budget(
     let session_inputs = Router::new()
         .route("/sessions/{session_id}/input", post(session_submit_input))
         .route_layer(middleware::from_fn(validate_json_mutation))
-        .route_layer(middleware::from_fn(validate_loopback_host))
+        .route_layer(middleware::from_fn(validate_admitted_host))
         .with_state(state.clone());
     let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
@@ -609,10 +591,10 @@ fn production_router_with_budget(
             "/sessions/{session_id}/timeline-detail",
             get(session_timeline_region_detail),
         )
-        .route_layer(middleware::from_fn(validate_loopback_host))
+        .route_layer(middleware::from_fn(validate_admitted_host))
         .with_state(state);
     // Every route that reads session-attached content sits behind the
-    // loopback authority gate. Blob descriptors and bytes are reachable by
+    // admitted authority gate. Blob descriptors and bytes are reachable by
     // digest alone and a descriptor read can start isolated derivation work,
     // so they belong here for the same reason the session reads do: the
     // listener is unauthenticated, and a rebound origin must not reach blob
@@ -630,7 +612,7 @@ fn production_router_with_budget(
             "/blobs/{digest}/download",
             get(blob_download).head(blob_download),
         )
-        .route_layer(middleware::from_fn(validate_loopback_host))
+        .route_layer(middleware::from_fn(validate_admitted_host))
         .with_state(http_state.clone());
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
@@ -687,7 +669,7 @@ fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
         None => router.fallback(static_assets_not_configured),
     };
     router
-        .layer(middleware::from_fn(validate_loopback_host))
+        .layer(middleware::from_fn(validate_admitted_host))
         .layer(middleware::from_fn(origin::validate_api_fetch_site))
 }
 
@@ -1064,9 +1046,9 @@ pub(crate) use response::{application_error, transport_error};
 
 mod origin;
 #[cfg(test)]
-use origin::has_loopback_host;
+use origin::has_admitted_host;
 use origin::{
-    has_content_type, has_json_content_type, validate_loopback_host, validate_supplied_origin,
+    has_content_type, has_json_content_type, validate_admitted_host, validate_supplied_origin,
 };
 
 mod body;

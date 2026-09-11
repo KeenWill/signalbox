@@ -24,7 +24,7 @@ use opentelemetry::{
     trace::{SpanBuilder, TraceContextExt as _, Tracer as _, TracerProvider as _},
 };
 use opentelemetry_otlp::{
-    Protocol, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
+    Compression, Protocol, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
 };
 use opentelemetry_sdk::{
     Resource,
@@ -85,6 +85,7 @@ pub const OTLP_MAX_EXPORT_BATCH: usize = 128;
 const OTLP_EXPORT_INTERVAL: Duration = Duration::from_secs(5);
 const OTLP_EXPORT_TIMEOUT: Duration = Duration::from_secs(5);
 const OTLP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+const OTLP_COMPRESSION: Compression = Compression::Gzip;
 const MAX_ENDPOINT_BYTES: usize = 2_048;
 const MAX_HEADER_FILE_BYTES: u64 = 16 * 1024;
 const MAX_HEADER_COUNT: usize = 16;
@@ -115,6 +116,12 @@ const AMBIENT_OTLP_ENVIRONMENTS: &[&str] = &[
     "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
 ];
 
+/// Environment variables removed before an explicitly configured exporter is
+/// constructed.
+pub fn ambient_otlp_environment_variables() -> impl Iterator<Item = &'static str> {
+    AMBIENT_OTLP_ENVIRONMENTS.iter().copied()
+}
+
 /// Closed reason why opt-in telemetry configuration could not be admitted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TelemetryConfigurationFailure {
@@ -132,7 +139,6 @@ pub enum TelemetryConfigurationFailure {
     TooManyHeaders,
     DuplicateHeader,
     ExporterConstruction,
-    AmbientOtlpSetting,
     MetricsConstruction,
 }
 
@@ -153,7 +159,6 @@ impl TelemetryConfigurationFailure {
             Self::TooManyHeaders => "contains too many telemetry headers",
             Self::DuplicateHeader => "contains a duplicate telemetry header",
             Self::ExporterConstruction => "could not construct the OTLP exporter",
-            Self::AmbientOtlpSetting => "is an unsupported ambient OTLP setting",
             Self::MetricsConstruction => "could not construct the Prometheus registry",
         }
     }
@@ -225,6 +230,7 @@ struct OtlpConfiguration {
 pub struct TelemetryConfiguration {
     otlp: Option<OtlpConfiguration>,
     prometheus_bind: Option<SocketAddr>,
+    ambient_otlp_setting: Option<&'static str>,
 }
 
 impl TelemetryConfiguration {
@@ -233,6 +239,7 @@ impl TelemetryConfiguration {
         Self {
             otlp: None,
             prometheus_bind: None,
+            ambient_otlp_setting: None,
         }
     }
 
@@ -268,14 +275,10 @@ impl TelemetryConfiguration {
             return Ok(Self {
                 otlp: None,
                 prometheus_bind,
+                ambient_otlp_setting: None,
             });
         };
-        if let Some(setting) = values.ambient_otlp_setting {
-            return Err(TelemetryConfigurationError::new(
-                setting,
-                TelemetryConfigurationFailure::AmbientOtlpSetting,
-            ));
-        }
+        let ambient_otlp_setting = values.ambient_otlp_setting;
         let transport = validate_endpoint(&endpoint)?;
         let protocol =
             match optional_unicode(OTLP_PROTOCOL_ENVIRONMENT, values.protocol)?.as_deref() {
@@ -311,12 +314,18 @@ impl TelemetryConfiguration {
                 service_name,
             }),
             prometheus_bind,
+            ambient_otlp_setting,
         })
     }
 
     /// Returns the configured scrape address when Prometheus is enabled.
     pub const fn prometheus_bind(&self) -> Option<SocketAddr> {
         self.prometheus_bind
+    }
+
+    /// Returns one ambient OTLP setting ignored in favor of Signalbox configuration.
+    pub const fn ambient_otlp_setting(&self) -> Option<&'static str> {
+        self.ambient_otlp_setting
     }
 
     /// Constructs an OTLP runtime only when its endpoint setting is present.
@@ -593,6 +602,7 @@ fn build_http_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
         .with_timeout(OTLP_EXPORT_TIMEOUT)
         .with_http_client(client)
         .with_headers(headers)
+        .with_compression(OTLP_COMPRESSION)
         .build()
         .map_err(|_| ())
 }
@@ -610,6 +620,7 @@ fn build_grpc_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
     };
     builder
         .with_metadata(grpc_metadata(&configuration.headers)?)
+        .with_compression(OTLP_COMPRESSION)
         .build()
         .map_err(|_| ())
 }
@@ -1088,6 +1099,14 @@ impl TelemetryMetrics {
     /// Builds every bounded label series before the daemon begins work.
     pub fn new() -> Result<Self, TelemetryConfigurationError> {
         let registry = Registry::new();
+        let redaction_disagreements = IntCounter::new(
+            "signalbox_credential_redaction_disagreements_total",
+            "Forwarded model observations rejected by the shadow credential predicate.",
+        )
+        .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(RedactionDisagreements(redaction_disagreements)))
+            .map_err(|_| metrics_error())?;
         let client_connections = IntGauge::with_opts(Opts::new(
             "signalbox_client_connections_active",
             "Active local process-protocol connections.",
@@ -1319,6 +1338,29 @@ impl TelemetryMetrics {
                 .unwrap_or(0),
         );
         TextEncoder::new().encode_to_string(&self.registry.gather())
+    }
+}
+
+/// Samples the runtime's process counter without retaining a second count.
+struct RedactionDisagreements(IntCounter);
+
+impl prometheus::core::Collector for RedactionDisagreements {
+    fn desc(&self) -> Vec<&prometheus::core::Desc> {
+        self.0.desc()
+    }
+
+    fn collect(&self) -> Vec<prometheus::proto::MetricFamily> {
+        let mut families = self.0.collect();
+        for family in &mut families {
+            for metric in family.mut_metric() {
+                let mut counter = prometheus::proto::Counter::default();
+                counter.set_value(
+                    signalbox_model_runtime::credential_redaction_disagreements() as f64,
+                );
+                metric.set_counter(counter);
+            }
+        }
+        families
     }
 }
 
@@ -2034,18 +2076,18 @@ mod tests {
     }
 
     #[test]
-    fn enabled_otlp_refuses_ambient_standard_header_channels() {
+    fn enabled_otlp_ignores_ambient_standard_header_channels() {
         let mut environment = disabled_environment();
         environment.endpoint = Some(OsString::from("http://127.0.0.1:4317"));
         environment.ambient_otlp_setting = Some("OTEL_EXPORTER_OTLP_HEADERS");
 
-        let error = TelemetryConfiguration::from_values(environment)
-            .err()
-            .expect("ambient header channel is rejected");
-        let displayed = error.to_string();
+        let configuration = TelemetryConfiguration::from_values(environment)
+            .expect("ambient header channel does not override Signalbox configuration");
 
-        assert!(displayed.contains("OTEL_EXPORTER_OTLP_HEADERS"));
-        assert!(!displayed.contains(SYNTHETIC_CREDENTIAL));
+        assert_eq!(
+            configuration.ambient_otlp_setting(),
+            Some("OTEL_EXPORTER_OTLP_HEADERS")
+        );
     }
 
     #[test]
@@ -2079,6 +2121,10 @@ mod tests {
         let rendered = metrics.render().expect("static registry encodes");
 
         assert!(rendered.contains("signalbox_turns_started_total 1"));
+        assert!(
+            rendered.contains("# TYPE signalbox_credential_redaction_disagreements_total counter")
+        );
+        assert!(rendered.contains("\nsignalbox_credential_redaction_disagreements_total "));
         assert!(rendered.contains("outcome=\"reconciliation_required\""));
         assert!(rendered.contains("disposition=\"ambiguous\""));
         assert!(!rendered.contains("session_id"));
@@ -2086,6 +2132,40 @@ mod tests {
         assert!(!rendered.contains("model_call_id"));
         assert!(!rendered.contains(SYNTHETIC_CREDENTIAL));
         assert!(!rendered.contains(SYNTHETIC_CONTENT));
+    }
+
+    #[test]
+    fn shadow_redaction_disagreement_is_scraped_without_changing_forwarded_facts() {
+        use signalbox_model_runtime::{
+            CredentialRedactingSink, CredentialValue, Observation, ObservationFact,
+            ObservationSink, ProviderReportedModel, credential_redaction_disagreements,
+        };
+
+        let metrics = TelemetryMetrics::new().expect("static metric descriptors are valid");
+        let before = credential_redaction_disagreements();
+        let credential = CredentialValue::new(b"fixture_secret".to_vec());
+        let input = ["fixture_", "secret"].map(|fragment| Observation {
+            correlation: (),
+            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(fragment)),
+        });
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &credential);
+        for observation in &input {
+            sink.observe(observation.clone());
+        }
+        sink.flush();
+        drop(sink);
+        assert_eq!(observed, input);
+        let rendered = metrics.render().expect("static registry encodes");
+        let count = rendered
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("signalbox_credential_redaction_disagreements_total ")
+                    .and_then(|value| value.parse::<f64>().ok())
+            })
+            .expect("the disagreement counter is present");
+        assert!(count > before as f64);
+        assert!(!rendered.contains("fixture_secret"));
     }
 
     #[tokio::test(start_paused = true)]

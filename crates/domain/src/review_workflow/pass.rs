@@ -415,20 +415,6 @@ impl ReviewPass {
                 failure: ReviewPassTransitionFailure::Evidence(failure),
             });
         }
-        if self.state == ReviewPassState::Queued
-            && matches!(next, ReviewPassState::Running { .. })
-            && turn_evidence
-                .is_some_and(|evidence| evidence.outcome != ReviewPassTurnOutcome::Active)
-        {
-            return Err(ReviewPassTransitionError {
-                attempt: Box::new(ReviewPassTransitionAttempt {
-                    current: Box::new(self.clone()),
-                    next: next.clone(),
-                    turn_evidence,
-                }),
-                failure: ReviewPassTransitionFailure::TurnNotActive,
-            });
-        }
         let permitted = match (&self.state, &next) {
             (ReviewPassState::Queued, ReviewPassState::Running { .. }) => true,
             (ReviewPassState::Queued, ReviewPassState::Cancelled { turn: None }) => true,
@@ -959,9 +945,6 @@ pub enum ReviewPassTransitionFailure {
     InvalidTransition,
     /// The transition names a different turn.
     TurnChanged,
-    /// A queued pass starts only while its canonical turn is active; terminal
-    /// lag is reserved for a pass that already projected the running start.
-    TurnNotActive,
     /// A typed result does not match this pass kind, outcome, or ownership.
     IncompatibleResult,
     /// A distinct result was supplied after the pass result became immutable.

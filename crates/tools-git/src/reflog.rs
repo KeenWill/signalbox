@@ -63,8 +63,10 @@ impl ReferenceLogLock {
         let directory_mode = installation_modes.directory;
         let file_mode = installation_modes.file;
         let mut created_directories = CreatedReferenceDirectories::default();
+        let log_directory =
+            dup(authority.administration_for(reference)).map_err(|_| LocalGitFailure::Operation)?;
         let logs = created_directories.open_or_create(
-            &git_directory,
+            &log_directory,
             OsStr::new("logs"),
             directory_mode,
         )?;

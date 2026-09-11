@@ -301,10 +301,14 @@ terminal sessions skipped at startup.
 The end message also carries `outbox_quarantine_count`, a persistent health
 alarm whose healthy value is zero.
 
-Operator status includes one `repository_ingestion` record per configured
-watched repository and a `repository_ingestion_count` in its end message. A
-repository attempt that exhausts its request budget or leaves failed targeted
-observations reports `partial`.
+Operator status includes one `unavailable_component` record with a stable cause
+for each process-local store, adapter, or credential member unavailable at
+startup, and its end message carries the count. A component name admits the
+credential-member prefix plus the full configured credential-profile name. It
+includes one `repository_ingestion` record per configured watched repository and
+a `repository_ingestion_count` in its end message. A repository attempt that
+exhausts its request budget or leaves failed targeted observations reports
+`partial`.
 
 The transcript snapshot and the operator-status read stream their rows through
 server-side cursors into a secure unnamed temporary file, commit the
@@ -691,7 +695,8 @@ never paginated or truncated; configuration admission bounds each profile and
 pool name to 256 UTF-8 bytes and each pool to 1,024 members so the duplicated
 evidence fits one frame under worst-case JSON escaping. The non-null
 `record_generation` is zero, the oldest generation, for an active action without
-a projection generation. OAuth quarantine writes retain a profile-quarantine
+a projection generation or for a member operationally unavailable in the
+captured selection snapshot. OAuth quarantine writes retain a profile-quarantine
 exclusion tied to the authorization generation; reauthorization retires its
 active state.
 

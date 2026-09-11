@@ -112,6 +112,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
         latest_address: { event_sequence: '41' },
         observed_through: holdLive ? '42' : '41',
         work: { active_turn_count: holdLive ? '0' : '1', queued_turn_count: '0' },
+        supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
         sizes: {

@@ -546,6 +546,12 @@ body continuations.
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
 
+The descriptor also includes retained supervision class, sanitized cause, and
+pending reconciliation state, independently of lifecycle reconstruction and
+transcript detail decoding. Pending supervision displays recovery required in
+the session header and composer status. Reconciled evidence remains visible.
+Transcript corruption checks and command admission remain unchanged.
+
 The session timeline descriptor reports the first and latest addresses, the item
 and projected-size facts, the active and queued turn counts, and the observation
 cursor, all from one snapshot. The timeline sequence is allocated once across
@@ -641,7 +647,8 @@ its dedicated prepared call, then changes exactly once to applied or failed; its
 request fields never change. Both compaction paths use the deployment-configured
 compaction prompt and the session's current direct selection, and automatic
 compaction selects a bounded safe prefix so its own summary request does not
-repeat the complete oversized input.
+repeat the complete oversized input. Truncatable source entries prioritize text
+and tool arguments over identity metadata.
 
 Compactions in one session form a forward-only chain, and a successor's source
 retains its predecessor's complete result frontier as a semantic prefix. For

@@ -644,6 +644,9 @@ pub(super) fn map_tool_evidence_error(
             source,
             commit_ambiguous,
         } => ModelCallRepositoryError::from_database(source, commit_ambiguous),
+        crate::tool_loop::ToolLoopRepositoryError::Corruption(
+            crate::tool_loop::ToolLoopCorruption::Inconsistent(detail),
+        ) => ModelCallCorruption::Inconsistent(detail).into(),
         crate::tool_loop::ToolLoopRepositoryError::IdentityCollision
         | crate::tool_loop::ToolLoopRepositoryError::Corruption(_)
         | crate::tool_loop::ToolLoopRepositoryError::DifferentCommandKind

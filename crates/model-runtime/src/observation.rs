@@ -27,7 +27,7 @@ pub struct Observation<C> {
 /// [`ExchangeEstablished`](Self::ExchangeEstablished)) let the caller record
 /// how far the attempt provably progressed; content facts surface transient
 /// deltas and decoded proposals.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum ObservationFact {
     /// The adapter is about to hand the request to the transport. From this
     /// point the provider may have accepted it.

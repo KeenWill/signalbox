@@ -296,8 +296,8 @@ def run_suite(
     if not 0 <= shard_index < suite.shards:
         raise ManifestError(f"suite `{name}` has no shard {shard_index}")
     command = [
-        "bazel", "test", "--keep_going", "--flaky_test_attempts=2", "--jobs=8",
-        "--local_resources=cpu=8", "--local_resources=memory=12288",
+        "bazel", "test", "--keep_going", "--flaky_test_attempts=2", "--jobs=4",
+        "--local_resources=cpu=4", "--local_resources=memory=12288",
         "--local_test_jobs=1", "--test_sharding_strategy=disabled",
         f"--test_env=SIGNALBOX_TEST_SHARD_INDEX={shard_index}",
         f"--test_env=SIGNALBOX_TEST_TOTAL_SHARDS={suite.shards}",

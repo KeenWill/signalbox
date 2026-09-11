@@ -107,6 +107,7 @@ pub struct WatchedRepositoryConfiguration {
     credential: crate::credential_pools::GithubCredentialProfile,
     credential_profile: Option<String>,
     push_credential_file: Option<PathBuf>,
+    push_remote_url: Option<signalbox_domain::GitRemoteUrl>,
     webhook: Option<WatchedRepositoryWebhookConfiguration>,
     convergence_pull_requests: Box<[PullRequestNumber]>,
 }
@@ -135,14 +136,43 @@ impl WatchedRepositoryConfiguration {
         &self.credential
     }
 
-    /// Whether a deployment credential enables Git pushes.
-    pub fn admits_push(&self) -> bool {
-        self.push_credential_file.is_some() || self.credential.authentication().is_some()
-    }
-
     /// Returns the optional deployment-owned credential file for configured pushes.
     pub fn push_credential_file(&self) -> Option<&Path> {
         self.push_credential_file.as_deref()
+    }
+
+    /// Returns the explicitly configured push destination, when supplied.
+    pub fn push_remote_url(&self) -> Option<&signalbox_domain::GitRemoteUrl> {
+        self.push_remote_url.as_ref()
+    }
+
+    /// Whether the destination has a configured credential or an available Linux SSH agent.
+    pub fn admits_push(&self) -> bool {
+        let socket = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
+        self.git_push_enabled_with_agent(socket.as_deref())
+    }
+
+    pub(crate) fn absolute_ssh_agent_socket(path: &Path) -> Option<PathBuf> {
+        std::fs::canonicalize(path).ok()
+    }
+
+    pub(super) fn git_push_enabled_with_agent(&self, socket: Option<&Path>) -> bool {
+        self.push_credential_file.is_some()
+            || (self.credential.authentication().is_some()
+                && self.push_remote_url.as_ref().is_none_or(|remote| {
+                    url::Url::parse(remote.as_str()).is_ok_and(|url| {
+                        url.scheme() == "https" && url.host_str() == Some("github.com")
+                    })
+                }))
+            || (cfg!(target_os = "linux")
+                && self
+                    .push_remote_url
+                    .as_ref()
+                    .is_some_and(|remote| !remote.as_str().starts_with("https://"))
+                && socket
+                    .and_then(Self::absolute_ssh_agent_socket)
+                    .as_deref()
+                    .is_some_and(agent_socket_available))
     }
 
     /// Returns the non-secret request credential reference for this repository.
@@ -186,6 +216,7 @@ impl fmt::Debug for WatchedRepositoryConfiguration {
                     .as_ref()
                     .map(|_| "[REDACTED REFERENCE]"),
             )
+            .field("push_remote_url", &self.push_remote_url)
             .field("webhook", &self.webhook)
             .field("convergence_pull_requests", &self.convergence_pull_requests)
             .finish()
@@ -400,6 +431,7 @@ pub(super) fn parse_repository_watch_configuration(
                 "credential_file",
                 "credential_profile",
                 "push_credential_file",
+                "push_remote_url",
                 "webhook_hook_id",
                 "webhook_secret_file",
                 "webhook_mode",
@@ -464,6 +496,15 @@ pub(super) fn parse_repository_watch_configuration(
                     return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
                 }
                 Ok(path)
+            })
+            .transpose()?;
+        let push_remote_url = repository
+            .get("push_remote_url")
+            .map(|_| {
+                let value = required_string(repository, "push_remote_url")
+                    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+                signalbox_domain::GitRemoteUrl::try_new(value.to_owned())
+                    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
             })
             .transpose()?;
         if let crate::credential_pools::GithubCredentialDelivery::File(credential_file) =
@@ -557,6 +598,7 @@ pub(super) fn parse_repository_watch_configuration(
                 .and_then(Item::as_str)
                 .map(str::to_owned),
             push_credential_file,
+            push_remote_url,
             webhook: repository_webhook,
             convergence_pull_requests: convergence_pull_requests.into_boxed_slice(),
         });
@@ -1052,6 +1094,29 @@ fn parse_repository_watch_actions(
             Ok(RepoWatchRuleActionV1::DispatchSession { template })
         })
         .collect()
+}
+
+fn agent_socket_available(path: &Path) -> bool {
+    use rustix::{
+        fs::{OFlags, fcntl_getfl, fcntl_setfl},
+        io::{FdFlags, fcntl_setfd},
+        net::{AddressFamily, SocketAddrUnix, SocketType, connect, socket},
+    };
+    let Ok(address) = SocketAddrUnix::new(path) else {
+        return false;
+    };
+    let Ok(probe) = socket(AddressFamily::UNIX, SocketType::STREAM, None) else {
+        return false;
+    };
+    let Ok(flags) = fcntl_getfl(&probe) else {
+        return false;
+    };
+    if fcntl_setfd(&probe, FdFlags::CLOEXEC).is_err()
+        || fcntl_setfl(&probe, flags | OFlags::NONBLOCK).is_err()
+    {
+        return false;
+    }
+    connect(&probe, &address).is_ok()
 }
 
 impl RepositoryWatchConfiguration {

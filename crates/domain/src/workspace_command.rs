@@ -13,13 +13,13 @@ pub enum WorkspaceOperation {
         /// The canonical directory spelling.
         root: WorkspaceRootPath,
     },
-    /// Mints one HTTPS destination scoped to a workspace.
+    /// Mints one HTTPS or SSH destination scoped to a workspace.
     MintRemote {
         /// The registered workspace.
         workspace: WorkspaceId,
         /// The chosen remote name.
         name: GitRemoteName,
-        /// The chosen HTTPS destination.
+        /// The chosen HTTPS or SSH destination.
         url: GitRemoteUrl,
     },
     /// Withdraws exactly one durable mint.

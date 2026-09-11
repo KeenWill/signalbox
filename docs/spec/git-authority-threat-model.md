@@ -86,8 +86,26 @@ records a withdrawal rather than editing or deleting the mint. The live
 destination table is derived from those facts, so a mint stands in it until its
 withdrawal is recorded.
 
-A push destination is `https` only; the durable mint and the configured remote
-judge a URL by one type, so both refuse the same set.
+Push destinations accept HTTPS, `ssh://`, and `git@host:` forms. The durable
+mint and the configured remote use the same destination type. SSH uses a
+configured private key file or, on Linux, the host SSH agent exposed to the
+sandbox. Push approval, branch and commit fences, captured object authority,
+non-forced updates, and remote confirmation apply to both transports. SSH runs
+in batch mode with user SSH configuration disabled. Credential preparation,
+account lookup, sandbox setup, push and confirmation share one 300-second
+deadline. Agent-backed pushes run through the execution sandbox with the private
+captured repository as its workspace, host networking, and read-only binds for
+the agent socket and host trust stores. User trust files are `known_hosts` and
+`known_hosts2` under the account home returned by the host account database; the
+`HOME` environment variable does not select them. These files are mounted at
+fixed paths outside the private workspace and selected explicitly for OpenSSH.
+Agent-backed push authority requires a socket that accepts a connection when
+authority is derived. Relative agent socket paths resolve to absolute paths
+before probing and retention. The socket is mounted at a fixed UTF-8 sandbox
+path, preserving arbitrary host pathname bytes. The sandbox receives a minimal
+passwd entry from the host account lookup, including the resolved UID and home.
+Its NSS configuration resolves passwd and group entries from mounted files and
+hostnames through hosts files and DNS.
 
 Workspace roots are globally unique by canonical spelling, and the key carries
 no runner or location dimension. Why: the single-runner rule means no two
@@ -102,6 +120,11 @@ model-authored code. `pushurl` is multi-valued, Git pushes to every value, and
 nothing about the rest. A canonical URL repeated in that list makes Git invoke
 the destination twice, so the repetition is rejected: the second invocation
 could report a known failure after the first had already changed external state.
+
+Branch-occupancy serialization covers cooperating daemon Git executors that
+honor its locks. External native worktree registration, including
+`git worktree add --no-checkout` outside the daemon, is outside this isolation
+contract. Occupancy scans reject conflicts visible at their validation points.
 
 Signalbox does not isolate a repository from every process that can write it:
 another same-authority or privileged process can mutate repository data after
@@ -146,10 +169,10 @@ limit (`"none"` for unbounded) applies to the objects an operation reads,
 including packed delta bases, intermediate results, and delta instructions, not
 to unrelated objects retained in its history.
 
-Repository semantics outside the direct main-worktree subset are unsupported,
-not partially trusted. Linked worktrees, discovery, alternate object databases,
-replacement-object configuration, and other rejected extension surfaces need a
-separate user-approved contract before support.
+Repository semantics outside the supported worktree layouts are unsupported, not
+partially trusted. Discovery, alternate object databases, replacement-object
+configuration, and other rejected extension surfaces need a separate
+user-approved contract before support.
 
 Remote authentication, transport security, server-side authorization, and remote
 repository behavior are not properties of the local authority;
@@ -164,11 +187,16 @@ residual.
 
 ## Boundary contracts
 
-The Git family operates only on a direct main worktree whose `.git` directory is
-immediately inside the root its suite was constructed with. The root is
-construction input and never a per-call argument, so a local operation cannot
-select another repository. Composing several suites does not weaken this: each
-suite is a separate construction, and no suite can reach another's root.
+The Git family resolves the configured root's `.git` directory or `gitdir:`
+file, including a linked worktree's common administration directory.
+Administration markers accept LF or CRLF endings. A linked checkout may use a
+bare common repository; the common repository's HEAD does not occupy a checkout.
+Branch switching resolves each sibling's symbolic reference chain in its own
+local namespace under one validated administration snapshot and refuses a branch
+checked out in another worktree. The root is construction input and never a
+per-call argument, so a local operation cannot select another repository.
+Composing several suites does not weaken this: each suite is a separate
+construction, and no suite can reach another's root.
 
 Every admitted Git action is a fixed typed operation with a compiled argument
 schema and a typed result or failure. Text fields such as a commit message are
@@ -203,8 +231,9 @@ workspace.
 Operator workspace registration canonicalizes the root once in the daemon
 filesystem and stores its unique spelling with the registering command.
 Workspace comparisons use the resulting identity. Git remote minting records one
-HTTPS destination per workspace and name; withdrawal retires exactly one mint
-and frees its name. Neither operation changes which roots the daemon may open.
+HTTPS or SSH destination per workspace and name; withdrawal retires exactly one
+mint and frees its name. Neither operation changes which roots the daemon may
+open.
 
 ## Planned
 

@@ -93,6 +93,7 @@ const useDeterministicSession = (page: Page) =>
     return route.fulfill({
       json: {
         session_id: sessionEvidenceFixture.id,
+        supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
         sizes: {

@@ -41,11 +41,10 @@ use signalbox_session_ownership::{
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
     RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchRule,
     RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
-    RepoWatchWorkflowRunObservation, RepositorySlug, ReviewState, ReviewThreadId, SessionCommand,
-    SessionCommandPayload, SessionCreated, SessionId, SessionLifecycleCommand,
-    SessionLifecycleOperation, SessionOwnership, SessionTemplateName, StartGate, StopStickiness,
-    WorkflowName,
+    RepoWatchThreadObservation, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
+    RepositorySlug, ReviewState, ReviewThreadId, SessionCommand, SessionCommandPayload,
+    SessionCreated, SessionId, SessionLifecycleCommand, SessionLifecycleOperation,
+    SessionOwnership, SessionTemplateName, StartGate, StopStickiness, WorkflowName,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -390,9 +389,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 Some(ReviewState::Approved),
                 default_head.clone(),
             )],
-            threads: vec![RepoWatchThreadObservation::new(
+            threads: vec![RepoWatchThreadObservation::resolved(
                 ReviewThreadId::try_new(String::from("thread-1"))?,
-                RepoWatchThreadState::Resolved,
+                Some(author.clone()),
+                Some(author.clone()),
             )],
             reactions: vec![RepoWatchReactionObservation::new(
                 ReactionSubject::ReviewComment {
@@ -786,7 +786,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             "completed_check_suites":[{"completion_generation":"suite-1"}],
             "completed_check_runs":[{"completion_generation":"run-1"}],
             "reviews":[{"reviewer":"octocat","state":"approved"}],
-            "threads":[{"thread":"thread-1","state":"resolved"}],
+            "threads":[{"thread":"thread-1","state":"resolved","author":"octocat","resolver":"octocat"}],
             "reactions":[{"reactor":"octocat","content":"+1"}]
           }],
           "workflow_runs":[{"workflow":"ci","attempt":2}],
@@ -2698,6 +2698,101 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn undecodable_event_is_quarantined_and_next_event_is_evaluated() -> Result<(), Box<dyn Error>>
+{
+    let (_container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("dispatch/project"))?;
+    let now = OffsetDateTime::now_utc();
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &dispatch_observation(&repository, 1, now),
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("ci"))?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+            repository: Some(repository.clone()),
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(String::from("watch"))?,
+        }],
+        RepoWatchSingletonScope::Repository,
+        Duration::ZERO,
+    )?;
+    store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                &repository,
+                std::slice::from_ref(&rule),
+            )],
+            now,
+        )
+        .await?;
+    for run in [2, 3] {
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &dispatch_observation(&repository, run, now),
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+    }
+    let poisoned: Uuid = sqlx::query_scalar(
+        "SELECT event_id FROM gh_event WHERE repository = $1
+         ORDER BY repository_event_ordinal DESC OFFSET 1 LIMIT 1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query("UPDATE gh_event SET normalized_payload = $2 WHERE event_id = $1")
+        .bind(poisoned)
+        .bind(b"not json".as_slice())
+        .execute(&pool)
+        .await?;
+    let mut ids = FixedDispatchIds {
+        value: 10001,
+        calls: 0,
+    };
+    let mut factory = FixtureSessionFactory {
+        next_command: 20001,
+        model: 30001,
+    };
+    let mut codec = FixtureCommandCodec;
+    assert!(
+        store
+            .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, now)
+            .await
+            .expect("next event evaluates")
+    );
+    let decode_error: Option<String> =
+        sqlx::query_scalar("SELECT decode_error FROM gh_event WHERE event_id = $1")
+            .bind(poisoned)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        decode_error.as_deref(),
+        Some("repository-watch retained event is invalid")
+    );
+    assert_eq!(store.recover_pending_commands(&mut codec).await?.len(), 1);
+    assert!(store.next_rule_event(&repository, &rule).await?.is_none());
+    Ok(())
+}
+
 struct SettlingThenFailingSink {
     store: RepoWatchStore,
     fail: bool,
@@ -4404,6 +4499,100 @@ async fn undated_compact_entries_do_not_reopen_ordinary_pull_requests() -> Resul
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn poll_cursor_attribution_migration_invalidates_parent_version_snapshots()
+-> Result<(), Box<dyn Error>> {
+    const MIGRATION_VERSION: i64 = 202609102359;
+    let previous = sqlx::migrate::Migrator {
+        migrations: signalbox_persistence::MIGRATOR
+            .iter()
+            .filter(|migration| migration.version != MIGRATION_VERSION)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    let (container, core_pool, database_url) = unmigrated_postgres().await?;
+    previous.run(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let poll_pool = module_pool(&database_url).await?;
+    sqlx::query(
+        "INSERT INTO poll_cursor (repository, cursor)
+         VALUES ('example/project', '{\"threads\": [{\"id\": \"thread-1\", \"isResolved\": false}]}'::jsonb)",
+    )
+    .execute(&poll_pool)
+    .await?;
+
+    migrate(&core_pool).await?;
+
+    let cursor_count: i64 = sqlx::query_scalar("SELECT count(*) FROM poll_cursor")
+        .fetch_one(&poll_pool)
+        .await?;
+    assert_eq!(cursor_count, 0);
+    poll_pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn rejected_legacy_thread_snapshot_clears_durable_cursor() -> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::{poll_cache::poll_with_cache, provider::ObservationError};
+    let (container, core_pool, database_url) = unmigrated_postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let poll_pool = module_pool(&database_url).await?;
+    let store = RepoWatchStore::new(poll_pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    sqlx::query(
+        "INSERT INTO poll_cursor (repository, cursor)
+         VALUES ($1, '{
+           \"pulls\": [1],
+           \"pages\": {},
+           \"threads\": {
+             \"legacy-page\": {
+               \"nodes\": [{\"id\": \"thread-1\", \"isResolved\": false}],
+               \"pageInfo\": {\"hasNextPage\": false, \"endCursor\": null}
+             }
+           },
+           \"retained\": []
+         }'::jsonb)",
+    )
+    .bind(repository.as_str())
+    .execute(&poll_pool)
+    .await?;
+
+    assert!(matches!(
+        poll_with_cache(
+            &ConditionalPollFixture::new(),
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(1000).expect("poll budget")
+        )
+        .await,
+        Err(ObservationError::Cache(StoreError::InvalidPollCache))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cursor")
+            .fetch_one(&poll_pool)
+            .await?,
+        0
+    );
+    poll_pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the_cache()
 -> Result<(), Box<dyn Error>> {
     use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
@@ -5581,7 +5770,11 @@ async fn coalesced_unseen_pull_snapshot_dispatches_its_label_and_retains_all_fac
         .settle_webhook(1, opened, WebhookDisposition::Applied, now)
         .await?;
     let mut io = ConditionalPollFixture::new();
-    io.thread_nodes = vec![serde_json::json!({"id":"fixture-thread", "isResolved":true})];
+    io.thread_nodes = vec![serde_json::json!({
+        "id":"fixture-thread", "isResolved":true,
+        "resolvedBy":{"login":"resolver"},
+        "comments":{"nodes":[{"author":{"login":"reviewer"}}]}
+    })];
     let rule = RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(String::from("label-dispatch"))?,
         RepoWatchRuleVersion::V1,
@@ -5770,7 +5963,11 @@ async fn reopening_a_closed_pull_does_not_repeat_its_initial_snapshot_facts()
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
     let mut io = ConditionalPollFixture::new();
     io.changed = true;
-    io.thread_nodes = vec![serde_json::json!({"id":"fixture-thread", "isResolved":true})];
+    io.thread_nodes = vec![serde_json::json!({
+        "id":"fixture-thread", "isResolved":true,
+        "resolvedBy":{"login":"resolver"},
+        "comments":{"nodes":[{"author":{"login":"reviewer"}}]}
+    })];
     io.pages
         .get_mut("/repos/example/project/pulls/1")
         .expect("pull detail")

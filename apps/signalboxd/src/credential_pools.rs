@@ -14,6 +14,7 @@ use std::{
 };
 
 use signalbox_model_runtime_claude_cli::CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY;
+pub(crate) use signalbox_process_protocol::MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES;
 use signalbox_process_protocol::MAX_HEADROOM_RESERVE_PERCENT;
 use toml_edit::{InlineTable, Item, Table};
 use url::Url;
@@ -25,9 +26,6 @@ use crate::configuration::{
 
 /// Maximum UTF-8 byte length admitted for a credential-delivery path.
 pub(crate) const MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES: usize = 4_096;
-
-/// Maximum UTF-8 byte length admitted for a credential profile or pool name.
-pub(crate) const MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES: usize = 256;
 
 /// Maximum number of members admitted in one credential pool.
 pub(crate) const MAX_CREDENTIAL_POOL_MEMBERS: usize = 1_024;
@@ -72,7 +70,7 @@ pub enum CredentialDelivery {
     /// The daemon validates directory shape but never reads its auth material,
     /// per `docs/spec/configuration-and-credentials.md`.
     CodexHome {
-        /// Absolute existing nonempty directory passed only as `CODEX_HOME`.
+        /// Absolute existing directory passed only as `CODEX_HOME`.
         path: PathBuf,
         /// Optional per-home process concurrency declaration.
         max_concurrent_invocations: Option<NonZeroU32>,
@@ -106,7 +104,7 @@ impl OauthDelivery {
 /// Typed startup failure for one configured credential home.
 ///
 /// `docs/spec/configuration-and-credentials.md` owns
-/// these fail-closed admission conditions.
+/// these admission conditions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialHomeAdmissionFailure {
     /// The configured path was not an absolute normalized path.
@@ -115,8 +113,6 @@ pub enum CredentialHomeAdmissionFailure {
     MissingOrNotDirectory,
     /// Directory enumeration failed closed.
     UnreadableDirectory,
-    /// The directory contains no provisioned entries.
-    EmptyDirectory,
 }
 
 impl CredentialHomeAdmissionFailure {
@@ -130,7 +126,6 @@ impl CredentialHomeAdmissionFailure {
             Self::InvalidPath => "path is not absolute and normalized",
             Self::MissingOrNotDirectory => "path is not an existing directory",
             Self::UnreadableDirectory => "directory could not be enumerated",
-            Self::EmptyDirectory => "directory contains no provisioned entries",
         }
     }
 }
@@ -267,14 +262,10 @@ fn admit_credential_home(
             failure: CredentialHomeAdmissionFailure::UnreadableDirectory,
         })?;
     match entries.next() {
-        Some(Ok(_)) => Ok(()),
+        Some(Ok(_)) | None => Ok(()),
         Some(Err(_)) => Err(HubModelConfigurationError::InvalidCredentialHome {
             credential_profile: Arc::clone(profile),
             failure: CredentialHomeAdmissionFailure::UnreadableDirectory,
-        }),
-        None => Err(HubModelConfigurationError::InvalidCredentialHome {
-            credential_profile: Arc::clone(profile),
-            failure: CredentialHomeAdmissionFailure::EmptyDirectory,
         }),
     }
 }

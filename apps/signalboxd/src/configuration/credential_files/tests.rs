@@ -49,29 +49,20 @@ async fn oversized_file_is_rejected_at_admission_and_resolution() {
 }
 
 #[tokio::test]
-async fn group_or_other_permissions_are_rejected_on_every_resolution() {
+async fn group_or_other_permissions_warn_and_are_read_on_every_resolution() {
     let (file, access, reference) = fixture();
     access.validate().expect("initial private file");
     for mode in [0o640, 0o620, 0o610, 0o604, 0o602, 0o601] {
         fs::set_permissions(file.path(), fs::Permissions::from_mode(mode))
             .expect("changed permissions");
-        let error = access
+        let credential = access
             .resolve(&reference)
             .await
-            .expect_err("nonprivate credential");
-        assert_eq!(
-            error.failure,
-            CredentialAccessFailure::InsecurePermissions,
-            "{mode:o}"
-        );
-        assert_eq!(
-            access
-                .validate()
-                .expect_err("admission rejects permissions")
-                .failure,
-            CredentialAccessFailure::InsecurePermissions,
-            "{mode:o}"
-        );
+            .expect("permissive mode does not withhold the credential");
+        assert_eq!(credential.expose_bytes(), b"synthetic-secret", "{mode:o}");
+        access
+            .validate()
+            .expect("admission accepts permissive mode after warning");
     }
 }
 
@@ -150,13 +141,13 @@ async fn symlinks_admit_the_final_target_and_recheck_replacements() {
 #[test]
 fn admission_errors_identify_the_reference_without_path_or_contents() {
     let (file, access, reference) = fixture();
-    fs::set_permissions(file.path(), fs::Permissions::from_mode(0o644)).expect("nonprivate file");
-    let error = access.validate().expect_err("permissions fail");
+    file.as_file().set_len(65_537).expect("oversized file");
+    let error = access.validate().expect_err("size admission fails");
     assert_eq!(error.reference, reference);
-    assert_eq!(error.failure, CredentialAccessFailure::InsecurePermissions);
+    assert_eq!(error.failure, CredentialAccessFailure::TooLarge);
     let diagnostic = format!("{error} {error:?}");
     assert!(diagnostic.contains(reference.as_str()));
-    assert!(diagnostic.contains("InsecurePermissions"));
+    assert!(diagnostic.contains("TooLarge"));
     assert!(!diagnostic.contains(file.path().to_str().expect("fixture path")));
     assert!(!diagnostic.contains("synthetic-secret"));
 }

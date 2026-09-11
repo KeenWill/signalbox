@@ -1,6 +1,7 @@
 use super::*;
 use signalbox_session_ownership::{
-    LifecycleActor, LifecycleEventKind, SessionStateKind, SessionTerminal, SessionTerminalOutcome,
+    GoalChange, GoalEventKind, LifecycleActor, LifecycleEventKind, SessionStateKind,
+    SessionTerminal, SessionTerminalOutcome,
 };
 
 async fn persist_creation(
@@ -349,6 +350,152 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
                 .await?;
         assert_eq!(rejection, "session_already_terminal");
     }
+    pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn quarantined_dispatch_origin_still_releases_and_retires_its_session()
+-> Result<(), Box<dyn Error>> {
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    let source = signalbox_session_ownership::LifecycleEventSource::new(core_pool.clone());
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("quarantine/project"))?;
+    let now = OffsetDateTime::now_utc();
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("opened"))?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            repository: Some(repository.clone()),
+            event_kinds: vec![RepoWatchEventKindNameV1::PullRequestOpened],
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(String::from("watch"))?,
+        }],
+        RepoWatchSingletonScope::PullRequest,
+        Duration::ZERO,
+    )?;
+    store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                &repository,
+                std::slice::from_ref(&rule),
+            )],
+            now,
+        )
+        .await?;
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &pull_observation(&repository, RepoWatchPullRequestLifecycle::Open),
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let mut ids = FixedDispatchIds {
+        value: 70001,
+        calls: 0,
+    };
+    let mut factory = FixtureSessionFactory {
+        next_command: 80001,
+        model: 90001,
+    };
+    let mut codec = FixtureCommandCodec;
+    store
+        .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, now)
+        .await
+        .expect("dispatch");
+    let pending = store.recover_pending_commands(&mut codec).await?;
+    let creation = pending.first().expect("create command");
+    let session = persist_creation(&core_pool, creation.command()).await?;
+    store
+        .react_to_lifecycle(
+            &LifecycleEvent::session_created_for_test(
+                1,
+                now,
+                session,
+                SessionCreated {
+                    cause: SessionCreationCause::ModuleDispatched {
+                        dispatch: ModuleDispatch::RepositoryWatch {
+                            dispatch: creation.dispatch(),
+                        },
+                    },
+                    ownership: SessionOwnership::Owned,
+                },
+            ),
+            &mut factory,
+            &mut codec,
+            &source,
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE gh_event SET decode_error = 'fixture quarantine'
+          WHERE event_id = (
+              SELECT event_id FROM dispatch_ledger WHERE command_id = $1)",
+    )
+    .bind(creation.command().command_id().into_uuid())
+    .execute(&pool)
+    .await?;
+
+    store
+        .react_to_lifecycle(
+            &LifecycleEvent::for_test(
+                2,
+                now,
+                Some(session),
+                LifecycleEventKind::GoalChanged(GoalChange {
+                    event_ordinal: 1,
+                    generation: 1,
+                    kind: GoalEventKind::Commissioned,
+                }),
+            ),
+            &mut factory,
+            &mut codec,
+            &source,
+        )
+        .await?;
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &pull_observation(&repository, RepoWatchPullRequestLifecycle::Closed),
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    store
+        .react_to_pull_request_lifecycle(&mut factory, &mut codec, &source)
+        .await?;
+
+    let reactions = store.recover_pending_commands(&mut codec).await?;
+    assert!(
+        reactions.iter().any(|planned| matches!(
+            planned.command().clone().into_payload(),
+            SessionCommandPayload::Lifecycle(command)
+                if *command.operation() == SessionLifecycleOperation::ReleaseStart
+        )),
+        "the quarantined origin still commissions its release"
+    );
+    assert!(
+        reactions.iter().any(|planned| matches!(
+            planned.command().clone().into_payload(),
+            SessionCommandPayload::Lifecycle(command)
+                if *command.operation() == SessionLifecycleOperation::Stop {
+                    sticky: StopStickiness::Sticky,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                }
+        )),
+        "a later closing fact still retires the quarantined origin"
+    );
+
     pool.close().await;
     core_pool.close().await;
     drop(container);

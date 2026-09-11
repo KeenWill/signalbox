@@ -35,7 +35,7 @@ pub enum ObservationFact {
     UsageReported(TokenUsage),
     FinishReported(FinishReason),
 }
-// derives: fmt::Debug, clone::Clone, cmp::PartialEq
+// derives: fmt::Debug, clone::Clone, cmp::PartialEq, ser::Serialize
 ```
 
 ## ObservationSink

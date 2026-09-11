@@ -20,7 +20,7 @@ struct Cursor {
 
 impl Cursor {
     fn decode(value: Value) -> Option<Self> {
-        Some(Self {
+        let cursor = Self {
             pulls: if value["pulls"].is_null() {
                 None
             } else {
@@ -33,7 +33,12 @@ impl Cursor {
             pages: serde_json::from_value(value.get("pages")?.clone()).ok()?,
             threads: serde_json::from_value(value.get("threads")?.clone()).ok()?,
             retained: serde_json::from_value(value.get("retained")?.clone()).ok()?,
-        })
+        };
+        cursor
+            .threads
+            .values()
+            .all(valid_thread_snapshot)
+            .then_some(cursor)
     }
     fn encode(&self) -> Value {
         json!({"pulls":self.pulls.as_ref().map(|pulls| pulls.iter().map(|p|p.get()).collect::<Vec<_>>()),
@@ -50,14 +55,14 @@ impl Cursor {
                 .await
                 .map_err(StoreError::from)
                 .map_err(ObservationError::Cache)?;
-        value
-            .map(|text| {
-                serde_json::from_str(&text)
-                    .ok()
-                    .and_then(Self::decode)
-                    .ok_or(ObservationError::Cache(StoreError::InvalidPollCache))
-            })
-            .unwrap_or_else(|| Ok(Self::default()))
+        let Some(text) = value else {
+            return Ok(Self::default());
+        };
+        if let Some(cursor) = serde_json::from_str(&text).ok().and_then(Self::decode) {
+            return Ok(cursor);
+        }
+        Self::clear(store, repository).await?;
+        Err(ObservationError::Cache(StoreError::InvalidPollCache))
     }
     async fn save(
         &self,
@@ -66,6 +71,18 @@ impl Cursor {
     ) -> Result<(), ObservationError> {
         sqlx::query("INSERT INTO poll_cursor (repository,cursor) VALUES ($1,$2::jsonb) ON CONFLICT(repository) DO UPDATE SET cursor=EXCLUDED.cursor")
             .bind(repository.as_str()).bind(self.encode().to_string()).execute(&store.pool).await.map_err(StoreError::from).map_err(ObservationError::Cache)?;
+        Ok(())
+    }
+    async fn clear(
+        store: &RepoWatchStore,
+        repository: &RepositorySlug,
+    ) -> Result<(), ObservationError> {
+        sqlx::query("DELETE FROM poll_cursor WHERE repository=$1")
+            .bind(repository.as_str())
+            .execute(&store.pool)
+            .await
+            .map_err(StoreError::from)
+            .map_err(ObservationError::Cache)?;
         Ok(())
     }
 }
@@ -131,12 +148,8 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for ResumableRead<'_, 
             return Err(ObservationError::InvalidResponse);
         }
         let connection = &value["data"]["repository"]["pullRequest"]["reviewThreads"];
-        let nodes = crate::observation_decode::array(&connection["nodes"], |node| {
-            Some(json!({
-                "id":node["id"].as_str()?,"isResolved":node["isResolved"].as_bool()?
-            }))
-        })
-        .ok_or(ObservationError::InvalidResponse)?;
+        let nodes = crate::observation_decode::array(&connection["nodes"], snapshot_thread)
+            .ok_or(ObservationError::InvalidResponse)?;
         let next = connection["pageInfo"]["hasNextPage"]
             .as_bool()
             .ok_or(ObservationError::InvalidResponse)?;
@@ -148,6 +161,38 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for ResumableRead<'_, 
         cursor.threads.insert(key, snapshot.clone());
         Ok(json!({"data":{"repository":{"pullRequest":{"reviewThreads":snapshot}}}}))
     }
+}
+
+fn snapshot_thread(node: &Value) -> Option<Value> {
+    let resolved = node["isResolved"].as_bool()?;
+    let resolved_by = if !resolved || node["resolvedBy"].is_null() {
+        None
+    } else {
+        Some(node["resolvedBy"]["login"].as_str()?)
+    };
+    let comment = node["comments"]["nodes"].as_array()?.first()?;
+    let author = if comment["author"].is_null() {
+        None
+    } else {
+        Some(comment["author"]["login"].as_str()?)
+    };
+    Some(json!({
+        "id":node["id"].as_str()?,
+        "isResolved":resolved,
+        "resolvedBy":resolved_by.map(|login| json!({"login":login})),
+        "comments":{"nodes":[{"author":author.map(|login| json!({"login":login}))}]}
+    }))
+}
+
+fn valid_thread_snapshot(snapshot: &Value) -> bool {
+    if crate::observation_decode::array(&snapshot["nodes"], snapshot_thread).is_none() {
+        return false;
+    }
+    let Some(next) = snapshot["pageInfo"]["hasNextPage"].as_bool() else {
+        return false;
+    };
+    let after = &snapshot["pageInfo"]["endCursor"];
+    (after.is_null() || after.is_string()) && (!next || after.is_string())
 }
 
 enum Step {
@@ -269,12 +314,7 @@ pub async fn poll_with_cache(
                     .await
                     .map_err(ObservationError::Cache)?;
                 if complete {
-                    sqlx::query("DELETE FROM poll_cursor WHERE repository=$1")
-                        .bind(repository.as_str())
-                        .execute(&store.pool)
-                        .await
-                        .map_err(StoreError::from)
-                        .map_err(ObservationError::Cache)?;
+                    Cursor::clear(store, repository).await?;
                     tracing::info!(repository=repository.as_str(),producer=?EventProducer::Poll,requests=io.requests.load(Ordering::Relaxed),outcome="succeeded","repository-watch observation completed");
                     return Ok(true);
                 }
@@ -308,4 +348,43 @@ pub(super) async fn webhook_observed(
         cursor.save(store, repository).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolved_thread() -> Value {
+        json!({
+            "id": "thread-one",
+            "isResolved": true,
+            "resolvedBy": {"login": "resolver"},
+            "comments": {"nodes": [{"author": {"login": "author"}}]},
+        })
+    }
+
+    #[test]
+    fn resumable_thread_snapshot_preserves_null_resolver() {
+        let mut thread = resolved_thread();
+        thread["resolvedBy"] = Value::Null;
+
+        let snapshot = snapshot_thread(&thread).expect("nullable resolver is accepted");
+
+        assert_eq!(snapshot["resolvedBy"], Value::Null);
+        assert_eq!(
+            snapshot["comments"]["nodes"][0]["author"]["login"],
+            "author"
+        );
+    }
+
+    #[test]
+    fn resumable_thread_snapshot_preserves_null_author() {
+        let mut thread = resolved_thread();
+        thread["comments"]["nodes"][0]["author"] = Value::Null;
+
+        let snapshot = snapshot_thread(&thread).expect("nullable author is accepted");
+
+        assert_eq!(snapshot["resolvedBy"]["login"], "resolver");
+        assert_eq!(snapshot["comments"]["nodes"][0]["author"], Value::Null);
+    }
 }

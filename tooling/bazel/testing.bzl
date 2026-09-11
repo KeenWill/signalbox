@@ -177,7 +177,7 @@ def rust_postgres_suite(name, binaries, json_preserve_order = True, tags = {}):
             test = test,
             json_preserve_order = json_preserve_order,
             args = ["--ignored"] + _TEST_ARGS + [arg for skip in suite["skip"] for arg in ["--skip", skip]],
-            env = {"RUST_MIN_STACK": "8388608"},
+            env = {"RUST_MIN_STACK": "8388608", "SIGNALBOX_TEST_SHARED_POSTGRES": "1"},
             shard_count = suite["shards"],
             tags = ["manual", "no-sandbox", "requires-network"] + tags.get(test, []),
             size = "enormous",
@@ -231,7 +231,7 @@ def rust_coverage_suite(name, binaries, skip = [], json_preserve_order = True):
             test = binary,
             args = ["--ignored", "--test-threads=4"] + [arg for item in skip for arg in ["--skip", item]],
             json_preserve_order = json_preserve_order,
-            env = {"RUST_MIN_STACK": "8388608"},
+            env = {"RUST_MIN_STACK": "8388608", "SIGNALBOX_TEST_SHARED_POSTGRES": "1"},
             tags = ["manual", "external", "no-sandbox", "requires-network"],
             size = "enormous",
         )

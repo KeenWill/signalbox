@@ -279,7 +279,7 @@ async fn runner_outbox_dispatch_quarantines_pinned_connection_provenance()
     sqlx::query("ALTER TABLE runner_state_transition_outbox_event ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidRunnerEvent).await?;
+    assert_next_outbox_event_quarantined(&pool, OutboxRowCorruption::InvalidRunnerEvent).await?;
     drop(pool);
     Ok(())
 }
@@ -801,7 +801,7 @@ async fn runner_outbox_dispatch_quarantines_corrupted_relocation_state()
     sqlx::query("ALTER TABLE runner_state_transition_outbox_event ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidRunnerEvent).await?;
+    assert_next_outbox_event_quarantined(&pool, OutboxRowCorruption::InvalidRunnerEvent).await?;
     drop(pool);
     Ok(())
 }
@@ -886,7 +886,7 @@ async fn runner_outbox_dispatch_quarantines_cross_wired_source() -> Result<(), B
     sqlx::query("ALTER TABLE runner_state_transition_outbox_event ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidRunnerEvent).await?;
+    assert_next_outbox_event_quarantined(&pool, OutboxRowCorruption::InvalidRunnerEvent).await?;
     drop(pool);
     Ok(())
 }

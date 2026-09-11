@@ -36,6 +36,8 @@ pub(super) struct PinnedRepository {
     root_path: PathBuf,
     pub(super) root: fs::File,
     pub(super) git_directory: fs::File,
+    pub(super) worktree_directory: fs::File,
+    administration: crate::repository_directories::AdministrationBinding,
     _refs: fs::File,
     _config: fs::File,
     config_snapshot: fs::File,
@@ -48,6 +50,8 @@ pub(super) struct RepositoryOperationGuard {
     root_path: PathBuf,
     root: fs::File,
     git_directory: fs::File,
+    worktree_directory: fs::File,
+    administration: crate::repository_directories::AdministrationBinding,
     _refs: fs::File,
     _config: fs::File,
     config_snapshot: fs::File,
@@ -261,20 +265,19 @@ impl PinnedRepository {
             )
             .map_err(|_| LocalGitToolsConstructionError::Repository)?,
         );
-        let git_directory = fs::File::from(
-            openat(
-                &root,
-                ".git",
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| LocalGitToolsConstructionError::Repository)?,
-        );
+        let directories = crate::repository_directories::AdministrationDirectories::open(&root)
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+        let administration = directories.binding;
+        let git_directory = directories.common;
+        let worktree_directory = directories.worktree;
         after_git_directory_open();
         unsupported_control_files_are_absent(git_directory.as_fd())
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-        let config = open_repository_config_at(&git_directory)?;
-        let head = open_repository_head_at(&git_directory, config.object_format)?;
+        let config = open_repository_config_at(
+            &git_directory,
+            administration.worktree != administration.common,
+        )?;
+        let head = open_repository_head_at(&worktree_directory, config.object_format)?;
         let refs = open_repository_refs_at(&git_directory)?;
         after_config_snapshot();
         unsupported_control_files_are_absent(git_directory.as_fd())
@@ -285,11 +288,7 @@ impl PinnedRepository {
                     .metadata()
                     .map_err(|_| LocalGitToolsConstructionError::Repository)?,
             ),
-            git_directory: file_identity(
-                &git_directory
-                    .metadata()
-                    .map_err(|_| LocalGitToolsConstructionError::Repository)?,
-            ),
+            administration,
             refs: file_identity(
                 &refs
                     .metadata()
@@ -306,7 +305,7 @@ impl PinnedRepository {
         if observed != expected {
             return Err(LocalGitToolsConstructionError::Repository);
         }
-        validate_directory_binding(&root, OsStr::new(".git"), &git_directory)
+        crate::repository_directories::validate_binding(&root, administration)
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         validate_directory_binding(&git_directory, OsStr::new("refs"), &refs)
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
@@ -319,6 +318,8 @@ impl PinnedRepository {
             root_path: root_path.to_owned(),
             root,
             git_directory,
+            worktree_directory,
+            administration,
             _refs: refs,
             _config: config.source,
             config_snapshot: config.snapshot,
@@ -353,17 +354,37 @@ impl PinnedRepository {
         Ok(repository)
     }
 
+    pub(super) fn common_repository_is_bare(&self) -> Result<bool, LocalGitFailure> {
+        let config = Config::open(&descriptor_path(&self.config_snapshot))
+            .map_err(|_| LocalGitFailure::Repository)?;
+        match config.get_bool("core.bare") {
+            Ok(bare) => Ok(bare),
+            Err(error) if error.code() == ErrorCode::NotFound => Ok(false),
+            Err(_) => Err(LocalGitFailure::Repository),
+        }
+    }
+
+    pub(super) fn administration_for(&self, path: &str) -> &fs::File {
+        if crate::repository_directories::reference_is_worktree_local(path) {
+            &self.worktree_directory
+        } else {
+            &self.git_directory
+        }
+    }
+
     pub(super) fn git_path(&self, path: &str) -> PathBuf {
-        descriptor_path(&self.git_directory).join(path)
+        descriptor_path(self.administration_for(path)).join(path)
     }
 
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
-        let head = open_repository_head_at(&self.git_directory, self.object_format)
+        let head = open_repository_head_at(&self.worktree_directory, self.object_format)
             .map_err(|_| LocalGitFailure::Repository)?;
         validate_supported_layout(
             &self.root_path,
             &self.root,
             &self.git_directory,
+            &self.worktree_directory,
+            self.administration,
             &self._refs,
             &self.config_snapshot,
             self.config_identity,
@@ -379,7 +400,7 @@ impl PinnedRepository {
 
     pub(super) fn operation_guard(&self) -> Result<RepositoryOperationGuard, LocalGitFailure> {
         self.validate_supported_layout()?;
-        let head = open_repository_head_at(&self.git_directory, self.object_format)
+        let head = open_repository_head_at(&self.worktree_directory, self.object_format)
             .map_err(|_| LocalGitFailure::Repository)?;
         let guard = RepositoryOperationGuard {
             root_path: self.root_path.clone(),
@@ -391,6 +412,11 @@ impl PinnedRepository {
                 .git_directory
                 .try_clone()
                 .map_err(|_| LocalGitFailure::Operation)?,
+            worktree_directory: self
+                .worktree_directory
+                .try_clone()
+                .map_err(|_| LocalGitFailure::Operation)?,
+            administration: self.administration,
             _refs: self
                 ._refs
                 .try_clone()
@@ -420,6 +446,8 @@ impl RepositoryOperationGuard {
             &self.root_path,
             &self.root,
             &self.git_directory,
+            &self.worktree_directory,
+            self.administration,
             &self._refs,
             &self.config_snapshot,
             self.config_identity,
@@ -435,6 +463,8 @@ fn validate_supported_layout(
     root_path: &Path,
     root: &fs::File,
     git_directory: &fs::File,
+    worktree_directory: &fs::File,
+    administration: crate::repository_directories::AdministrationBinding,
     refs: &fs::File,
     config_snapshot: &fs::File,
     config_identity: FileSnapshotIdentity,
@@ -443,23 +473,33 @@ fn validate_supported_layout(
     object_format: ObjectFormat,
 ) -> Result<(), LocalGitFailure> {
     validate_root_path_binding(root_path, root)?;
-    validate_directory_binding(root, OsStr::new(".git"), git_directory)?;
+    crate::repository_directories::validate_binding(root, administration)?;
     validate_directory_binding(git_directory, OsStr::new("refs"), refs)?;
-    validate_head_at(git_directory, object_format, head_identity, head_bytes)?;
+    validate_head_at(worktree_directory, object_format, head_identity, head_bytes)?;
     unsupported_control_files_are_absent(git_directory.as_fd())?;
     validate_live_shallow(git_directory, object_format)?;
-    validate_config_at(git_directory, config_snapshot, config_identity)?;
+    validate_config_at(
+        git_directory,
+        administration.worktree != administration.common,
+        config_snapshot,
+        config_identity,
+    )?;
     // Repeat the mutable-file checks to bracket config validation and catch a
     // concurrent change that occurs between either side of the sequence.
-    validate_head_at(git_directory, object_format, head_identity, head_bytes)?;
+    validate_head_at(worktree_directory, object_format, head_identity, head_bytes)?;
     validate_live_shallow(git_directory, object_format)?;
     unsupported_control_files_are_absent(git_directory.as_fd())?;
-    validate_head_at(git_directory, object_format, head_identity, head_bytes)?;
+    validate_head_at(worktree_directory, object_format, head_identity, head_bytes)?;
     validate_directory_binding(git_directory, OsStr::new("refs"), refs)?;
-    validate_directory_binding(root, OsStr::new(".git"), git_directory)?;
+    crate::repository_directories::validate_binding(root, administration)?;
     let administrative_directory = dup(git_directory).map_err(|_| LocalGitFailure::Repository)?;
     reject_administrative_symlinks(&administrative_directory, object_format)
         .map_err(|_| LocalGitFailure::Repository)?;
+    if administration.worktree != administration.common {
+        let worktree = dup(worktree_directory).map_err(|_| LocalGitFailure::Repository)?;
+        reject_administrative_symlinks(&worktree, object_format)
+            .map_err(|_| LocalGitFailure::Repository)?;
+    }
     validate_root_path_binding(root_path, root)
 }
 
@@ -497,11 +537,12 @@ fn validate_head_at(
 
 fn validate_config_at(
     git_directory: &fs::File,
+    linked_checkout: bool,
     config_snapshot: &fs::File,
     config_identity: FileSnapshotIdentity,
 ) -> Result<(), LocalGitFailure> {
-    let current =
-        open_repository_config_at(git_directory).map_err(|_| LocalGitFailure::Repository)?;
+    let current = open_repository_config_at(git_directory, linked_checkout)
+        .map_err(|_| LocalGitFailure::Repository)?;
     if current.identity != config_identity
         || config_snapshot_bytes(&current.snapshot)? != config_snapshot_bytes(config_snapshot)?
     {

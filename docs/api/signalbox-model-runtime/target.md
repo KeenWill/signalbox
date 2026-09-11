@@ -28,7 +28,7 @@ impl ResolvedTarget {
 
 ```rust
 pub struct ProviderReportedModel(/* private */);
-// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
+// derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, ser::Serialize
 impl ProviderReportedModel {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;

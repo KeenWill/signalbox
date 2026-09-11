@@ -60,6 +60,8 @@ opentelemetry = { version = "0.32.0", default-features = false, features = [
 ] }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = [
     "grpc-tonic",
+    "gzip-http",
+    "gzip-tonic",
     "http-proto",
     "reqwest-blocking-client",
     "tls-ring",
@@ -79,7 +81,7 @@ rust_decimal = { version = "1.42.1", default-features = false, features = ["std"
 ring = "0.17.14"
 rustls = { version = "0.23.35", default-features = false, features = ["ring"] }
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+serde_json = { version = "1.0.140", features = ["preserve_order"] }
 sha2 = "0.11.0"
 signalbox-application = { path = "../../crates/application" }
 signalbox-blob-store = { path = "../../crates/blob-store" }
@@ -148,6 +150,10 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
 tower-http = { version = "0.7.0", default-features = false, features = ["fs"] }
 url = "2.5.8"
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# rustix does not expose Darwin's search-only directory-open flag.
+libc = "0.2.186"
 
 [dev-dependencies]
 # The composed daemon tests read drain dispositions through persistence's

@@ -32,6 +32,30 @@ impl fmt::Display for CodexCliVersionProbeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for CodexCliVersionProbeError {}
+impl CodexCliVersionProbeError {
+    pub const fn cause_code(self) -> &'static str;
+}
+```
+
+## CodexCliVersionProbe
+
+```rust
+pub struct CodexCliVersionProbe {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl CodexCliVersionProbe {
+    pub fn version(&self) -> &semver::Version;
+    pub fn digest(&self) -> &str;
+    pub const fn matches_pin(&self) -> bool;
+}
+```
+
+## probe_pinned_codex_cli_version
+
+```rust
+pub async fn probe_pinned_codex_cli_version(
+    executable: &path::Path,
+    bound: time::Duration,
+) -> result::Result<CodexCliVersionProbe, CodexCliVersionProbeError>;
 ```
 
 ## verify_pinned_codex_cli_version
@@ -109,7 +133,6 @@ pub enum CodexCliConstructionError {
     RelativeCredentialHome,
     InvalidCredentialHome,
     UnreadableCredentialHome,
-    EmptyCredentialHome,
     InvalidModelContextWindowOverride,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
