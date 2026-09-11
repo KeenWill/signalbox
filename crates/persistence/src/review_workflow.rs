@@ -43,7 +43,7 @@ async fn commit_mutation(
         .map_err(classify_mutating_commit_error)
 }
 
-fn classify_mutating_commit_error(error: sqlx::Error) -> ReviewWorkflowStoreError {
+pub(crate) fn classify_mutating_commit_error(error: sqlx::Error) -> ReviewWorkflowStoreError {
     if crate::commit_failure_is_ambiguous(&error) {
         ReviewWorkflowStoreError::CommitAmbiguous(error)
     } else {

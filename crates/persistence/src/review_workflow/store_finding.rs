@@ -14,7 +14,7 @@ use signalbox_domain::{
     validate_complete_review_finding_reference_graph,
 };
 use sqlx::types::Uuid;
-use sqlx::{PgConnection, Row};
+use sqlx::{PgConnection, Postgres, Row, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl ReviewWorkflowStore {
@@ -43,6 +43,19 @@ impl ReviewWorkflowStore {
         pass: &ReviewPassEvidence,
         findings: &[ReviewFinding],
     ) -> Result<(), ReviewWorkflowStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        self.insert_findings_in_transaction(&mut transaction, pass, findings)
+            .await?;
+        commit_mutation(transaction).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn insert_findings_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        pass: &ReviewPassEvidence,
+        findings: &[ReviewFinding],
+    ) -> Result<(), ReviewWorkflowStoreError> {
         let Some(ReviewPassResult::ProducedFindings(inventory)) = pass_state_result(pass.state())
         else {
             return Err(ReviewWorkflowStoreError::IncompleteFindingInventory);
@@ -60,10 +73,9 @@ impl ReviewWorkflowStore {
         {
             return Err(ReviewWorkflowStoreError::IncompleteFindingInventory);
         }
-        let mut transaction = self.pool.begin().await?;
-        bind_pass_result(&mut transaction, pass).await?;
+        bind_pass_result(transaction, pass).await?;
         for finding in findings {
-            insert_finding_row(&mut transaction, finding).await?;
+            insert_finding_row(transaction, finding).await?;
         }
         for (index, reference) in inventory.findings().iter().enumerate() {
             sqlx::query(
@@ -83,7 +95,7 @@ impl ReviewWorkflowStore {
             .bind(reference.run().run().into_uuid())
             .bind(reference.target().into_uuid())
             .bind(reference.pass().pass().into_uuid())
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         }
         sqlx::query(
@@ -98,15 +110,32 @@ impl ReviewWorkflowStore {
                 String::from("finding inventory count overflow"),
             )
         })?)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
-        commit_mutation(transaction).await?;
         Ok(())
     }
 
     /// Appends one event after domain validation of the complete current history.
     pub async fn append_finding_event(
         &self,
+        finding: ReviewFindingId,
+        event: ReviewFindingEvent,
+    ) -> Result<Option<ReviewFinding>, ReviewWorkflowStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let next = self
+            .append_finding_event_in_transaction(&mut transaction, finding, event)
+            .await?;
+        if next.is_some() {
+            commit_mutation(transaction).await?;
+        } else {
+            transaction.rollback().await?;
+        }
+        Ok(next)
+    }
+
+    pub(crate) async fn append_finding_event_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
         finding: ReviewFindingId,
         event: ReviewFindingEvent,
     ) -> Result<Option<ReviewFinding>, ReviewWorkflowStoreError> {
@@ -117,17 +146,16 @@ impl ReviewWorkflowStore {
             } => Some(pending.link()),
             _ => None,
         };
-        let mut transaction = self.pool.begin().await?;
         if let Some(link) = publication_link {
             // Publication reconciliation locks the reservation before any
             // finding, matching the attachment-path lock order.
             sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
                 .bind(link.into_uuid())
-                .fetch_one(&mut *transaction)
+                .fetch_one(&mut **transaction)
                 .await?;
             sqlx::query(crate::lock_inventory::REVIEW_FINDINGS_TRANSITION)
                 .bind(vec![finding.into_uuid()])
-                .fetch_all(&mut *transaction)
+                .fetch_all(&mut **transaction)
                 .await?;
         } else {
             // Every ordinary event writer locks the complete target inventory
@@ -137,20 +165,19 @@ impl ReviewWorkflowStore {
             // across the loader statements.
             sqlx::query(crate::lock_inventory::REVIEW_TARGET_FINDINGS_TRANSITION)
                 .bind(finding.into_uuid())
-                .fetch_all(&mut *transaction)
+                .fetch_all(&mut **transaction)
                 .await?;
         }
         let current = if publication_link.is_some() {
             // The held reservation and finding locks make the subject projection
             // stable while preserving attachment commits observed after waiting.
-            self.load_finding_projection_on_connection(&mut transaction, finding)
+            self.load_finding_projection_on_connection(transaction, finding)
                 .await?
         } else {
-            self.load_finding_on_connection(&mut transaction, finding)
+            self.load_finding_on_connection(transaction, finding)
                 .await?
         };
         let Some(current) = current else {
-            transaction.rollback().await?;
             return Ok(None);
         };
         let next = current.apply(event.clone()).map_err(|error| {
@@ -158,8 +185,7 @@ impl ReviewWorkflowStore {
                 error,
             ))
         })?;
-        insert_finding_event(&mut transaction, &event).await?;
-        commit_mutation(transaction).await?;
+        insert_finding_event(transaction, &event).await?;
         Ok(Some(next))
     }
 
@@ -258,6 +284,18 @@ impl ReviewWorkflowStore {
         run: ReviewRunId,
     ) -> Result<Vec<ReviewFinding>, ReviewWorkflowStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let findings = self
+            .list_findings_on_connection(&mut transaction, run)
+            .await?;
+        transaction.commit().await?;
+        Ok(findings)
+    }
+
+    pub(crate) async fn list_findings_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        run: ReviewRunId,
+    ) -> Result<Vec<ReviewFinding>, ReviewWorkflowStoreError> {
         let target = sqlx::query_scalar::<_, Uuid>(
             "SELECT target_id
                FROM review_finding
@@ -266,23 +304,20 @@ impl ReviewWorkflowStore {
               LIMIT 1",
         )
         .bind(run.into_uuid())
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut *connection)
         .await?;
         let Some(target) = target else {
-            transaction.commit().await?;
             return Ok(Vec::new());
         };
-        let findings = self
-            .load_target_findings_on_connection(&mut transaction, target)
+        Ok(self
+            .load_target_findings_on_connection(connection, target)
             .await?
             .into_iter()
             .filter(|finding| finding.proposal().reference().run().run() == run)
-            .collect();
-        transaction.commit().await?;
-        Ok(findings)
+            .collect())
     }
 
-    async fn load_finding_on_connection(
+    pub(crate) async fn load_finding_on_connection(
         &self,
         connection: &mut PgConnection,
         finding: ReviewFindingId,

@@ -18,8 +18,8 @@ use super::{
 use crate::mapping::{session_id_from_uuid, session_id_to_uuid};
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, SessionReadScopeDecision,
-    ToolRequestId, TurnId,
+    ContextFrontierId, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
+    SessionReadScopeDecision, ToolRequestId, TurnId,
 };
 use sqlx::types::Uuid;
 use sqlx::{PgPool, Row};
@@ -526,6 +526,16 @@ impl ProcessReadRepository {
         &self,
         requested_session: SessionId,
     ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
+        self.open_transcript_after(requested_session, None).await
+    }
+
+    /// Opens one repeatable-read transcript cursor after an acknowledged
+    /// semantic frontier, or a complete cursor when no frontier is supplied.
+    pub async fn open_transcript_after(
+        &self,
+        requested_session: SessionId,
+        after_frontier: Option<ContextFrontierId>,
+    ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(REPEATABLE_READ_ONLY)
             .execute(&mut *transaction)
@@ -545,6 +555,7 @@ impl ProcessReadRepository {
                 transaction,
                 requested_session,
                 self.automatic_reconciliation_attempt_budget,
+                after_frontier,
             )
             .await?,
         ))
@@ -581,6 +592,7 @@ impl ProcessReadRepository {
                     transaction,
                     target_session,
                     self.automatic_reconciliation_attempt_budget,
+                    None,
                 )
                 .await?,
             ))),

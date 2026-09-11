@@ -239,12 +239,10 @@ impl ReloadConfigurationRepository {
         changed_profiles: &[String],
     ) -> Result<(), ReloadRepositoryError> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "SELECT command_id FROM reload_configuration_command WHERE command_id = $1 FOR UPDATE",
-        )
-        .bind(request.command_id.into_uuid())
-        .fetch_one(&mut *tx)
-        .await?;
+        sqlx::query(crate::lock_inventory::RELOAD_CONFIGURATION_COMMAND)
+            .bind(request.command_id.into_uuid())
+            .fetch_one(&mut *tx)
+            .await?;
         if let ReloadLookup::Recorded(recorded) = lookup(&mut tx, request).await? {
             return if recorded == *result {
                 Ok(())

@@ -2,6 +2,334 @@
 
 use super::*;
 
+/// a deferred constraint failure at commit proves the claim and effect rolled back.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn definite_commit_failure_rolls_back_claim_and_effect() -> Result<(), Box<dyn Error>> {
+    const TARGET_IDENTITY: u128 = 0x74e;
+    const COMMAND_IDENTITY: u128 = 0x74f;
+
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_review_target_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected deferred commit failure' USING ERRCODE = '23514';
+         END $$;
+         CREATE CONSTRAINT TRIGGER reject_review_target_at_commit
+         AFTER INSERT ON review_target
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW EXECUTE FUNCTION reject_review_target_at_commit();",
+    )
+    .execute(&pool)
+    .await?;
+    let store = ReviewWorkflowStore::new(pool.clone());
+    let target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(TARGET_IDENTITY)),
+        key("provider"),
+        key("repository"),
+        ReviewTargetSubject::Commit,
+        key("head"),
+        None,
+        None,
+    )
+    .expect("target fixture is admitted");
+    let command_id = DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY));
+    let command = ReviewWorkflowCommand::new(
+        command_id,
+        [4; 32],
+        ReviewWorkflowOperation::CreateTarget(target.clone()),
+    );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::TargetCreated {
+            target: target.id(),
+        });
+    let mut service = ReviewWorkflowCommandService::new(store.clone());
+
+    let error = service
+        .execute(command.clone())
+        .await
+        .expect_err("deferred constraint rejects commit");
+    let ReviewWorkflowStoreError::Database(error) = error else {
+        panic!("definite commit failure must be an ordinary database error");
+    };
+    assert_sqlstate(&error, "23514");
+    assert_eq!(store.load_target(target.id()).await?, None);
+    assert_eq!(
+        store
+            .load_command_outcome(
+                command_id,
+                [4; 32],
+                ReviewWorkflowOperationKind::CreateTarget,
+            )
+            .await?,
+        None,
+    );
+
+    sqlx::raw_sql(
+        "DROP TRIGGER reject_review_target_at_commit ON review_target;
+         DROP FUNCTION reject_review_target_at_commit();",
+    )
+    .execute(&pool)
+    .await?;
+    assert_eq!(service.execute(command).await?, expected);
+    assert_eq!(store.load_target(target.id()).await?, Some(target));
+    assert_eq!(
+        store
+            .load_command_outcome(
+                command_id,
+                [4; 32],
+                ReviewWorkflowOperationKind::CreateTarget,
+            )
+            .await?,
+        Some(expected),
+    );
+    Ok(())
+}
+
+/// a review command applies its effect and receipt through one pool connection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_workflow_command_uses_one_pool_connection() -> Result<(), Box<dyn Error>> {
+    const TARGET_IDENTITY: u128 = 0x75e;
+    const COMMAND_IDENTITY: u128 = 0x75f;
+
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
+    let target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(TARGET_IDENTITY)),
+        key("provider"),
+        key("repository"),
+        ReviewTargetSubject::Commit,
+        key("head"),
+        None,
+        None,
+    )
+    .expect("target fixture is admitted");
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        [6; 32],
+        ReviewWorkflowOperation::CreateTarget(target.clone()),
+    );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::TargetCreated {
+            target: target.id(),
+        });
+    let mut service = ReviewWorkflowCommandService::new(ReviewWorkflowStore::new(pool));
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), service.execute(command))
+        .await
+        .expect("one-connection command handling does not wait for another connection")?;
+    assert_eq!(outcome, expected);
+    Ok(())
+}
+
+/// a receipt insertion failure is a proven rollback of the claim and effect.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn receipt_insert_failure_rolls_back_claim_and_effect() -> Result<(), Box<dyn Error>> {
+    const TARGET_IDENTITY: u128 = 0x750;
+    const COMMAND_IDENTITY: u128 = 0x751;
+
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_review_workflow_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'injected receipt failure' USING ERRCODE = '23514'; END $$;
+         CREATE TRIGGER reject_review_workflow_receipt
+         BEFORE INSERT ON review_workflow_command
+         FOR EACH ROW EXECUTE FUNCTION reject_review_workflow_receipt();",
+    )
+    .execute(&pool)
+    .await?;
+    let store = ReviewWorkflowStore::new(pool);
+    let target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(TARGET_IDENTITY)),
+        key("provider"),
+        key("repository"),
+        ReviewTargetSubject::Commit,
+        key("head"),
+        None,
+        None,
+    )
+    .expect("target fixture is admitted");
+    let command_id = DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY));
+    let command = ReviewWorkflowCommand::new(
+        command_id,
+        [5; 32],
+        ReviewWorkflowOperation::CreateTarget(target.clone()),
+    );
+    let mut service = ReviewWorkflowCommandService::new(store.clone());
+
+    let error = service
+        .execute(command)
+        .await
+        .expect_err("receipt insertion is rejected");
+    let ReviewWorkflowStoreError::Database(error) = error else {
+        panic!("pre-commit receipt failure must be an ordinary database error");
+    };
+    assert_sqlstate(&error, "23514");
+    assert_eq!(store.load_target(target.id()).await?, None);
+    assert_eq!(
+        store
+            .load_command_outcome(
+                command_id,
+                [5; 32],
+                ReviewWorkflowOperationKind::CreateTarget,
+            )
+            .await?,
+        None,
+    );
+    Ok(())
+}
+
+/// an attachment command waits for a concurrent external-link update before
+/// loading the multi-row aggregate projection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn attach_command_loads_after_concurrent_external_link_commit() -> Result<(), Box<dyn Error>>
+{
+    const COMMAND_IDENTITY: u128 = 0x752;
+    const PUBLISH_PASS_IDENTITY: u128 = 0x753;
+    const IMPORT_PASS_IDENTITY: u128 = 0x754;
+    const LINK_IDENTITY: u128 = 0x755;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let publish_pass =
+        insert_fixture_pass(&fixture, PUBLISH_PASS_IDENTITY, ReviewPassKind::Publish).await;
+    let import_pass = insert_fixture_pass(
+        &fixture,
+        IMPORT_PASS_IDENTITY,
+        ReviewPassKind::ImportExternalContext,
+    )
+    .await;
+    let evidence =
+        succeed_fixture_passes(&pool, &fixture.store, &[publish_pass, import_pass]).await;
+    let link = ReviewExternalLinkId::from_uuid(uuid(LINK_IDENTITY));
+    fixture
+        .store
+        .reserve_external_link(
+            ReviewExternalLink::try_reserve(
+                link,
+                ReviewExternalLinkAssociation::Target(fixture.target),
+                key("example-code-host"),
+                ReviewExternalObjectKind::ReviewComment,
+                &fixture.target_snapshot,
+            )
+            .expect("reservation matches the target"),
+        )
+        .await?;
+    let requested_attachment = attachment(link, evidence[0].clone(), key("comment-755"));
+    let concurrent_observation = observation(
+        link,
+        ReviewEventOrdinal::one(),
+        evidence[1].clone(),
+        ReviewExternalObjectState::Current,
+    );
+
+    let mut writer = pool.begin().await?;
+    sqlx::query(
+        "SELECT external_link_id
+           FROM review_external_link
+          WHERE external_link_id = $1
+          FOR NO KEY UPDATE",
+    )
+    .bind(link.into_uuid())
+    .fetch_one(&mut *writer)
+    .await?;
+    sqlx::query(
+        "LOCK TABLE review_external_link_observation
+         IN ACCESS EXCLUSIVE MODE",
+    )
+    .execute(&mut *writer)
+    .await?;
+
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        [0x75; 32],
+        ReviewWorkflowOperation::AttachExternalLink {
+            link,
+            attachment: requested_attachment.clone(),
+        },
+    );
+    let mut service = ReviewWorkflowCommandService::new(fixture.store.clone());
+    let mut handling = tokio::spawn(async move { service.execute(command).await });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "attachment command waits for the external-link transition lock"
+    );
+
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'external_link_attachment',
+                result_external_link_id = $2,
+                result_external_object_key = $3
+          WHERE pass_id = $1",
+    )
+    .bind(publish_pass.pass().into_uuid())
+    .bind(link.into_uuid())
+    .bind(requested_attachment.external_object().as_str())
+    .execute(&mut *writer)
+    .await?;
+    sqlx::query(
+        "INSERT INTO review_external_link_attachment
+            (external_link_id, target_id, pass_run_id, pass_id,
+             provider_key, object_kind, external_object_key)
+         VALUES ($1, $2, $3, $4, 'example-code-host',
+                 'review_comment', $5)",
+    )
+    .bind(link.into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(publish_pass.run().run().into_uuid())
+    .bind(publish_pass.pass().into_uuid())
+    .bind(requested_attachment.external_object().as_str())
+    .execute(&mut *writer)
+    .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'external_link_observation',
+                result_external_link_id = $2,
+                result_event_ordinal = 1,
+                result_observation_state = 'current'
+          WHERE pass_id = $1",
+    )
+    .bind(import_pass.pass().into_uuid())
+    .bind(link.into_uuid())
+    .execute(&mut *writer)
+    .await?;
+    sqlx::query(
+        "INSERT INTO review_external_link_observation
+            (external_link_id, observation_ordinal, target_id,
+             pass_run_id, pass_id, object_state)
+         VALUES ($1, 1, $2, $3, $4, 'current')",
+    )
+    .bind(link.into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(import_pass.run().run().into_uuid())
+    .bind(import_pass.pass().into_uuid())
+    .execute(&mut *writer)
+    .await?;
+    writer.commit().await?;
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), &mut handling)
+        .await
+        .expect("attachment command completes after the concurrent commit")
+        .expect("attachment command task remains live")?;
+    assert_eq!(
+        outcome,
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::ExternalLinkAttached {
+            link,
+            external_object: requested_attachment.external_object().clone(),
+        },)
+    );
+    let loaded = fixture
+        .store
+        .load_external_link(link)
+        .await?
+        .expect("committed external link remains loadable");
+    assert_eq!(loaded.attachment(), Some(&requested_attachment));
+    assert_eq!(loaded.observations(), &[concurrent_observation]);
+    Ok(())
+}
+
 /// exact review-command replay and effect recovery preserve one result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -11,7 +339,7 @@ async fn review_workflow_command_receipts_replay_and_recover() -> Result<(), Box
     const COMMAND_IDENTITY: u128 = 0x762;
     const RECOVERY_COMMAND_IDENTITY: u128 = 0x763;
 
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
     let store = ReviewWorkflowStore::new(pool);
     let target = ReviewTarget::try_new(
         ReviewTargetId::from_uuid(uuid(TARGET_IDENTITY)),
@@ -111,7 +439,7 @@ async fn review_workflow_command_receipts_replay_and_recover() -> Result<(), Box
 async fn start_run_recovers_a_loadable_run_only_commit() -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x777;
 
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
     let fixture = review_command_admission_fixture(&pool).await;
     fixture.store.insert_run(&fixture.run).await?;
     let partial = fixture
@@ -157,7 +485,7 @@ async fn start_run_recovers_a_loadable_run_only_commit() -> Result<(), Box<dyn E
 async fn start_run_rolls_back_run_when_pass_admission_fails() -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x778;
 
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
     let fixture = review_command_admission_fixture(&pool).await;
     fixture
         .store
@@ -204,7 +532,7 @@ async fn start_run_rolls_back_run_when_pass_admission_fails() -> Result<(), Box<
 async fn start_run_receipt_recovers_after_lifecycle_advancement() -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x764;
 
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let queued_run = fixture
         .store
@@ -252,7 +580,7 @@ async fn start_run_receipt_recovers_after_lifecycle_advancement() -> Result<(), 
 async fn activation_receipt_recovers_after_pass_completion() -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x768;
 
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let (running_pass, turn) = start_review_pass(&fixture.store, fixture.pass).await;
     let running_run = fixture
@@ -296,7 +624,7 @@ async fn complete_pass_commits_and_replays_terminal_status() -> Result<(), Box<d
     const COMMAND_IDENTITY: u128 = 0x790;
     const PASS_IDENTITY: u128 = 0x791;
 
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let pass_ref = insert_fixture_pass(&fixture, PASS_IDENTITY, ReviewPassKind::Judge).await;
     let (running_pass, turn) = start_review_pass(&fixture.store, pass_ref).await;

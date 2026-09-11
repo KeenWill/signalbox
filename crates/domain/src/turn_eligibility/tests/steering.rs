@@ -536,3 +536,82 @@ fn parked_tool_round_retains_consumed_steering() {
         .reconstitute()
         .expect("a parked tool round retains its consumed steering");
 }
+
+#[test]
+fn consumed_steering_after_active_compaction_reconstitutes() {
+    let session = current_session();
+    let active = accepted_origin(1);
+    let consumed = accepted_origin(2);
+    let mut facts =
+        ConsumedSteeringReconstitutionFacts::matching_at_continuation(&session, active, consumed);
+    let origin = ActiveReconstitutionFacts::matching_origin_entry();
+    let tool_use = semantic_entry(34);
+    let result = semantic_entry(35);
+    let steering = semantic_entry(31);
+    let summary = semantic_entry(903);
+    let source_frontier = frontier(901);
+    let compacted_frontier = frontier(902);
+    let compaction_call = model_call_id(904);
+    let range = crate::ContextCompactionRange::inclusive(
+        origin.reference(&session),
+        result.reference(&session),
+    );
+    facts
+        .semantic_entries
+        .push(SemanticTranscriptEntryReconstitutionInput::new(
+            summary.id(),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::ContextSummary {
+                producing_call: compaction_call,
+                summarized: range,
+                value: AssistantText::try_new(String::from("completed tool round summary"))
+                    .expect("fixture summary is nonempty"),
+            },
+        ));
+    facts
+        .snapshots
+        .push(source_frontier.snapshot(&session, &[origin, tool_use, result]));
+    facts
+        .snapshots
+        .push(compacted_frontier.snapshot(&session, &[origin, tool_use, result, summary]));
+    let call_frontier = facts
+        .model_calls
+        .last()
+        .expect("fixture has its consuming call")
+        .frontier();
+    facts.snapshots[1] = ResolvedContextFrontierReconstitutionInput::new(
+        session.id(),
+        call_frontier,
+        [origin, tool_use, result, summary, steering]
+            .map(|entry| entry.reference(&session))
+            .to_vec(),
+    );
+    let input = facts.input().with_context_compaction_facts(
+        vec![crate::ContextCompactionModelCallReconstitutionInput::new(
+            compaction_call,
+            session.id(),
+            direct(1),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            source_frontier.id(),
+            crate::ContextCompactionModelCallState::Terminal(ModelCallDisposition::Completed),
+            crate::ContextCompactionTokenUsage::unreported(),
+        )],
+        vec![crate::ContextCompactionReconstitutionInput::new(
+            crate::ContextCompactionId::from_uuid(uuid::Uuid::from_u128(905)),
+            session.id(),
+            None,
+            source_frontier.id(),
+            compacted_frontier.id(),
+            compaction_call,
+            range,
+            summary.id(),
+        )],
+    );
+    let projection = input
+        .reconstitute()
+        .expect("a steer appended to the validated compacted frontier reconstructs");
+    assert_eq!(
+        projection.active_turn().map(|turn| turn.turn()),
+        Some(active.turn())
+    );
+}

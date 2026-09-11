@@ -12,7 +12,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt)?;
     std::fs::write("fake-claude-prompt", &prompt)?;
-    let scenario = scenario(&prompt)?;
+    let scenario = if let Some(pair) = arguments.windows(2).find(|pair| pair[0] == "--resume") {
+        let history_path = &pair[1];
+        let history = std::fs::read_to_string(history_path)?;
+        std::fs::write("fake-claude-history", &history)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(history_path)?.permissions().mode() & 0o777;
+            std::fs::write("fake-claude-history-mode", format!("{mode:o}"))?;
+        }
+        scenario(&history)?
+    } else {
+        let controls: serde_json::Value = serde_json::from_str(
+            prompt
+                .split_once("\n\n")
+                .ok_or("missing request controls")?
+                .1,
+        )?;
+        controls["system"]
+            .as_str()
+            .ok_or("missing system-only scenario")?
+            .to_string()
+    };
     if scenario == "piped_stdin_too_large" {
         std::io::stderr().write_all(b"Error: piped stdin input exceeds a synthetic limit.\n")?;
         std::process::exit(1);
@@ -57,8 +79,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "session_id": session,
             "compact_metadata": { "trigger": "auto", "pre_tokens": PRE_COMPACTION_TOKENS }
         }))?;
+        if scenario.starts_with("native_compaction_summary") {
+            let session = if scenario == "native_compaction_summary_wrong_session" {
+                fixtures::OTHER_SESSION_ID
+            } else {
+                fixtures::SESSION_ID
+            };
+            // Arbitrary summary text must not appear as assistant output.
+            const NATIVE_SUMMARY: &str = "A native summary of earlier scratch edits.";
+            let content = if scenario == "native_compaction_summary_tool_result" {
+                assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+                serde_json::json!([{ "type": "tool_result", "tool_use_id": fixtures::TOOL_ID,
+                    "content": "Signalbox recorded this tool proposal for external execution." }])
+            } else {
+                serde_json::json!([{ "type": "text", "text": NATIVE_SUMMARY }])
+            };
+            emit_json(&serde_json::json!({
+                "type": "user", "session_id": session,
+                "isSynthetic": scenario != "native_compaction_summary_not_synthetic",
+                "message": { "role": "user", "content": content }
+            }))?;
+            if scenario == "native_compaction_summary_without_result" {
+                return Ok(());
+            }
+            if scenario == "native_compaction_summary_tool_result" {
+                success("tool_use", None)?;
+                return Ok(());
+            }
+        }
         assistant_text(fixtures::ANSWER)?;
         success("end_turn", Some(fixtures::ANSWER))?;
+        return Ok(());
+    }
+
+    if matches!(
+        scenario.as_str(),
+        "refusal_notice_before_init" | "refusal_notice_missing_session"
+    ) {
+        let mut notice = serde_json::json!({
+            "type": "system", "subtype": "model_refusal_no_fallback"
+        });
+        if scenario == "refusal_notice_before_init" {
+            notice["session_id"] = serde_json::json!(fixtures::SESSION_ID);
+            emit_json(&notice)?;
+            system_init(&arguments)?;
+        } else {
+            system_init(&arguments)?;
+            emit_json(&notice)?;
+        }
+        assistant_text(fixtures::REFUSAL)?;
+        success("refusal", Some(fixtures::REFUSAL))?;
         return Ok(());
     }
 
@@ -93,6 +163,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     system_init(&arguments)?;
     match scenario.as_str() {
+        "api_error_diagnostic"
+        | "api_error_diagnostic_without_result"
+        | "api_error_diagnostic_wrong_session" => {
+            assistant_text(fixtures::REFUSAL)?;
+            let session = if scenario == "api_error_diagnostic_wrong_session" {
+                fixtures::OTHER_SESSION_ID
+            } else {
+                fixtures::SESSION_ID
+            };
+            emit_json(&serde_json::json!({
+                "type": "assistant", "session_id": session,
+                "is_api_error_message": true, "error": "invalid_request",
+                "message": { "id": fixtures::OTHER_MESSAGE_ID, "model": "<synthetic>",
+                    "role": "assistant", "stop_reason": "refusal",
+                    "content": [{ "type": "text", "text": fixtures::ANSWER }] }
+            }))?;
+            if scenario != "api_error_diagnostic_without_result" {
+                success("refusal", Some(fixtures::REFUSAL))?;
+            }
+        }
+        "refusal_notice" | "refusal_notice_without_result" | "refusal_notice_wrong_session" => {
+            let session = if scenario == "refusal_notice_wrong_session" {
+                fixtures::OTHER_SESSION_ID
+            } else {
+                fixtures::SESSION_ID
+            };
+            emit_json(&serde_json::json!({
+                "type": "system", "subtype": "model_refusal_no_fallback",
+                "session_id": session, "original_model": fixtures::MODEL,
+                "request_id": null, "content": "",
+                "api_refusal_category": "synthetic_refusal"
+            }))?;
+            if scenario != "refusal_notice_without_result" {
+                assistant_text(fixtures::REFUSAL)?;
+                success("refusal", Some(fixtures::REFUSAL))?;
+            }
+        }
         "session_window_status"
         | "session_window_without_status"
         | "request_size_status"
@@ -679,14 +786,10 @@ fn record_settings_mode(_settings: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn scenario(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let value: serde_json::Value = serde_json::from_str(
-        prompt
-            .split_once("\n\n")
-            .map(|(_, json)| json.trim())
-            .ok_or("missing prompt JSON")?,
-    )?;
-    Ok(value["messages"][0]["parts"][0]["text"]
+fn scenario(history: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let row: serde_json::Value =
+        serde_json::from_str(history.lines().next().ok_or("empty native history")?)?;
+    Ok(row["message"]["content"][0]["text"]
         .as_str()
         .ok_or("missing scenario")?
         .to_string())

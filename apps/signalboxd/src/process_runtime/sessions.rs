@@ -2434,7 +2434,7 @@ where
                             )
                             .await;
                         }
-                        Err(ProcessReadError::Corruption(_)) => {
+                        Err(ProcessReadError::ResyncRequired | ProcessReadError::Corruption(_)) => {
                             return write_error(
                                 writer,
                                 version,
@@ -2484,7 +2484,7 @@ where
             )
             .await;
         }
-        Err(ProcessReadError::Corruption(_)) => {
+        Err(ProcessReadError::ResyncRequired | ProcessReadError::Corruption(_)) => {
             return write_error(
                 writer,
                 version,
