@@ -173,6 +173,11 @@ async fn clone_database(
                 .await?;
             return Err(error.into());
         }
+        // Role passwords are cluster-wide; initialize this fixture login under
+        // the template lock before concurrent database clones authenticate.
+        sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+            .execute(&mut admin)
+            .await?;
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "ALTER DATABASE \"{template}\" ALLOW_CONNECTIONS false"
         )))

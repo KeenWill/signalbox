@@ -53,9 +53,6 @@ fn observation(
 async fn ended_conflict_dispatch_retries_after_cooldown_without_a_new_matching_event()
 -> Result<(), Box<dyn Error>> {
     let (_database, core, url) = postgres().await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let source = signalbox_session_ownership::LifecycleEventSource::new(core);
