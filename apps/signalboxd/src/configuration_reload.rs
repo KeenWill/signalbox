@@ -221,7 +221,7 @@ impl ConfigurationReload {
         template_path: PathBuf,
         home: Option<PathBuf>,
     ) -> Result<Self, ReloadResult> {
-        let startup = startup_sections(&models)?;
+        let startup = startup_sections(models.source())?;
         Ok(Self {
             current: Arc::new(RwLock::new(ConfigurationCatalogs {
                 models: Arc::new(models),
@@ -372,8 +372,7 @@ impl ConfigurationReload {
         on_disk: &str,
         snapshot: &str,
     ) -> Result<ConfigurationCatalogs, ReloadResult> {
-        let on_disk_models = HubModelConfiguration::parse(on_disk)
-            .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
+        let startup = startup_sections(on_disk)?;
         let snapshot: RetainedSnapshot = serde_json::from_str(snapshot)
             .map_err(|_| failure(ReloadPhase::Validate, "retained snapshot cannot be decoded"))?;
         let mut source = on_disk
@@ -397,7 +396,7 @@ impl ConfigurationReload {
         }
         let models = HubModelConfiguration::parse(&source.to_string())
             .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
-        if startup_sections(&models)? != startup_sections(&on_disk_models)? {
+        if startup_sections(models.source())? != startup {
             return Err(failure(
                 ReloadPhase::Validate,
                 "startup-only configuration differs",
@@ -635,7 +634,7 @@ impl ConfigurationReload {
             };
             failure(phase, &error.to_string())
         })?;
-        if startup_sections(&models)? != self.startup {
+        if startup_sections(models.source())? != self.startup {
             return Err(failure(
                 ReloadPhase::Validate,
                 "startup-only configuration differs",
@@ -709,8 +708,8 @@ pub(crate) fn validate_catalogs(catalogs: &ConfigurationCatalogs) -> Result<(), 
     Ok(())
 }
 
-fn startup_sections(models: &HubModelConfiguration) -> Result<toml::Table, ReloadResult> {
-    let mut source: toml::Table = toml::from_str(models.source())
+fn startup_sections(source: &str) -> Result<toml::Table, ReloadResult> {
+    let mut source: toml::Table = toml::from_str(source)
         .map_err(|_| failure(ReloadPhase::Validate, "model source is invalid"))?;
     source.retain(|key, _| key == "credential_profiles" || !RELOADABLE_KEYS.contains(&key));
     if let Some(profiles) = source
@@ -797,7 +796,10 @@ mod tests {
         let replacement = source.replace(before_path, after_path);
         let before = HubModelConfiguration::parse(&source).expect("initial home catalog");
         let after = HubModelConfiguration::parse(&replacement).expect("replacement home catalog");
-        assert_eq!(startup_sections(&before), startup_sections(&after));
+        assert_eq!(
+            startup_sections(before.source()),
+            startup_sections(after.source())
+        );
         assert_eq!(changed_codex_homes(&before, &after), ["codex-ambient"]);
         assert!(changed_codex_homes(&after, &after).is_empty());
         let equivalent_path = homes.path().join("unused/../before");
@@ -809,8 +811,8 @@ mod tests {
         let identity_change =
             HubModelConfiguration::parse(&identity_change).expect("other profile");
         assert_ne!(
-            startup_sections(&before),
-            startup_sections(&identity_change)
+            startup_sections(before.source()),
+            startup_sections(identity_change.source())
         );
         let snapshot = ConfigurationCatalogs {
             models: Arc::new(after),
