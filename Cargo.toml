@@ -57,6 +57,7 @@ members = [
     "crates/tools-sessions",
     "crates/tools-web",
     "crates/tools-workspace",
+    "crates/tools-workflows",
     "crates/web-contract",
 ]
 resolver = "3"

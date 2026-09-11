@@ -2087,6 +2087,7 @@ async fn run_hub_incarnation(
             return startup_failure_after_close(failure, database.close().await);
         }
     };
+    let workflow_workspace_roots = tools.workspace_instruction_root_resolver();
     let workspace_instruction_runtime = WorkspaceInstructionRuntime::new(
         pool.clone(),
         tools.workspace_instruction_root_resolver(),
@@ -2628,6 +2629,28 @@ async fn run_hub_incarnation(
             Err(failure) => startup_failure_after_close(failure, closed),
         };
     }
+    let workflow_tool_policy = signalboxd::WorkflowToolPolicy::new(pool.clone());
+    if let Ok((service, _)) = &workflows {
+        let workflow_catalog = signalbox_tools_workflows::catalog().map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("workflow_tool_catalog"),
+            )
+        })?;
+        tool_catalog = tool_catalog
+            .with_compiled_catalog(workflow_catalog)
+            .map_err(|error| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Tools(&error),
+                )
+            })?;
+        tool_executor = tool_executor.with_workflows(signalboxd::DaemonWorkflowPort::new(
+            workflow_tool_policy.clone(),
+            service.clone(),
+            workflow_workspace_roots,
+        ));
+    }
     let recovered_catalogs = configuration_reload.catalogs();
     let model_configuration = (*recovered_catalogs.models).clone();
     let template_configuration = (*recovered_catalogs.templates).clone();
@@ -2781,6 +2804,7 @@ async fn run_hub_incarnation(
                 tool_catalog.clone(),
                 tool_executor.clone(),
             )
+            .with_workflow_tool_policy(workflow_tool_policy.clone())
             .with_workspace_instructions(workspace_instruction_runtime.clone())
             .with_approval_judge(
                 approval_judge,

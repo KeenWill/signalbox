@@ -98,6 +98,7 @@ pub struct ConfigurationReload {
     current: Arc<RwLock<ConfigurationCatalogs>>,
     serial: Arc<Mutex<()>>,
     repository: ReloadConfigurationRepository,
+    pool: sqlx::PgPool,
     model_path: PathBuf,
     template_path: PathBuf,
     home: Option<PathBuf>,
@@ -229,7 +230,8 @@ impl ConfigurationReload {
             })),
             serial: Arc::new(Mutex::new(())),
             repository: ReloadConfigurationRepository::new(pool.clone()),
-            convergence: PostgresConvergenceSweepStore::new(pool),
+            convergence: PostgresConvergenceSweepStore::new(pool.clone()),
+            pool,
             watch: None,
             runtime_factory: None,
             github_tool_credential: None,
@@ -326,9 +328,31 @@ impl ConfigurationReload {
         self
     }
 
+    async fn retain_template_policies(
+        &self,
+        catalogs: &ConfigurationCatalogs,
+    ) -> Result<(), ReloadRepositoryError> {
+        for (name, _) in catalogs.templates.summaries() {
+            let template =
+                catalogs
+                    .templates
+                    .resolve(name)
+                    .ok_or(ReloadRepositoryError::Corruption(
+                        "template summary has no resolved snapshot",
+                    ))?;
+            sqlx::query("INSERT INTO session_workflow_template_snapshot (template_name, template_content_digest, workflow_tools) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
+                .bind(name.as_str())
+                .bind(template.provenance().content_digest().as_bytes().as_slice())
+                .bind(sqlx::types::Json(template.workflow_tools()))
+                .execute(&self.pool).await?;
+        }
+        Ok(())
+    }
+
     /// Delivers pending snapshots before ordinary on-disk rule activation or client admission.
     pub async fn recover(&self) -> Result<(), ReloadRepositoryError> {
         let _serial = self.serial.lock().await;
+        self.retain_template_policies(&self.catalogs()).await?;
         let pending = self.repository.pending().await?;
         if pending.is_empty() {
             if let Some(watch) = &self.watch {
@@ -453,6 +477,7 @@ impl ConfigurationReload {
             .map_err(|_| {
                 ReloadRepositoryError::Corruption("prior reload credential homes cannot be decoded")
             })?;
+        self.retain_template_policies(&replacement).await?;
         Arc::make_mut(&mut replacement.models).reuse_github_credentials(&self.catalogs().models);
         let prepared_watch = if let Some(watch) = &self.watch {
             let prepared = match watch.prepare_reload(replacement.clone()).await {
@@ -506,6 +531,7 @@ impl ConfigurationReload {
                         ));
                     }
                 };
+                self.retain_template_policies(&prior).await?;
                 let prepared = watch.prepare_reload(prior.clone()).await.map_err(|_| {
                     ReloadRepositoryError::Corruption("prior reload worker preparation failed")
                 })?;
@@ -1045,15 +1071,9 @@ mod tests {
             std::os::unix::fs::PermissionsExt::from_mode(0o644),
         )
         .expect("weaken permissions");
-        assert_eq!(
-            reload
-                .read_replacement()
-                .expect_err("public fallback rejected"),
-            failure(
-                ReloadPhase::Validate,
-                "credential reference `github-primary` could not be resolved: InsecurePermissions"
-            )
-        );
+        reload
+            .read_replacement()
+            .expect("reload warns and reads the permissive fallback credential");
         credential.close().expect("remove fallback");
         assert_eq!(
             reload

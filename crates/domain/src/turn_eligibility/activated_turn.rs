@@ -526,6 +526,23 @@ impl ActivatedTurn {
         )
     }
 
+    /// Cancels this turn's executing tool batch or foreground child wait.
+    pub fn apply_interrupt_to_tool_batch(
+        self,
+        batch: crate::ToolBatch,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_interrupt_to_executing_tool_batch(
+            self,
+            batch,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
     /// Cancels this turn while it is parked on exact runner-loss evidence.
     pub fn apply_interrupt_to_runner_recovery(
         self,

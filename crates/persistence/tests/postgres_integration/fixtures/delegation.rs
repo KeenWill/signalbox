@@ -1843,6 +1843,15 @@ pub(crate) async fn checkpoint_foreground_child_wait_without_result(
         &[("spawn_session", "{}"), ("await_session", "{}")],
     )
     .await?;
+    checkpoint_foreground_child_wait_for_batch(pool, seed, fixture, requests).await
+}
+
+async fn checkpoint_foreground_child_wait_for_batch(
+    pool: &PgPool,
+    seed: u128,
+    fixture: RestartModelCallFixture,
+    requests: Vec<ToolRequestId>,
+) -> Result<(RestartModelCallFixture, ToolRequestId, ToolRequestId), Box<dyn Error>> {
     let [spawning_request, awaiting_request] = requests.as_slice() else {
         panic!("the foreground fixture has spawn and await requests")
     };
@@ -2003,4 +2012,66 @@ pub(crate) async fn checkpoint_foreground_child_wait_without_result(
     .await?;
 
     Ok((fixture, *spawning_request, *awaiting_request))
+}
+
+/// A delegated initial task issues spawn and foreground-await in one tool round.
+pub(crate) async fn checkpoint_delegated_foreground_child_wait(
+    pool: &PgPool,
+) -> Result<(RestartModelCallFixture, ToolRequestId, ToolRequestId), Box<dyn Error>> {
+    // Arbitrary identity namespace, disjoint from this fixture's generated requests.
+    let seed = 0x12ff_8000;
+    let delegated = authorize_delegated_model_call_fixture(pool, seed).await?;
+    let fixture = RestartModelCallFixture {
+        session: delegated.child,
+        turn: delegated.authorized.turn(),
+        attempt: delegated.authorized.attempt().id(),
+        call: delegated.authorized.call().id(),
+    };
+    let requests = vec![
+        ToolRequestId::from_uuid(next_test_submit_uuid()),
+        ToolRequestId::from_uuid(next_test_submit_uuid()),
+    ];
+    let response = ToolUsingAssistantResponse::try_from_parts(
+        ["spawn_session", "await_session"]
+            .into_iter()
+            .map(|name| {
+                AssistantResponsePart::ToolCall(ToolCallProposal::new(
+                    ToolName::try_new(name.into()).expect("fixture tool"),
+                    NormalizedToolArguments::try_from_provider_text("{}".into())
+                        .expect("fixture arguments"),
+                ))
+            })
+            .collect(),
+    )
+    .expect("two calls form a response");
+    delegated
+        .repository
+        .apply_terminal_observation(
+            delegated.child,
+            delegated
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+                    response,
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
+                }),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                requests
+                    .iter()
+                    .map(|request| {
+                        ToolResponsePartIdentity::tool_call(
+                            SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                            *request,
+                            InitialToolApproval::Confirm,
+                        )
+                    })
+                    .collect(),
+                ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                None,
+            )),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?;
+    checkpoint_foreground_child_wait_for_batch(pool, seed, fixture, requests).await
 }
