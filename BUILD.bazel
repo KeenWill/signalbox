@@ -92,6 +92,17 @@ py_test(
     tags = ["external"],
 )
 
+py_test(
+    name = "test_test_database_lifecycle",
+    size = "small",
+    srcs = ["tooling/test_postgres_test_container.py"],
+    data = [
+        "config/signalboxd.example.toml",
+        "tooling/postgres_test_container.py",
+    ],
+    main = "tooling/test_postgres_test_container.py",
+)
+
 test_suite(
     name = "python_checker_tests",
     tests = [
@@ -99,6 +110,7 @@ test_suite(
         ":test_summarize_coverage",
         ":test_supervise_lifecycle",
         ":test_sweep_test_containers",
+        ":test_test_database_lifecycle",
         "//scripts:checker_tests",
     ],
 )
