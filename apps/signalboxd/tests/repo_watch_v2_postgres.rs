@@ -4404,6 +4404,45 @@ async fn undated_compact_entries_do_not_reopen_ordinary_pull_requests() -> Resul
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn poll_cursor_attribution_migration_invalidates_parent_version_snapshots()
+-> Result<(), Box<dyn Error>> {
+    const MIGRATION_VERSION: i64 = 202609102359;
+    let previous = sqlx::migrate::Migrator {
+        migrations: signalbox_persistence::MIGRATOR
+            .iter()
+            .filter(|migration| migration.version != MIGRATION_VERSION)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    let (container, core_pool, database_url) = unmigrated_postgres().await?;
+    previous.run(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let poll_pool = module_pool(&database_url).await?;
+    sqlx::query(
+        "INSERT INTO poll_cursor (repository, cursor)
+         VALUES ('example/project', '{\"threads\": [{\"id\": \"thread-1\", \"isResolved\": false}]}'::jsonb)",
+    )
+    .execute(&poll_pool)
+    .await?;
+
+    migrate(&core_pool).await?;
+
+    let cursor_count: i64 = sqlx::query_scalar("SELECT count(*) FROM poll_cursor")
+        .fetch_one(&poll_pool)
+        .await?;
+    assert_eq!(cursor_count, 0);
+    poll_pool.close().await;
+    core_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn restart_reuses_every_persisted_page_and_reviewer_change_invalidates_the_cache()
 -> Result<(), Box<dyn Error>> {
     use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
