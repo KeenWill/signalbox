@@ -465,6 +465,9 @@ retain accepted transport pages. A completed reconciliation removes untraversed
 resources and terminal pull-request pages; unchanged responses retain their
 traversed pages.
 
+Reading a session's retained dispatch provenance does not wait for
+repository-watch dispatch processing.
+
 Dispatched sessions retain the repository-watch creation cause, module actor,
 and dispatch reference. Their provenance resolves the existing dispatch ledger
 row and its created session, rule revision, event, action ordinal, repository,
