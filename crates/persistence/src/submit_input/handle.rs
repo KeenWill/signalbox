@@ -399,6 +399,21 @@ where
                     "executing tool batch cannot project cancellation",
                 )
             })?;
+            let projection =
+                match crate::tool_loop::checkpoint::load(connection, batch.session(), batch.turn())
+                    .await
+                    .map_err(map_tool_loop_error)?
+                {
+                    Some(checkpoint) => crate::tool_loop::checkpoint::load_result_projection(
+                        connection,
+                        &batch,
+                        checkpoint.frontier().snapshot(),
+                        scheduling.as_ref(),
+                    )
+                    .await
+                    .map_err(map_tool_loop_error)?,
+                    None => projection,
+                };
             // The scheduling projection is built from `queued_input_origin`, so
             // it carries an active turn only for an accepted-input origin. A
             // delegation-origin active turn is absent from it and must be

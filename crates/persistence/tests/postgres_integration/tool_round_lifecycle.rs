@@ -1509,6 +1509,367 @@ async fn deferred_turn_validation_skips_immutable_tool_round_frontiers()
 /// turn without preparing an oversized continuation call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn interrupt_reuses_results_checkpointed_for_compaction() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7efb;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round_with_usage(
+        &pool,
+        seed,
+        "current_time",
+        "{}",
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(70))
+            .with_output_tokens(Some(5)),
+    )
+    .await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || continuation_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    // Six three-byte characters exceed the remaining fifteen-byte allowance.
+    let result_text = String::from("界界界界界界");
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(result_text).expect("bounded result"),
+                    ),
+                }),
+        )
+        .await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one continuation target forms a catalog");
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let model_repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                10,
+                100,
+            )]);
+    let continuing_repository = model_repository.tool_loop_repository();
+    let result_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x26));
+    let result_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27));
+    let outcome = continuing_repository
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![result_entry],
+                result_frontier,
+                continuation_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+            ),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+    let signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(required) =
+        outcome
+    else {
+        panic!("reported usage closes the continuation for compaction");
+    };
+    assert_eq!(required, fixture.turn);
+    let interrupt = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x40)),
+        fixture.session,
+        UserContent::try_text("stop after the result checkpoint".to_owned()).unwrap(),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: fixture.turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let accepted = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x41));
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x42));
+    let repository = SubmitInputRepository::new(pool.clone());
+    let outcome = repository
+        .handle(interrupt.clone(), accepted, Some(successor))
+        .await?;
+    assert!(matches!(
+        outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let replay = repository
+        .handle(interrupt, accepted, Some(successor))
+        .await?;
+    assert!(matches!(
+        replay,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let results: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT semantic_entry_id FROM semantic_transcript_entry WHERE tool_result_attempt_id = $1",
+    )
+    .bind(tool_attempt.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(results, vec![result_entry.into_uuid()]);
+    let terminal: (String, bool) = sqlx::query_as(
+        "SELECT terminal_disposition_kind,
+                context_frontier_preserves_prefix(session_id, $2, terminal_frontier_id)
+           FROM turn_lifecycle WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal, (String::from("cancelled"), true));
+    let activation = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            fixture.session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x60)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x61)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x62)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x63)),
+            ),
+        )
+        .await?;
+    assert!(
+        activation.is_some(),
+        "interrupt successor remains activatable"
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn interrupt_retains_completed_tool_compaction() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7efc;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round_with_usage(
+        &pool,
+        seed,
+        "current_time",
+        "{}",
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(70))
+            .with_output_tokens(Some(5)),
+    )
+    .await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || continuation_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    // Six three-byte characters exceed the remaining fifteen-byte allowance.
+    let result_text = String::from("界界界界界界");
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(result_text).expect("bounded result"),
+                    ),
+                }),
+        )
+        .await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one continuation target forms a catalog");
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let model_repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                10,
+                100,
+            )]);
+    let continuing_repository = model_repository.tool_loop_repository();
+    let result_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x26));
+    let result_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27));
+    let outcome = continuing_repository
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![result_entry],
+                result_frontier,
+                continuation_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+            ),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+    let signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(required) =
+        outcome
+    else {
+        panic!("reported usage closes the continuation for compaction");
+    };
+    assert_eq!(required, fixture.turn);
+    let summary_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x53));
+    let summary_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x54));
+    let compaction = ContextCompactionRepository::new(pool.clone());
+    let preview = compaction
+        .preview_automatic_range(fixture.session)
+        .await?
+        .expect("checkpointed results expose a compaction frontier");
+    let through = preview
+        .members()
+        .last()
+        .expect("the checkpoint ends with a tool result");
+    assert!(through.is_safe_boundary());
+
+    let PrepareContextCompactionOutcome::Prepared(prepared) = compaction
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x50)),
+            session: fixture.session,
+            requested_through_position: Some(through.position()),
+            automatic_for_turn: Some(fixture.turn),
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection,
+            target,
+            input_includes_cache_tokens: false,
+            credential_reference: String::from("compaction-fixture"),
+            call: ModelCallId::from_uuid(Uuid::from_u128(seed + 0x51)),
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(seed + 0x52)),
+            summary_entry,
+            result_frontier: summary_frontier,
+        })
+        .await?
+    else {
+        panic!("checkpointed tool results admit automatic compaction");
+    };
+    compaction.authorize(&prepared).await?;
+    compaction
+        .complete(
+            &prepared,
+            "retained tool checkpoint summary",
+            ContextCompactionTokenUsage::unreported(),
+        )
+        .await?;
+    let interrupt = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x40)),
+        fixture.session,
+        UserContent::try_text("stop after the result checkpoint".to_owned()).unwrap(),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: fixture.turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let accepted = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x41));
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x42));
+    let repository = SubmitInputRepository::new(pool.clone());
+    let outcome = repository
+        .handle(interrupt.clone(), accepted, Some(successor))
+        .await?;
+    assert!(matches!(
+        outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let replay = repository
+        .handle(interrupt, accepted, Some(successor))
+        .await?;
+    assert!(matches!(
+        replay,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let results: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT semantic_entry_id FROM semantic_transcript_entry WHERE tool_result_attempt_id = $1",
+    )
+    .bind(tool_attempt.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(results, vec![result_entry.into_uuid()]);
+    let terminal: (String, bool) = sqlx::query_as(
+        "SELECT terminal_disposition_kind,
+                context_frontier_preserves_prefix(session_id, $2, terminal_frontier_id)
+           FROM turn_lifecycle WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(summary_frontier.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal, (String::from("cancelled"), true));
+    let summaries: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT semantic_entry_id FROM semantic_transcript_entry WHERE source_session_id = $1 AND payload_kind = 'context_summary'",
+    ).bind(fixture.session.into_uuid()).fetch_all(&pool).await?;
+    assert_eq!(summaries, vec![summary_entry.into_uuid()]);
+    let activation = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            fixture.session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x60)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x61)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x62)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x63)),
+            ),
+        )
+        .await?;
+    assert!(
+        activation.is_some(),
+        "interrupt successor remains activatable"
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn tool_continuation_headroom_checkpoints_the_active_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7ef9;
