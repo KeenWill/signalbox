@@ -2632,8 +2632,208 @@ async fn lifecycle_stop_of_available_foreground_child_result_reconstitutes_on_st
         fixture.parent,
         fixture.spawning_request,
         fixture.awaiting_request,
+        fixture.initial_turn,
     )
     .await?;
+    let committed = recorded(
+        &pool,
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(next_test_submit_uuid()),
+            fixture.parent,
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Redispatchable,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        ),
+    )
+    .await?;
+    assert_eq!(
+        committed,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable
+            },
+            live_turn: fixture.parent_turn,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+        })
+    );
+    let successor = TurnId::from_uuid(next_test_submit_uuid());
+    let interrupted = SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates_alias_resolver_as(
+            SubmitInput::new_core_interrupt(
+                DurableCommandId::from_uuid(next_test_submit_uuid()),
+                fixture.parent,
+                UserContent::try_text("settle the stopped child wait".into())
+                    .expect("fixture content"),
+                fixture.parent_turn,
+                DescendantTerminationScope::ParentAlone,
+                input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            ),
+            CommandPrincipal::Core,
+            ParentTerminationKind::Stopped,
+            AcceptedInputId::from_uuid(next_test_submit_uuid()),
+            Some(successor),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                ContextFrontierId::from_uuid(next_test_submit_uuid()),
+            ),
+            |_| successor,
+            |requests| {
+                assert_eq!(
+                    requests,
+                    [
+                        fixture.spawning_request,
+                        fixture.awaiting_request,
+                        fixture.message_request
+                    ]
+                );
+                (
+                    vec![
+                        SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                        SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                        SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                    ],
+                    ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                )
+            },
+            || panic!("the wait has no approval decision"),
+            || panic!("the wait has no approval attempt"),
+            |_| None,
+        )
+        .await?;
+    assert!(matches!(
+        interrupted,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let lifecycle = SessionLifecycleRepository::new(pool.clone())
+        .load(fixture.parent)
+        .await?
+        .expect("retained session");
+    assert_eq!(
+        lifecycle.state(),
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable
+            },
+        }
+    );
+    let terminal_attempt: Option<Uuid> =
+        sqlx::query_scalar("SELECT terminal_attempt_id FROM turn_lifecycle WHERE turn_id=$1")
+            .bind(fixture.parent_turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(terminal_attempt, None);
+    let mut ids = FixedStartupScanIds::new([], []);
+    let recovered = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.parent,
+            AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                ContextFrontierId::from_uuid(next_test_submit_uuid()),
+            ),
+            &mut ids,
+        )
+        .await?;
+    assert!(matches!(recovered, StartupScanSessionOutcome::NoActiveTurn));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// An earlier resumed wait in the same batch is not the cancelled foreground wait.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn lifecycle_stop_ignores_resumed_foreground_waits_in_the_same_batch()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x11ff_c000;
+    let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
+    let spawn_arguments = serde_json::json!({
+        "relationship": { "kind": "background" },
+        "task": RAW_DELEGATED_TASK,
+    })
+    .to_string();
+    let await_arguments = serde_json::json!({
+        "child_session_id": child.as_uuid().to_string(),
+        "mode": "foreground",
+    })
+    .to_string();
+    let (parent, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        &[
+            ("spawn_session", spawn_arguments.as_str()),
+            ("await_session", await_arguments.as_str()),
+            ("await_session", await_arguments.as_str()),
+        ],
+        InitialToolApproval::PolicyAuto,
+    )
+    .await?;
+    let second_wait = requests[2];
+    let fixture = RawDelegationFixture {
+        parent: parent.session,
+        parent_turn: parent.turn,
+        parent_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xc1)),
+        child,
+        initial_turn: TurnId::from_uuid(Uuid::from_u128(seed + 0x201)),
+        initial_semantic_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x202)),
+        spawning_request: requests[0],
+        awaiting_request: requests[1],
+        message_request: second_wait,
+        message_id: Uuid::from_u128(seed + 0x400),
+    };
+    insert_raw_delegation_tool_receipts(&pool, fixture, seed).await?;
+    let mut transaction = pool.begin().await?;
+    insert_raw_delegation_with_update(&mut transaction, fixture).await?;
+    transaction.commit().await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Foreground,
+    )?;
+    SessionDelegationRepository::new(pool.clone())
+        .record_wait(request, &dispatch)
+        .await?;
+    checkpoint_available_child_result(
+        &pool,
+        fixture.parent,
+        fixture.spawning_request,
+        fixture.awaiting_request,
+        fixture.initial_turn,
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    assert!(
+        repository
+            .resume_child_wait(
+                fixture.parent,
+                fixture.parent_turn,
+                TurnAttemptId::from_uuid(next_test_submit_uuid()),
+            )
+            .await?
+    );
+    let second_attempt = ToolAttemptId::from_uuid(next_test_submit_uuid());
+    repository
+        .prepare_next_attempt(
+            fixture.parent,
+            fixture.parent_turn,
+            second_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the second await is next in the same batch");
+    let dispatch = repository
+        .authorize_attempt(fixture.parent, fixture.parent_turn, second_attempt)
+        .await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Foreground,
+    )?;
+    SessionDelegationRepository::new(pool.clone())
+        .record_wait(request, &dispatch)
+        .await?;
     let committed = recorded(
         &pool,
         SessionLifecycleCommand::new(
@@ -2745,6 +2945,7 @@ async fn checkpoint_available_child_result(
     session: SessionId,
     spawning: ToolRequestId,
     awaiting: ToolRequestId,
+    child_turn: TurnId,
 ) -> Result<(), Box<dyn Error>> {
     let mut transaction = pool.begin().await?;
     sqlx::raw_sql(
@@ -2763,7 +2964,7 @@ async fn checkpoint_available_child_result(
            FROM session_delegation WHERE spawning_tool_request_id = $1",
     )
     .bind(spawning.into_uuid())
-    .bind(next_test_submit_uuid())
+    .bind(child_turn.into_uuid())
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
