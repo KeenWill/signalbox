@@ -44,8 +44,7 @@ use session_workspace_roots::{
     ComposedRootIdentity, GIT_ADMINISTRATION_DIRECTORY, MAX_RETAINED_SESSION_WORKSPACES,
     RecordedSessionBinding, SESSION_WORKSPACE_REPLACED_DETAIL,
     SESSION_WORKSPACE_UNVERIFIABLE_CONFIGURED_DETAIL, SessionRootDecision, SessionWorkspaceRoot,
-    WorkspaceInstructionRootResolutionError, a_derived_binding_exists,
-    a_derived_binding_shares_the_configured_root, another_session_bound,
+    WorkspaceInstructionRootResolutionError, a_derived_binding_exists, another_session_bound,
     composition_aliases_its_own_parent, decide_session_root, parent_aliases_the_configured_root,
     probe_is_stale, shares_a_directory_with_the_configured_root,
 };
