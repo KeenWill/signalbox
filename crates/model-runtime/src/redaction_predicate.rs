@@ -3,8 +3,9 @@
 //! The same byte predicate scans two inputs: canonical JSON of ObservationFact
 //! (excluding caller-owned correlation), and decoded provider content. Content
 //! joins string leaves in lexical object-key / array order and observation
-//! arrival order, without field separators. Complete JSON strings also project
-//! their decoded keys and string values; plain text is not escape-decoded.
+//! arrival order, without field separators. Embedded JSON objects, arrays, and
+//! strings project their decoded keys and string values in place, joining content on
+//! either side in the same window; plain text is not escape-decoded.
 //! Text, thinking, and argument deltas additionally reconstruct separate streams
 //! by (kind, part index), retaining their tails across intervening observations.
 //! Argument streams decode JSON escapes, including escapes split across deltas.
@@ -171,15 +172,27 @@ impl ObservationPredicate {
             return true;
         };
         let mut found = self.serialized.inspect(&serialized, credential);
+        let streamed_arguments = matches!(fact, ObservationFact::ToolArgumentsDelta { .. });
+        let mut join_decoded_stream = false;
         visit_strings(&value, None, &mut |field, text| {
             found |= self.content.inspect(text.as_bytes(), credential);
             let json = serde_json::from_str::<serde_json::Value>(text)
                 .ok()
+                // Scalar spellings in ordinary string fields retain their
+                // literal bytes; only structured/string JSON projects leaves.
+                .filter(|value| {
+                    matches!(
+                        value,
+                        serde_json::Value::Object(_)
+                            | serde_json::Value::Array(_)
+                            | serde_json::Value::String(_)
+                    )
+                })
                 .map(|mut value| {
                     value.sort_all_objects();
                     value
                 });
-            if !matches!(fact, ObservationFact::ToolArgumentsDelta { .. }) {
+            if !streamed_arguments {
                 // The proposed-argument field retains its JSON role even when
                 // incomplete or malformed. Decode it at its projection position
                 // so its tail can join later fields and observations.
@@ -188,15 +201,25 @@ impl ObservationPredicate {
                 if proposed_arguments {
                     JsonEscapes::default().push(text, |unit| {
                         found |= self.escaped_content.inspect(unit.as_bytes(), credential);
+                        if json.is_none() {
+                            found |= self.json_content.inspect(unit.as_bytes(), credential);
+                        }
                     });
                 } else {
                     found |= self.escaped_content.inspect(text.as_bytes(), credential);
+                    if json.is_none() {
+                        found |= self.json_content.inspect(text.as_bytes(), credential);
+                    }
                 }
             }
             if let Some(json) = json {
+                // Replace the embedded JSON at this field's position with its
+                // leaves; its tail must join the following ordinary content.
                 visit_json_content(&json, &mut |unit| {
                     found |= self.json_content.inspect(unit.as_bytes(), credential);
                 });
+            } else {
+                join_decoded_stream = streamed_arguments;
             }
         });
         let stream = match fact {
@@ -214,6 +237,9 @@ impl ObservationPredicate {
                 stream.escapes.push(text, |unit| {
                     found |= stream.decoded.inspect(unit.as_bytes(), credential);
                     found |= self.escaped_content.inspect(unit.as_bytes(), credential);
+                    if join_decoded_stream {
+                        found |= self.json_content.inspect(unit.as_bytes(), credential);
+                    }
                 });
             }
         }
@@ -444,6 +470,104 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn complete_json_prefixes_join_following_fields_and_facts() {
+        runner()
+            .run(
+                &(
+                    credentials(),
+                    prop_oneof![
+                        Just("0".to_owned()),
+                        Just("true".to_owned()),
+                        Just("null".to_owned()),
+                        credentials().prop_map(|text| format!("secret{text}")),
+                    ],
+                    0usize..3,
+                    any::<bool>(),
+                    0usize..3,
+                ),
+                |(prefix, suffix, shape, use_escapes, following)| {
+                    let secret = format!("{prefix}{suffix}");
+                    let value = if use_escapes {
+                        format!("\"{}\"", escaped(&prefix))
+                    } else {
+                        serde_json::to_string(&prefix).unwrap()
+                    };
+                    let arguments_json = match shape {
+                        0 => value,
+                        1 => format!("[{value}]"),
+                        _ => format!("{{\"x\":{value}}}"),
+                    };
+                    let mut predicate = ObservationPredicate::default();
+                    let proposal = ObservationFact::ToolCallProposed(crate::ToolCallProposal {
+                        arguments_json,
+                        id: crate::ToolCallId::new(if following == 0 { &suffix } else { "" }),
+                        name: crate::ToolName::new(""),
+                    });
+                    let mut detected = predicate.inspect(&proposal, secret.as_bytes());
+                    if following != 0 {
+                        let fact = if following == 1 {
+                            delta(Kind::Text, 0, suffix.to_owned())
+                        } else {
+                            delta(Kind::Arguments, 0, escaped(&suffix))
+                        };
+                        detected |= predicate.inspect(&fact, secret.as_bytes());
+                    }
+                    prop_assert!(detected, "JSON leaves must join the following content");
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn complete_json_prefix_joins_following_proposal_fields() {
+        let mut predicate = ObservationPredicate::default();
+        let fact = ObservationFact::ToolCallProposed(crate::ToolCallProposal {
+            arguments_json: r#"{"x":"fixture_"}"#.to_owned(),
+            id: crate::ToolCallId::new("secret"),
+            name: crate::ToolName::new(""),
+        });
+        assert!(predicate.inspect(&fact, b"fixture_secret"));
+    }
+
+    #[test]
+    fn ordinary_prefix_joins_complete_json_suffix() {
+        let mut predicate = ObservationPredicate::default();
+        assert!(!predicate.inspect(
+            &delta(Kind::Text, 0, "fixture_".to_owned()),
+            b"fixture_secret"
+        ));
+        assert!(predicate.inspect(
+            &delta(Kind::Text, 1, r#"["secret"]"#.to_owned()),
+            b"fixture_secret"
+        ));
+    }
+
+    #[test]
+    fn ordinary_content_separates_embedded_json_leaves() {
+        let mut predicate = ObservationPredicate::default();
+        for text in [r#""fixture_""#, "gap", r#""secret""#] {
+            assert!(!predicate.inspect(&delta(Kind::Text, 0, text.to_owned()), b"fixture_secret"));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "credential redaction predicate disagrees with forwarded output")]
+    fn forwarded_json_prefix_and_identifier_suffix_fail_shadow_audit() {
+        let credential = CredentialValue::new(b"fixture_secret".to_vec());
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &credential);
+        sink.observe(Observation {
+            correlation: (),
+            fact: ObservationFact::ToolCallProposed(crate::ToolCallProposal {
+                arguments_json: r#"{"x":"fixture_"}"#.to_owned(),
+                id: crate::ToolCallId::new("secret"),
+                name: crate::ToolName::new(""),
+            }),
+        });
     }
 
     #[test]

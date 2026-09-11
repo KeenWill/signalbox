@@ -546,9 +546,10 @@ unmodified.
 The exact-value observation sink also checks each forwarded fact with a shadow
 predicate over its canonical JSON bytes and decoded content, using the same
 credential-length-minus-one byte lookbehind. The content projection joins string
-leaves across fields and facts, decodes complete embedded JSON and malformed
-proposed arguments, and reconstructs text, thinking, and JSON-escaped argument
-streams by kind and part index within one request. A match increments
+leaves across fields and facts, joins decoded complete embedded JSON leaves with
+ordinary content in order, decodes malformed proposed arguments, and
+reconstructs text, thinking, and JSON-escaped argument streams by kind and part
+index within one request. A match increments
 `signalbox_credential_redaction_disagreements_total` on the daemon's Prometheus
 surface and fails runtime unit tests; production forwarding retains the existing
 redaction behavior.
