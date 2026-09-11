@@ -171,8 +171,9 @@ aggregate the loaders can reconstitute.
 Each primitive review mutation performs its command claim, aggregate recovery or
 effect, and receipt in one transaction on one database connection. Exact receipt
 replay still precedes aggregate validation. A failure before commit rolls back
-the claim, effect, and receipt and is definite; a failure while committing
-remains ambiguous.
+the claim, effect, and receipt and is definite. A failure while committing is
+definite when the database reports a rejection, and ambiguous only when the
+commit outcome is unknown.
 
 How the terminal prints a review mutation's command identity for exact retry
 belongs to [process protocol](process-protocol.md).
