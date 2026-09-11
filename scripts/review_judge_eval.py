@@ -2,7 +2,7 @@
 """Run injected review findings through a daemon's judgment session template."""
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import hashlib
 import json
 from pathlib import Path
@@ -30,6 +30,8 @@ def atomic_json(path, value):
 
 
 def request(socket_path, kind, **fields):
+    if kind == "read_transcript":
+        fields["after_frontier"] = None
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(120)
         connection.connect(str(socket_path))
@@ -203,6 +205,35 @@ class Trial:
         return evidence
 
 
+def run_trials(args, cases):
+    remaining = iter(cases)
+    failures = []
+    with ThreadPoolExecutor(max_workers=args.workers) as workers:
+        pending = {}
+        def admit():
+            for case in remaining:
+                pending[workers.submit(Trial(args, case).run)] = case["id"]
+                if len(pending) == args.workers:
+                    break
+        admit()
+        while pending:
+            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                identity = pending.pop(future)
+                try:
+                    result = future.result()
+                    print(json.dumps({"id": identity, "wall_seconds": result["wall_seconds"]}), flush=True)
+                except Exception as error:
+                    failure = {"id": identity, "error": str(error)}
+                    failures.append(failure)
+                    print(json.dumps(failure), flush=True)
+            if not failures:
+                admit()
+        failures.extend({"id": case["id"], "error": "not submitted after a trial failure"}
+                        for case in remaining)
+    return failures
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("socket", "repository", "workspace", "cases", "output"):
@@ -229,18 +260,7 @@ def main():
         parser.error("run inputs changed; select a new output directory")
     atomic_json(path, manifest)
     git(args.repository, "worktree", "list")
-    failures = []
-    with ThreadPoolExecutor(max_workers=args.workers) as workers:
-        futures = {workers.submit(Trial(args, case).run): case["id"] for case in cases}
-        for future in as_completed(futures):
-            identity = futures[future]
-            try:
-                result = future.result()
-                print(json.dumps({"id": identity, "wall_seconds": result["wall_seconds"]}), flush=True)
-            except Exception as error:
-                failure = {"id": identity, "error": str(error)}
-                failures.append(failure)
-                print(json.dumps(failure), flush=True)
+    failures = run_trials(args, cases)
     atomic_json(args.output / "failures.json", failures)
     return bool(failures)
 

@@ -2,8 +2,10 @@
 """Exercise complete-inventory and independent judge-result admission."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from review_judge_eval import validate_result
+from review_judge_eval import run_trials, validate_result
 
 
 class JudgmentResultTests(unittest.TestCase):
@@ -32,6 +34,17 @@ class JudgmentResultTests(unittest.TestCase):
         }]}
         with self.assertRaisesRegex(ValueError, "one through five"):
             validate_result(result, ["candidate"])
+
+
+class TrialAdmissionTests(unittest.TestCase):
+    def test_failure_stops_new_sessions_until_the_operator_resolves_it(self):
+        cases = [{"id": "active"}, {"id": "later"}]
+        with patch("review_judge_eval.Trial") as trial:
+            trial.return_value.run.side_effect = RuntimeError("transcript unavailable")
+            failures = run_trials(SimpleNamespace(workers=1), cases)
+        self.assertEqual(trial.call_count, 1)
+        self.assertEqual([failure["id"] for failure in failures], ["active", "later"])
+        self.assertEqual(failures[1]["error"], "not submitted after a trial failure")
 
 
 if __name__ == "__main__":
