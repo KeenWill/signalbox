@@ -382,8 +382,11 @@ use the same bound workspace.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
-correlated with that exact attempt. A tool that executes and exits nonzero
-returns bounded structured `ExecutionFailed` evidence and is `KnownFailed`. A
+correlated with that exact attempt. Delegated turns retain the same recovery
+evidence for automatic reconciliation and explicit stop without erasing the
+physical ambiguity. Automatic reconciliation publishes an unavailable child
+result and wakes the parent. A tool that executes and exits nonzero returns
+bounded structured `ExecutionFailed` evidence and is `KnownFailed`. A
 supervisor-reported sandbox timeout or cancellation retains its bounded output
 without requiring a launcher completion record. Output admission applies the
 size, U+0000, credential-redaction, and correlation checks before durable

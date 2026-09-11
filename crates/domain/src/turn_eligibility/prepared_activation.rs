@@ -196,6 +196,52 @@ impl PreparedDelegatedTurnActivation {
         Some((self.turn, self.starting_entries, self.starting_snapshot))
     }
 
+    /// Reconstitutes a delegated tool wait with its exact ended attempt.
+    pub fn with_reconstituted_tool_recovery(
+        mut self,
+        phase: ActiveTurnSchedulingReconstitutionInput,
+        pending: Vec<crate::PendingSteeringInput>,
+        consumed: Vec<crate::ConsumedSteeringReconstitutionInput>,
+    ) -> Option<(
+        ActivatedTurn,
+        EndedTurnAttempt,
+        ResolvedContextFrontierSnapshot,
+    )> {
+        let ActiveTurnSchedulingReconstitutionInput {
+            owning_turn,
+            current_attempt: Some(current_attempt),
+            state: StoredActiveTurnPhase::AwaitingToolRecovery { wait, attempt_end },
+            executing_tool_batch: None,
+        } = phase
+        else {
+            return None;
+        };
+        if owning_turn != self.turn.turn
+            || wait.turn() != owning_turn
+            || wait.session() != self.turn.session
+            || wait.issuing_attempt() != current_attempt
+        {
+            return None;
+        }
+        let attempt = reconstitute_recovery_attempt(
+            self.turn.session,
+            owning_turn,
+            current_attempt,
+            &attempt_end,
+        )?;
+        self.turn.phase = ActiveTurnPhase::AwaitingRecoveryDecision {
+            ambiguous_operations: NonEmptyIssuedOperationRefs::singleton(
+                crate::IssuedOperationRef::ToolAttempt(wait.attempt()),
+            ),
+            applied_interrupt: attempt_end.interrupt().map(|interrupt| interrupt.proof()),
+        };
+        self.turn = self
+            .turn
+            .with_pending_steering(pending)?
+            .with_consumed_steering(consumed)?;
+        Some((self.turn.into(), attempt, self.starting_snapshot))
+    }
+
     /// Reconstitutes a delegated ambiguous model-call wait from its complete
     /// stored evidence. The returned call, attempt, and snapshots are checked
     /// against the delegated origin and its pinned configuration.
@@ -245,35 +291,12 @@ impl PreparedDelegatedTurnActivation {
         else {
             return None;
         };
-        let running_attempt = CurrentTurnAttempt::prepared(current_attempt)
-            .begin_running()
-            .ok()?;
-        let attempt = match attempt_end.end() {
-            AttemptEnd::WithoutStop {
-                disposition:
-                    disposition @ (UnstoppedAttemptDisposition::Ambiguous
-                    | UnstoppedAttemptDisposition::Lost),
-            } => running_attempt.end_without_stop(*disposition).ok()?,
-            AttemptEnd::AfterCancellation {
-                cause,
-                disposition:
-                    disposition @ (CancellationStopDisposition::Ambiguous
-                    | CancellationStopDisposition::Lost),
-            } => {
-                let interrupt = attempt_end.interrupt()?;
-                if interrupt.session() != self.turn.session
-                    || interrupt.proof() != *cause
-                    || cause.predecessor() != owning_turn
-                {
-                    return None;
-                }
-                running_attempt
-                    .request_cancellation(*cause)
-                    .and_then(|attempt| attempt.end_after_cancellation(*cause, *disposition))
-                    .ok()?
-            }
-            _ => return None,
-        };
+        let attempt = reconstitute_recovery_attempt(
+            self.turn.session,
+            owning_turn,
+            current_attempt,
+            &attempt_end,
+        )?;
         self.turn.phase = ActiveTurnPhase::AwaitingRecoveryDecision {
             ambiguous_operations: NonEmptyIssuedOperationRefs::singleton(
                 crate::IssuedOperationRef::ModelCall(recovery_call),
@@ -292,6 +315,44 @@ impl PreparedDelegatedTurnActivation {
             self.starting_snapshot,
         ))
     }
+}
+
+fn reconstitute_recovery_attempt(
+    session: SessionId,
+    turn: TurnId,
+    current_attempt: TurnAttemptId,
+    attempt_end: &crate::TerminalAttemptEndReconstitutionInput,
+) -> Option<EndedTurnAttempt> {
+    let running_attempt = CurrentTurnAttempt::prepared(current_attempt)
+        .begin_running()
+        .ok()?;
+    let attempt = match attempt_end.end() {
+        AttemptEnd::WithoutStop {
+            disposition:
+                disposition @ (UnstoppedAttemptDisposition::Ambiguous
+                | UnstoppedAttemptDisposition::Lost),
+        } => running_attempt.end_without_stop(*disposition).ok()?,
+        AttemptEnd::AfterCancellation {
+            cause,
+            disposition:
+                disposition @ (CancellationStopDisposition::Ambiguous
+                | CancellationStopDisposition::Lost),
+        } => {
+            let interrupt = attempt_end.interrupt()?;
+            if interrupt.session() != session
+                || interrupt.proof() != *cause
+                || cause.predecessor() != turn
+            {
+                return None;
+            }
+            running_attempt
+                .request_cancellation(*cause)
+                .and_then(|attempt| attempt.end_after_cancellation(*cause, *disposition))
+                .ok()?
+        }
+        _ => return None,
+    };
+    Some(attempt)
 }
 
 fn delegation_delivery_sequence(payload: &SemanticTranscriptEntryPayload) -> Option<NonZeroU64> {
