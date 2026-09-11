@@ -287,10 +287,11 @@ mod tests {
     use super::*;
     use signalbox_session_ownership::{
         BranchName, CommitSha, LabelName, PullRequestBody, PullRequestEventContext,
-        PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchEventId,
-        RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPullRequestStateInput,
-        RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
-        RepoWatchThreadObservation, ReviewThreadId, SessionTemplateName,
+        PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin,
+        RepoWatchEventId, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+        RepoWatchPullRequestStateInput, RepoWatchRuleActionV1, RepoWatchRuleId,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchThreadObservation, ReviewThreadId,
+        SessionTemplateName,
     };
     use std::num::NonZeroU64;
 
@@ -355,6 +356,10 @@ mod tests {
         )
         .expect("rule");
         (rule, event)
+    }
+
+    fn thread_author() -> RepoWatchAuthorLogin {
+        RepoWatchAuthorLogin::try_new("reviewer".to_owned()).expect("author")
     }
 
     #[test]
@@ -443,9 +448,9 @@ mod tests {
         });
         let mut current = input();
         current.mergeable_state = MergeableState::Mergeable;
-        current.threads = vec![RepoWatchThreadObservation::new(
+        current.threads = vec![RepoWatchThreadObservation::open(
             ReviewThreadId::try_new("remaining-review".to_owned()).expect("thread"),
-            RepoWatchThreadState::Open,
+            Some(thread_author()),
         )];
         let retry = retry_event(
             &rule,
@@ -513,11 +518,13 @@ mod tests {
         let thread = ReviewThreadId::try_new("thread".to_owned()).expect("thread");
         let (rule, event) = origin(RepoWatchEventKindV1::ThreadOpened {
             thread: thread.clone(),
+            author: Some(thread_author()),
         });
         let mut current = input();
-        current.threads = vec![RepoWatchThreadObservation::new(
+        current.threads = vec![RepoWatchThreadObservation::resolved(
             thread,
-            RepoWatchThreadState::Resolved,
+            Some(thread_author()),
+            Some(thread_author()),
         )];
         assert!(
             retry_event(
@@ -534,11 +541,12 @@ mod tests {
         let thread = ReviewThreadId::try_new("thread".to_owned()).expect("thread");
         let (rule, event) = origin(RepoWatchEventKindV1::ThreadOpened {
             thread: thread.clone(),
+            author: Some(thread_author()),
         });
         let mut current = input();
-        current.threads = vec![RepoWatchThreadObservation::new(
+        current.threads = vec![RepoWatchThreadObservation::open(
             thread,
-            RepoWatchThreadState::Open,
+            Some(thread_author()),
         )];
         assert!(
             retry_event(

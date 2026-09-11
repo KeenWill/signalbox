@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 use signalbox_session_ownership::{
-    CheckConclusion, ChecksOutcome, MergeableState, ReactionSubject,
+    CheckConclusion, ChecksOutcome, MergeableState, ReactionSubject, RepoWatchAuthorLogin,
     RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
     RepoWatchPullRequestState, RepoWatchThreadState, ReviewState,
 };
@@ -100,6 +100,8 @@ fn merged_pull_request_payload(baseline: &RepoWatchMergedPullRequestBaselineV1) 
             .map(|thread| json!({
                 "thread": thread.thread().as_str(),
                 "state": thread_state_storage(thread.state()),
+                "author": thread.author().map(RepoWatchAuthorLogin::as_str),
+                "resolver": thread.resolver().map(RepoWatchAuthorLogin::as_str),
             }))
             .collect::<Vec<_>>(),
         "reactions": baseline
@@ -170,6 +172,8 @@ fn pull_request_payload(state: &RepoWatchPullRequestState) -> Value {
             .map(|thread| json!({
                 "thread": thread.thread().as_str(),
                 "state": thread_state_storage(thread.state()),
+                "author": thread.author().map(RepoWatchAuthorLogin::as_str),
+                "resolver": thread.resolver().map(RepoWatchAuthorLogin::as_str),
             }))
             .collect::<Vec<_>>(),
         "reactions": state
