@@ -44,7 +44,7 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
             ("GIT_CONFIG_NOSYSTEM", "1"),
             ("GIT_CONFIG_GLOBAL", "/dev/null"),
             ("GIT_TERMINAL_PROMPT", "0"),
-            ("GIT_CONFIG_COUNT", "6"),
+            ("GIT_CONFIG_COUNT", "9"),
             ("GIT_CONFIG_KEY_1", "credential.helper"),
             ("GIT_CONFIG_VALUE_1", ""),
             ("GIT_CONFIG_KEY_2", "core.hooksPath"),
@@ -55,6 +55,12 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
             ("GIT_CONFIG_VALUE_4", "0"),
             ("GIT_CONFIG_KEY_5", "pack.depth"),
             ("GIT_CONFIG_VALUE_5", "0"),
+            ("GIT_CONFIG_KEY_6", "core.bigFileThreshold"),
+            ("GIT_CONFIG_VALUE_6", "1"),
+            ("GIT_CONFIG_KEY_7", "core.packedGitWindowSize"),
+            ("GIT_CONFIG_VALUE_7", "1m"),
+            ("GIT_CONFIG_KEY_8", "core.packedGitLimit"),
+            ("GIT_CONFIG_VALUE_8", "8m"),
             ("LC_ALL", "C"),
         ]
         .into_iter()

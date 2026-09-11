@@ -99,6 +99,9 @@ names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
 members are required except for the defaulted repository-watch poll request
 budget, while other tables carry their own configured limits. Numeric-bound
 duration policies use Jiff's friendly unsigned-duration syntax.
+`max_git_object_bytes` limits decoded Git object content, including packed delta
+dependencies; `"none"` leaves blob content unbounded. Commits, trees, and tags
+retain the Git family's 1 MiB structural metadata bound.
 `max_review_findings_per_run` must be finite and no greater than its domain
 bound. A finite `max_blob_replica_count` must admit the durable catalog's full
 store bound. Disabling reconciliation requires an unbounded nudge buffer.

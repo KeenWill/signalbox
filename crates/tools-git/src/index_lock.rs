@@ -924,8 +924,14 @@ pub(super) fn write_index_entries(
     object_format: ObjectFormat,
 ) -> Result<IndexContentIdentity, LocalGitFailure> {
     validate_index_entries(index, object_format)?;
+    // Git's index format persists only intent-to-add and skip-worktree here;
+    // libgit2 also uses this field for in-memory flags such as UPTODATE.
+    const PERSISTED_EXTENDED_FLAGS: u16 = (1 << 13) | (1 << 14);
     let mut bytes = Vec::new();
-    let version = if index.iter().any(|entry| entry.flags_extended != 0) {
+    let version = if index
+        .iter()
+        .any(|entry| entry.flags_extended & PERSISTED_EXTENDED_FLAGS != 0)
+    {
         3_u32
     } else {
         2_u32
@@ -957,11 +963,12 @@ pub(super) fn write_index_entries(
         let path_length = u16::try_from(entry.path.len())
             .unwrap_or(u16::MAX)
             .min(0x0fff);
-        let extended = entry.flags_extended != 0;
+        let extended_flags = entry.flags_extended & PERSISTED_EXTENDED_FLAGS;
+        let extended = extended_flags != 0;
         let flags = (entry.flags & !0x4fff) | path_length | if extended { 0x4000 } else { 0 };
         bytes.extend_from_slice(&flags.to_be_bytes());
         if extended {
-            bytes.extend_from_slice(&entry.flags_extended.to_be_bytes());
+            bytes.extend_from_slice(&extended_flags.to_be_bytes());
         }
         bytes.extend_from_slice(&entry.path);
         bytes.push(0);

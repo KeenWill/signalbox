@@ -281,8 +281,126 @@ pub struct WorkspaceFileBytes {
     pub mode: u32,
 }
 
+/// A regular file pinned for a complete streamed read.
+///
+/// Every read revalidates the opened file and its root-relative pathname before
+/// and after reading, rejecting replacement or changes to size, mode, or timestamps.
+pub struct WorkspaceFileReader {
+    file: File,
+    root: WorkspaceRoot,
+    path: PathBuf,
+    snapshot: std::fs::Metadata,
+}
+
+impl fmt::Debug for WorkspaceFileReader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkspaceFileReader")
+            .finish_non_exhaustive()
+    }
+}
+
+impl WorkspaceFileReader {
+    fn open(root: &WorkspaceRoot, path: &Path) -> Result<Self, WorkspaceResolveError> {
+        let file = File::from(open_relative(
+            root,
+            path,
+            OFlags::RDONLY | OFlags::NONBLOCK,
+        )?);
+        let snapshot = file
+            .metadata()
+            .map_err(|source| resolve_std_io(path, source))?;
+        if !snapshot.is_file() {
+            return Err(resolve_std_io(
+                path,
+                io::Error::other("workspace path is not a regular file"),
+            ));
+        }
+        let reader = Self {
+            file,
+            root: root.clone(),
+            path: path.to_owned(),
+            snapshot,
+        };
+        reader
+            .validate()
+            .map_err(|source| resolve_std_io(path, source))?;
+        Ok(reader)
+    }
+
+    /// File length captured when the descriptor was opened.
+    pub fn len(&self) -> u64 {
+        self.snapshot.len()
+    }
+
+    /// Whether the captured regular file is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Captured permission and special mode bits.
+    pub fn mode(&self) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        self.snapshot.mode()
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        let current = File::from(
+            open_relative(&self.root, &self.path, OFlags::RDONLY | OFlags::NONBLOCK)
+                .map_err(io::Error::other)?,
+        );
+        if !same_file_read_snapshot(&self.snapshot, &self.file.metadata()?)
+            || !same_file_read_snapshot(&self.snapshot, &current.metadata()?)
+        {
+            return Err(io::Error::other("worktree file changed during read"));
+        }
+        Ok(())
+    }
+}
+
+impl Read for WorkspaceFileReader {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.validate()?;
+        let count = self.file.read(bytes)?;
+        self.validate()?;
+        Ok(count)
+    }
+}
+
+fn same_file_read_snapshot(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    (
+        left.dev(),
+        left.ino(),
+        left.len(),
+        left.mode(),
+        left.mtime(),
+        left.mtime_nsec(),
+        left.ctime(),
+        left.ctime_nsec(),
+    ) == (
+        right.dev(),
+        right.ino(),
+        right.len(),
+        right.mode(),
+        right.mtime(),
+        right.mtime_nsec(),
+        right.ctime(),
+        right.ctime_nsec(),
+    )
+}
+
 /// Injectable descriptor-relative filesystem operations needed by the tools.
 pub trait WorkspaceFileSystem: Clone + Send + Sync + 'static {
+    /// Opens one no-follow regular-file stream rooted in the pinned workspace.
+    fn open_file_stream(
+        &self,
+        root: &WorkspaceRoot,
+        path: &Path,
+    ) -> Result<WorkspaceFileReader, WorkspaceResolveError> {
+        WorkspaceFileReader::open(root, path)
+    }
+
     /// Opens and pins the injected root directory.
     fn open_root(&self, root: &Path) -> Result<WorkspaceRoot, WorkspaceRootError>;
     /// Classifies an existing root-relative path without following symlinks.

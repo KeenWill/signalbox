@@ -157,20 +157,19 @@ fn commit_rejects_a_generated_tree_over_the_recursive_budget() {
 }
 
 #[test]
-fn commit_rejects_indexed_blob_bytes_over_the_tree_budget() {
+fn commit_publishes_large_aggregate_index_content() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     plant_index_over_blob_budget(&repository);
     let executor = fixture.executor();
 
-    let failure = executor
+    executor
         .execute_operation(LocalOperation::Commit(GitCommitArguments {
             message: MODEL_MESSAGE.to_owned(),
         }))
-        .expect_err("aggregate indexed blobs reject before packing");
+        .expect("large aggregate index commits");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
-    assert_eq!(
+    assert_ne!(
         repository.head().expect("HEAD exists").target(),
         Some(fixture.initial)
     );
@@ -395,11 +394,6 @@ fn commit_rejects_a_nonregular_merge_state_entry_before_publication() {
         .expect("pinned fixture repository opens");
     let pinned_objects =
         PinnedObjectDatabase::capture(&executor.repository_authority).expect("fixture objects pin");
-    let persistent_object_database =
-        Odb::new().expect("fixture persistent object database constructs");
-    pinned_objects
-        .add_to(&persistent_object_database)
-        .expect("fixture persistent objects attach");
     let object_database = Odb::new().expect("fixture object database constructs");
     pinned_objects
         .add_to(&object_database)
@@ -424,11 +418,7 @@ fn commit_rejects_a_nonregular_merge_state_entry_before_publication() {
             message: MODEL_MESSAGE.to_owned(),
         },
         &executor.repository_authority,
-        (
-            &persistent_object_database,
-            &object_database,
-            &pinned_objects,
-        ),
+        &pinned_objects,
         || executor.validate_current_repository_identity(),
     )
     .expect_err("nonregular merge state rejects before publication");
