@@ -9,8 +9,8 @@ use super::{
         RecordedSessionBinding, SessionRootDecision, SessionWorkspaceRoot, SessionWorkspaceRoots,
         WorkspaceInstructionRootAuthority, WorkspaceInstructionRootFuture,
         WorkspaceInstructionRootResolutionError, a_derived_binding_exists,
-        a_derived_binding_shares_the_configured_root, composition_aliases_its_own_parent,
-        decide_session_root, parent_aliases_the_configured_root, probe_is_stale,
+        composition_aliases_its_own_parent, decide_session_root,
+        parent_aliases_the_configured_root, probe_is_stale,
         shares_a_directory_with_the_configured_root,
     },
     workspace_failure::{SessionWorkspaceFailure, SessionWorkspaceFailureDetails},
@@ -292,8 +292,8 @@ where
                 // protect only the requests that take that branch.
                 if a_derived_binding_exists(&state.bindings, session) {
                     let standing_configured = self.standing_configured_identity()?;
-                    if a_derived_binding_shares_the_configured_root(
-                        &state.bindings,
+                    if state.refuses_configured_workspace_sharing(
+                        &self.roots,
                         session,
                         self.configured.workspace_identity.clone(),
                         standing_configured.clone(),
