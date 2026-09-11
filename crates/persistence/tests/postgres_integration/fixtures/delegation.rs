@@ -1846,7 +1846,7 @@ pub(crate) async fn checkpoint_foreground_child_wait_without_result(
     checkpoint_foreground_child_wait_for_batch(pool, seed, fixture, requests).await
 }
 
-async fn checkpoint_foreground_child_wait_for_batch(
+pub(crate) async fn checkpoint_foreground_child_wait_for_batch(
     pool: &PgPool,
     seed: u128,
     fixture: RestartModelCallFixture,
