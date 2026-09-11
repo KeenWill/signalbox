@@ -1099,6 +1099,14 @@ impl TelemetryMetrics {
     /// Builds every bounded label series before the daemon begins work.
     pub fn new() -> Result<Self, TelemetryConfigurationError> {
         let registry = Registry::new();
+        let redaction_disagreements = IntCounter::new(
+            "signalbox_credential_redaction_disagreements_total",
+            "Forwarded model observations rejected by the shadow credential predicate.",
+        )
+        .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(RedactionDisagreements(redaction_disagreements)))
+            .map_err(|_| metrics_error())?;
         let client_connections = IntGauge::with_opts(Opts::new(
             "signalbox_client_connections_active",
             "Active local process-protocol connections.",
@@ -1330,6 +1338,29 @@ impl TelemetryMetrics {
                 .unwrap_or(0),
         );
         TextEncoder::new().encode_to_string(&self.registry.gather())
+    }
+}
+
+/// Samples the runtime's process counter without retaining a second count.
+struct RedactionDisagreements(IntCounter);
+
+impl prometheus::core::Collector for RedactionDisagreements {
+    fn desc(&self) -> Vec<&prometheus::core::Desc> {
+        self.0.desc()
+    }
+
+    fn collect(&self) -> Vec<prometheus::proto::MetricFamily> {
+        let mut families = self.0.collect();
+        for family in &mut families {
+            for metric in family.mut_metric() {
+                let mut counter = prometheus::proto::Counter::default();
+                counter.set_value(
+                    signalbox_model_runtime::credential_redaction_disagreements() as f64,
+                );
+                metric.set_counter(counter);
+            }
+        }
+        families
     }
 }
 
@@ -2090,6 +2121,10 @@ mod tests {
         let rendered = metrics.render().expect("static registry encodes");
 
         assert!(rendered.contains("signalbox_turns_started_total 1"));
+        assert!(
+            rendered.contains("# TYPE signalbox_credential_redaction_disagreements_total counter")
+        );
+        assert!(rendered.contains("\nsignalbox_credential_redaction_disagreements_total "));
         assert!(rendered.contains("outcome=\"reconciliation_required\""));
         assert!(rendered.contains("disposition=\"ambiguous\""));
         assert!(!rendered.contains("session_id"));
@@ -2097,6 +2132,40 @@ mod tests {
         assert!(!rendered.contains("model_call_id"));
         assert!(!rendered.contains(SYNTHETIC_CREDENTIAL));
         assert!(!rendered.contains(SYNTHETIC_CONTENT));
+    }
+
+    #[test]
+    fn shadow_redaction_disagreement_is_scraped_without_changing_forwarded_facts() {
+        use signalbox_model_runtime::{
+            CredentialRedactingSink, CredentialValue, Observation, ObservationFact,
+            ObservationSink, ProviderReportedModel, credential_redaction_disagreements,
+        };
+
+        let metrics = TelemetryMetrics::new().expect("static metric descriptors are valid");
+        let before = credential_redaction_disagreements();
+        let credential = CredentialValue::new(b"fixture_secret".to_vec());
+        let input = ["fixture_", "secret"].map(|fragment| Observation {
+            correlation: (),
+            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(fragment)),
+        });
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &credential);
+        for observation in &input {
+            sink.observe(observation.clone());
+        }
+        sink.flush();
+        drop(sink);
+        assert_eq!(observed, input);
+        let rendered = metrics.render().expect("static registry encodes");
+        let count = rendered
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("signalbox_credential_redaction_disagreements_total ")
+                    .and_then(|value| value.parse::<f64>().ok())
+            })
+            .expect("the disagreement counter is present");
+        assert!(count > before as f64);
+        assert!(!rendered.contains("fixture_secret"));
     }
 
     #[tokio::test(start_paused = true)]
