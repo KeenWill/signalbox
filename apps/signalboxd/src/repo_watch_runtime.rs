@@ -902,6 +902,10 @@ impl RuntimeState {
                 .await
                 .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
         }
+        self.store
+            .react_to_ordinary_dispatch_completion(&mut self.factory, &mut codec, &self.lifecycle)
+            .await
+            .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
         for repository in configuration.repositories() {
             for rule in configuration.rules() {
                 self.store

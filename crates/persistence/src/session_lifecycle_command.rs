@@ -8,6 +8,8 @@
 
 use std::{error::Error, fmt};
 
+pub(crate) mod ordinary;
+
 use rust_decimal::Decimal;
 use signalbox_domain::{
     CommandPrincipal, DescendantTerminationScope, DurableCommandId, GoalState, LifecycleActor,
@@ -108,6 +110,12 @@ pub struct SessionLifecycleCommandRepository {
     pool: PgPool,
 }
 
+#[derive(Clone, Copy)]
+enum LifecycleAdmission {
+    Unconditional,
+    CompletedOrdinaryDispatch,
+}
+
 impl SessionLifecycleCommandRepository {
     /// Uses the supplied pool for atomic handling and replay.
     pub const fn new(pool: PgPool) -> Self {
@@ -119,6 +127,42 @@ impl SessionLifecycleCommandRepository {
         &self,
         command: SessionLifecycleCommand,
         principal: CommandPrincipal,
+    ) -> Result<SessionLifecycleCommandHandlingOutcome, SessionLifecycleCommandRepositoryError>
+    {
+        self.handle_with_admission(command, principal, LifecycleAdmission::Unconditional)
+            .await
+    }
+
+    /// Closes an ordinary repository-watch dispatch only while no accepted work remains.
+    /// The completion check and nonsticky stop hold the session's lifecycle lock together.
+    pub async fn close_completed_ordinary_dispatch(
+        &self,
+        command_id: DurableCommandId,
+        session: SessionId,
+    ) -> Result<SessionLifecycleCommandHandlingOutcome, SessionLifecycleCommandRepositoryError>
+    {
+        self.handle_with_admission(
+            SessionLifecycleCommand::new(
+                command_id,
+                session,
+                SessionLifecycleOperation::Stop {
+                    sticky: StopStickiness::Redispatchable,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            CommandPrincipal::Module {
+                module: signalbox_domain::DispatchingModule::RepositoryWatch,
+            },
+            LifecycleAdmission::CompletedOrdinaryDispatch,
+        )
+        .await
+    }
+
+    async fn handle_with_admission(
+        &self,
+        command: SessionLifecycleCommand,
+        principal: CommandPrincipal,
+        admission: LifecycleAdmission,
     ) -> Result<SessionLifecycleCommandHandlingOutcome, SessionLifecycleCommandRepositoryError>
     {
         let command_id = command.command_id();
@@ -165,7 +209,7 @@ impl SessionLifecycleCommandRepository {
         sqlx::query("SAVEPOINT lifecycle_apply")
             .execute(&mut *transaction)
             .await?;
-        let result = match apply(&mut transaction, &command, actor).await {
+        let result = match apply(&mut transaction, &command, actor, admission).await {
             Ok(result) => SessionLifecycleCommandResult::Applied(result),
             Err(ApplyError::Rejected(rejection)) => {
                 sqlx::query("ROLLBACK TO SAVEPOINT lifecycle_apply")
@@ -278,6 +322,7 @@ async fn apply(
     connection: &mut PgConnection,
     command: &SessionLifecycleCommand,
     actor: LifecycleActor,
+    admission: LifecycleAdmission,
 ) -> Result<SessionLifecycleApplication, ApplyError> {
     let session = command.session();
     if matches!(
@@ -305,6 +350,15 @@ async fn apply(
         }
         Err(error) => return Err(error.into()),
     };
+    if matches!(admission, LifecycleAdmission::CompletedOrdinaryDispatch)
+        && ordinary::completed_turn_sequences(connection, &[session])
+            .await?
+            .is_empty()
+    {
+        return Err(ApplyError::Rejected(
+            SessionLifecycleCommandRejection::TransitionNotAdmitted,
+        ));
+    }
     match command.operation() {
         SessionLifecycleOperation::ReleaseStart => {
             session_lifecycle::release_start_in_transaction(connection, session, actor).await?;

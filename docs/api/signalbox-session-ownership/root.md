@@ -962,6 +962,10 @@ impl LifecycleEventSource {
         option::Option<offset_date_time::OffsetDateTime>,
         signalbox_persistence::outbox::OutboxDispatchError,
     >;
+    pub async fn completed_ordinary_dispatches(
+        &self,
+        sessions: &[signalbox_domain::SessionId],
+    ) -> result::Result<vec::Vec<LifecycleEvent>, signalbox_persistence::outbox::OutboxDispatchError>;
     pub async fn session_pushed(
         &self,
         session: signalbox_domain::SessionId,

@@ -3929,3 +3929,155 @@ async fn assert_projected_origin(
     task.await??;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn ordinary_dispatch_completion_releases_retry_after_its_event_was_consumed()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{
+        InProcessAttemptDispatchGate, ModelCallCredentialReference, ModelCallExecutionOutcome,
+        ModelCallExecutionService, ScriptedModelCallProvider, ScriptedModelCallStep,
+        StartEligibleTurnOutcome, StartEligibleTurnService, UuidV7ModelCallExecutionIdGenerator,
+        UuidV7StartEligibleTurnIdGenerator,
+    };
+    use signalbox_domain::{AssistantText, ModelCallTerminalObservation};
+    use signalbox_persistence::{
+        model_execution::PostgresModelCallRepository,
+        start_eligible_turn::StartEligibleTurnRepository,
+    };
+
+    let mut fixture = CheckoutFixture::with_threads(
+        "checkout/project",
+        "review",
+        vec![RepoWatchThreadObservation::open(
+            ReviewThreadId::try_new("unfinished-thread".to_owned())?,
+            None,
+        )],
+    )
+    .await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(fixture.core.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) = activation.execute(session).await? else {
+        panic!("fixture turn activates");
+    };
+    assert!(
+        signalboxd::WorkspaceInstructionRuntime::new(fixture.core.clone(), None, Vec::new())
+            .prepare(session, activated.turn())
+            .await?
+    );
+    let repository = PostgresModelCallRepository::new(
+        fixture.core.clone(),
+        fixture.sink.models.target_catalog(),
+        ModelCallCredentialReference::new(fixture.sink.models.fallback_credential_profile()),
+    );
+    let mut execution = ModelCallExecutionService::new(
+        UuidV7ModelCallExecutionIdGenerator,
+        repository.clone(),
+        repository.clone(),
+        repository.clone(),
+        repository,
+        ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new("Review finished without a push".to_owned())
+                        .expect("nonempty assistant text"),
+                ],
+            },
+        )]),
+        InProcessAttemptDispatchGate::default(),
+        None,
+    );
+    assert!(matches!(
+        execution.execute(session).await?,
+        ModelCallExecutionOutcome::Checkpointed(_)
+    ));
+    assert!(matches!(
+        execution.execute(session).await?,
+        ModelCallExecutionOutcome::ObservationCommitted(_)
+    ));
+    fixture.settle().await;
+    let source = signalbox_session_ownership::LifecycleEventSource::new(fixture.core.clone());
+    assert!(source.next().await?.is_none());
+    let templates = signalboxd::SessionTemplateConfiguration::read(
+        &fixture._files.path().join("templates.toml"),
+        || None,
+        &fixture.sink.models,
+    )?;
+    let mut factory =
+        signalboxd::repo_watch_dispatch::RepositoryWatchCommandFactory(Arc::new(templates));
+    let mut codec = RepositoryWatchCommandCodec;
+    fixture
+        .store
+        .react_to_ordinary_dispatch_completion(&mut factory, &mut codec, &source)
+        .await?;
+    fixture
+        .store
+        .react_to_ordinary_dispatch_completion(&mut factory, &mut codec, &source)
+        .await?;
+    assert_eq!(
+        fixture
+            .store
+            .recover_pending_commands(&mut codec)
+            .await?
+            .len(),
+        1
+    );
+    fixture
+        .store
+        .submit_pending(&mut codec, &mut fixture.sink, &source)
+        .await
+        .expect("completion stop submitted");
+    while let Some(event) = source.next().await? {
+        fixture
+            .store
+            .react_to_lifecycle(&event, &mut factory, &mut codec, &source)
+            .await?;
+        source.acknowledge(&event).await?;
+    }
+    let sticky: bool = sqlx::query_scalar(
+        "SELECT terminal_stop_sticky FROM session_lifecycle WHERE session_id=$1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&fixture.core)
+    .await?;
+    assert!(!sticky);
+    let released: bool = sqlx::query_scalar("SELECT session_terminal_at IS NOT NULL AND singleton_released_at IS NOT NULL FROM dispatch_ledger WHERE command_id=$1")
+        .bind(fixture.command.into_uuid()).fetch_one(&fixture.module).await?;
+    assert!(released);
+    let configuration = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("watch configuration");
+    assert!(
+        fixture
+            .store
+            .retry_due(
+                configuration.repositories()[0].repository(),
+                &configuration.rules()[0],
+                &mut FixedDispatchIds {
+                    value: Uuid::now_v7().as_u128(),
+                    calls: 0
+                },
+                &mut factory,
+                &mut codec,
+                &source,
+                OffsetDateTime::now_utc(),
+            )
+            .await
+            .expect("retry admission")
+    );
+    assert_eq!(
+        fixture
+            .store
+            .recover_pending_commands(&mut codec)
+            .await?
+            .len(),
+        1
+    );
+    Ok(())
+}
