@@ -6,8 +6,8 @@ use signalbox_application::{
     ReviewWorkflowTransaction,
 };
 use signalbox_domain::{
-    ReviewFinding, ReviewFindingStatus, ReviewKey, ReviewPass, ReviewPassState, ReviewRun,
-    ReviewRunState,
+    ReviewFinding, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingStatus, ReviewKey,
+    ReviewPass, ReviewPassId, ReviewPassState, ReviewRun, ReviewRunId, ReviewRunState,
 };
 use sqlx::{Postgres, Row, Transaction, types::Uuid};
 
@@ -70,10 +70,14 @@ impl ReviewWorkflowTransaction for ReviewWorkflowStore {
             ClaimInspection::New => {}
         }
 
-        let result = apply_or_recover(self, command.operation()).await?;
-        insert_receipt(&mut claim, &command, &result)
-            .await
-            .map_err(ReviewWorkflowStoreError::CommitAmbiguous)?;
+        let result = apply_or_recover(self, &mut claim, command.operation()).await?;
+        if let Err(error) = insert_receipt(&mut claim, &command, &result).await {
+            // No commit has been attempted, and PostgreSQL aborts the transaction
+            // after the failed statement. Rolling it back makes both the claim and
+            // aggregate effect definitively absent.
+            let _ = claim.rollback().await;
+            return Err(ReviewWorkflowStoreError::Database(error));
+        }
         commit_claim(claim).await?;
         Ok(ReviewWorkflowCommandOutcome::Recorded(result))
     }
@@ -190,30 +194,47 @@ async fn inspect_existing(
 
 async fn apply_or_recover(
     store: &ReviewWorkflowStore,
+    transaction: &mut Transaction<'_, Postgres>,
     operation: &ReviewWorkflowOperation,
 ) -> Result<ReviewWorkflowCommandResult, ReviewWorkflowStoreError> {
     match operation {
         ReviewWorkflowOperation::CreateTarget(target) => {
-            match store.load_target(target.id()).await? {
+            match store
+                .load_target_in_transaction(transaction, target.id())
+                .await?
+            {
                 Some(existing) if existing == *target => {}
                 Some(_) => return Err(command_conflict("target identity names another snapshot")),
-                None => store.insert_target(target).await?,
+                None => {
+                    store
+                        .insert_target_on_connection(transaction, target)
+                        .await?
+                }
             }
             Ok(ReviewWorkflowCommandResult::TargetCreated {
                 target: target.id(),
             })
         }
         ReviewWorkflowOperation::StartRun { run, pass } => {
-            let existing_run = store.load_run(run.reference().run()).await?;
-            let existing_pass = store.load_pass(pass.reference().pass()).await?;
+            lock_run_and_pass(transaction, run.reference().run(), pass.reference().pass()).await?;
+            let existing_run = store
+                .load_run_on_connection(transaction, run.reference().run())
+                .await?;
+            let existing_pass = store
+                .load_pass_on_connection(transaction, pass.reference().pass())
+                .await?;
             match (existing_run, existing_pass) {
                 (Some(existing_run), Some(existing_pass))
                     if same_run_admission(&existing_run, run)
                         && same_pass_admission(&existing_pass, pass) => {}
                 (Some(existing_run), None) if same_run_admission(&existing_run, run) => {
-                    store.insert_pass(pass).await?;
+                    store.insert_pass_on_connection(transaction, pass).await?;
                 }
-                (None, None) => store.insert_run_and_pass(run, pass).await?,
+                (None, None) => {
+                    store
+                        .insert_run_and_pass_on_connection(transaction, run, pass)
+                        .await?
+                }
                 (Some(_), _) => {
                     return Err(command_conflict("run identity names another workflow"));
                 }
@@ -227,8 +248,13 @@ async fn apply_or_recover(
             })
         }
         ReviewWorkflowOperation::ActivatePass { run, pass } => {
-            let current_run = store.load_run(run.reference().run()).await?;
-            let current_pass = store.load_pass(pass.reference().pass()).await?;
+            lock_run_and_pass(transaction, run.reference().run(), pass.reference().pass()).await?;
+            let current_run = store
+                .load_run_on_connection(transaction, run.reference().run())
+                .await?;
+            let current_pass = store
+                .load_pass_on_connection(transaction, pass.reference().pass())
+                .await?;
             let activation_is_recoverable = current_run
                 .as_ref()
                 .zip(current_pass.as_ref())
@@ -237,7 +263,8 @@ async fn apply_or_recover(
                 });
             if !activation_is_recoverable {
                 let transitioned = store
-                    .transition_run_and_pass(
+                    .transition_run_and_pass_on_connection(
+                        transaction,
                         run.reference().run(),
                         pass.reference().pass(),
                         run.state(),
@@ -261,15 +288,21 @@ async fn apply_or_recover(
         ReviewWorkflowOperation::CompletePass { run, pass } => {
             let status = ReviewPassCompletionStatus::from_state(pass.state())
                 .ok_or_else(|| command_conflict("pass completion is not result-free terminal"))?;
-            let current_run = store.load_run(run.reference().run()).await?;
-            let current_pass = store.load_pass(pass.reference().pass()).await?;
+            lock_run_and_pass(transaction, run.reference().run(), pass.reference().pass()).await?;
+            let current_run = store
+                .load_run_on_connection(transaction, run.reference().run())
+                .await?;
+            let current_pass = store
+                .load_pass_on_connection(transaction, pass.reference().pass())
+                .await?;
             let completion_is_recoverable =
                 current_run.as_ref().zip(current_pass.as_ref()).is_some_and(
                     |(current_run, current_pass)| current_run == run && current_pass == pass,
                 );
             if !completion_is_recoverable {
                 let transitioned = store
-                    .transition_run_and_pass(
+                    .transition_run_and_pass_on_connection(
+                        transaction,
                         run.reference().run(),
                         pass.reference().pass(),
                         run.state(),
@@ -292,17 +325,30 @@ async fn apply_or_recover(
             })
         }
         ReviewWorkflowOperation::RecordFindings { pass, findings } => {
-            let committed = store.load_pass(pass.reference().pass()).await?;
+            lock_run_and_pass(
+                transaction,
+                pass.reference().run().run(),
+                pass.reference().pass(),
+            )
+            .await?;
+            let committed = store
+                .load_pass_on_connection(transaction, pass.reference().pass())
+                .await?;
             if committed
                 .as_ref()
                 .is_none_or(|current| current.state() != pass.state())
             {
-                store.insert_findings(pass, findings).await?;
+                store
+                    .insert_findings_in_transaction(transaction, pass, findings)
+                    .await?;
             }
+            sqlx::query(crate::lock_inventory::REVIEW_TARGET_FINDINGS_BY_TARGET_TRANSITION)
+                .bind(pass.reference().target().into_uuid())
+                .fetch_all(&mut **transaction)
+                .await?;
             let loaded = store
-                .list_findings(pass.reference().run().run())
-                .await
-                .map_err(post_effect_verification_error)?;
+                .list_findings_on_connection(transaction, pass.reference().run().run())
+                .await?;
             if !same_finding_inventory(&loaded, findings) {
                 return Err(command_conflict(
                     "finding inventory differs from the recorded result",
@@ -315,7 +361,10 @@ async fn apply_or_recover(
             })
         }
         ReviewWorkflowOperation::RecordFindingEvent { pass, event } => {
-            let current = store.load_finding(event.finding().finding()).await?;
+            lock_finding_graph(transaction, event).await?;
+            let current = store
+                .load_finding_on_connection(transaction, event.finding().finding())
+                .await?;
             let event_index = usize::try_from(event.ordinal().get())
                 .ok()
                 .and_then(|ordinal| ordinal.checked_sub(1));
@@ -343,7 +392,11 @@ async fn apply_or_recover(
                 }
                 None => {
                     let updated = store
-                        .append_finding_event(event.finding().finding(), event.clone())
+                        .append_finding_event_in_transaction(
+                            transaction,
+                            event.finding().finding(),
+                            event.clone(),
+                        )
                         .await?;
                     updated
                         .ok_or_else(|| command_conflict("finding does not exist"))?
@@ -351,9 +404,8 @@ async fn apply_or_recover(
                 }
             };
             let committed = store
-                .load_pass(pass.reference().pass())
-                .await
-                .map_err(post_effect_verification_error)?;
+                .load_pass_on_connection(transaction, pass.reference().pass())
+                .await?;
             if committed
                 .as_ref()
                 .is_none_or(|current| current.state() != pass.state())
@@ -366,20 +418,28 @@ async fn apply_or_recover(
             })
         }
         ReviewWorkflowOperation::ReserveExternalLink(link) => {
-            match store.reserve_external_link(link.clone()).await? {
+            match store
+                .reserve_external_link_in_transaction(transaction, link.clone())
+                .await?
+            {
                 ReserveExternalLinkOutcome::Inserted(_)
                 | ReserveExternalLinkOutcome::Existing(_) => {}
             }
             Ok(ReviewWorkflowCommandResult::ExternalLinkReserved { link: link.id() })
         }
         ReviewWorkflowOperation::AttachExternalLink { link, attachment } => {
-            let current = store.load_external_link(*link).await?;
+            sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
+                .bind(link.into_uuid())
+                .fetch_optional(&mut **transaction)
+                .await?;
+            let current =
+                ReviewWorkflowStore::load_external_link_on_connection(transaction, *link).await?;
             match current.as_ref().and_then(|current| current.attachment()) {
                 Some(existing) if existing == attachment => {}
                 Some(_) => return Err(command_conflict("external link has another attachment")),
                 None => {
                     if store
-                        .attach_external_link(*link, attachment.clone())
+                        .attach_external_link_in_transaction(transaction, *link, attachment.clone())
                         .await?
                         .is_none()
                     {
@@ -393,6 +453,54 @@ async fn apply_or_recover(
             })
         }
     }
+}
+
+async fn lock_run_and_pass(
+    transaction: &mut Transaction<'_, Postgres>,
+    run: ReviewRunId,
+    pass: ReviewPassId,
+) -> Result<(), ReviewWorkflowStoreError> {
+    sqlx::query(crate::lock_inventory::REVIEW_RUN_TRANSITION)
+        .bind(run.into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    sqlx::query(crate::lock_inventory::REVIEW_PASS_TRANSITION)
+        .bind(pass.into_uuid())
+        .bind(Option::<Uuid>::None)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
+async fn lock_finding_graph(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &ReviewFindingEvent,
+) -> Result<(), ReviewWorkflowStoreError> {
+    let link = match event.kind() {
+        ReviewFindingEventKind::Posted { link } => Some(link.link()),
+        ReviewFindingEventKind::BlockedWithReason {
+            link: Some(pending),
+            ..
+        } => Some(pending.link()),
+        ReviewFindingEventKind::Accepted
+        | ReviewFindingEventKind::Rejected { .. }
+        | ReviewFindingEventKind::Duplicate { .. }
+        | ReviewFindingEventKind::Superseded { .. }
+        | ReviewFindingEventKind::Stale
+        | ReviewFindingEventKind::Fixed
+        | ReviewFindingEventKind::BlockedWithReason { link: None, .. } => None,
+    };
+    if let Some(link) = link {
+        sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
+            .bind(link.into_uuid())
+            .fetch_one(&mut **transaction)
+            .await?;
+    }
+    sqlx::query(crate::lock_inventory::REVIEW_TARGET_FINDINGS_TRANSITION)
+        .bind(event.finding().finding().into_uuid())
+        .fetch_all(&mut **transaction)
+        .await?;
+    Ok(())
 }
 
 fn same_run_admission(existing: &ReviewRun, requested: &ReviewRun) -> bool {
@@ -708,15 +816,6 @@ fn registry_error(error: RegistryInspectionError) -> ReviewWorkflowStoreError {
     }
 }
 
-fn post_effect_verification_error(error: ReviewWorkflowStoreError) -> ReviewWorkflowStoreError {
-    match error {
-        ReviewWorkflowStoreError::Database(error) => {
-            ReviewWorkflowStoreError::CommitAmbiguous(error)
-        }
-        error => error,
-    }
-}
-
 fn command_conflict(detail: &str) -> ReviewWorkflowStoreError {
     super::review_workflow::corruption("review_workflow_command", detail.to_owned())
 }
@@ -727,25 +826,5 @@ async fn commit_claim(
     transaction
         .commit()
         .await
-        .map_err(ReviewWorkflowStoreError::CommitAmbiguous)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ReviewWorkflowStoreError, post_effect_verification_error};
-
-    #[test]
-    fn post_effect_database_failure_is_commit_ambiguous() {
-        assert_commit_ambiguous(post_effect_verification_error(
-            ReviewWorkflowStoreError::Database(sqlx::Error::PoolClosed),
-        ));
-    }
-
-    #[track_caller]
-    fn assert_commit_ambiguous(error: ReviewWorkflowStoreError) {
-        let ReviewWorkflowStoreError::CommitAmbiguous(source) = error else {
-            panic!("expected commit ambiguity, got {error}");
-        };
-        assert!(matches!(source, sqlx::Error::PoolClosed));
-    }
+        .map_err(super::review_workflow::classify_mutating_commit_error)
 }
