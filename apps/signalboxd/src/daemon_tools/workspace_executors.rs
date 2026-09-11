@@ -521,6 +521,8 @@ where
                 commit,
                 self.exec_runner.clone(),
                 &filesystem,
+                &self.sandbox,
+                self.cargo_registry_cache.as_deref(),
             )
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
             self.resolve_workspace_instruction_root(session)

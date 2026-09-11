@@ -99,6 +99,10 @@ impl error::Error for GitPushTransportFailure {
 
 ```rust
 pub trait GitPushTransport: marker::Send {
+    fn regenerate(
+        &mut self,
+        request: GitGenerationRequest,
+    ) -> impl future::Future<Output = result::Result<(), GitPushTransportFailure>> + marker::Send;
     fn push(
         &mut self,
         request: GitPushRequest,

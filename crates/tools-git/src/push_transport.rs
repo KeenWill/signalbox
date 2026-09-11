@@ -197,6 +197,12 @@ pub enum GitPushTransportFailure {
 /// Deployment-owned push boundary. Implementations receive the fixed remote;
 /// the model never supplies or modifies a destination.
 pub trait GitPushTransport: Send {
+    /// Runs checked-in generators in an isolated combined tree without push credentials.
+    fn regenerate(
+        &mut self,
+        request: crate::GitGenerationRequest,
+    ) -> impl std::future::Future<Output = Result<(), GitPushTransportFailure>> + Send;
+
     /// Pushes one non-forced branch refspec and acknowledges the remote commit.
     fn push(
         &mut self,

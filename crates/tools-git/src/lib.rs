@@ -30,6 +30,7 @@ mod pinning;
 mod push_arguments;
 mod push_catalog;
 mod push_executor;
+mod push_generated;
 mod push_merge;
 mod push_objects;
 mod push_transport;
@@ -59,6 +60,7 @@ pub use names::{
 pub use push_arguments::GitPushArguments;
 pub use push_catalog::{GitPushTools, GitPushToolsConstructionError, git_push_catalog};
 pub use push_executor::{GitPushExecutor, GitPushExecutorError};
+pub use push_generated::{GitGenerationRequest, GitGeneratorCommand};
 pub use push_transport::{
     ConfiguredGitRemote, GitPushReceipt, GitPushRequest, GitPushTransport, GitPushTransportFailure,
     InvalidConfiguredGitRemote, InvalidGitPushReceipt,

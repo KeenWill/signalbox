@@ -37,7 +37,7 @@ pub(super) fn verify_merge(
     target: Oid,
     fence: Option<Oid>,
     deadline: Instant,
-) -> Result<(), GitPushFailure> {
+) -> Result<Option<crate::push_generated::GeneratedMerge>, GitPushFailure> {
     // A separate shell keeps the push snapshot's shallow dispatch fence intact.
     let repository = authority
         .open_repository_shell()
@@ -54,7 +54,7 @@ pub(super) fn verify_merge(
         });
     }
     if merge.parent_count() < 2 {
-        return Ok(());
+        return Ok(None);
     }
     let fence = fence.ok_or(GitPushFailure::UnprovenMergeParents)?;
     let mut commits: Vec<_> = merge.parent_ids().collect();
@@ -137,6 +137,8 @@ pub(super) fn verify_merge(
     let base_tree = tree(base).map_err(repository_failure)?;
     let branch_tree = tree(branch).map_err(repository_failure)?;
     let ancestor_tree = tree(ancestor).map_err(repository_failure)?;
+    let mut generated =
+        crate::push_generated::GeneratedManifest::load(&repository, &base_tree, &mut source)?;
     let mut options = diff_options();
     let mut carried = repository
         .diff_tree_to_tree(Some(&base_tree), Some(&merge_tree), Some(&mut options))
@@ -216,6 +218,7 @@ pub(super) fn verify_merge(
         let own_index = own_by_path.get(source_path).copied();
         let base_index = base_by_path.get(source_path).copied();
         checked_branch.extend(own_index);
+        let regenerates = generated.select(path);
         // Capture compared paths only, in addition to the rename candidates.
         for delta in std::iter::once(delta)
             .chain(own_index.and_then(|index| own.get_delta(index)))
@@ -281,12 +284,16 @@ pub(super) fn verify_merge(
         {
             *permitted.entry(effect).or_insert(0usize) += 1;
         }
-        let missing_base = base_hunks.iter().find(|hunk| {
-            !hunk
-                .effects()
-                .filter(|effect| is_text_change(effect))
-                .all(|effect| consume_effect(&mut retained, effect))
-        });
+        let missing_base = (!regenerates)
+            .then(|| {
+                base_hunks.iter().find(|hunk| {
+                    !hunk
+                        .effects()
+                        .filter(|effect| is_text_change(effect))
+                        .all(|effect| consume_effect(&mut retained, effect))
+                })
+            })
+            .flatten();
         let invalid_metadata = || {
             carried_hunks.iter().find(|hunk| {
                 !hunk
@@ -295,10 +302,11 @@ pub(super) fn verify_merge(
                     .all(|effect| consume_effect(&mut permitted, effect))
             })
         };
-        if let Some(hunk) = missing_base
-            .or_else(invalid_metadata)
-            .or_else(|| (!preserves_branch).then(|| carried_hunks.first()).flatten())
-        {
+        if let Some(hunk) = missing_base.or_else(invalid_metadata).or_else(|| {
+            (!regenerates && !preserves_branch)
+                .then(|| carried_hunks.first())
+                .flatten()
+        }) {
             record_dropped_hunk(&mut dropped, &mut preview_bytes, path, hunk);
         }
     }
@@ -314,6 +322,9 @@ pub(super) fn verify_merge(
             .as_ref()
             .and_then(|delta| delta.new_file().path())
             .unwrap_or(path);
+        if generated.select(result_path) {
+            continue;
+        }
         let result_entry = match merge_tree.get_path(result_path) {
             Ok(entry) => Some(entry),
             Err(error) if error.code() == git2::ErrorCode::NotFound => None,
@@ -367,7 +378,9 @@ pub(super) fn verify_merge(
     }
     source.validate(authority).map_err(repository_failure)?;
     if dropped.is_empty() {
-        Ok(())
+        let prepared = generated.prepare(&repository, &merge_tree, &mut source, deadline)?;
+        source.validate(authority).map_err(repository_failure)?;
+        Ok(prepared)
     } else {
         Err(GitPushFailure::MergeDroppedBaseChanges(
             dropped

@@ -84,6 +84,7 @@ where
     FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem,
     ExecRunner: ProcessRunner,
 {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn git_push(
         root: &Path,
         repository: &crate::WatchedRepositoryConfiguration,
@@ -91,6 +92,8 @@ where
         commit: signalbox_domain::CommitSha,
         runner: ExecRunner,
         filesystem: &FileSystem,
+        sandbox: &signalbox_tools_exec::SandboxConfiguration,
+        cargo_registry: Option<&Path>,
     ) -> Result<
         signalbox_tools_git::GitPushExecutor<super::git_push::ProcessGitPushTransport<ExecRunner>>,
         DaemonToolsConstructionError,
@@ -105,6 +108,8 @@ where
         .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
         let transport = super::git_push::ProcessGitPushTransport {
             runner,
+            sandbox: sandbox.clone(),
+            cargo_registry: cargo_registry.map(Path::to_owned),
             credentials:
                 crate::repo_watch_credentials::RepositoryWatchClientLoader::for_repository_push(
                     repository,

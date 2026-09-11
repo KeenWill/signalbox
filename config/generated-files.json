@@ -1,0 +1,48 @@
+{
+  "generators": [
+    {
+      "program": "python3",
+      "script": "scripts/render_domain_spine.py",
+      "outputs": [
+        "docs/api/signalbox-application/",
+        "docs/api/signalbox-approval-judge-eval/",
+        "docs/api/signalbox-blob-store/",
+        "docs/api/signalbox-blob-store-filesystem/",
+        "docs/api/signalbox-blob-store-s3/",
+        "docs/api/signalbox-convergence/",
+        "docs/api/signalbox-domain/",
+        "docs/api/signalbox-egress-transport/",
+        "docs/api/signalbox-github-transport/",
+        "docs/api/signalbox-file-media-linux-sandbox/",
+        "docs/api/signalbox-file-media-processor-runtime/",
+        "docs/api/signalbox-file-media-provider-runtime/",
+        "docs/api/signalbox-file-media-runtime/",
+        "docs/api/signalbox-model-provider-runtime/",
+        "docs/api/signalbox-model-reference-catalog/",
+        "docs/api/signalbox-model-runtime/",
+        "docs/api/signalbox-model-runtime-anthropic/",
+        "docs/api/signalbox-model-runtime-claude-cli/",
+        "docs/api/signalbox-model-runtime-codex-cli/",
+        "docs/api/signalbox-model-runtime-openai/",
+        "docs/api/signalbox-session-ownership/",
+        "docs/api/signalbox-persistence/",
+        "docs/api/signalbox-process-protocol/",
+        "docs/api/signalbox-workflow-runtime/",
+        "docs/api/signalbox-runner-wire/",
+        "docs/api/signalbox-tool-contract/",
+        "docs/api/signalbox-tools-basic/",
+        "docs/api/signalbox-tools-code-host/",
+        "docs/api/signalbox-tools-conversations/",
+        "docs/api/signalbox-tools-exec/",
+        "docs/api/signalbox-tools-file-media/",
+        "docs/api/signalbox-tools-git/",
+        "docs/api/signalbox-tools-github/",
+        "docs/api/signalbox-tools-plan/",
+        "docs/api/signalbox-tools-sessions/",
+        "docs/api/signalbox-tools-web/",
+        "docs/api/signalbox-tools-workspace/",
+        "docs/api/signalbox-web-contract/"
+      ]
+    }
+  ]
+}

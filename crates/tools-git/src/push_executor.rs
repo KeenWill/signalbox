@@ -203,7 +203,7 @@ impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
         let authority = Arc::clone(&self.repository_authority);
         let commit_fence = self.commit_fence.clone();
         let reference = format!("refs/heads/{}", arguments.branch);
-        let (snapshot, target) = prepare_before_deadline(
+        let (snapshot, target, generated) = prepare_before_deadline(
             move |deadline| {
                 let repository_identity = validate_repository_layout(&root_path, root_identity)
                     .map_err(|_| GitPushFailure::Repository)?;
@@ -220,16 +220,24 @@ impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
                             .ok_or(GitPushFailure::Repository)
                     })
                     .transpose()?;
-                crate::push_merge::verify_merge(&authority, target, fence, deadline)?;
+                let generated =
+                    crate::push_merge::verify_merge(&authority, target, fence, deadline)?;
                 let snapshot = PushObjectSnapshot::capture_before_deadline(
                     &authority, target, fence, deadline,
                 )
                 .map_err(|_| GitPushFailure::Repository)?;
-                Ok((snapshot, target))
+                Ok((snapshot, target, generated))
             },
             PUSH_PREPARATION_TIMEOUT,
         )
         .await?;
+        if let Some(generated) = generated {
+            self.transport
+                .regenerate(generated.request())
+                .await
+                .map_err(|_| GitPushFailure::PreDispatchInfrastructure)?;
+            generated.verify()?;
+        }
         let commit = target.to_string();
         let git_directory = snapshot.repository.path().to_owned();
         let request = GitPushRequest::new(

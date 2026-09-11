@@ -217,6 +217,23 @@ impl RecordingPushTransport {
 }
 
 impl GitPushTransport for RecordingPushTransport {
+    async fn regenerate(
+        &mut self,
+        request: crate::GitGenerationRequest,
+    ) -> Result<(), GitPushTransportFailure> {
+        for command in request.commands() {
+            let status = std::process::Command::new(command.program())
+                .args(command.arguments())
+                .current_dir(request.root())
+                .status()
+                .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
+            if !status.success() {
+                return Err(GitPushTransportFailure::PreDispatchInfrastructure);
+            }
+        }
+        Ok(())
+    }
+
     async fn push(
         &mut self,
         request: GitPushRequest,
@@ -2639,5 +2656,274 @@ async fn push_refuses_unsupported_merge_shape_before_an_oversized_parent_snapsho
         result,
         Err(GitPushFailure::UnsupportedMergeShape { parents: 3 })
     );
+    assert!(!transport.has_request());
+}
+
+/// Contents whose exact bytes determine generation and line-preservation outcomes.
+struct GeneratedContents<'a> {
+    input: &'a str,
+    output: &'a str,
+    fixture: &'a str,
+}
+
+/// Commits a checked-in copying generator and its declared output; index metadata is arbitrary.
+fn generated_test_commit(
+    repository: &Repository,
+    contents: GeneratedContents<'_>,
+    parents: &[git2::Oid],
+) -> git2::Oid {
+    let manifest = r#"{"generators":[{"program":"python3","script":"generate.py","outputs":["generated.txt"]}]}"#;
+    let generator = "from pathlib import Path\nPath('generated.txt').write_text(Path('input.txt').read_text())\n";
+    let mut index = git2::Index::new().expect("isolated tree index");
+    for (path, content) in [
+        ("config/generated-files.json", manifest),
+        ("generate.py", generator),
+        ("input.txt", contents.input),
+        ("generated.txt", contents.output),
+        ("fixture_tests.rs", contents.fixture),
+    ] {
+        index
+            .add(&git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: repository.blob(content.as_bytes()).expect("fixture blob"),
+                flags: 0,
+                flags_extended: 0,
+                path: path.as_bytes().to_vec(),
+            })
+            .expect("tree entry");
+    }
+    let tree = index.write_tree_to(repository).expect("fixture tree");
+    merge_test_commit_tree(repository, tree, parents)
+}
+
+#[tokio::test]
+async fn push_accepts_declared_generator_output_from_the_combined_tree() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let ancestor = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: "shared\n",
+            output: "shared\n",
+            fixture: "unchanged\n",
+        },
+        &[],
+    );
+    let branch = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: "shared\nbranch\n",
+            output: "branch output\n",
+            fixture: "unchanged\n",
+        },
+        &[ancestor],
+    );
+    let base = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: "shared\nbase\n",
+            output: "base output\n",
+            fixture: "unchanged\n",
+        },
+        &[ancestor],
+    );
+    let combined = "shared\nbase\nbranch\n";
+    let merge = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: combined,
+            output: combined,
+            fixture: "unchanged\n",
+        },
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("generator proves combined output");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_refuses_declared_output_that_differs_from_its_generator() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let ancestor = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: "shared\n",
+            output: "shared\n",
+            fixture: "unchanged\n",
+        },
+        &[],
+    );
+    let branch = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: "shared\nbranch\n",
+            output: "branch output\n",
+            fixture: "unchanged\n",
+        },
+        &[ancestor],
+    );
+    let base = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: "shared\nbase\n",
+            output: "base output\n",
+            fixture: "unchanged\n",
+        },
+        &[ancestor],
+    );
+    let merge = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: "shared\nbase\nbranch\n",
+            output: "arbitrary output\n",
+            fixture: "unchanged\n",
+        },
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let error = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect_err("declaring a path alone does not exempt its content");
+
+    assert!(matches!(error, GitPushFailure::MergeDroppedBaseChanges(_)));
+    assert!(
+        !transport.has_request(),
+        "different generated output cannot reach publication"
+    );
+}
+
+#[tokio::test]
+async fn push_refuses_handwritten_fixture_changes_despite_generated_output() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let ancestor = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: "shared\n",
+            output: "shared\n",
+            fixture: "r#\"{\"count\":0}\"#\n",
+        },
+        &[],
+    );
+    let branch = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: "shared\nbranch\n",
+            output: "branch output\n",
+            fixture: "r#\"{\"count\":2}\"#\n",
+        },
+        &[ancestor],
+    );
+    let base = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: "shared\nbase\n",
+            output: "base output\n",
+            fixture: "r#\"{\"count\":1}\"#\n",
+        },
+        &[ancestor],
+    );
+    let combined = "shared\nbase\nbranch\n";
+    let merge = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: combined,
+            output: combined,
+            fixture: "r#\"{\"count\":3}\"#\n",
+        },
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let error = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect_err("handwritten JSON keeps exact main lines");
+
+    let GitPushFailure::MergeDroppedBaseChanges(dropped) = error else {
+        panic!("expected the exact-line refusal")
+    };
+    assert_eq!(dropped[0].file, "fixture_tests.rs");
+    assert!(
+        !transport.has_request(),
+        "a handwritten fixture is not generated by declaration elsewhere"
+    );
+}
+
+#[tokio::test]
+async fn push_refuses_exemptions_added_only_by_the_branch() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let generator = "from pathlib import Path\nPath('generated.txt').write_text(Path('input.txt').read_text())\n";
+    let ancestor = merge_test_commit_files(
+        &repository,
+        &[
+            (b"generate.py", generator),
+            (b"input.txt", "shared\n"),
+            (b"generated.txt", "shared\n"),
+            (b"fixture_tests.rs", "unchanged\n"),
+        ],
+        &[],
+    );
+    let branch = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: "shared\nbranch\n",
+            output: "branch output\n",
+            fixture: "unchanged\n",
+        },
+        &[ancestor],
+    );
+    let base = merge_test_commit_files(
+        &repository,
+        &[
+            (b"generate.py", generator),
+            (b"input.txt", "shared\nbase\n"),
+            (b"generated.txt", "base output\n"),
+            (b"fixture_tests.rs", "unchanged\n"),
+        ],
+        &[ancestor],
+    );
+    let combined = "shared\nbase\nbranch\n";
+    let merge = generated_test_commit(
+        &repository,
+        GeneratedContents {
+            input: combined,
+            output: combined,
+            fixture: "unchanged\n",
+        },
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let error = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect_err("the branch cannot exempt itself from base preservation");
+
+    let GitPushFailure::MergeDroppedBaseChanges(dropped) = error else {
+        panic!("expected the exact-line refusal")
+    };
+    assert_eq!(dropped[0].file, "generated.txt");
     assert!(!transport.has_request());
 }

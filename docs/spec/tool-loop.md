@@ -172,14 +172,21 @@ removals relative to that same ancestor, ignoring line offsets and consuming
 each matching effect once. The merge result must keep every line the base added
 verbatim and must not restore a line the base removed; the branch's own lines
 may be re-expressed only in regions of overlapping parent hunks with different
-replacement text; non-conflicting text stays verbatim. A missing base effect or
-a changed non-conflicting span refuses the push with `MergeDroppedBaseChanges`
-and a hunk preview. Rename detection correlates parent renames through their
-common source paths, permitting either parent's destination while retaining
-exact carried destinations. Non-text changes relative to the base parent must
-occur in the branch diff. Collected dropped-hunk previews share a 4 KiB budget,
-and collection truncation remains explicit in the detail. Its bounded JSON
-detail lists filenames before hunk previews, marks each shortened preview with
+replacement text; non-conflicting text stays verbatim. Outputs declared by the
+base parent's `config/generated-files.json` are exempt only when their bytes
+match the declared checked-in generator rerun in a disposable, sandboxed copy of
+the combined tree. The manifest names an interpreter (`program`), a checked-in
+`script`, optional `arguments`, and `outputs` containing exact paths or
+directory prefixes ending in `/`. The verifier removes candidate outputs before
+generation and refuses failed or differing output. Hand-written fixtures and
+undeclared paths retain the exact-line check. A missing base effect or a changed
+non-conflicting span refuses the push with `MergeDroppedBaseChanges` and a hunk
+preview. Rename detection correlates parent renames through their common source
+paths, permitting either parent's destination while retaining exact carried
+destinations. Non-text changes relative to the base parent must occur in the
+branch diff. Collected dropped-hunk previews share a 4 KiB budget, and
+collection truncation remains explicit in the detail. Its bounded JSON detail
+lists filenames before hunk previews, marks each shortened preview with
 `truncated`, and counts omitted filenames and previews explicitly when they
 cannot fit. Filenames use bytewise Git path quoting. Verification supports
 two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming

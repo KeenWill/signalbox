@@ -17,10 +17,49 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(super) struct ProcessGitPushTransport<Runner> {
     pub(super) runner: Runner,
+    pub(super) sandbox: signalbox_tools_exec::SandboxConfiguration,
+    pub(super) cargo_registry: Option<std::path::PathBuf>,
     pub(super) credentials: RepositoryWatchClientLoader,
 }
 
 impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner> {
+    async fn regenerate(
+        &mut self,
+        request: signalbox_tools_git::GitGenerationRequest,
+    ) -> Result<(), GitPushTransportFailure> {
+        use signalbox_tools_exec::{ExecArguments, ExecutionConfinement, SandboxedCommandRunner};
+        let runner = match &self.cargo_registry {
+            Some(registry) => SandboxedCommandRunner::try_new_with_cargo_registry(
+                self.runner.clone(),
+                request.root(),
+                registry,
+            ),
+            None => SandboxedCommandRunner::try_new(self.runner.clone(), request.root()),
+        }
+        .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
+        let mut runner = runner.with_sandbox_configuration(self.sandbox.clone());
+        let deadline = tokio::time::Instant::now() + PUSH_TIMEOUT;
+        for command in request.commands() {
+            let timeout = remaining_push_timeout(deadline)
+                .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?;
+            let result = runner
+                .try_run(ExecArguments {
+                    program: command.program().to_owned(),
+                    arguments: command.arguments().to_vec(),
+                    working_directory: ".".to_owned(),
+                    timeout_seconds: timeout.as_secs().max(1),
+                })
+                .await
+                .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
+            if !matches!(result.confinement, ExecutionConfinement::FilesystemConfined)
+                || !matches!(result.outcome, ProcessOutcome::Exited { code: Some(0) })
+            {
+                return Err(GitPushTransportFailure::PreDispatchInfrastructure);
+            }
+        }
+        Ok(())
+    }
+
     async fn push(
         &mut self,
         request: GitPushRequest,
