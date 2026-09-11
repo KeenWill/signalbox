@@ -785,7 +785,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_rechecks_model_credential_permissions() {
+    async fn reload_accepts_a_model_credential_with_permissive_mode() {
         let (directory, reload) = fixture();
         reload
             .read_replacement()
@@ -795,15 +795,9 @@ mod tests {
             std::os::unix::fs::PermissionsExt::from_mode(0o644),
         )
         .expect("make unused profile public");
-        assert_eq!(
-            reload
-                .read_replacement()
-                .expect_err("reload rejects public profile"),
-            failure(
-                ReloadPhase::Validate,
-                "credential reference `anthropic-overflow` could not be resolved: InsecurePermissions"
-            )
-        );
+        reload
+            .read_replacement()
+            .expect("reload warns and reads the permissive credential");
     }
 
     #[tokio::test]

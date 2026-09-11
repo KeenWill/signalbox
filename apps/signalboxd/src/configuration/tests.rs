@@ -739,13 +739,9 @@ fn credential_admission_checks_every_configured_file_kind() {
             std::os::unix::fs::PermissionsExt::from_mode(0o644),
         )
         .expect("expose one file");
-        assert_eq!(
-            configuration
-                .validate_credential_files()
-                .expect_err("each configured credential must be private")
-                .failure,
-            CredentialAccessFailure::InsecurePermissions
-        );
+        configuration
+            .validate_credential_files()
+            .expect("permissive modes warn and remain readable");
         std::fs::set_permissions(
             file.path(),
             std::os::unix::fs::PermissionsExt::from_mode(0o600),
@@ -3661,24 +3657,49 @@ fn configuration_rejects_a_missing_credential_home_with_a_typed_member_error() {
 }
 
 #[test]
-fn configuration_rejects_an_empty_credential_home_with_a_typed_member_error() {
+fn configuration_marks_an_empty_credential_home_unavailable() {
     let temporary = tempfile::tempdir().expect("synthetic home root is created");
     let empty = temporary.path().join("empty-account");
     std::fs::create_dir(&empty).expect("empty synthetic home is created");
-    let credential_home = CONFIGURATION.replace(
+    let executable = std::env::current_exe().expect("test executable has a path");
+    let credential_home = configuration_with_codex_paths(&executable, temporary.path()).replace(
         "delivery = \"ambient\"",
         &format!(
             "delivery = \"codex_home\"\ncodex_home = {:?}",
             empty.to_string_lossy()
         ),
     );
-
+    let credential_home = format!(
+        r#"{credential_home}
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000002"
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "codex"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#
+    );
+    let configuration = HubModelConfiguration::parse(&credential_home)
+        .expect("an empty home does not reject the pool");
     assert_eq!(
-        HubModelConfiguration::parse(&credential_home).err(),
-        Some(HubModelConfigurationError::InvalidCredentialHome {
-            credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
-            failure: crate::CredentialHomeAdmissionFailure::EmptyDirectory,
-        })
+        configuration.empty_codex_home_profiles(),
+        vec![CODEX_SUBSCRIPTION_PROFILE]
+    );
+    let runtime_policy = configuration
+        .credential_pool_runtime_catalog()
+        .into_values()
+        .find(|policy| policy.name() == "codex-main")
+        .expect("the Codex pool is projected");
+    assert!(
+        !runtime_policy.members()[0].is_available(),
+        "the empty home is excluded before pool selection"
+    );
+    std::fs::write(empty.join("auth.json"), "synthetic login material")
+        .expect("the synthetic home is provisioned");
+    assert!(
+        runtime_policy.members()[0].is_available(),
+        "the runtime member rechecks a provisioned home"
     );
 }
 
