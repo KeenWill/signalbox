@@ -850,3 +850,30 @@ test('retains reconciled supervision without showing recovery pending', async ({
   await expect(page.getByText('Inactive', { exact: true })).toBeVisible()
   api.grow()
 })
+
+for (const response of [204, 500]) {
+  test(`keeps recovery status above a submission notice after HTTP ${response}`, async ({
+    page,
+  }) => {
+    const api = await sessionApi(page)
+    api.state.supervision = {
+      class: 'infrastructure',
+      cause_code: 'infrastructure',
+      pending: true,
+    }
+    await page.route(`**/api/sessions/${sessionId}/input`, (route) =>
+      route.fulfill({ status: response }),
+    )
+    await page.goto(`/sessions?session=${sessionId}&workspace=true`)
+    await page.getByRole('textbox', { name: 'Message' }).fill('Retain the recovery status.')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    if (response === 204) {
+      await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue('')
+    } else {
+      await expect(page.getByRole('button', { name: 'Retry message' })).toBeEnabled()
+    }
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Session recovery required' }),
+    ).toBeVisible()
+  })
+}

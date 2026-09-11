@@ -786,7 +786,6 @@ pub enum ReviewPassTransitionFailure {
     Evidence(ReviewPassReconstitutionFailure),
     InvalidTransition,
     TurnChanged,
-    TurnNotActive,
     IncompatibleResult,
     ResultAlreadyBound,
 }
