@@ -20,8 +20,9 @@ use crate::model_execution::{
     attach_interrupt_reclassification_candidates_for_active,
     attach_recovery_interrupt_reclassification_candidates,
     attach_recovery_interrupt_reclassification_candidates_for_activated,
-    load_delegated_runner_recovery_for_interrupt, lock_delegated_child_endpoint_sessions,
-    persist_stop_requested, persist_terminal_outcome, persist_tool_reconciliation_required,
+    load_delegated_active_turn_for_interrupt, load_delegated_runner_recovery_for_interrupt,
+    load_delegated_tool_recovery, lock_delegated_child_endpoint_sessions, persist_stop_requested,
+    persist_terminal_outcome, persist_tool_reconciliation_required,
     require_live_execution_for_restart,
 };
 use crate::tool_loop::{
@@ -449,16 +450,18 @@ where
                         })?,
                 ))
             } else {
-                let execution =
-                    require_live_execution_for_restart(connection, interrupt.session()).await?;
-                let identities = attach_interrupt_reclassification_candidates(
+                let active =
+                    load_delegated_active_turn_for_interrupt(connection, interrupt.session())
+                        .await?
+                        .ok_or(SubmitInputCorruption::Missing("delegated active tool turn"))?;
+                let identities = attach_interrupt_reclassification_candidates_for_activated(
                     cancellation_identities,
-                    &execution,
+                    &active,
                     &mut next_reclassified_turn,
                 )?;
                 Some(ModelCallInterruptOutcome::Cancelled(
-                    execution
-                        .apply_interrupt_to_tool_batch(interrupt, projection, identities)
+                    active
+                        .apply_interrupt_to_tool_batch(batch, projection, interrupt, identities)
                         .map_err(|_| {
                             SubmitInputCorruption::Inconsistent(
                                 "applied interrupt cannot close executing tool batch",
@@ -467,9 +470,22 @@ where
                 ))
             }
         } else {
+            let delegated_tool_recovery = match scheduling.as_ref() {
+                Some(scheduling) if scheduling.active_turn_execution().is_none() => {
+                    load_delegated_tool_recovery(connection, interrupt.session(), scheduling)
+                        .await?
+                }
+                _ => None,
+            };
             let recovery_operation = scheduling
                 .as_ref()
                 .and_then(AcceptedInputSchedulingProjection::active_turn_execution)
+                .map(signalbox_domain::ActivatedTurn::from)
+                .or_else(|| {
+                    delegated_tool_recovery
+                        .as_ref()
+                        .map(|recovery| recovery.active.clone())
+                })
                 .and_then(|active| match active.phase() {
                     signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
                         ambiguous_operations,
@@ -532,30 +548,54 @@ where
                             "tool recovery batch cannot materialize terminal results",
                         )
                     })?;
-                let active_turn = scheduling.active_turn_execution().ok_or(
-                    SubmitInputCorruption::Inconsistent(
-                        "applied interrupt lacks active turn execution",
-                    ),
-                )?;
-                let identities = attach_recovery_interrupt_reclassification_candidates(
-                    signalbox_domain::AmbiguousModelCallTurnIdentities::new(result_frontier),
-                    &active_turn,
-                    &mut next_reclassified_turn,
-                )?;
-                Some(ModelCallInterruptOutcome::ToolReconciliationRequired(
-                    scheduling
-                        .apply_interrupt_to_tool_recovery(
+                let reconciliation = match delegated_tool_recovery {
+                    Some(recovery) => {
+                        let identities =
+                            attach_recovery_interrupt_reclassification_candidates_for_activated(
+                                signalbox_domain::AmbiguousModelCallTurnIdentities::new(
+                                    result_frontier,
+                                ),
+                                &recovery.active,
+                                &mut next_reclassified_turn,
+                            )?;
+                        recovery.active.apply_interrupt_to_tool_recovery(
+                            wait,
+                            tool_attempt,
+                            recovery.attempt,
+                            result_projection,
+                            interrupt,
+                            identities,
+                        )
+                    }
+                    None => {
+                        let active_turn = scheduling.active_turn_execution().ok_or(
+                            SubmitInputCorruption::Inconsistent(
+                                "applied interrupt lacks active turn execution",
+                            ),
+                        )?;
+                        let identities = attach_recovery_interrupt_reclassification_candidates(
+                            signalbox_domain::AmbiguousModelCallTurnIdentities::new(
+                                result_frontier,
+                            ),
+                            &active_turn,
+                            &mut next_reclassified_turn,
+                        )?;
+                        scheduling.apply_interrupt_to_tool_recovery(
                             wait,
                             tool_attempt,
                             result_projection,
                             interrupt,
                             identities,
                         )
-                        .map_err(|_| {
-                            SubmitInputCorruption::Inconsistent(
-                                "applied interrupt does not match tool recovery wait",
-                            )
-                        })?,
+                    }
+                }
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "applied interrupt does not match tool recovery wait",
+                    )
+                })?;
+                Some(ModelCallInterruptOutcome::ToolReconciliationRequired(
+                    reconciliation,
                 ))
             } else if matches!(recovery_operation, Some(IssuedOperationRef::ModelCall(_))) {
                 let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(

@@ -2260,6 +2260,175 @@ async fn a_pending_closure_settles_when_its_live_turn_becomes_runtime_terminal()
     Ok(())
 }
 
+/// The seed only separates durable identities in an ordinary completed-turn fixture.
+async fn completed_ordinary_dispatch(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<SessionId, Box<dyn Error>> {
+    let creation = dispatched_creation(seed);
+    let session = creation.session().id();
+    let ModelSelectionRequest::Direct(selection) =
+        creation.command().initial_configuration_defaults().model()
+    else {
+        panic!("fixture selects a direct model");
+    };
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+    queue_turn(pool, session, seed, 1).await?;
+    activate_turn(pool, session, seed).await?;
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::now_v7())),
+    )])
+    .expect("fixture target catalog");
+    complete_text_turn(
+        pool,
+        session,
+        targets,
+        model_credential_reference(),
+        SEED + seed + 0x10_000,
+        "ordinary dispatch finished",
+    )
+    .await?;
+    Ok(session)
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ordinary_dispatch_completion_closes_nonsticky_with_exact_replay()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let session = completed_ordinary_dispatch(&pool, 0x3000).await?;
+    let reader = signalbox_persistence::outbox::OutboxConsumerReader::new(
+        pool.clone(),
+        signalbox_persistence::outbox::OutboxConsumer::RepoWatch,
+    );
+    let completions = reader.completed_ordinary_dispatches(&[session]).await?;
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0].session(), Some(session));
+    let command = DurableCommandId::from_uuid(Uuid::now_v7());
+    let repository = SessionLifecycleCommandRepository::new(pool.clone());
+    let outcome = repository
+        .close_completed_ordinary_dispatch(command, session)
+        .await?;
+    assert!(matches!(
+        outcome,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
+            SessionLifecycleApplication::Closed {
+                outcome: SessionTerminalOutcome::Stopped {
+                    sticky: StopStickiness::Redispatchable
+                }
+            }
+        ))
+    ));
+    let replay = repository
+        .close_completed_ordinary_dispatch(command, session)
+        .await?;
+    assert!(matches!(
+        replay,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Applied(
+            SessionLifecycleApplication::Closed {
+                outcome: SessionTerminalOutcome::Stopped {
+                    sticky: StopStickiness::Redispatchable
+                }
+            }
+        ))
+    ));
+    let receipts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM command_settled_outbox_event WHERE command_id=$1")
+            .bind(command.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(receipts, 1);
+    assert!(
+        reader
+            .completed_ordinary_dispatches(&[session])
+            .await?
+            .is_empty()
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ordinary_dispatch_completion_preserves_work_accepted_after_observation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let session = completed_ordinary_dispatch(&pool, 0x4000).await?;
+    let reader = signalbox_persistence::outbox::OutboxConsumerReader::new(
+        pool.clone(),
+        signalbox_persistence::outbox::OutboxConsumer::RepoWatch,
+    );
+    assert_eq!(
+        reader
+            .completed_ordinary_dispatches(&[session])
+            .await?
+            .len(),
+        1
+    );
+    let queued = queue_turn(&pool, session, 0x4000, 2).await?;
+    let outcome = SessionLifecycleCommandRepository::new(pool.clone())
+        .close_completed_ordinary_dispatch(DurableCommandId::from_uuid(Uuid::now_v7()), session)
+        .await?;
+    assert!(matches!(
+        outcome,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Rejected(
+            SessionLifecycleCommandRejection::TransitionNotAdmitted
+        ))
+    ));
+    assert_eq!(
+        turn_disposition(&pool, queued).await?,
+        (String::from("queued"), None, None)
+    );
+    let state: String =
+        sqlx::query_scalar("SELECT state_kind FROM session_lifecycle WHERE session_id=$1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(state, "active");
+    assert!(
+        reader
+            .completed_ordinary_dispatches(&[session])
+            .await?
+            .is_empty()
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ordinary_dispatch_completion_leaves_goal_sessions_to_goal_lifecycle()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let session = completed_ordinary_dispatch(&pool, 0x5000).await?;
+    commission_fixture_session_goal(&pool, session, SEED + 0x50_000).await?;
+    stop_fixture_session_goal(&pool, session, SEED + 0x60_000).await?;
+    let unfinished: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turn_lifecycle WHERE session_id=$1 AND state_kind <> 'terminal'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(unfinished, 0);
+    let outcome = SessionLifecycleCommandRepository::new(pool.clone())
+        .close_completed_ordinary_dispatch(DurableCommandId::from_uuid(Uuid::now_v7()), session)
+        .await?;
+    assert!(matches!(
+        outcome,
+        SessionLifecycleCommandHandlingOutcome::Recorded(SessionLifecycleCommandResult::Rejected(
+            SessionLifecycleCommandRejection::TransitionNotAdmitted
+        ))
+    ));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A late completion of a stopped descendant retains cancellation instead of
 /// trying to reconstitute the logically terminated tool batch.
 #[tokio::test(flavor = "multi_thread")]
@@ -2993,5 +3162,91 @@ async fn checkpoint_available_child_result(
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
+    Ok(())
+}
+
+/// A delegated turn waiting on its own child remains closable without a live model call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn lifecycle_stop_settles_a_delegated_foreground_child_wait() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, spawning_request, awaiting_request) =
+        checkpoint_delegated_foreground_child_wait(&pool).await?;
+    let committed = recorded(
+        &pool,
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(next_test_submit_uuid()),
+            fixture.session,
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Redispatchable,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        ),
+    )
+    .await?;
+    assert_eq!(
+        committed,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::ClosurePending {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable
+            },
+            live_turn: fixture.turn,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+        })
+    );
+    let successor = TurnId::from_uuid(next_test_submit_uuid());
+    let interrupted = SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates_alias_resolver_as(
+            SubmitInput::new_core_interrupt(
+                DurableCommandId::from_uuid(next_test_submit_uuid()),
+                fixture.session,
+                UserContent::try_text("settle the stopped child wait".into())
+                    .expect("fixture content"),
+                fixture.turn,
+                DescendantTerminationScope::ParentAlone,
+                input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            ),
+            CommandPrincipal::Core,
+            ParentTerminationKind::Stopped,
+            AcceptedInputId::from_uuid(next_test_submit_uuid()),
+            Some(successor),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                ContextFrontierId::from_uuid(next_test_submit_uuid()),
+            ),
+            |_| successor,
+            |requests| {
+                assert_eq!(requests, [spawning_request, awaiting_request]);
+                (
+                    vec![
+                        SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                        SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                    ],
+                    ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                )
+            },
+            || panic!("the wait has no approval decision"),
+            || panic!("the wait has no approval attempt"),
+            |_| None,
+        )
+        .await?;
+    assert!(matches!(
+        interrupted,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let lifecycle = SessionLifecycleRepository::new(pool.clone())
+        .load(fixture.session)
+        .await?
+        .expect("retained session");
+    assert_eq!(
+        lifecycle.state(),
+        SessionLifecycleState::Terminal {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable
+            },
+        }
+    );
+    pool.close().await;
+    drop(container);
     Ok(())
 }

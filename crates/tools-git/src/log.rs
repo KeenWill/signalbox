@@ -6,7 +6,7 @@ use crate::bounded::{
 };
 use crate::failure::LocalGitFailure;
 use crate::layout::validate_live_shallow;
-use crate::limits::{MAX_LOG_IDENTITY_BYTES, MAX_LOG_MESSAGE_BYTES, MAX_WORKTREE_INSPECTIONS};
+use crate::limits::{MAX_LOG_IDENTITY_BYTES, MAX_LOG_MESSAGE_BYTES};
 use crate::pinning::{PinnedRepository, RepositoryShell};
 use crate::result::{LogEntry, LogResult};
 
@@ -58,14 +58,8 @@ pub(super) fn bounded_topological_page(
     let mut queued = BTreeSet::from([start]);
     let mut emitted = BTreeSet::new();
     let mut ordered = Vec::with_capacity(limit);
-    let mut topology_inspections = 0_usize;
     while !frontier.is_empty() && ordered.len() < limit {
-        let selected = select_topological_candidate(
-            repository,
-            &frontier,
-            shallow,
-            &mut topology_inspections,
-        )?;
+        let selected = select_topological_candidate(repository, &frontier, shallow)?;
         let oid = frontier.remove(selected);
         queued.remove(&oid);
         if !emitted.insert(oid) {
@@ -95,14 +89,13 @@ pub(super) fn select_topological_candidate(
     repository: &RepositoryShell,
     frontier: &[git2::Oid],
     shallow: &BTreeSet<git2::Oid>,
-    inspections: &mut usize,
 ) -> Result<usize, LocalGitFailure> {
     for candidate_index in 0..frontier.len() {
         let candidate = frontier[candidate_index];
         let mut is_ancestor = false;
         for (other_index, other) in frontier.iter().copied().enumerate() {
             if candidate_index != other_index
-                && bounded_commit_reaches(repository, other, candidate, shallow, inspections)?
+                && bounded_commit_reaches(repository, other, candidate, shallow)?
             {
                 is_ancestor = true;
                 break;
@@ -120,7 +113,6 @@ pub(super) fn bounded_commit_reaches(
     descendant: git2::Oid,
     ancestor: git2::Oid,
     shallow: &BTreeSet<git2::Oid>,
-    inspections: &mut usize,
 ) -> Result<bool, LocalGitFailure> {
     let mut pending = vec![descendant];
     let mut visited = BTreeSet::new();
@@ -131,10 +123,6 @@ pub(super) fn bounded_commit_reaches(
         if !visited.insert(oid) {
             continue;
         }
-        *inspections = inspections
-            .checked_add(1)
-            .filter(|count| *count <= MAX_WORKTREE_INSPECTIONS)
-            .ok_or(LocalGitFailure::Operation)?;
         let commit = find_bounded_commit(repository, oid)?;
         if !shallow.contains(&oid) {
             pending.extend(commit.parent_ids());

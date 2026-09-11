@@ -17,7 +17,7 @@ use uuid::Uuid;
 pub enum RepoWatchCommandRecord {
     /// Held template creation with copied defaults and repository-watch provenance.
     Create(Box<CreateSession>),
-    /// A start release or parent-only sticky stop.
+    /// A start release or parent-only stop.
     Lifecycle(SessionLifecycleCommand),
 }
 
@@ -60,6 +60,10 @@ impl RepoWatchCommandRecord {
                         sticky: StopStickiness::Sticky,
                         descendant_scope: DescendantTerminationScope::ParentAlone,
                     } => "sticky_stop",
+                    SessionLifecycleOperation::Stop {
+                        sticky: StopStickiness::Redispatchable,
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    } => "nonsticky_stop",
                     _ => return None,
                 };
                 json!({"kind":"lifecycle", "command":command.command_id().into_uuid().to_string(), "session":command.session().into_uuid().to_string(), "operation":operation})
@@ -133,6 +137,10 @@ impl RepoWatchCommandRecord {
                     "release_start" => SessionLifecycleOperation::ReleaseStart,
                     "sticky_stop" => SessionLifecycleOperation::Stop {
                         sticky: StopStickiness::Sticky,
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                    "nonsticky_stop" => SessionLifecycleOperation::Stop {
+                        sticky: StopStickiness::Redispatchable,
                         descendant_scope: DescendantTerminationScope::ParentAlone,
                     },
                     _ => return None,
@@ -220,6 +228,10 @@ mod tests {
             SessionLifecycleOperation::ReleaseStart,
             SessionLifecycleOperation::Stop {
                 sticky: StopStickiness::Sticky,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Redispatchable,
                 descendant_scope: DescendantTerminationScope::ParentAlone,
             },
         ] {

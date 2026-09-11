@@ -39,6 +39,8 @@
 //!   `runner_connection_authority_head`, both by enrollment `FOR SHARE`.
 //! - `context_compaction::complete`: source `context_frontier` `FOR SHARE` after the lifecycle
 //!   session lock.
+//! - `reload_configuration::finish_with_profiles`: `reload_configuration_command FOR UPDATE`
+//!   before credential and outbox locks.
 //!
 //! Advisory-lock protocols:
 //! - `oauth_credential`: the `oauth-registration-catalog` transaction advisory lock is

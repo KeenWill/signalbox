@@ -665,6 +665,41 @@ impl RepositoryWatchRuntime {
         })
     }
 
+    async fn command_tick(&self) -> Result<(), RepositoryWatchRuntimeError> {
+        let prepared = {
+            let state = self.state.lock().await;
+            if state.paused {
+                return Ok(());
+            }
+            state
+                .configuration
+                .as_ref()
+                .filter(|configuration| configuration.enabled())
+                .map(|_| {
+                    (
+                        state.store.clone(),
+                        state.lifecycle.clone(),
+                        RepositoryWatchCommandFactory(state.factory.0.clone()),
+                    )
+                })
+        };
+        if let Some((store, source, mut factory)) = prepared {
+            store
+                .drain_lifecycle(&mut factory, &mut RepositoryWatchCommandCodec, &source)
+                .await
+                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
+            store
+                .react_to_ordinary_dispatch_completion(
+                    &mut factory,
+                    &mut RepositoryWatchCommandCodec,
+                    &source,
+                )
+                .await
+                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
+        }
+        self.state.lock().await.tick().await
+    }
+
     async fn run_commands(self, mut shutdown: watch::Receiver<bool>) {
         loop {
             if *shutdown.borrow() {
@@ -673,7 +708,7 @@ impl RepositoryWatchRuntime {
             tokio::select! {
                 biased;
                 _ = shutdown.changed() => return,
-                result = async { self.state.lock().await.tick().await } => {
+                result = self.command_tick() => {
                     if let Err(error) = result { tracing::warn!(?error, "repository-watch command attempt failed"); }
                 }
             }
@@ -882,26 +917,6 @@ impl RuntimeState {
             return Ok(());
         };
         let mut codec = RepositoryWatchCommandCodec;
-        if let Some(event) = self
-            .lifecycle
-            .next()
-            .await
-            .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?
-        {
-            self.store
-                .react_to_lifecycle(&event, &mut self.factory, &mut codec, &self.lifecycle)
-                .await
-                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
-            self.lifecycle
-                .acknowledge(&event)
-                .await
-                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
-        } else {
-            self.store
-                .react_to_pull_request_lifecycle(&mut self.factory, &mut codec, &self.lifecycle)
-                .await
-                .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
-        }
         for repository in configuration.repositories() {
             for rule in configuration.rules() {
                 self.store
@@ -1011,6 +1026,67 @@ mod tests {
         assert_eq!(
             tokio::time::timeout(DELIVERY_TIMEOUT, source.next()).await,
             Ok(Ok(next_restored))
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_database_wait_keeps_runtime_control_available() {
+        use std::time::Duration;
+        // A silent local endpoint holds the drain at its first database read.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let pool = PgPoolOptions::new()
+            .connect_lazy(&format!(
+                "postgres://unused:unused@{}/unused",
+                listener.local_addr().expect("local address")
+            ))
+            .expect("lazy pool");
+        let base = crate::configuration::checked_in_example_configuration().expect("models");
+        let credential = tempfile::NamedTempFile::new().expect("fixture credential path");
+        let models = crate::HubModelConfiguration::parse(&format!(
+            "{}\n[repository_watch]\nversion = 1\nenabled = true\nsignal_reviewers = []\n[[repository_watch.repositories]]\nrepository = \"fixture/project\"\npoll_interval_seconds = 60\ncredential_file = \"{}\"\n",
+            base.source(), credential.path().display()
+        ))
+        .expect("enabled watch fixture");
+        let (nudge, _work) = signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let runtime = RepositoryWatchRuntime::unstarted(
+            pool.clone(),
+            RepositoryWatchServices {
+                goal_resumption: crate::PostgresGoalPassDisposition::new(
+                    pool.clone(),
+                    models.clone(),
+                    nudge.clone(),
+                    crate::GoalModeNumericBounds::new(None, None, None, None, None),
+                ),
+                core_pool: pool,
+                checkout_runner: None,
+                models: Arc::new(models.clone()),
+                templates: Arc::new(SessionTemplateConfiguration::default()),
+                eligibility_nudge: nudge,
+                tool_dispatch_gate: InProcessToolDispatchGate::default(),
+            },
+        );
+        {
+            let mut state = runtime.state.lock().await;
+            state.configuration = models.repository_watch().cloned();
+            state.paused = false;
+        }
+        let worker_runtime = runtime.clone();
+        let worker = tokio::spawn(async move { worker_runtime.command_tick().await });
+        let (connection, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("drain reaches its database read")
+            .expect("accept connection");
+        let available = tokio::time::timeout(Duration::from_secs(5), runtime.state.lock()).await;
+        worker.abort();
+        let _ = worker.await;
+        drop(connection);
+        assert!(
+            available.is_ok(),
+            "session reads and reload control remain available during lifecycle IO"
         );
     }
 

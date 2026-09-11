@@ -20,6 +20,9 @@ def _native_runtime_impl(ctx):
         "\n".join([
             "#!/bin/bash",
             "set -euo pipefail",
+            # Repository fixtures validate ancestry through the filesystem root.
+            # The runner's /tmp can be a separate mount.
+            'export TMPDIR=/var/tmp',
             # Script launchers already select their declared interpreter.
             'IFS= read -r -n 4 magic < "$1" || true',
             'if [[ "$magic" != $\'\\x7fELF\' ]]; then exec "$@"; fi',

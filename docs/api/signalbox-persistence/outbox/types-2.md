@@ -100,10 +100,17 @@ pub struct OutboxConsumerReader {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl outbox::OutboxConsumerReader {
     pub const fn new(pool: sqlx_postgres::PgPool, consumer: outbox::OutboxConsumer) -> Self;
+    pub async fn through_current_frontier(
+        &self,
+    ) -> result::Result<Self, outbox::OutboxDispatchError>;
     pub async fn session_terminal_at(
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<option::Option<offset_date_time::OffsetDateTime>, outbox::OutboxDispatchError>;
+    pub async fn completed_ordinary_dispatches(
+        &self,
+        sessions: &[signalbox_domain::SessionId],
+    ) -> result::Result<vec::Vec<outbox::DispatchedOutboxEvent>, outbox::OutboxDispatchError>;
     pub async fn session_pushed(
         &self,
         session: signalbox_domain::SessionId,

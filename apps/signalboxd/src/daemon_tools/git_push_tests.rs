@@ -119,6 +119,7 @@ fn captured_output(file: &mut fs::File, limit: usize) -> signalbox_tools_exec::P
 
 fn git(root: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
+        .args(["-c", "maintenance.auto=false"])
         .args(["-C", root.to_str().expect("fixture path")])
         .args(arguments)
         .output()

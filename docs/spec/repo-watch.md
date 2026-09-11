@@ -235,11 +235,11 @@ address changes bind a replacement before retiring the running listener, and a
 bind failure preserves the running settings. In-flight deliveries retry against
 the replacement configuration.
 
-Lifecycle reactions accept `session_terminal`, `goal_changed`, and retained
-`pull_request_closed` or `pull_request_merged` facts and emit only
-`release_start` or sticky-stop lifecycle commands. These are the command forms
-used for convergence release and stale-work termination; no module lease table
-or scheduler join exists. Each reaction in a multi-action batch has its own
+Lifecycle reactions accept `session_terminal`, `turn_terminal`, `goal_changed`,
+and retained `pull_request_closed` or `pull_request_merged` facts and emit only
+`release_start` or stop lifecycle commands. These are the command forms used for
+convergence release and stale-work termination; no module lease table or
+scheduler join exists. Each reaction in a multi-action batch has its own
 one-based ordinal. A reaction naming a committed dispatch remains admissible
 after its rule is deactivated; deactivation prevents only new matched
 dispatches.
@@ -274,6 +274,12 @@ pull-request context, retain their preceding dispatch and evaluated event
 context, and pass through the existing singleton and dispatch admission limits;
 they do not create GitHub change events.
 
+An ordinary dispatch closes nonsticky after its turn ends and no accepted work
+remains. The closure rechecks that condition under the session lock; a goal,
+active or queued turn, or pending steering prevents it. Reconciliation includes
+completed turns already consumed before restart. Terminal settlement releases
+the singleton for the existing event and cooldown retry rules.
+
 Goal commissioning or resumption releases the dispatched session's held start
 gate. A user-stopped goal issues a parent-only sticky stop. An achieved session
 releases its singleton on terminal settlement; a later matching pull-request
@@ -289,7 +295,11 @@ discovered terminal times on the dispatch ledger. A queued retirement whose
 session has ended is rejected locally as `session_already_terminal`. Reactions
 retain their original rule and action even after configuration removes the rule.
 The module commits lifecycle effects before advancing its application cursor;
-the daemon acknowledges the corresponding seam event afterward.
+the daemon acknowledges the corresponding seam event afterward. Lifecycle events
+through the committed frontier captured at the start of each pass are drained
+before replaying pending commands; later events remain for the next pass.
+Lifecycle catch-up does not hold the runtime mutex used by session reads and
+configuration reload.
 
 Pull-request dispatch atomically creates the session with a provisioning hold
 that public start and ownership releases cannot clear. Input accepted during

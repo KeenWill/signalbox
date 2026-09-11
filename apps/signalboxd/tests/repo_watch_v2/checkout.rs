@@ -474,6 +474,97 @@ async fn assert_input_during_checkout_waits(
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn lifecycle_drain_settles_creation_before_pending_replay() -> Result<(), Box<dyn Error>> {
+    struct NoLifecycleCommands;
+    impl signalbox_module_repo_watch_v2::dispatch::LifecycleCommandFactory for NoLifecycleCommands {
+        fn lifecycle(
+            &mut self,
+            _: SessionId,
+            _: SessionLifecycleOperation,
+        ) -> SessionLifecycleCommand {
+            panic!("creation and start-release facts require no lifecycle reaction")
+        }
+    }
+    let mut fixture =
+        CheckoutFixture::with_rule("checkout/project", "labeled-review-response").await?;
+    fixture.submit_without_lifecycle_settlement().await;
+    let pending = fixture
+        .store
+        .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+        .await?;
+    assert_eq!(pending.len(), 1, "creation awaits its lifecycle event");
+    let release_commands_before: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM session_lifecycle_command WHERE operation_kind = 'release_start'",
+    )
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(release_commands_before, 1);
+    let source = signalbox_session_ownership::LifecycleEventSource::new(fixture.core.clone());
+    fixture
+        .store
+        .drain_lifecycle(
+            &mut NoLifecycleCommands,
+            &mut RepositoryWatchCommandCodec,
+            &source,
+        )
+        .await?;
+    assert!(
+        source.next().await?.is_none(),
+        "one drain applies every available lifecycle fact"
+    );
+    assert!(
+        fixture
+            .store
+            .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+            .await?
+            .is_empty(),
+        "settled creation is not resubmitted"
+    );
+    fixture.submit_without_lifecycle_settlement().await;
+    let release_commands_after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM session_lifecycle_command WHERE operation_kind = 'release_start'",
+    )
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(
+        release_commands_after, release_commands_before,
+        "a submission pass after draining creates no extra release commands"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn lifecycle_frontier_leaves_later_facts_replayable() -> Result<(), Box<dyn Error>> {
+    let mut fixture =
+        CheckoutFixture::with_rule("checkout/project", "labeled-review-response").await?;
+    fixture.submit_without_lifecycle_settlement().await;
+    let source = signalbox_session_ownership::LifecycleEventSource::new(fixture.core.clone());
+    let bounded = source.through_current_frontier().await?;
+    // Replaying the unsettled creation appends a later start-release settlement.
+    fixture.submit_without_lifecycle_settlement().await;
+    let mut observed = Vec::new();
+    while let Some(event) = bounded.next().await? {
+        observed.push(event.sequence());
+        bounded.acknowledge(&event).await?;
+    }
+    let last = observed
+        .last()
+        .expect("the captured pass contains creation facts");
+    let later = source
+        .next()
+        .await?
+        .expect("the later settlement remains replayable");
+    assert!(later.sequence() > *last);
+    assert!(
+        bounded.next().await?.is_none(),
+        "a captured pass does not follow the moving tail"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn kickoff_replays_after_provisioning_and_after_input_commit() -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{DeliveryRequest, SubmitInputResult};
     use signalbox_persistence::submit_input::SubmitInputRepository;
@@ -1135,9 +1226,6 @@ impl CheckoutFixture {
     ) -> Result<Self, Box<dyn Error>> {
         let (container, core, url) = postgres().await?;
         migrate(&core).await?;
-        sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-            .execute(&core)
-            .await?;
         let module = module_pool(&url).await?;
         let store = RepoWatchStore::new(module.clone());
         let files = tempfile::tempdir()?;
@@ -3928,5 +4016,157 @@ async fn assert_projected_origin(
     drop(writer);
     drop(reader);
     task.await??;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn ordinary_dispatch_completion_releases_retry_after_its_event_was_consumed()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{
+        InProcessAttemptDispatchGate, ModelCallCredentialReference, ModelCallExecutionOutcome,
+        ModelCallExecutionService, ScriptedModelCallProvider, ScriptedModelCallStep,
+        StartEligibleTurnOutcome, StartEligibleTurnService, UuidV7ModelCallExecutionIdGenerator,
+        UuidV7StartEligibleTurnIdGenerator,
+    };
+    use signalbox_domain::{AssistantText, ModelCallTerminalObservation};
+    use signalbox_persistence::{
+        model_execution::PostgresModelCallRepository,
+        start_eligible_turn::StartEligibleTurnRepository,
+    };
+
+    let mut fixture = CheckoutFixture::with_threads(
+        "checkout/project",
+        "review",
+        vec![RepoWatchThreadObservation::open(
+            ReviewThreadId::try_new("unfinished-thread".to_owned())?,
+            None,
+        )],
+    )
+    .await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(fixture.core.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) = activation.execute(session).await? else {
+        panic!("fixture turn activates");
+    };
+    assert!(
+        signalboxd::WorkspaceInstructionRuntime::new(fixture.core.clone(), None, Vec::new())
+            .prepare(session, activated.turn())
+            .await?
+    );
+    let repository = PostgresModelCallRepository::new(
+        fixture.core.clone(),
+        fixture.sink.models.target_catalog(),
+        ModelCallCredentialReference::new(fixture.sink.models.fallback_credential_profile()),
+    );
+    let mut execution = ModelCallExecutionService::new(
+        UuidV7ModelCallExecutionIdGenerator,
+        repository.clone(),
+        repository.clone(),
+        repository.clone(),
+        repository,
+        ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new("Review finished without a push".to_owned())
+                        .expect("nonempty assistant text"),
+                ],
+            },
+        )]),
+        InProcessAttemptDispatchGate::default(),
+        None,
+    );
+    assert!(matches!(
+        execution.execute(session).await?,
+        ModelCallExecutionOutcome::Checkpointed(_)
+    ));
+    assert!(matches!(
+        execution.execute(session).await?,
+        ModelCallExecutionOutcome::ObservationCommitted(_)
+    ));
+    fixture.settle().await;
+    let source = signalbox_session_ownership::LifecycleEventSource::new(fixture.core.clone());
+    assert!(source.next().await?.is_none());
+    let templates = signalboxd::SessionTemplateConfiguration::read(
+        &fixture._files.path().join("templates.toml"),
+        || None,
+        &fixture.sink.models,
+    )?;
+    let mut factory =
+        signalboxd::repo_watch_dispatch::RepositoryWatchCommandFactory(Arc::new(templates));
+    let mut codec = RepositoryWatchCommandCodec;
+    fixture
+        .store
+        .react_to_ordinary_dispatch_completion(&mut factory, &mut codec, &source)
+        .await?;
+    fixture
+        .store
+        .react_to_ordinary_dispatch_completion(&mut factory, &mut codec, &source)
+        .await?;
+    assert_eq!(
+        fixture
+            .store
+            .recover_pending_commands(&mut codec)
+            .await?
+            .len(),
+        1
+    );
+    fixture
+        .store
+        .submit_pending(&mut codec, &mut fixture.sink, &source)
+        .await
+        .expect("completion stop submitted");
+    while let Some(event) = source.next().await? {
+        fixture
+            .store
+            .react_to_lifecycle(&event, &mut factory, &mut codec, &source)
+            .await?;
+        source.acknowledge(&event).await?;
+    }
+    let sticky: bool = sqlx::query_scalar(
+        "SELECT terminal_stop_sticky FROM session_lifecycle WHERE session_id=$1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&fixture.core)
+    .await?;
+    assert!(!sticky);
+    let released: bool = sqlx::query_scalar("SELECT session_terminal_at IS NOT NULL AND singleton_released_at IS NOT NULL FROM dispatch_ledger WHERE command_id=$1")
+        .bind(fixture.command.into_uuid()).fetch_one(&fixture.module).await?;
+    assert!(released);
+    let configuration = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("watch configuration");
+    assert!(
+        fixture
+            .store
+            .retry_due(
+                configuration.repositories()[0].repository(),
+                &configuration.rules()[0],
+                &mut FixedDispatchIds {
+                    value: Uuid::now_v7().as_u128(),
+                    calls: 0
+                },
+                &mut factory,
+                &mut codec,
+                &source,
+                OffsetDateTime::now_utc(),
+            )
+            .await
+            .expect("retry admission")
+    );
+    assert_eq!(
+        fixture
+            .store
+            .recover_pending_commands(&mut codec)
+            .await?
+            .len(),
+        1
+    );
     Ok(())
 }
