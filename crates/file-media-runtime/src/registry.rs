@@ -502,7 +502,6 @@ impl FileMediaRegistry {
                     reason_code,
                 });
             }
-            FileInspection::Ambiguous { .. } => return Err(FileMediaFailure::AmbiguousType),
             FileInspection::DeclaredMismatch {
                 declared, detected, ..
             } => {

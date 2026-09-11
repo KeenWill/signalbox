@@ -47,6 +47,16 @@ fn operator_status_request_and_rows_round_trip_in_one_closed_vocabulary()
     )?;
     assert_server_message_round_trip(
         request(1)?,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::UnavailableComponent(
+            Box::new(OperatorStatusUnavailableComponentMessage {
+                component: "adapter:codex_cli".to_owned(),
+                cause: "codex_cli_pin_mismatch".to_owned(),
+            }),
+        ))),
+        r#"{"type":"operator_status","kind":"unavailable_component","component":"adapter:codex_cli","cause":"codex_cli_pin_mismatch"}"#,
+    )?;
+    assert_server_message_round_trip(
+        request(1)?,
         ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::SessionSupervision(
             Box::new(OperatorStatusSessionSupervisionMessage {
                 session_id: CanonicalUuid::from_uuid(uuid::Uuid::from_u128(0x2a)),
@@ -61,6 +71,7 @@ fn operator_status_request_and_rows_round_trip_in_one_closed_vocabulary()
         request(1)?,
         ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
             OperatorStatusEndMessage {
+                unavailable_component_count: CanonicalU64::new(1),
                 session_supervision_count: CanonicalU64::new(0),
                 repository_ingestion_count: CanonicalU64::new(0),
                 lifecycle_week_count: CanonicalU64::new(1),
@@ -68,7 +79,7 @@ fn operator_status_request_and_rows_round_trip_in_one_closed_vocabulary()
                 outbox_quarantine_count: CanonicalU64::new(2),
             },
         )))),
-        r#"{"type":"operator_status","kind":"end","repository_ingestion_count":"0","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1","session_supervision_count":"0","outbox_quarantine_count":"2"}"#,
+        r#"{"type":"operator_status","kind":"end","unavailable_component_count":"1","repository_ingestion_count":"0","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1","session_supervision_count":"0","outbox_quarantine_count":"2"}"#,
     )?;
     Ok(())
 }
@@ -103,6 +114,57 @@ fn operator_status_rejects_a_lifecycle_week_that_is_not_a_rate()
         Err(FrameValidationError::OperatorStatusShape)
     ));
 
+    Ok(())
+}
+
+#[test]
+fn operator_status_admits_the_longest_configured_credential_component()
+-> Result<(), Box<dyn std::error::Error>> {
+    let component = format!(
+        "{}{}",
+        CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX,
+        "p".repeat(MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES)
+    );
+    let admitted = ServerFrame::try_new(
+        request(1)?,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::UnavailableComponent(
+            Box::new(OperatorStatusUnavailableComponentMessage {
+                component: component.clone(),
+                cause: "codex_home_empty".to_owned(),
+            }),
+        ))),
+    );
+    assert!(admitted.is_ok());
+
+    let rejected = ServerFrame::try_new(
+        request(1)?,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::UnavailableComponent(
+            Box::new(OperatorStatusUnavailableComponentMessage {
+                component: format!("{component}p"),
+                cause: "codex_home_empty".to_owned(),
+            }),
+        ))),
+    );
+    assert!(matches!(
+        rejected,
+        Err(FrameValidationError::OperatorStatusShape)
+    ));
+    Ok(())
+}
+
+#[test]
+fn operator_status_admits_digit_bearing_unavailable_causes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let admitted = ServerFrame::try_new(
+        request(1)?,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::UnavailableComponent(
+            Box::new(OperatorStatusUnavailableComponentMessage {
+                component: "blob_store:archive".to_owned(),
+                cause: "s3_configuration_unavailable".to_owned(),
+            }),
+        ))),
+    );
+    assert!(admitted.is_ok());
     Ok(())
 }
 

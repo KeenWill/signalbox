@@ -215,6 +215,12 @@ impl GitPushAuthentication {
         remote: &str,
         timeout: std::time::Duration,
     ) -> Result<Self, RepositoryWatchClientLoadError> {
+        if url::Url::parse(remote)
+            .ok()
+            .is_none_or(|url| url.scheme() != "https" || url.host_str() != Some("github.com"))
+        {
+            return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
+        }
         let token = app
             .token(Some(timeout))
             .await
@@ -233,11 +239,7 @@ fn authenticated_push_url(
     let unavailable = RepositoryWatchClientLoadError::CredentialUnavailable;
     let token = std::str::from_utf8(token).map_err(|_| unavailable)?;
     let mut url = url::Url::parse(remote).map_err(|_| unavailable)?;
-    if url.scheme() != "https"
-        || url.host_str() != Some("github.com")
-        || token.is_empty()
-        || token.contains(['\r', '\n', '\0'])
-    {
+    if url.scheme() != "https" || token.is_empty() || token.contains(['\r', '\n', '\0']) {
         return Err(unavailable);
     }
     url.set_username("x-access-token")
@@ -766,6 +768,17 @@ mod tests {
         assert_eq!(
             url.url,
             "https://x-access-token:synthetic-installation-token@github.com/fixture/project.git"
+        );
+        let custom = loader
+            .authenticated_push_url(
+                "https://git.example.test/fixture/project.git",
+                std::time::Duration::from_secs(300),
+            )
+            .await
+            .expect("configured HTTPS destination accepts its token file");
+        assert_eq!(
+            custom.url,
+            "https://x-access-token:synthetic-installation-token@git.example.test/fixture/project.git"
         );
         assert_eq!(
             loader

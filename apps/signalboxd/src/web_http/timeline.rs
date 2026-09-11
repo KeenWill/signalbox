@@ -457,9 +457,9 @@ fn repository_projection_error(error: SessionTimelineRepositoryError) -> Respons
         SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Database(_)) => {
             "infrastructure"
         }
-        SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Corruption(_)) => {
-            "fail_closed_corruption"
-        }
+        SessionTimelineRepositoryError::Outbox(
+            OutboxDispatchError::CursorCorruption(_) | OutboxDispatchError::RowCorruption(_),
+        ) => "fail_closed_corruption",
     };
     tracing::error!(
         failure_class,

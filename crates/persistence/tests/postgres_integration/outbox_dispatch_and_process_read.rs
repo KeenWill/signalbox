@@ -784,8 +784,8 @@ async fn dispatcher_reports_a_missing_committed_header() -> Result<(), Box<dyn E
         dispatcher
             .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
             .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::MissingCommittedEventHeader
+        Err(OutboxDispatchError::RowCorruption(
+            OutboxRowCorruption::MissingCommittedEventHeader
         ))
     ));
     assert_eq!(
@@ -841,8 +841,8 @@ async fn dispatcher_rejects_a_header_beyond_the_allocator() -> Result<(), Box<dy
         dispatcher
             .dispatch_next(|_| panic!("an unallocated header must not be offered"))
             .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::EventBeyondAllocatedSequence
+        Err(OutboxDispatchError::CursorCorruption(
+            OutboxCursorCorruption::EventBeyondAllocatedSequence
         ))
     ));
 
@@ -911,8 +911,8 @@ async fn dispatcher_rejects_a_noncontiguous_header_beyond_the_allocator()
         dispatcher
             .dispatch_next(|_| panic!("an unallocated header must not be offered"))
             .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::EventBeyondAllocatedSequence
+        Err(OutboxDispatchError::CursorCorruption(
+            OutboxCursorCorruption::EventBeyondAllocatedSequence
         ))
     ));
 
@@ -968,8 +968,8 @@ async fn dispatcher_validates_the_allocator_at_exhaustion() -> Result<(), Box<dy
         dispatcher
             .dispatch_next(|_| panic!("exhausted delivery cannot offer an event"))
             .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::MissingSequenceState
+        Err(OutboxDispatchError::CursorCorruption(
+            OutboxCursorCorruption::MissingSequenceState
         ))
     ));
 
@@ -1121,8 +1121,11 @@ async fn dispatcher_quarantines_crosswired_terminal_correlations() -> Result<(),
     .execute(&pool)
     .await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
-        .await?;
+    assert_next_outbox_event_quarantined(
+        &pool,
+        OutboxRowCorruption::InvalidTerminalEventCorrelation,
+    )
+    .await?;
 
     pool.close().await;
     drop(container);
@@ -1759,8 +1762,11 @@ async fn turn_activation_dispatch_requires_authoritative_attempt() -> Result<(),
         .await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidLifecycleEventCorrelation)
-        .await?;
+    assert_next_outbox_event_quarantined(
+        &pool,
+        OutboxRowCorruption::InvalidLifecycleEventCorrelation,
+    )
+    .await?;
 
     pool.close().await;
     drop(container);
@@ -1859,8 +1865,11 @@ async fn terminal_model_call_dispatch_requires_exact_disposition() -> Result<(),
         .execute(&pool)
         .await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
-        .await?;
+    assert_next_outbox_event_quarantined(
+        &pool,
+        OutboxRowCorruption::InvalidTerminalEventCorrelation,
+    )
+    .await?;
 
     let authoritative: (String, Option<String>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind
@@ -1907,7 +1916,7 @@ async fn model_call_dispatch_quarantines_an_unreached_transition() -> Result<(),
         .execute(&pool)
         .await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidModelCallState).await?;
+    assert_next_outbox_event_quarantined(&pool, OutboxRowCorruption::InvalidModelCallState).await?;
 
     pool.close().await;
     drop(container);
@@ -1957,8 +1966,11 @@ async fn completed_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<
     corrupt_ended_attempt_disposition(&pool, fixture.attempt, "known_failure").await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
-        .await?;
+    assert_next_outbox_event_quarantined(
+        &pool,
+        OutboxRowCorruption::InvalidTerminalEventCorrelation,
+    )
+    .await?;
 
     pool.close().await;
     drop(container);
@@ -1999,8 +2011,11 @@ async fn refused_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dy
     corrupt_ended_attempt_disposition(&pool, fixture.attempt, "turn_completed").await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
-        .await?;
+    assert_next_outbox_event_quarantined(
+        &pool,
+        OutboxRowCorruption::InvalidTerminalEventCorrelation,
+    )
+    .await?;
 
     pool.close().await;
     drop(container);
@@ -2057,8 +2072,11 @@ async fn reconciliation_dispatch_requires_exact_terminal_attempt() -> Result<(),
     corrupt_ended_attempt_disposition(&pool, fixture.attempt, "cancelled").await?;
     rewind_outbox_delivery_before(&pool, sequence).await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
-        .await?;
+    assert_next_outbox_event_quarantined(
+        &pool,
+        OutboxRowCorruption::InvalidTerminalEventCorrelation,
+    )
+    .await?;
 
     pool.close().await;
     drop(container);
@@ -2112,7 +2130,7 @@ async fn dispatcher_quarantines_crosswired_accepted_content() -> Result<(), Box<
         .execute(&pool)
         .await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::MissingTypedRecord).await?;
+    assert_next_outbox_event_quarantined(&pool, OutboxRowCorruption::MissingTypedRecord).await?;
 
     pool.close().await;
     drop(container);
@@ -2492,7 +2510,7 @@ async fn dispatcher_quarantines_crosswired_turn_settings_origin() -> Result<(), 
         .execute(&pool)
         .await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidModelSettingsEvent)
+    assert_next_outbox_event_quarantined(&pool, OutboxRowCorruption::InvalidModelSettingsEvent)
         .await?;
 
     pool.close().await;
@@ -2532,7 +2550,7 @@ async fn dispatcher_quarantines_crosswired_defaults_settings_event() -> Result<(
         .execute(&pool)
         .await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidModelSettingsEvent)
+    assert_next_outbox_event_quarantined(&pool, OutboxRowCorruption::InvalidModelSettingsEvent)
         .await?;
 
     pool.close().await;
@@ -2577,7 +2595,7 @@ async fn dispatcher_quarantines_crosswired_settings_caller() -> Result<(), Box<d
         .execute(&pool)
         .await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidModelSettingsEvent)
+    assert_next_outbox_event_quarantined(&pool, OutboxRowCorruption::InvalidModelSettingsEvent)
         .await?;
 
     pool.close().await;
@@ -2657,7 +2675,7 @@ async fn turn_settings_authenticate_the_defaults_epoch() -> Result<(), Box<dyn E
         .execute(&pool)
         .await?;
 
-    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidModelSettingsEvent)
+    assert_next_outbox_event_quarantined(&pool, OutboxRowCorruption::InvalidModelSettingsEvent)
         .await?;
     assert!(matches!(
         ProcessReadRepository::new(pool.clone())

@@ -1,6 +1,7 @@
 use std::{
     num::NonZeroU64,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use signalbox_domain::{
@@ -13,6 +14,10 @@ use uuid::Uuid;
 
 use super::{
     EXAMPLE_EXEC_SUPERVISOR, HubModelConfiguration, ModelAdapter, checked_in_example_configuration,
+};
+use crate::{
+    SessionTemplateConfiguration,
+    configuration_reload::{ConfigurationCatalogs, validate_catalogs},
 };
 
 fn example_path() -> PathBuf {
@@ -63,8 +68,17 @@ credential_file = "/run/credentials/repository-watch-token"
 {rules}"#
     )
     .replace(EXAMPLE_EXEC_SUPERVISOR, &executable);
-    HubModelConfiguration::parse(&repository_watch)
+    let models = HubModelConfiguration::parse(&repository_watch)
         .expect("the repository-watch rules example is valid daemon configuration");
+    let template_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/session-templates.example.toml");
+    let templates = SessionTemplateConfiguration::read(&template_path, || None, &models)
+        .expect("the session-template example is valid for the daemon example");
+    validate_catalogs(&ConfigurationCatalogs {
+        models: Arc::new(models),
+        templates: Arc::new(templates),
+    })
+    .expect("the repository-watch rules resolve against the session-template example");
 }
 
 fn example_watch_configuration() -> HubModelConfiguration {

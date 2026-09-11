@@ -50,6 +50,7 @@ mod preparation;
 mod provider_json;
 mod provider_support;
 mod redaction;
+mod redaction_predicate;
 mod runtime;
 mod scripted;
 mod settings;
@@ -107,6 +108,7 @@ pub use provider_support::{
     provider_response_prefix_len, serialize_provider_request, transport_facts_from_error,
 };
 pub use redaction::{CredentialRedactingSink, redact_credential_text, redact_evidence};
+pub use redaction_predicate::credential_redaction_disagreements;
 pub use runtime::{CancellationSignal, ModelRuntime};
 pub use scripted::{Script, ScriptedModel, ScriptedPrepared};
 pub use settings::{

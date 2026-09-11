@@ -20,6 +20,7 @@ pub struct ProcessRuntime {
     metrics: Option<TelemetryMetrics>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     snapshot_reader_budget: Option<Arc<Semaphore>>,
+    unavailable_components: Vec<OperatorStatusUnavailableComponentMessage>,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +95,7 @@ impl ProcessRuntime {
             metrics: None,
             blob_store_registry: None,
             snapshot_reader_budget,
+            unavailable_components: Vec::new(),
             fanouts: ProcessFanouts {
                 durable: durable_updates,
                 streaming: streaming_updates,
@@ -160,6 +162,15 @@ impl ProcessRuntime {
     #[must_use]
     pub fn with_snapshot_reader_budget(mut self, budget: Arc<Semaphore>) -> Self {
         self.snapshot_reader_budget = Some(budget);
+        self
+    }
+
+    /// Installs process-local component availability for operator status.
+    pub fn with_unavailable_components(
+        mut self,
+        components: Vec<OperatorStatusUnavailableComponentMessage>,
+    ) -> Self {
+        self.unavailable_components = components;
         self
     }
 
@@ -238,6 +249,7 @@ impl ProcessRuntime {
             fanouts: fanouts.clone(),
             blob_store_registry: self.blob_store_registry,
             snapshot_reader_budget: self.snapshot_reader_budget,
+            unavailable_components: self.unavailable_components,
         };
         let server = serve_connections(&self.listener, connection_dependencies, shutdown.clone());
         let dispatcher = dispatch_updates(

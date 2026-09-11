@@ -273,11 +273,13 @@ operation.
 Startup acquires the single-daemon guard, fences the prior pool incarnation once
 the fence migration has run, runs the remaining migrations, marks prior-process
 runner connections lost and propagates their loss before the generic scan,
-initializes every configured blob store, binds the runner socket, binds the
-process socket, and then starts enrollment, admission, dispatch, and scheduling
-concurrently. No request, dispatch cursor advance, scheduler pass, or runner
-admission occurs before recovery completes. Any phase failure is a failed
-startup with a classified, key-bearing log line and a failure exit code.
+initializes every available configured blob store, binds the runner socket,
+binds the process socket, and then starts enrollment, admission, dispatch, and
+scheduling concurrently. No request, dispatch cursor advance, scheduler pass, or
+runner admission occurs before recovery completes. A blob-store initialization
+failure makes that store unavailable and does not fail the phase. Any other
+phase failure is a failed startup with a classified, key-bearing log line and a
+failure exit code.
 
 Each scan transaction classifies the lost tenure by its durable evidence and
 never fabricates a live end. A running turn with no model call ends its attempt
@@ -307,14 +309,18 @@ parked, while terminal sessions retain their outcome. Missing or undecodable
 lifecycle projections retain independent operator evidence and remain suspended
 without automatic repair. Operator status exposes both kinds of pending
 supervision item. Successful startup reconstitution settles repaired terminal
-items without resuming them. Other sessions continue. Infrastructure failures
-stop initial startup visibly. Fenced migrations and the startup scan run under
-guard monitoring, including operator-item identity reconciliation. Observed
-guard loss starts the recovery clock even while pool drain waits, so the elapsed
-bound and shutdown can interrupt that wait. During guard recovery, database
-failures throughout incarnation reconstruction, including repository-watch
-startup, continue reacquisition with the same capped backoff and elapsed bound,
-after closing the failed incarnation’s fenced pool. Migration validation, fence
+items without resuming them. Other sessions continue. Session-scoped recovery
+failures, including failed operator-item writes, remain suspended in the
+execution supervisor while operator parking retries. Runtime components that
+read durable lifecycle state launch only after those failures are parked
+durably. Only failures without session scope stop initial startup visibly.
+Fenced migrations and the startup scan run under guard monitoring, including
+operator-item identity reconciliation. Observed guard loss starts the recovery
+clock even while pool drain waits, so the elapsed bound and shutdown can
+interrupt that wait. During guard recovery, unscoped database failures
+throughout incarnation reconstruction, including repository-watch startup,
+continue reacquisition with the same capped backoff and elapsed bound, after
+closing the failed incarnation’s fenced pool. Migration validation, fence
 corruption, and reload corruption failures stop recovery visibly. Recovery is
 idempotent, and a stale observation rolls back.
 
