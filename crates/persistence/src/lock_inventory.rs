@@ -646,7 +646,16 @@ pub(crate) const DELEGATION_LOAD_RELATION: &str =
     "SELECT relation.parent_session_id, relation.parent_turn_id,
             relation.child_session_id, relation.policy_kind,
             relation.on_parent_stopped, relation.on_parent_cancelled,
-            task.turn_id AS child_turn_id, task.task_content
+            task.turn_id AS child_turn_id, task.task_content,
+            EXISTS (
+                SELECT 1
+                  FROM turn_lifecycle AS lifecycle
+                 WHERE lifecycle.session_id = task.child_session_id
+                   AND lifecycle.turn_id = task.turn_id
+                   AND lifecycle.state_kind = 'terminal'
+                   AND lifecycle.terminal_disposition_kind =
+                        'reconciliation_required'
+            ) AS reconciliation_required_child
        FROM session_delegation AS relation
        JOIN session_delegation_initial_task AS task
          ON task.spawning_tool_request_id = relation.spawning_tool_request_id
