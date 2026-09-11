@@ -93,13 +93,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     system_init(&arguments)?;
     match scenario.as_str() {
-        "session_limit" => {
+        "session_window_status"
+        | "session_window_without_status"
+        | "request_size_status"
+        | "native_budget_subtype"
+        | "unknown_error_subtype" => {
+            let (subtype, status, message) = match scenario.as_str() {
+                "session_window_status" => ("success", Some(429), "You've hit your session limit"),
+                "session_window_without_status" => {
+                    ("success", None, "You've hit your session limit")
+                }
+                "request_size_status" => ("success", Some(413), "Prompt is too long"),
+                "native_budget_subtype" => {
+                    ("error_max_budget_usd", None, "synthetic budget detail")
+                }
+                _ => (
+                    "synthetic_unknown_error",
+                    None,
+                    "authentication failed; rate limit; request too large",
+                ),
+            };
             emit_json(&serde_json::json!({
-                "type": "result", "subtype": "success", "is_error": true,
-                "session_id": fixtures::SESSION_ID, "stop_reason": "stop_sequence",
-                "result": "You've hit your session limit",
-                "usage": {"input_tokens": 0, "output_tokens": 0,
-                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+                "type": "result", "subtype": subtype, "is_error": true,
+                "session_id": fixtures::SESSION_ID, "api_error_status": status,
+                "result": message
             }))?;
         }
         "native_prompt_too_large" => {

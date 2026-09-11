@@ -1,107 +1,10 @@
-//! Conservative classification of Claude Code failure messages.
+//! Classification from Claude Code terminal subtype and HTTP status.
 
 use signalbox_model_runtime::ProviderErrorKind;
 
-pub(crate) fn classify_error(
-    status: Option<u16>,
-    subtype: &str,
-    message: &str,
-) -> ProviderErrorKind {
-    if status == Some(401) {
-        return ProviderErrorKind::CredentialRejected;
-    }
-    let normalized = format!("{subtype} {message}").to_ascii_lowercase();
-    let text_kind = match () {
-        _ if contains_any(
-            &normalized,
-            &[
-                "not logged in",
-                "unauthorized",
-                "authentication failed",
-                "invalid api key",
-                "invalid_api_key",
-                "oauth token",
-                "credential rejected",
-                "authentication_error",
-            ],
-        ) =>
-        {
-            ProviderErrorKind::CredentialRejected
-        }
-        _ if contains_any(
-            &normalized,
-            &["permission denied", "forbidden", "permission_denied"],
-        ) =>
-        {
-            ProviderErrorKind::PermissionDenied
-        }
-        _ if contains_any(
-            &normalized,
-            &["model not found", "model_not_found", "unknown model"],
-        ) =>
-        {
-            ProviderErrorKind::TargetNotFound
-        }
-        _ if contains_any(
-            &normalized,
-            &[
-                "request too large",
-                "piped stdin input exceeds",
-                "prompt is too long",
-                "context length exceeded",
-                "context_length_exceeded",
-            ],
-        ) =>
-        {
-            ProviderErrorKind::RequestTooLarge
-        }
-        _ if contains_any(
-            &normalized,
-            &[
-                "quota exhausted",
-                "insufficient quota",
-                "insufficient_quota",
-                "usage limit reached",
-                "hit your usage limit",
-                "hit your session limit",
-                "error_max_budget_usd",
-            ],
-        ) =>
-        {
-            ProviderErrorKind::QuotaExhausted
-        }
-        _ if contains_any(
-            &normalized,
-            &["rate limit", "rate_limit", "too many requests"],
-        ) =>
-        {
-            ProviderErrorKind::RateLimited
-        }
-        _ if contains_any(&normalized, &["overloaded", "at capacity"]) => {
-            ProviderErrorKind::Overloaded
-        }
-        _ if contains_any(
-            &normalized,
-            &["internal server error", "provider internal", "server_error"],
-        ) =>
-        {
-            ProviderErrorKind::ProviderInternal
-        }
-        _ if contains_any(
-            &normalized,
-            &["invalid request", "bad request", "invalid_request_error"],
-        ) =>
-        {
-            ProviderErrorKind::InvalidRequest
-        }
-        _ => ProviderErrorKind::Unrecognized,
-    };
-    if status == Some(401) {
-        return ProviderErrorKind::CredentialRejected;
-    }
-    if text_kind != ProviderErrorKind::Unrecognized {
-        return text_kind;
-    }
+use crate::wire::ResultSubtype;
+
+pub(crate) fn classify_error(status: Option<u16>, subtype: &ResultSubtype) -> ProviderErrorKind {
     match status {
         Some(400) => ProviderErrorKind::InvalidRequest,
         Some(401) => ProviderErrorKind::CredentialRejected,
@@ -110,42 +13,55 @@ pub(crate) fn classify_error(
         Some(413) => ProviderErrorKind::RequestTooLarge,
         Some(429) => ProviderErrorKind::RateLimited,
         Some(500) => ProviderErrorKind::ProviderInternal,
-        Some(529) => ProviderErrorKind::Overloaded,
-        _ => ProviderErrorKind::Unrecognized,
+        Some(503 | 529) => ProviderErrorKind::Overloaded,
+        _ => match subtype {
+            ResultSubtype::ErrorMaxBudgetUsd => ProviderErrorKind::QuotaExhausted,
+            ResultSubtype::Success
+            | ResultSubtype::ErrorDuringExecution
+            | ResultSubtype::ErrorMaxTurns
+            | ResultSubtype::ErrorMaxStructuredOutputRetries
+            | ResultSubtype::Unknown(_) => ProviderErrorKind::Unrecognized,
+        },
     }
-}
-
-fn contains_any(text: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| text.contains(needle))
 }
 
 #[cfg(test)]
 mod tests {
-    use signalbox_model_runtime::ProviderErrorKind;
-
-    use super::classify_error;
+    use super::*;
 
     #[test]
-    fn credential_rejection_status_precedes_rendered_overload_text() {
+    fn http_status_classifies_generic_terminal_subtypes() {
+        for (status, expected) in [
+            (400, ProviderErrorKind::InvalidRequest),
+            (401, ProviderErrorKind::CredentialRejected),
+            (403, ProviderErrorKind::PermissionDenied),
+            (404, ProviderErrorKind::TargetNotFound),
+            (413, ProviderErrorKind::RequestTooLarge),
+            (429, ProviderErrorKind::RateLimited),
+            (500, ProviderErrorKind::ProviderInternal),
+            (503, ProviderErrorKind::Overloaded),
+            (529, ProviderErrorKind::Overloaded),
+        ] {
+            assert_eq!(
+                classify_error(Some(status), &ResultSubtype::Success),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn http_status_precedes_budget_subtype() {
         assert_eq!(
-            classify_error(Some(401), "error_during_execution", "overloaded"),
-            ProviderErrorKind::CredentialRejected
+            classify_error(Some(429), &ResultSubtype::ErrorMaxBudgetUsd),
+            ProviderErrorKind::RateLimited
         );
     }
 
     #[test]
-    fn definitive_status_classifies_an_otherwise_generic_error() {
+    fn a_native_budget_failure_is_quota_exhaustion() {
         assert_eq!(
-            classify_error(Some(401), "error_during_execution", ""),
-            ProviderErrorKind::CredentialRejected
-        );
-        assert_eq!(
-            classify_error(Some(429), "error_during_execution", ""),
-            ProviderErrorKind::RateLimited
-        );
-        assert_eq!(
-            classify_error(Some(529), "error_during_execution", ""),
-            ProviderErrorKind::Overloaded
+            classify_error(None, &ResultSubtype::ErrorMaxBudgetUsd),
+            ProviderErrorKind::QuotaExhausted
         );
     }
 }
