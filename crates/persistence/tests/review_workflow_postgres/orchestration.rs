@@ -139,7 +139,7 @@ async fn prepare_orchestration_fixture(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn schema_requires_scored_categorical_judgments() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let mut fixture = prepare_orchestration_fixture(&pool).await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
     let original: serde_json::Value = sqlx::query_scalar(
         "SELECT judgment FROM review_orchestration_judgment_member WHERE attempt_id = $1",
     )
