@@ -1912,6 +1912,19 @@ async fn run_hub_incarnation(
             eligibility_nudge.clone(),
         );
 
+    let capacity_refresh = signalboxd::credential_invocations::CodexCapacityRefresh::new(
+        pool.clone(),
+        &model_configuration,
+        reconciliation_sweep_interval,
+        codex_cli_version_probe_bound,
+    )
+    .map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("codex_capacity_refresh_construction_failed"),
+        )
+    })?;
+
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
         .map(|configuration| configuration.exec_supervisor_executable().to_path_buf());
@@ -1936,6 +1949,11 @@ async fn run_hub_incarnation(
             tool_configuration.exec_supervisor_executable(),
             tool_configuration.cargo_registry_cache(),
             tool_configuration.sandbox(),
+            model_configuration
+                .numeric_bounds()
+                .integer("max_git_object_bytes")
+                .flatten()
+                .map(|bytes| bytes as usize),
             tool_configuration.sandboxed_exec_timeout_bound(),
             model_configuration.web_fetch_egress_policy(),
         ),
@@ -2806,7 +2824,12 @@ async fn run_hub_incarnation(
                 }
                 let invocation_shutdown = turn_liveness_shutdown_receiver.clone();
                 runtime_tasks.spawn(async move {
-                    invocation_processes.run(invocation_shutdown).await;
+                    let capacity_shutdown = invocation_shutdown.clone();
+                    tokio::join!(invocation_processes.run(invocation_shutdown), async {
+                        if let Some(refresh) = capacity_refresh {
+                            refresh.run(capacity_shutdown).await;
+                        }
+                    },);
                     RuntimeTaskExit::CredentialInvocations
                 });
                 runtime_tasks.spawn(async move {

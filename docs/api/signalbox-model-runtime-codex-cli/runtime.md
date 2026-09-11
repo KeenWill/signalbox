@@ -78,6 +78,13 @@ impl<C: clone::Clone + marker::Send + marker::Sync> signalbox_model_runtime::Mod
         cancellation: signalbox_model_runtime::CancellationSignal,
     ) -> signalbox_model_runtime::TerminalReport<C>;
 }
+impl CodexCliRuntime {
+    pub async fn read_credential_capacity(
+        &self,
+        credential: &signalbox_model_runtime::CredentialReference,
+        bound: time::Duration,
+    ) -> result::Result<signalbox_model_runtime::RateLimitSnapshot, CodexCliCapacityProbeError>;
+}
 ```
 
 ## CodexCliPreparedRequest
@@ -118,4 +125,19 @@ impl error::Error for CodexCliConstructionError {}
 pub fn validate_model_settings(
     settings: &signalbox_model_runtime::ModelSettings,
 ) -> result::Result<(), signalbox_model_runtime::PreparationFailure>;
+```
+
+## CodexCliCapacityProbeError
+
+```rust
+pub enum CodexCliCapacityProbeError {
+    UnsupportedCredential,
+    Failed,
+    TimedOut,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl fmt::Display for CodexCliCapacityProbeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for CodexCliCapacityProbeError {}
 ```

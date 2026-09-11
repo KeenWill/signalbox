@@ -102,6 +102,18 @@ impl<Transport> GitPushTools<Transport> {
         })
     }
 
+    /// Sets the decoded byte limit for each pushed object and delta dependency.
+    /// `None` leaves blob content unbounded, which is the default.
+    /// Commits, trees, and tags retain their structural byte limit.
+    pub fn with_max_object_bytes(mut self, max_bytes: Option<usize>) -> Self {
+        // The suite owns its executor exclusively until into_parts exposes it.
+        #[allow(clippy::expect_used)]
+        let authority = std::sync::Arc::get_mut(&mut self.executor.repository_authority)
+            .expect("an unexecuted Git push suite owns its authority exclusively");
+        authority.max_object_bytes = max_bytes;
+        self
+    }
+
     /// Separates catalog and executor composition roles.
     pub fn into_parts(self) -> (CompiledToolCatalog, GitPushExecutor<Transport>) {
         (self.catalog, self.executor)

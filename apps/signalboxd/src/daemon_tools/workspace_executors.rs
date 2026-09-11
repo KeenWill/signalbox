@@ -104,6 +104,7 @@ pub(super) struct SessionWorkspaceExecutors<
     exec_runner: ExecRunner,
     cargo_registry_cache: Option<PathBuf>,
     sandbox: signalbox_tools_exec::SandboxConfiguration,
+    max_git_object_bytes: Option<usize>,
     sandboxed_exec_timeout_bound: Option<Duration>,
     configured: WorkspaceBoundExecutors<FileSystem, ExecRunner>,
     failure_details: SessionWorkspaceFailureDetails,
@@ -123,6 +124,7 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
             exec_runner: self.exec_runner.clone(),
             cargo_registry_cache: self.cargo_registry_cache.clone(),
             sandbox: self.sandbox.clone(),
+            max_git_object_bytes: self.max_git_object_bytes,
             sandboxed_exec_timeout_bound: self.sandboxed_exec_timeout_bound,
             configured: self.configured.clone(),
             failure_details: self.failure_details.clone(),
@@ -156,6 +158,7 @@ where
             exec_runner,
             cargo_registry_cache,
             sandbox,
+            max_git_object_bytes,
             sandboxed_exec_timeout_bound,
         } = composition;
         let failure_details = SessionWorkspaceFailureDetails::try_new()?;
@@ -168,6 +171,7 @@ where
             exec_runner,
             cargo_registry_cache,
             sandbox,
+            max_git_object_bytes,
             sandboxed_exec_timeout_bound,
             configured: families.executors,
             failure_details,
@@ -398,6 +402,7 @@ where
             self.exec_runner.clone(),
             self.cargo_registry_cache.as_deref(),
             &self.sandbox,
+            self.max_git_object_bytes,
             self.sandboxed_exec_timeout_bound,
         )
         .map_err(SessionWorkspaceFailure::Composition)?;
@@ -521,6 +526,7 @@ where
                 commit,
                 self.exec_runner.clone(),
                 &filesystem,
+                self.max_git_object_bytes,
             )
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
             self.resolve_workspace_instruction_root(session)

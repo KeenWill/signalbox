@@ -15,10 +15,13 @@ exports_files([
     "Cargo.toml",
     "rust-toolchain.toml",
     "__subpackages__",
+    "config/approval-judge-eval-codex.example.toml",
+    "config/repository-watch-rules.example.toml",
     "config/session-templates.example.toml",
     "config/signalbox-runner.example.toml",
     "tooling/codex-cli/release.json",
     "tooling/postgres_test_image.rs",
+    "tooling/generate-git-scale.py",
     "tooling/postgres_test_container.py",
     ".github/postgres-integration-suites.toml",
     "tooling/requirements-mdformat.txt",
@@ -46,6 +49,18 @@ filegroup(
         ".github/workflows/swift.yml",
     ],
     visibility = ["//scripts:__pkg__"],
+)
+
+py_test(
+    name = "test_bazel_scratch",
+    size = "small",
+    srcs = ["tooling/test_bazel_scratch.py"],
+    data = [
+        ".github/actions/setup-bazel/action.yml",
+        ".github/actions/setup-bazel/prepare-scratch.sh",
+    ],
+    main = "tooling/test_bazel_scratch.py",
+    deps = [requirement("PyYAML")],
 )
 
 py_test(
@@ -80,6 +95,7 @@ py_test(
 test_suite(
     name = "python_checker_tests",
     tests = [
+        ":test_bazel_scratch",
         ":test_summarize_coverage",
         ":test_supervise_lifecycle",
         ":test_sweep_test_containers",

@@ -329,10 +329,20 @@ impl<Runner: ProcessRunner> UnsandboxedCommandRunner<Runner> {
 pub struct ExecResult {
     pub confinement: ExecutionConfinement,
     pub outcome: ProcessOutcome,
+    pub diagnostic: option::Option<ExecutionDiagnostic>,
     pub stdout: OutputCapture,
     pub stderr: OutputCapture,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
+```
+
+## ExecutionDiagnostic
+
+```rust
+pub enum ExecutionDiagnostic {
+    NetworkFenceActive,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
 ```
 
 ## ExecutionConfinement

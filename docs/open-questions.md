@@ -516,6 +516,42 @@ automatic resumption of an execution-failure block are specified in
   question rather than a blocker; the one-root-per-session derivation remains
   correct until it is answered.
 
+## Checkout publication integration
+
+The
+[checkout publication by rename design](design/checkout-publication-by-rename.md)
+commits the primitive's ownership preconditions, atomic namespace transition,
+failure behavior, and acceptance criteria. The following choices remain
+questions for the owner and block checkout integration and snapshot deletion;
+the design does not decide them:
+
+- **Staging exclusion.** Which writer boundary and enforcement mechanism may
+  establish exclusive control of the prepared directory, its descendants, and
+  its source name? A directory FD and mode 0700 do not exclude another same-UID
+  writer, including one holding a writable descriptor or hard link. How will the
+  selected boundary preserve the existing interference tests without silently
+  weakening the Git authority contract?
+- **Displaced-data reclamation.** What ownership evidence permits reclaiming the
+  displaced tree after publication when writers can retain old handles? How
+  should retained data be recovered and eventually removed without losing
+  concurrent edits or accumulating unbounded disk usage?
+- **Publication unit.** Which checkout paths belong to one prepared directory:
+  an affected parent subtree or the configured root? A tracked directory
+  becoming a file currently prepares a leaf inside a staging directory;
+  publishing that container would change the Git tree shape. A larger subtree
+  must preserve unchanged, untracked, and ignored entries. Root replacement
+  additionally needs a writable parent, treatment of embedded `.git`
+  administration, and rebinding pinned authorities; mounted roots cannot simply
+  be exchanged, and existing cwd/open handles retain the displaced tree. What
+  publication unit and reader-visible atomicity should checkout promise?
+- **Platform behavior.** Which platforms and filesystems should use the
+  primitive, and what should checkout do where the required operations are
+  unavailable? Should a Linux-only implementation retain the current checkout
+  path elsewhere or make checkout unavailable there? Retaining that path also
+  retains its snapshot helpers and tests. The Linux NFS client described by the
+  design rejects flagged renames, and macOS support depends on volume
+  capabilities. What availability contract should cover those cases?
+
 ## Identity, credentials, and resource governance
 
 Provider and integration credential lifecycle (storage, delivery, and rotation)

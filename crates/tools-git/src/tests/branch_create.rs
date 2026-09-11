@@ -64,21 +64,26 @@ fn branch_create_rejects_nonempty_shallow_state() {
 }
 
 #[test]
-fn branch_create_rejects_captured_ancestry_over_the_traversal_budget() {
+fn branch_create_selects_an_existing_commit_without_traversing_its_history() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     let newest = plant_linear_history(&repository, fixture.initial, MAX_WORKTREE_INSPECTIONS + 1);
     let executor = fixture.executor();
 
-    let failure = executor
+    executor
         .execute_operation(LocalOperation::BranchCreate(GitBranchCreateArguments {
             name: FIX_BRANCH.to_owned(),
             start: newest.to_string(),
         }))
-        .expect_err("over-budget captured ancestry rejects");
+        .expect("existing commit creates a branch without copying its ancestry");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
-    assert!(!fixture.root().join(".git/refs/heads/agent/fix").exists());
+    assert_eq!(
+        repository
+            .find_reference("refs/heads/agent/fix")
+            .expect("created branch exists")
+            .target(),
+        Some(newest)
+    );
 }
 
 #[test]
@@ -104,7 +109,6 @@ fn branch_create_rejects_an_alternates_fifo_planted_after_object_pinning() {
     let failure = branch_create(
         &repository,
         &executor.repository_authority,
-        &object_database,
         &pinned_objects,
         GitBranchCreateArguments {
             name: FIX_BRANCH.to_owned(),
@@ -153,16 +157,12 @@ fn branch_create_revalidates_the_injected_root_before_publication() {
         .repository_authority
         .repository()
         .expect("pinned original repository opens");
-    let object_database = repository
-        .odb()
-        .expect("original object database opens before replacement");
     let pinned_objects =
         PinnedObjectDatabase::capture(&executor.repository_authority).expect("fixture objects pin");
 
     let failure = branch_create(
         &repository,
         &executor.repository_authority,
-        &object_database,
         &pinned_objects,
         GitBranchCreateArguments {
             name: FIX_BRANCH.to_owned(),

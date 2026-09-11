@@ -17,6 +17,42 @@ use crate::tests::support::{
 };
 
 #[test]
+fn serialized_index_with_library_memory_flags_is_readable_by_git() {
+    let fixture = Fixture::new();
+    let repository = git2::Repository::open(fixture.root()).expect("fixture opens");
+    let mut index = repository.index().expect("fixture index opens");
+    let mut entry = index.get(0).expect("tracked entry exists");
+    // libgit2's GIT_INDEX_ENTRY_UPTODATE is an in-memory extended flag.
+    const LIBRARY_UPTODATE: u16 = 1 << 2;
+    entry.flags_extended |= LIBRARY_UPTODATE;
+    index.add(&entry).expect("in-memory entry updates");
+    assert_ne!(
+        index.get(0).expect("entry remains").flags_extended & LIBRARY_UPTODATE,
+        0
+    );
+    let mut serialized = tempfile::NamedTempFile::new().expect("index destination");
+    write_index_entries(serialized.as_file_mut(), &index, ObjectFormat::Sha1)
+        .expect("index serializes");
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(fixture.root())
+        .env("GIT_INDEX_FILE", serialized.path())
+        .args(["ls-files", "--stage"])
+        .output()
+        .expect("Git reads serialized index");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .expect("Git output")
+            .contains(TRACKED_PATH)
+    );
+}
+
+#[test]
 fn index_lock_acquisition_failure_removes_the_created_lock() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");

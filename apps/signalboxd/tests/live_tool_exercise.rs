@@ -291,6 +291,7 @@ async fn run_live_smoke() -> SmokeResult {
         &exec_supervisor_executable,
         None,
         &Default::default(),
+        None,
         sandboxed_exec_timeout_bound,
         web_fetch_egress_policy,
     )?;

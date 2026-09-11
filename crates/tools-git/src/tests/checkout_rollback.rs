@@ -517,8 +517,15 @@ fn checkout_error_rolls_back_a_partially_written_worktree() {
     let updated_identities = RefCell::new(WorktreeRollbackIdentities::new());
     let executor = fixture.executor();
 
+    let shell = executor
+        .repository_authority
+        .open_repository_shell()
+        .expect("rollback shell opens");
+    shell
+        .capture_objects_on_read(&executor.repository_authority)
+        .expect("rollback source binds");
     let failure = checkout_tree_with_rollback(
-        &repository,
+        &shell,
         Some(&current_tree),
         &target_tree,
         &updated_paths,
@@ -578,8 +585,15 @@ fn checkout_error_preserves_an_edit_after_a_partial_write() {
         identity,
     )]));
 
+    let shell = executor
+        .repository_authority
+        .open_repository_shell()
+        .expect("rollback shell opens");
+    shell
+        .capture_objects_on_read(&executor.repository_authority)
+        .expect("rollback source binds");
     let failure = checkout_tree_with_rollback(
-        &repository,
+        &shell,
         Some(&current_tree),
         &target_tree,
         &updated_paths,

@@ -29,7 +29,7 @@ pub use oauth::{
     OauthCredentialRoot, OauthDeliveryFuture, OauthDeliveryOutcome, OauthRecoveryFuture,
 };
 pub use runtime::{
-    CodexCliConstructionError, CodexCliPreparedRequest, CodexCliRuntime, CodexCliVersionProbeError,
-    DISABLED_CODEX_CLI_CAPABILITY_FEATURES, SUPPORTED_CODEX_CLI_VERSION, validate_model_settings,
-    verify_pinned_codex_cli_version,
+    CodexCliCapacityProbeError, CodexCliConstructionError, CodexCliPreparedRequest,
+    CodexCliRuntime, CodexCliVersionProbeError, DISABLED_CODEX_CLI_CAPABILITY_FEATURES,
+    SUPPORTED_CODEX_CLI_VERSION, validate_model_settings, verify_pinned_codex_cli_version,
 };

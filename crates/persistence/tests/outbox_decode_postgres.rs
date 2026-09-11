@@ -495,7 +495,12 @@ fn every_tool_batch_state() -> Vec<DispatchedToolBatchState> {
                     attempt: ToolAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_ATTEMPT_SEED)),
                 })
             }
-            DispatchedToolBatchState::RecoveryRequired { .. } => None,
+            DispatchedToolBatchState::RecoveryRequired { .. } => {
+                Some(DispatchedToolBatchState::ChildWaitResumed {
+                    attempt: ToolAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_ATTEMPT_SEED)),
+                })
+            }
+            DispatchedToolBatchState::ChildWaitResumed { .. } => None,
         };
         states.push(current);
     }
@@ -669,7 +674,7 @@ fn row_decoded_families_are_enumerated() {
     assert_eq!(every_delegation_provenance().len(), 4);
     assert_eq!(every_model_call_state().len(), 4);
     assert_eq!(every_model_call_disposition().len(), 5);
-    assert_eq!(every_tool_batch_state().len(), 3);
+    assert_eq!(every_tool_batch_state().len(), 4);
     assert_eq!(every_reconciliation_operation().len(), 2);
 }
 
