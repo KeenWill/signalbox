@@ -129,11 +129,11 @@ failures admit successors whether received before or during a stream;
 non-acceptance proof is not required. OAuth access-token recovery admits a
 same-profile retry after refresh, independent of the transient attempt bound; a
 failed refresh or rejection of the refreshed token rotates. Other credential
-rejections never admit same-credential retry. The turn stays active and keeps
-its slot; the predecessor attempt ends KnownFailure without terminalizing, and
-the same commit prepares a successor attempt. That commit appends no
-`TurnFailed`: one commit never both terminalizes the turn and authorizes a
-successor. The rotation and transient retry tests pin this ending.
+rejections require a changed Codex-home profile to readmit a parked member. The
+turn stays active and keeps its slot; the predecessor attempt ends KnownFailure
+without terminalizing, and the same commit prepares a successor attempt. That
+commit appends no `TurnFailed`: one commit never both terminalizes the turn and
+authorizes a successor. The rotation and transient retry tests pin this ending.
 
 A timeout, connection loss, lost body or incomplete stream before observed
 response content follows the provider-internal transient retry path. The durable
@@ -149,14 +149,15 @@ A transient successor commit writes a credential-scoped durable exclusion whose
 reset equals the successor's durable retry deadline. Every session's call
 preparation skips that credential until the reset passes; after it passes, the
 member is admitted again. A chain exclusion is written when a failure rotates
-the pool and removes that member for the remainder of the turn. A quota rotation
-uses the current headroom exclusion instead when the reported capacity already
-excludes that member, allowing a parked turn to resume after capacity returns.
-Rotation prefers another admissible member over the restored predecessor. If
-another durable action excludes a retry successor's credential before
-preparation, that successor fails instead of selecting another member; when a
-fallback member remains admissible, the failure keeps the generic failed
-projection and records no pool exhaustion.
+the pool and removes that member until an authentication exclusion is released
+by a changed-profile reload, or the turn ends. A quota rotation uses the current
+headroom exclusion instead when the reported capacity already excludes that
+member, allowing a parked turn to resume after capacity returns. Rotation
+prefers another admissible member over the restored predecessor. If another
+durable action excludes a retry successor's credential before preparation, that
+successor fails instead of selecting another member; when a fallback member
+remains admissible, the failure keeps the generic failed projection and records
+no pool exhaustion.
 
 A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially
@@ -183,10 +184,11 @@ authorizes no successor.
 
 Exhausted-wait: no member is admissible and the frozen policy selects a wait.
 Exhaustion under `fail` never selects a wait; `park` selects one only when some
-member's every active exclusion can be cleared by a wake. A chain exclusion
-never qualifies. The attempt ends call-free WithoutStop(YieldedToDurableWait),
-the active turn keeps its session slot, and the transaction appends no
-transcript entry.
+member's every active exclusion can be cleared by a wake. An authentication
+chain exclusion for a registered Codex-home member qualifies for a
+changed-profile wake; other chain exclusions do not. The attempt ends call-free
+WithoutStop(YieldedToDurableWait), the active turn keeps its session slot, and
+the transaction appends no transcript entry.
 
 A fresh availability chain resolves the current catalog; calls and waits retain
 the policy identity governing their chain. The wait retains its latest frontier,
@@ -202,7 +204,14 @@ lock. Re-parking rewrites the same wait's evidence and deadline without another
 attempt. Successful release consumes the wait and prepares the selected call on
 a fresh immediate-successor attempt in one transaction. Its wait-release origin
 retains any predecessor call and non-acceptance proof; release never readmits a
-chain-excluded member.
+member with an unreleased chain exclusion.
+
+A successful reload that changes a member's Codex-home path releases its
+authentication exclusions for already parked turns and grants their waits
+eligibility in the receipt transaction. Replay releases nothing again. Unchanged
+profiles, time passage, and restart do not release authentication exclusions.
+The predecessor failure and the turn's input, frontier, target, and policy
+remain retained; a terminal turn is never revived.
 
 A release that selects neither a member nor another wait consumes the wait,
 opens a fresh call-free attempt, ends it KnownFailure, reclassifies pending
@@ -287,4 +296,4 @@ pre-call exhaustion state and live event.
 
 ## Planned
 
-[Authentication recovery after profile changes](../design/auth-profile-recovery.md).
+None.
