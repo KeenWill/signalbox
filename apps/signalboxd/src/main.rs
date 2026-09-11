@@ -32,8 +32,7 @@ use signalbox_application::{
     ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
     InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
     OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
-    SchedulerPassOccupancyBound, StaleActiveTurnBound, StartupScanService,
-    TurnLivenessScanInterval, UuidV7StartupScanIdGenerator,
+    SchedulerPassOccupancyBound, StaleActiveTurnBound, TurnLivenessScanInterval,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -2113,7 +2112,10 @@ async fn run_hub_incarnation(
     let scan_runner_service = runner_service.clone();
     let migration_oauth_registrations = model_configuration.oauth_registrations();
     let invocation_registrations = model_configuration.credential_invocation_registrations();
+    let (execution_supervisor, fatal_execution) = FatalExecutionSupervisor::new(());
+    let scan_supervision = execution_supervisor.recovery_reporter();
     let scan_pool = pool.clone();
+    let scan_nudge = eligibility_nudge.clone();
     let scan_approval_wait_wakeups = approval_wait_wakeups.clone();
     let startup = migrate_scan_then_schedule(
         async {
@@ -2146,17 +2148,20 @@ async fn run_hub_incarnation(
                         SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
                     )
                 })?;
-            let mut scan = StartupScanService::new(
-                UuidV7StartupScanIdGenerator,
-                PostgresStartupScanRepository::new(scan_pool),
-            );
-            let outcome = scan.execute().await.map_err(|error| {
-                let failure_class = error.operator_failure_class();
-                let cause_code = error.operator_failure_cause_code();
-                let session = error.session();
-                let turn = error.repository_error().corruption_turn();
-                erase_startup_scan_cause(failure_class, cause_code, session, turn)
-            })?;
+            let outcome = scan_supervision
+                .scan_and_park_startup_sessions(
+                    PostgresStartupScanRepository::new(scan_pool.clone()),
+                    scan_pool,
+                    scan_nudge,
+                )
+                .await
+                .map_err(|error| {
+                    let failure_class = error.operator_failure_class();
+                    let cause_code = error.operator_failure_cause_code();
+                    let session = error.session();
+                    let turn = error.repository_error().corruption_turn();
+                    erase_startup_scan_cause(failure_class, cause_code, session, turn)
+                })?;
             scan_runner_service
                 .recovery_store()
                 .resume_runner_replacements()
@@ -2187,7 +2192,7 @@ async fn run_hub_incarnation(
                 tracing::error!(
                     session = %session.as_uuid(),
                     cause = "durable_state_corruption",
-                    "startup skipped corrupt session; durable operator item recorded"
+                    "startup skipped corrupt session; operator recovery requested"
                 );
             }
             for session in outcome.awaiting_recovery_decision_sessions() {
@@ -2699,7 +2704,6 @@ async fn run_hub_incarnation(
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let text_deltas = process_runtime.provider_text_delta_sink();
     let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
-    let (execution_supervisor, fatal_execution) = FatalExecutionSupervisor::new(());
     let session_supervision = execution_supervisor.recovery_reporter();
     let process_runtime =
         process_runtime.with_recovery_reporter(execution_supervisor.recovery_reporter());
@@ -4577,6 +4581,111 @@ mod tests {
         assert!(
             matches!(super::recovery_incarnation_outcome(Err(corruption), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == corruption)
         );
+    }
+
+    struct StartupFailureRepository {
+        sessions: Box<[SessionId]>,
+        failure: Option<signalbox_persistence::startup::StartupScanRepositoryError>,
+        operator_write_fails: bool,
+        recovered: Arc<Mutex<Vec<SessionId>>>,
+    }
+
+    impl signalbox_application::StartupScanRepository for StartupFailureRepository {
+        type Error = signalbox_persistence::startup::StartupScanRepositoryError;
+
+        async fn sessions(&mut self) -> Result<Box<[SessionId]>, Self::Error> {
+            Ok(self.sessions.clone())
+        }
+
+        async fn record_corrupt_session(
+            &mut self,
+            _session: SessionId,
+            _error: &Self::Error,
+        ) -> Result<(), Self::Error> {
+            if self.operator_write_fails {
+                Err(
+                    signalbox_persistence::startup::StartupScanCorruption::Inconsistent(
+                        "startup operator item",
+                    )
+                    .into(),
+                )
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn recover<Generator>(
+            &mut self,
+            session: SessionId,
+            _identities: signalbox_domain::AcceptedInputTurnFailureIdentities,
+            _ids: &mut Generator,
+        ) -> Result<signalbox_application::StartupScanSessionOutcome, Self::Error>
+        where
+            Generator: signalbox_application::StartupScanIdGenerator + Send,
+        {
+            self.recovered.lock().unwrap().push(session);
+            match self.failure.take() {
+                Some(error) => Err(error),
+                None => Ok(signalbox_application::StartupScanSessionOutcome::NoActiveTurn),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_scan_retains_scoped_failures_without_requesting_process_recovery() {
+        use signalbox_persistence::startup::{StartupScanCorruption, StartupScanRepositoryError};
+        for (label, failure, operator_write_fails, suspended) in [
+            (
+                "corrupt session parked durably",
+                StartupScanCorruption::Missing("session projection").into(),
+                false,
+                false,
+            ),
+            (
+                "corrupt session operator write fails",
+                StartupScanCorruption::Missing("session projection").into(),
+                true,
+                true,
+            ),
+            (
+                "session recovery database unavailable",
+                StartupScanRepositoryError::Database {
+                    source: sqlx::Error::PoolClosed,
+                    commit_ambiguous: false,
+                },
+                false,
+                true,
+            ),
+            (
+                "session recovery commit ambiguous",
+                StartupScanRepositoryError::Database {
+                    source: sqlx::Error::PoolClosed,
+                    commit_ambiguous: true,
+                },
+                false,
+                true,
+            ),
+        ] {
+            let failed = SessionId::from_uuid(Uuid::now_v7());
+            let healthy = SessionId::from_uuid(Uuid::now_v7());
+            let recovered = Arc::new(Mutex::new(Vec::new()));
+            let (supervisor, signal) = signalboxd::FatalExecutionSupervisor::new(());
+            let reporter = supervisor.recovery_reporter();
+            let repository = StartupFailureRepository {
+                sessions: Box::new([failed, healthy]),
+                failure: Some(failure),
+                operator_write_fails,
+                recovered: Arc::clone(&recovered),
+            };
+            reporter.scan_startup_sessions(repository).await.unwrap();
+            tokio::select! {
+                biased;
+                () = signal.wait_for_process_recovery() => panic!("{label}: scoped failure requested process recovery"),
+                () = ready(()) => {}
+            }
+            assert_eq!(*recovered.lock().unwrap(), [failed, healthy], "{label}");
+            assert_eq!(signal.is_triggered(), suspended, "{label}");
+        }
     }
 
     #[tokio::test]

@@ -428,8 +428,8 @@ effect-class crash-loss transition. A committed classification carrying an
 infrastructure or identity-collision failure fails or parks the affected turn
 without failing unrelated session execution. A fail-closed corruption or
 caller-or-hub bug remains an error after classification closes the attempt, so
-the execution supervisor parks that session with its cause;
-[runtime-substrate](runtime-substrate.md) owns the failure classes. If
+the execution supervisor parks that session with its cause without stopping the
+daemon; [runtime-substrate](runtime-substrate.md) owns the failure classes. If
 trustworthy evidence returns but its commit fails, the service retains that
 exact correlated observation as an opaque linear same-incarnation value and
 never downgrades still-owned evidence to restart crash loss.
