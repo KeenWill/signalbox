@@ -261,6 +261,73 @@ async fn native_compaction_boundary_preserves_the_completion() {
 }
 
 #[tokio::test]
+async fn native_compaction_summary_preserves_only_the_assistant_completion() {
+    let result = execute_scenario("native_compaction_summary", OperationShape::Text).await;
+
+    assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
+    assert_eq!(
+        completed(&result.evidence).finish,
+        CompletionFinish::EndTurn
+    );
+}
+
+#[tokio::test]
+async fn native_compaction_summary_requires_the_initialized_session() {
+    let result = execute_scenario(
+        "native_compaction_summary_wrong_session",
+        OperationShape::Text,
+    )
+    .await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn ordinary_user_text_is_not_a_native_compaction_summary() {
+    let result = execute_scenario(
+        "native_compaction_summary_not_synthetic",
+        OperationShape::Text,
+    )
+    .await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn synthetic_tool_results_are_not_native_context_text() {
+    let result = execute_scenario(
+        "native_compaction_summary_tool_result",
+        OperationShape::Tool,
+    )
+    .await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn native_compaction_summary_does_not_establish_completion() {
+    let result = execute_scenario(
+        "native_compaction_summary_without_result",
+        OperationShape::Text,
+    )
+    .await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker { .. }
+    ));
+}
+
+#[tokio::test]
 async fn native_compaction_boundary_rejects_a_different_session() {
     let result = execute_scenario("native_compaction_wrong_session", OperationShape::Text).await;
 

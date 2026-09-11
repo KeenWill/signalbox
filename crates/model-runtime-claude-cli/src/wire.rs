@@ -104,6 +104,10 @@ pub(crate) enum AssistantContent {
 #[derive(Debug, Deserialize)]
 pub(crate) struct UserEvent {
     pub(crate) message: UserMessage,
+    #[serde(default, rename = "isSynthetic")]
+    pub(crate) is_synthetic: bool,
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,11 +117,15 @@ pub(crate) struct UserMessage {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct UserContent {
-    #[serde(rename = "type")]
-    pub(crate) content_type: String,
-    pub(crate) tool_use_id: String,
-    pub(crate) content: serde_json::Value,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum UserContent {
+    Text {
+        text: String,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: serde_json::Value,
+    },
 }
 
 // Native result vocabulary: https://code.claude.com/docs/en/agent-sdk/typescript#sdkresultmessage

@@ -18,7 +18,7 @@ use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
     AssistantContent, AssistantEvent, AssistantRawEvent, CompactBoundary, RawToolUse, ResultEvent,
-    ResultSubtype, SystemInit, UserEvent,
+    ResultSubtype, SystemInit, UserContent, UserEvent,
 };
 
 fn reject_duplicate_json_members(line: &str) -> Result<(), DecodeFailure> {
@@ -524,14 +524,38 @@ impl<C: Clone> EventDecoder<C> {
         let event: UserEvent = decode(value)?;
         if event.message.role != "user" || event.message.content.is_empty() {
             return Err(DecodeFailure::stream_protocol(
-                "Claude user event is not a tool result",
+                "Claude user event has no user-role content",
             ));
         }
+        if event.is_synthetic {
+            if event.session_id.as_deref() != self.native_session_id.as_deref() {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude synthetic user event contradicts system init",
+                ));
+            }
+            for content in event.message.content {
+                let UserContent::Text { text } = content else {
+                    return Err(DecodeFailure::stream_protocol(
+                        "Claude synthetic user event is not native context text",
+                    ));
+                };
+                drop(text);
+            }
+            return Ok(());
+        }
         for result in event.message.content {
-            if result.content_type != "tool_result"
-                || !self.proposal_indexes.contains_key(&result.tool_use_id)
-                || !self.result_ids.insert(result.tool_use_id)
-                || tool_result_text(&result.content) != Some(TOOL_ACKNOWLEDGEMENT)
+            let UserContent::ToolResult {
+                tool_use_id,
+                content,
+            } = result
+            else {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude user event is not a tool result",
+                ));
+            };
+            if !self.proposal_indexes.contains_key(&tool_use_id)
+                || !self.result_ids.insert(tool_use_id)
+                || tool_result_text(&content) != Some(TOOL_ACKNOWLEDGEMENT)
             {
                 return Err(DecodeFailure::stream_protocol(
                     "Claude tool_result does not acknowledge exactly one declared proposal",
