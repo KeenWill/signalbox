@@ -72,5 +72,16 @@ pub(super) fn verify_merge(
     if contains_fence(first)? == contains_fence(second)? {
         return Err(GitPushFailure::UnprovenMergeParents);
     }
+    let ancestors = repository
+        .merge_bases(first, second)
+        .map_err(repository_failure)?;
+    if ancestors.len() > 1 {
+        let mut bases = ancestors.to_vec();
+        bases.sort_unstable();
+        return Err(GitPushFailure::AmbiguousMergeBases { bases });
+    }
+    if ancestors.is_empty() {
+        return Err(GitPushFailure::Repository);
+    }
     source.validate(authority).map_err(repository_failure)
 }

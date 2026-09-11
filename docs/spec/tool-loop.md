@@ -163,13 +163,14 @@ configured repository URL and confirms the remote branch equals the resolved
 commit before acknowledging success. For a two-parent merge, exactly one parent
 must equal or descend from the retained-head fence; it is the branch parent,
 regardless of parent order. A missing or ambiguous fence binding refuses the
-push with `UnprovenMergeParents`. The merge verifier checks ancestry only; it
-does not compare file contents or classify production, generated or fixture
-paths. Required validation on `refs/pull/N/merge` checks the combined tree,
-including dropped base changes. Verification supports two-parent merges and
-refuses larger merges with `UnsupportedMergeShape` naming the parent count
-before capturing the push snapshot or traversing ancestry. Non-merge pushes are
-unaffected.
+push with `UnprovenMergeParents`. The parents must share exactly one merge base;
+multiple merge bases refuse with `AmbiguousMergeBases`. The merge verifier
+checks ancestry only; it does not compare file contents or classify production,
+generated or fixture paths. Required validation on `refs/pull/N/merge` checks
+the combined tree, including dropped base changes. Verification supports
+two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
+the parent count before capturing the push snapshot or traversing ancestry.
+Non-merge pushes are unaffected.
 
 The seven local Git tools perform no remote operation.
 
