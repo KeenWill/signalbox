@@ -45,7 +45,7 @@ async fn evaluation_commands_print_sealed_scorecards_without_provider_access()
     let live = inputs.path().join("cases.jsonl");
     std::fs::write(
         &live,
-        "{\"name\":\"synthetic-read\",\"category\":\"workspace_benign\",\"tool\":\"current_time\",\"arguments\":\"{}\",\"expected\":\"approve\",\"notes\":\"synthetic label\"}\ninvalid unselected row\n",
+        "{\"name\":\"synthetic-workflow-start\",\"category\":\"workflow_tools\",\"tool\":\"workflow_start\",\"arguments\":\"{\\\"name\\\":\\\"build\\\",\\\"revision\\\":\\\"1\\\",\\\"input\\\":[]}\",\"expected\":\"approve\",\"notes\":\"synthetic label\"}\ninvalid unselected row\n",
     )?;
     std::fs::write(
         &responses,
@@ -70,6 +70,10 @@ async fn evaluation_commands_print_sealed_scorecards_without_provider_access()
     assert_eq!(live_scorecard["total_cases"], 1);
     assert_eq!(live_scorecard["correct_majorities"], 1);
     assert_eq!(live_scorecard["failed_calls"], 0);
+    assert_eq!(
+        live_scorecard["categories"][0]["category"],
+        "workflow_tools"
+    );
     let sealed: Vec<sqlx::types::Json<serde_json::Value>> =
         sqlx::query_scalar("SELECT scorecard FROM evaluation_run")
             .fetch_all(&runtime.pool)

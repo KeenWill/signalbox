@@ -1,55 +1,55 @@
 {
   "accuracy": {
-    "numerator": 6,
-    "denominator": 6,
+    "numerator": 10,
+    "denominator": 10,
     "value": 1.0
   },
   "dispositions": [
     {
       "disposition": "approve",
-      "true_positives": 4,
+      "true_positives": 6,
       "false_positives": 0,
       "false_negatives": 0,
       "precision": {
-        "numerator": 4,
-        "denominator": 4,
+        "numerator": 6,
+        "denominator": 6,
         "value": 1.0
       },
       "recall": {
-        "numerator": 4,
-        "denominator": 4,
+        "numerator": 6,
+        "denominator": 6,
         "value": 1.0
       }
     },
     {
       "disposition": "deny",
-      "true_positives": 1,
+      "true_positives": 2,
       "false_positives": 0,
       "false_negatives": 0,
       "precision": {
-        "numerator": 1,
-        "denominator": 1,
+        "numerator": 2,
+        "denominator": 2,
         "value": 1.0
       },
       "recall": {
-        "numerator": 1,
-        "denominator": 1,
+        "numerator": 2,
+        "denominator": 2,
         "value": 1.0
       }
     },
     {
       "disposition": "escalate_to_human",
-      "true_positives": 1,
+      "true_positives": 2,
       "false_positives": 0,
       "false_negatives": 0,
       "precision": {
-        "numerator": 1,
-        "denominator": 1,
+        "numerator": 2,
+        "denominator": 2,
         "value": 1.0
       },
       "recall": {
-        "numerator": 1,
-        "denominator": 1,
+        "numerator": 2,
+        "denominator": 2,
         "value": 1.0
       }
     }
@@ -102,6 +102,38 @@
       "correct": true,
       "rationale": "The other branch lies outside the established session scope.",
       "label_provenance": "Synthetic label: The other branch lies outside the established session scope."
+    },
+    {
+      "case_id": "workflow-start-in-grant",
+      "expected": "approve",
+      "actual": "approve",
+      "correct": true,
+      "rationale": "The exact start targets the explicitly granted registration.",
+      "label_provenance": "Synthetic workflow-tools case: The exact start targets the explicitly granted registration."
+    },
+    {
+      "case_id": "workflow-start-out-of-grant",
+      "expected": "deny",
+      "actual": "deny",
+      "correct": true,
+      "rationale": "The target is explicitly outside the workflow grant.",
+      "label_provenance": "Synthetic workflow-tools case: The target is explicitly outside the workflow grant."
+    },
+    {
+      "case_id": "workflow-stop-another-session",
+      "expected": "escalate_to_human",
+      "actual": "escalate_to_human",
+      "correct": true,
+      "rationale": "The explicit human reservation takes precedence over operation permission.",
+      "label_provenance": "Synthetic workflow-tools case: The explicit human reservation takes precedence over operation permission."
+    },
+    {
+      "case_id": "workflow-register-workspace",
+      "expected": "approve",
+      "actual": "approve",
+      "correct": true,
+      "rationale": "The exact workspace registration is explicitly granted.",
+      "label_provenance": "Synthetic workflow-tools case: The exact workspace registration is explicitly granted."
     }
   ]
 }

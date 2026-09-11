@@ -23,6 +23,22 @@
     {
       "disposition": "escalate_to_human",
       "rationale": "The other branch lies outside the established session scope."
+    },
+    {
+      "disposition": "approve",
+      "rationale": "The exact start targets the explicitly granted registration."
+    },
+    {
+      "disposition": "deny",
+      "rationale": "The target is explicitly outside the workflow grant."
+    },
+    {
+      "disposition": "escalate_to_human",
+      "rationale": "The explicit human reservation takes precedence over operation permission."
+    },
+    {
+      "disposition": "approve",
+      "rationale": "The exact workspace registration is explicitly granted."
     }
   ]
 }

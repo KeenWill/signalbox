@@ -174,6 +174,29 @@ impl RepoWatchStore {
         Ok(true)
     }
 
+    /// Applies the captured lifecycle prefix before retained commands are replayed.
+    pub async fn drain_lifecycle<Factory: LifecycleCommandFactory, Codec: SessionCommandCodec>(
+        &self,
+        factory: &mut Factory,
+        codec: &mut Codec,
+        source: &LifecycleEventSource,
+    ) -> Result<(), StoreError> {
+        let source = source
+            .through_current_frontier()
+            .await
+            .map_err(StoreError::Lifecycle)?;
+        while let Some(event) = source.next().await.map_err(StoreError::Lifecycle)? {
+            self.react_to_lifecycle(&event, factory, codec, &source)
+                .await?;
+            source
+                .acknowledge(&event)
+                .await
+                .map_err(StoreError::Lifecycle)?;
+        }
+        self.react_to_pull_request_lifecycle(factory, codec, &source)
+            .await
+    }
+
     /// Applies one lifecycle fact and commits any reaction before acknowledging its source.
     pub async fn react_to_lifecycle<
         Factory: LifecycleCommandFactory,

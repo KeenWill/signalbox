@@ -5,6 +5,8 @@
 )]
 
 mod support;
+#[path = "offline_tool_loop/workflows.rs"]
+mod workflow_tools;
 
 use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::{
@@ -297,7 +299,21 @@ struct SessionMetadataRootFacts {
 
 impl ToolLoopFixture {
     async fn new(posture: DangerousToolAutoApproval) -> Result<Self, Box<dyn Error>> {
-        let (container, pool) = migrated_postgres().await?;
+        Self::with_template(posture, None).await
+    }
+
+    async fn with_template(
+        posture: DangerousToolAutoApproval,
+        template: Option<&signalboxd::ResolvedSessionTemplate>,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::with_template_database(posture, template, migrated_postgres().await?).await
+    }
+
+    async fn with_template_database(
+        posture: DangerousToolAutoApproval,
+        template: Option<&signalboxd::ResolvedSessionTemplate>,
+        (container, pool): (TestDatabase, PgPool),
+    ) -> Result<Self, Box<dyn Error>> {
         let selection = DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_ID_SEED + 1));
         let defaults = SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
             ModelSelectionRequest::Direct(selection),
@@ -307,13 +323,16 @@ impl ToolLoopFixture {
             UuidV7SessionIdGenerator,
             CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
         );
-        let CreateSessionOutcome::Applied(created) = create
-            .execute(CreateSessionRequest::try_new(
-                DurableCommandId::from_uuid(Uuid::from_u128(FIXTURE_ID_SEED + 2)),
-                defaults,
-            )?)
-            .await?
-        else {
+        let command = DurableCommandId::from_uuid(Uuid::from_u128(FIXTURE_ID_SEED + 2));
+        let request = match template {
+            Some(template) => CreateSessionRequest::try_new_from_template(
+                command,
+                template.provenance().clone(),
+                template.defaults().clone(),
+            )?,
+            None => CreateSessionRequest::try_new(command, defaults)?,
+        };
+        let CreateSessionOutcome::Applied(created) = create.execute(request).await? else {
             panic!("the unique fixture command must create its session")
         };
         let session = created.session();
