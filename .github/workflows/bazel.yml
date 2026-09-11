@@ -106,8 +106,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.postgres-matrix.outputs.matrix) }}
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-integration-tests' }}
-    # Each worker runs one manifest partition across the suite's binaries.
-    timeout-minutes: 15
+    # Cold daemon binaries can still be compiling at the usual suite deadline.
+    timeout-minutes: ${{ matrix.suite == 'signalboxd' && 30 || 15 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

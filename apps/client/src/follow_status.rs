@@ -233,6 +233,7 @@ pub(crate) fn write_assistant_texts(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 enum OperatorStatusPhase {
+    UnavailableComponents,
     LifecycleWeeks,
     LifecycleDeadlineViolations,
     SessionSupervision,
@@ -241,6 +242,7 @@ enum OperatorStatusPhase {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct OperatorStatusCounts {
+    unavailable_components: u64,
     repository_ingestion: u64,
     lifecycle_weeks: u64,
     lifecycle_deadline_violations: u64,
@@ -267,7 +269,7 @@ pub(crate) async fn status(
         }
     }
     let mut spool = tempfile::tempfile()?;
-    let mut phase = OperatorStatusPhase::LifecycleWeeks;
+    let mut phase = OperatorStatusPhase::UnavailableComponents;
     let mut counts = OperatorStatusCounts::default();
     let outbox_quarantines;
     loop {
@@ -282,6 +284,11 @@ pub(crate) async fn status(
                     counts.repository_ingestion = status_increment(counts.repository_ingestion)?;
                     Some(OperatorStatusPhase::RepositoryIngestion)
                 }
+                OperatorStatusMessage::UnavailableComponent(_) => {
+                    counts.unavailable_components =
+                        status_increment(counts.unavailable_components)?;
+                    Some(OperatorStatusPhase::UnavailableComponents)
+                }
                 OperatorStatusMessage::LifecycleWeek(_) => {
                     counts.lifecycle_weeks = status_increment(counts.lifecycle_weeks)?;
                     Some(OperatorStatusPhase::LifecycleWeeks)
@@ -294,6 +301,7 @@ pub(crate) async fn status(
                 OperatorStatusMessage::End(item)
                     if counts
                         == (OperatorStatusCounts {
+                            unavailable_components: item.unavailable_component_count.value(),
                             repository_ingestion: item.repository_ingestion_count.value(),
                             session_supervision: item.session_supervision_count.value(),
                             lifecycle_weeks: item.lifecycle_week_count.value(),

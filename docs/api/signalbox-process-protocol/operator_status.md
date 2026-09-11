@@ -2,6 +2,24 @@
 
 # operator_status
 
+## MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES
+
+```rust
+pub const MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES: usize;
+```
+
+## CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX
+
+```rust
+pub const CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX: &str;
+```
+
+## MAX_UNAVAILABLE_COMPONENT_UTF8_BYTES
+
+```rust
+pub const MAX_UNAVAILABLE_COMPONENT_UTF8_BYTES: usize;
+```
+
 ## OperatorStatusLifecycleState
 
 ```rust
@@ -80,6 +98,7 @@ pub struct OperatorStatusSessionSupervisionMessage {
 
 ```rust
 pub struct OperatorStatusEndMessage {
+    pub unavailable_component_count: CanonicalU64,
     pub repository_ingestion_count: CanonicalU64,
     pub lifecycle_week_count: CanonicalU64,
     pub lifecycle_deadline_violation_count: CanonicalU64,
@@ -89,11 +108,22 @@ pub struct OperatorStatusEndMessage {
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
 
+## OperatorStatusUnavailableComponentMessage
+
+```rust
+pub struct OperatorStatusUnavailableComponentMessage {
+    pub component: string::String,
+    pub cause: string::String,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## OperatorStatusMessage
 
 ```rust
 pub enum OperatorStatusMessage {
     Start {},
+    UnavailableComponent(boxed::Box<OperatorStatusUnavailableComponentMessage>),
     LifecycleWeek(boxed::Box<OperatorStatusLifecycleWeekMessage>),
     LifecycleDeadlineViolation(boxed::Box<OperatorStatusLifecycleDeadlineViolationMessage>),
     SessionSupervision(boxed::Box<OperatorStatusSessionSupervisionMessage>),

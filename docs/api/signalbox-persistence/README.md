@@ -30,7 +30,7 @@
 | model_execution | 15 | 1 | 0 | [model_execution](model_execution.md) |
 | oauth_credential | 15 | 0 | 0 | [oauth_credential](oauth_credential.md) |
 | operator_status | 6 | 0 | 0 | [operator_status](operator_status.md) |
-| outbox | 31 | 0 | 7 | [types](outbox/types.md), [types-2](outbox/types-2.md), [functions](outbox/functions.md) |
+| outbox | 32 | 0 | 7 | [types](outbox/types.md), [types-2](outbox/types-2.md), [functions](outbox/functions.md) |
 | plan | 3 | 0 | 0 | [plan](plan.md) |
 | process_read | 36 | 0 | 0 | [types](process_read/types.md), [types-2](process_read/types-2.md) |
 | program_cancellation | 5 | 0 | 1 | [program_cancellation](program_cancellation.md) |
@@ -67,4 +67,4 @@
 | workspace_instructions | 6 | 0 | 0 | [workspace_instructions](workspace_instructions.md) |
 | credential_pool_exhaustion | 4 | 0 | 3 | [credential_pool_exhaustion](credential_pool_exhaustion.md) |
 | reload_configuration | 8 | 0 | 0 | [reload_configuration](reload_configuration.md) |
-| root | 0 | 0 | 10 | [root](root.md) |
+| root | 0 | 0 | 12 | [root](root.md) |

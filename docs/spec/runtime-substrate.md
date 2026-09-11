@@ -197,6 +197,13 @@ The Codex CLI adapter neither resumes nor persists a Codex thread; each call is
 a fresh invocation given the complete conversation frontier, so provider session
 state stays out of memory.
 
+Claude Code calls with conversation history fork a disposable native transcript
+of the complete canonical frontier, preserving distinct assistant message groups
+for native compaction. Historical tool calls and results remain canonical JSON
+text; images retain their message and part order. Request and growth
+measurements include the native framing, and the private transcript is removed
+with the request’s support directory.
+
 Unix supervision contains the process group the adapter creates, so construction
 rejects hosts without process-group control; containment beyond that group
 belongs to host isolation, not to the adapter.
@@ -557,36 +564,47 @@ replaced with a redaction marker. Under an ambient CLI login no credential value
 crosses the adapter boundary, so CLI-controlled text and JSON pass through
 unmodified.
 
+The exact-value observation sink also checks each forwarded fact with a shadow
+predicate over its canonical JSON bytes and decoded content, using the same
+credential-length-minus-one byte lookbehind. The content projection joins string
+leaves across fields and facts, joins decoded complete embedded JSON leaves with
+ordinary content in order, decodes malformed proposed arguments, and
+reconstructs text, thinking, and JSON-escaped argument streams by kind and part
+index within one request. A match increments
+`signalbox_credential_redaction_disagreements_total` on the daemon's Prometheus
+surface and fails runtime unit tests; production forwarding retains the existing
+redaction behavior.
+
 Each CLI adapter's build derives its supported-version constant from the exact
 version in its pin manifest, so the manifest is the sole source. The daemon
-composition probes only the Codex CLI executable, and refuses startup before
-socket admission when its bounded probe cannot prove the installed executable
-reports that version and its SHA-256 matches the fork executable digest in the
-pin manifest; nothing probes the Claude Code executable before an exchange
-begins. Before spending anything, the Codex smoke asserts that the reported
-version equals the supported version and compares the CLI's complete feature
-list, including stage and default, with an exact classified inventory. In every
-smoke workflow, forks are excluded by GitHub secret withholding and by three
-explicit repository-name comparisons, no credential is echoed or passed in argv,
-and the test binary is compiled before any step carries the credential. The
-direct-HTTP smokes reference their secret only in the step that spends the
-exchange, and that step runs the compiled binary directly, so no build script or
-procedural macro runs while the key is readable. Each CLI smoke references its
-secret in a setup step before the exchange: the Claude smoke writes it to a file
-and gives the exchange step only that path, and the Codex smoke pipes it on
-stdin into the CLI's own login, which writes the credential store the CLI then
-reads. The exchange step then invokes the compiled test through Cargo, so its
-freshness check runs after credential setup. Each CLI smoke removes what it
-materialized when the job ends.
+composition probes only the Codex CLI executable and logs its installed version
+and SHA-256. A failed probe or pin mismatch makes the Codex adapter unavailable
+with a typed cause while the daemon and other adapters remain available; nothing
+probes the Claude Code executable before an exchange begins. Before spending
+anything, the Codex smoke asserts that the reported version equals the supported
+version and compares the CLI's complete feature list, including stage and
+default, with an exact classified inventory. In every smoke workflow, forks are
+excluded by GitHub secret withholding and by three explicit repository-name
+comparisons, no credential is echoed or passed in argv, and the test binary is
+compiled before any step carries the credential. The direct-HTTP smokes
+reference their secret only in the step that spends the exchange, and that step
+runs the compiled binary directly, so no build script or procedural macro runs
+while the key is readable. Each CLI smoke references its secret in a setup step
+before the exchange: the Claude smoke writes it to a file and gives the exchange
+step only that path, and the Codex smoke pipes it on stdin into the CLI's own
+login, which writes the credential store the CLI then reads. The exchange step
+then invokes the compiled test through Cargo, so its freshness check runs after
+credential setup. Each CLI smoke removes what it materialized when the job ends.
 
 `OperatorFailureClass` states only a failure's severity and carries no user
 content, so shared telemetry may emit it while the underlying error keeps its
 diagnostic detail internally. The class is one of infrastructure, which states
 whether the commit is ambiguous, fail-closed corruption, identity collision, or
-a caller or hub defect; the daemon treats corruption and caller defects as fatal
-and distinguishes an ambiguous infrastructure failure from a nonambiguous one.
-The sanitized cause code stating what happened is owned by the page that owns
-the behavior raising it: [model-call-execution](model-call-execution.md) for
+a caller or hub defect. A failure stops the daemon only when it has no session
+scope. Session-scoped recovery suspends only the affected session. The daemon
+distinguishes ambiguous infrastructure failures from nonambiguous ones. The
+sanitized cause code stating what happened is owned by the page that owns the
+behavior raising it: [model-call-execution](model-call-execution.md) for
 provider and model-call causes,
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) for
 turn-liveness causes.

@@ -2895,6 +2895,7 @@ version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9966929966d17620d7c316c643ba62631826e10021409357772d5eea84f62c35"
 dependencies = [
+ "flate2",
  "http",
  "opentelemetry",
  "opentelemetry-http",
@@ -4197,6 +4198,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "tracing",
  "url",
  "zeroize",
 ]
@@ -4539,6 +4541,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "httpdate",
+ "proptest",
  "rustix 1.1.4",
  "schemars 1.2.2",
  "serde",
@@ -4567,6 +4570,7 @@ name = "signalbox-model-runtime-claude-cli"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "chrono",
  "rustix 1.1.4",
  "semver",
  "serde",
@@ -4576,6 +4580,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5001,6 +5006,7 @@ dependencies = [
  "http-body-util",
  "image",
  "jiff",
+ "libc",
  "mime",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -5977,6 +5983,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "h2",
  "http",
  "http-body",

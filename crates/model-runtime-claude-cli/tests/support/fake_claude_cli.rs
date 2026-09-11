@@ -12,7 +12,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt)?;
     std::fs::write("fake-claude-prompt", &prompt)?;
-    let scenario = scenario(&prompt)?;
+    let scenario = if let Some(pair) = arguments.windows(2).find(|pair| pair[0] == "--resume") {
+        let history_path = &pair[1];
+        let history = std::fs::read_to_string(history_path)?;
+        std::fs::write("fake-claude-history", &history)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(history_path)?.permissions().mode() & 0o777;
+            std::fs::write("fake-claude-history-mode", format!("{mode:o}"))?;
+        }
+        scenario(&history)?
+    } else {
+        let controls: serde_json::Value = serde_json::from_str(
+            prompt
+                .split_once("\n\n")
+                .ok_or("missing request controls")?
+                .1,
+        )?;
+        controls["system"]
+            .as_str()
+            .ok_or("missing system-only scenario")?
+            .to_string()
+    };
     if scenario == "piped_stdin_too_large" {
         std::io::stderr().write_all(b"Error: piped stdin input exceeds a synthetic limit.\n")?;
         std::process::exit(1);
@@ -662,14 +684,15 @@ fn record_settings_mode(_settings: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn scenario(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn scenario(history: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let row: serde_json::Value =
+        serde_json::from_str(history.lines().next().ok_or("empty native history")?)?;
     let value: serde_json::Value = serde_json::from_str(
-        prompt
-            .split_once("\n\n")
-            .map(|(_, json)| json.trim())
-            .ok_or("missing prompt JSON")?,
+        row["message"]["content"][0]["text"]
+            .as_str()
+            .ok_or("missing canonical message")?,
     )?;
-    Ok(value["messages"][0]["parts"][0]["text"]
+    Ok(value["parts"][0]["text"]
         .as_str()
         .ok_or("missing scenario")?
         .to_string())
