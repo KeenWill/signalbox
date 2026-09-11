@@ -493,7 +493,11 @@ fn range_closes_tool_exchanges(entries: &[&SemanticTranscriptEntry]) -> bool {
             SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
             | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
-            | SemanticTranscriptEntryPayload::ToolClosed { .. } => {
+            | SemanticTranscriptEntryPayload::ToolClosed { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult {
+                mode: crate::DelegationWaitMode::Foreground,
+                ..
+            } => {
                 let Some(remaining) = open_requests.checked_sub(1) else {
                     return false;
                 };
@@ -634,6 +638,39 @@ mod tests {
         )
     }
 
+    /// Builds a child delivery for the fixture request; only its delivery mode varies.
+    fn child_result(value: u128, mode: crate::DelegationWaitMode) -> SemanticTranscriptEntry {
+        let child = session_id(31);
+        let outcome = crate::DelegationOutcome::reconstitute(
+            crate::DelegationOutcomeKind::ResultReturned,
+            Some(
+                crate::DelegationContent::try_new("child completed".into())
+                    .expect("fixture result"),
+            ),
+            crate::DelegationOutcomeReason::ChildCompleted,
+            crate::DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: child,
+                turn: crate::test_support::turn_id(32),
+            },
+        )
+        .expect("canonical child outcome");
+        SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(value),
+            session_id(1),
+            SemanticTranscriptEntryPayload::DelegationResult {
+                awaiting_request: crate::ToolRequestId::from_uuid(uuid::Uuid::from_u128(9)),
+                spawning_request: crate::ToolRequestId::from_uuid(uuid::Uuid::from_u128(10)),
+                child,
+                mode,
+                delivery_sequence: match mode {
+                    crate::DelegationWaitMode::Foreground => None,
+                    crate::DelegationWaitMode::Background => std::num::NonZeroU64::new(1),
+                },
+                outcome: Box::new(outcome),
+            },
+        )
+    }
+
     fn summary(value: u128, summarized: ContextCompactionRange) -> SemanticTranscriptEntry {
         SemanticTranscriptEntry::from_validated_parts(
             semantic_transcript_entry_id(value),
@@ -712,8 +749,8 @@ mod tests {
     /// and exact source-frontier range.
     #[test]
     fn compaction_reconstitution_preserves_exact_provenance() {
-        let first = entry(1);
-        let through = entry(2);
+        let first = tool_use(1, 9);
+        let through = child_result(2, crate::DelegationWaitMode::Foreground);
         let range = ContextCompactionRange::inclusive(first.reference(), through.reference());
         let summary = summary(4, range);
         let source_snapshot = crate::ResolvedContextFrontierSnapshot::try_from_candidate(
@@ -755,13 +792,20 @@ mod tests {
             .reconstitute(
                 &source_snapshot,
                 &result_snapshot,
-                &[first, through],
-                &[entry(1), entry(2), summary.clone()],
+                &[first.clone(), through.clone()],
+                &[first.clone(), through.clone(), summary.clone()],
                 &summary,
                 &call,
             )
             .expect("the exact stored compaction reconstructs");
 
+        let projection =
+            ContextFrontierProjection::from_complete_entries(&[first, through, summary.clone()])
+                .expect("the reconstituted foreground-result summary also projects");
+        assert_eq!(
+            projection.ordered_entries().collect::<Vec<_>>(),
+            [summary.reference()]
+        );
         assert_eq!(compaction.session(), session_id(1));
         assert_eq!(compaction.predecessor(), None);
         assert_eq!(compaction.source_frontier(), source_frontier);
@@ -769,6 +813,31 @@ mod tests {
         assert_eq!(compaction.producing_call(), model_call_id(8));
         assert_eq!(compaction.range(), range);
         assert_eq!(compaction.summary_entry(), summary.identity());
+    }
+
+    #[test]
+    fn background_child_result_does_not_close_an_open_compaction_exchange() {
+        let proposal = tool_use(1, 9);
+        let background = child_result(2, crate::DelegationWaitMode::Background);
+        let range = ContextCompactionRange::inclusive(proposal.reference(), background.reference());
+        assert_eq!(
+            ContextFrontierProjection::from_complete_entries(&[
+                proposal,
+                background.clone(),
+                summary(3, range)
+            ]),
+            Err(ContextFrontierProjectionFailure::UnsafeToolExchangeBoundary)
+        );
+        let range =
+            ContextCompactionRange::inclusive(background.reference(), background.reference());
+        let summary = summary(3, range);
+        let projection =
+            ContextFrontierProjection::from_complete_entries(&[background, summary.clone()])
+                .expect("an inbox delivery needs no open tool exchange");
+        assert_eq!(
+            projection.ordered_entries().collect::<Vec<_>>(),
+            [summary.reference()]
+        );
     }
 
     /// successor ranges are interpreted in the current model-visible
