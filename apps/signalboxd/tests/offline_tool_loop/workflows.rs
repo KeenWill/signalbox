@@ -750,3 +750,111 @@ async fn workflow_judge_sees_an_explicit_absent_grant_and_cannot_widen_it()
     assert_eq!(runs, 0);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn workflow_snapshot_upgrade_keeps_existing_sessions_running_without_grants()
+-> Result<(), Box<dyn Error>> {
+    let database = migrated_postgres().await?;
+    let pool = database.1.clone();
+    let snapshot_migration = signalbox_persistence::MIGRATOR
+        .iter()
+        .find(|migration| migration.description == "session workflow template snapshot")
+        .expect("template policy migration");
+    // Restore this isolated fixture to the schema immediately before the policy migration.
+    sqlx::query("DROP TABLE session_workflow_template_snapshot")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = $1")
+        .bind(snapshot_migration.version)
+        .execute(&pool)
+        .await?;
+    let models = approval_judge_model_configuration();
+    let directory = tempdir()?;
+    let template_path = directory.path().join("templates.toml");
+    let original_source = format!(
+        r#"
+version = 1
+[[templates]]
+name = "workflow-upgrade"
+version = 1
+model = "{}"
+system_prompt = "Original session instructions."
+dangerous_tool_auto_approval = false
+"#,
+        Uuid::from_u128(FIXTURE_ID_SEED + 1)
+    );
+    fs::write(&template_path, &original_source)?;
+    let original = SessionTemplateConfiguration::read(&template_path, || None, &models)?;
+    let name = signalbox_domain::SessionTemplateName::try_new("workflow-upgrade".into())?;
+    let template = original.resolve(&name).expect("original template");
+    let original_digest = template.provenance().content_digest();
+    let fixture = ToolLoopFixture::with_template_database(
+        DangerousToolAutoApproval::Disabled,
+        Some(template),
+        database,
+    )
+    .await?;
+
+    let changed_source = format!(
+        "{}\n[templates.workflow_tools.list]\nenabled = true\n",
+        original_source.replace(
+            "Original session instructions.",
+            "Changed session instructions."
+        )
+    );
+    fs::write(&template_path, changed_source)?;
+    let changed = SessionTemplateConfiguration::read(&template_path, || None, &models)?;
+    assert_ne!(
+        changed
+            .resolve(&name)
+            .expect("changed template")
+            .provenance()
+            .content_digest(),
+        original_digest
+    );
+    signalbox_persistence::MIGRATOR.run(&pool).await?;
+    let reload = ConfigurationReload::new(
+        pool.clone(),
+        models,
+        changed,
+        directory.path().join("models.toml"),
+        template_path,
+        None,
+    )
+    .map_err(|error| format!("reload: {error:?}"))?;
+    reload.recover().await?;
+    let retained_digest: Vec<u8> =
+        sqlx::query_scalar("SELECT template_content_digest FROM session WHERE session_id = $1")
+            .bind(fixture.session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(retained_digest, original_digest.as_bytes().as_slice());
+    let snapshots: i64 = sqlx::query_scalar("SELECT count(*) FROM session_workflow_template_snapshot WHERE template_name = $1 AND template_content_digest = $2")
+        .bind(name.as_str()).bind(original_digest.as_bytes().as_slice()).fetch_one(&pool).await?;
+    assert_eq!(snapshots, 0);
+    let policy = WorkflowToolPolicy::new(pool.clone());
+    assert_eq!(
+        policy.for_session(fixture.session).await?,
+        Default::default()
+    );
+    let (service, _runner) = WorkflowRuntime::new(pool)?;
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("workflow_list", "{}")]),
+            completion_script("The session can continue without workflow grants."),
+        ],
+        signalbox_tools_workflows::catalog()?,
+        WorkflowExecutor(DaemonWorkflowPort::new(policy.clone(), service, None)),
+    );
+    execution
+        .with_workflow_tool_policy(policy)
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    assert_eq!(runtime.received_operations().len(), 2);
+    assert_eq!(
+        continuation_result_json(&runtime)?,
+        serde_json::json!({"error":{"kind":"execution_failed","detail":"workflow_grant_denied"}})
+    );
+    Ok(())
+}

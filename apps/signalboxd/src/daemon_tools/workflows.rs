@@ -35,14 +35,9 @@ impl WorkflowToolPolicy {
         &self,
         session: SessionId,
     ) -> Result<WorkflowPolicy, WorkflowToolError> {
-        let row = sqlx::query("SELECT session.template_name, snapshot.workflow_tools FROM session LEFT JOIN session_workflow_template_snapshot AS snapshot USING (template_name, template_content_digest) WHERE session_id = $1")
+        let policy: Option<sqlx::types::Json<WorkflowPolicy>> = sqlx::query_scalar("SELECT snapshot.workflow_tools FROM session LEFT JOIN session_workflow_template_snapshot AS snapshot USING (template_name, template_content_digest) WHERE session_id = $1")
             .bind(session.into_uuid()).fetch_one(&self.pool).await?;
-        if row.try_get::<Option<String>, _>("template_name")?.is_none() {
-            return Ok(WorkflowPolicy::default());
-        }
-        row.try_get::<Option<sqlx::types::Json<WorkflowPolicy>>, _>("workflow_tools")?
-            .map(|policy| policy.0)
-            .ok_or(WorkflowToolError::Contract)
+        Ok(policy.map(|policy| policy.0).unwrap_or_default())
     }
 }
 

@@ -607,11 +607,12 @@ registration-name list or `"*"`. Absent grants refuse with
 `workflow_grant_denied`, retained as an ordinary typed tool failure
 independently of approval. Grants and postures resolve from the retained
 template snapshot keyed by the session's template name and content digest, which
-includes the workflow policy. Reloading the catalog cannot change a live
-session's grants or postures; each proposed call freezes its selected posture.
-The judge receives the configured operation grant, or an explicit statement that
-no grant is configured, alongside the ordinary request context.
-[Workflows](workflows.md) owns run views, registration and mutation receipts.
+includes the workflow policy. A session without a retained policy snapshot has
+no workflow grants. Reloading the catalog cannot change a live session's grants
+or postures; each proposed call freezes its selected posture. The judge receives
+the configured operation grant, or an explicit statement that no grant is
+configured, alongside the ordinary request context. [Workflows](workflows.md)
+owns run views, registration and mutation receipts.
 
 ## Planned
 

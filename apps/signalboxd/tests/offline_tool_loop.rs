@@ -306,7 +306,14 @@ impl ToolLoopFixture {
         posture: DangerousToolAutoApproval,
         template: Option<&signalboxd::ResolvedSessionTemplate>,
     ) -> Result<Self, Box<dyn Error>> {
-        let (container, pool) = migrated_postgres().await?;
+        Self::with_template_database(posture, template, migrated_postgres().await?).await
+    }
+
+    async fn with_template_database(
+        posture: DangerousToolAutoApproval,
+        template: Option<&signalboxd::ResolvedSessionTemplate>,
+        (container, pool): (TestDatabase, PgPool),
+    ) -> Result<Self, Box<dyn Error>> {
         let selection = DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_ID_SEED + 1));
         let defaults = SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
             ModelSelectionRequest::Direct(selection),
