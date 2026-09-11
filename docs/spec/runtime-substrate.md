@@ -157,9 +157,7 @@ carries a validated provider-compaction block with non-null replacement content
 and retained input and output counts; otherwise execute returns an unrecognized
 provider error.
 
-The Claude Code CLI never supplies the non-acceptance proof. A reported 401
-status takes precedence over rendered failure text; other failures use its
-rendered-prose classification and status fallback.
+The Claude Code CLI never supplies the non-acceptance proof.
 
 SSE id and retry fields are parsed and dropped, because they exist for stream
 resumption and resuming would be a second request.
