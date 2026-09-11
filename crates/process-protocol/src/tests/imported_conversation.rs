@@ -9,21 +9,6 @@ use crate::*;
 fn conversation_import_rejection_evidence_has_exact_closed_shapes()
 -> Result<(), Box<dyn std::error::Error>> {
     assert_server_message_round_trip(
-        request(1)?,
-        ServerMessage::Error {
-            code: ErrorCode::InvalidRequest,
-            message: String::from("conversation import was rejected"),
-            detail: ErrorDetail::invalid_request(
-                RejectionDetail::ConversationImportSourceTooLarge {
-                    limit_bytes: CanonicalU64::new(268_435_456),
-                    declared_size_bytes: CanonicalU64::new(300_000_000),
-                    actual_size_bytes: None,
-                },
-            ),
-        },
-        r#"{"type":"error","code":"invalid_request","message":"conversation import was rejected","detail":{"type":"conversation_import_source_too_large","limit_bytes":"268435456","declared_size_bytes":"300000000","actual_size_bytes":null}}"#,
-    )?;
-    assert_server_message_round_trip(
         request(2)?,
         ServerMessage::Error {
             code: ErrorCode::InvalidRequest,
@@ -94,23 +79,6 @@ fn conversation_import_rejection_evidence_has_exact_closed_shapes()
             ProtocolVersion::One,
             request(6)?,
             invalid_json_without_ordinal,
-        ),
-        Err(FrameValidationError::ConversationImportShape)
-    );
-    let contradictory_observed_bound = ServerMessage::Error {
-        code: ErrorCode::InvalidRequest,
-        message: String::from("conversation import was rejected"),
-        detail: ErrorDetail::invalid_request(RejectionDetail::ConversationImportSourceTooLarge {
-            limit_bytes: CanonicalU64::new(8),
-            declared_size_bytes: CanonicalU64::new(9),
-            actual_size_bytes: Some(CanonicalU64::new(10)),
-        }),
-    };
-    assert_eq!(
-        ServerFrame::try_new_for_version(
-            ProtocolVersion::One,
-            request(7)?,
-            contradictory_observed_bound,
         ),
         Err(FrameValidationError::ConversationImportShape)
     );

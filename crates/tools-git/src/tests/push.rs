@@ -482,15 +482,55 @@ fn plant_push_pack_with_unrelated_objects(
     directory.join(format!("pack-{name}.pack"))
 }
 
+#[test]
+fn packed_commit_range_is_captured_before_the_preparation_deadline() {
+    use crate::tests::support::commit_with_parents;
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let mut commits = Vec::new();
+    let mut tip = fixture.initial;
+    for _ in 0..8000 {
+        tip = commit_with_parents(&repository, &[tip], "packed history");
+        commits.push(tip);
+    }
+    plant_push_pack_with_unrelated_objects(&repository, &commits, 0..0);
+    let authority = fixture.executor().repository_authority;
+    // Leave a generous minute for this bounded range, below the tool's five-minute deadline.
+    let snapshot = crate::push_objects::PushObjectSnapshot::capture_before_deadline(
+        &authority,
+        tip,
+        Some(fixture.initial),
+        Instant::now() + Duration::from_secs(60),
+    )
+    .expect("packed history captures without a growing set of per-object packs");
+    assert_eq!(
+        snapshot
+            .repository
+            .find_commit(tip)
+            .expect("captured tip")
+            .id(),
+        tip
+    );
+    assert!(
+        snapshot
+            .repository
+            .odb()
+            .expect("captured objects")
+            .exists(fixture.initial)
+    );
+}
+
 #[tokio::test]
 async fn push_range_ignores_large_history_in_the_pack_containing_its_tip() {
-    use crate::limits::MAX_OBJECT_DATABASE_BYTES;
+    const LARGE_HISTORY_BYTES: usize = 200 * 1024 * 1024;
     use crate::tests::support::{AUTHOR_EMAIL, AUTHOR_NAME};
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository");
     let signature = git2::Signature::now(AUTHOR_NAME, AUTHOR_EMAIL).expect("fixture author");
     let archive = repository
-        .blob(&vec![b'x'; MAX_OBJECT_DATABASE_BYTES + 1])
+        .blob(&vec![b'x'; LARGE_HISTORY_BYTES + 1])
         .expect("large history blob");
     let mut archive_tree = repository.treebuilder(None).expect("archive tree");
     archive_tree
@@ -535,7 +575,7 @@ async fn push_range_ignores_large_history_in_the_pack_containing_its_tip() {
         )
         .expect("tip");
     let pack = plant_uncompressed_push_pack(&repository, &[tip, archive]);
-    assert!(fs::metadata(&pack).expect("large pack").len() > MAX_OBJECT_DATABASE_BYTES as u64);
+    assert!(fs::metadata(&pack).expect("large pack").len() > LARGE_HISTORY_BYTES as u64);
     let transport = RecordingPushTransport::default();
     let mut executor = GitPushTools::try_new(
         &LocalWorkspaceFileSystem,
@@ -582,7 +622,10 @@ fn merge_push_omits_history_shared_with_the_dispatch_fence() {
     let repository = Repository::open(fixture.root()).expect("fixture repository");
     let signature = git2::Signature::now(AUTHOR_NAME, AUTHOR_EMAIL).expect("fixture author");
     let archive = repository
-        .blob(&vec![ARCHIVE_BYTE; crate::limits::MAX_OBJECT_BYTES + 1])
+        .blob(&vec![
+            ARCHIVE_BYTE;
+            crate::tests::support::TEST_OBJECT_BYTES + 1
+        ])
         .expect("historical blob exceeds the selected-object ceiling");
     let mut builder = repository.treebuilder(None).expect("archive tree builder");
     builder
@@ -830,6 +873,28 @@ fn commit_with_push_blob(fixture: &Fixture, blob: git2::Oid) -> git2::Oid {
 }
 
 #[test]
+fn push_snapshot_decodes_deltas_with_a_non_utf8_temporary_directory() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt, process::Command};
+
+    let directory = tempfile::tempdir().expect("temporary directory parent");
+    let temporary = directory.path().join(OsStr::from_bytes(b"non-utf8-\xff"));
+    fs::create_dir(&temporary).expect("non-UTF-8 temporary directory");
+    let child_test = "tests::push::push_snapshot_decodes_bounded_offset_and_reference_delta_chains";
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", child_test, "--nocapture"])
+        .env("TMPDIR", &temporary)
+        .output()
+        .expect("run delta capture with the non-UTF-8 temporary directory");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let completed = format!("test {child_test} ... ok");
+    assert!(
+        output.status.success() && stdout.lines().any(|line| line == completed),
+        "the delta capture child must run and pass: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn push_snapshot_decodes_bounded_offset_and_reference_delta_chains() {
     use crate::tests::pack_reads::{DeltaEncoding, plant_delta_chain};
     for encoding in [DeltaEncoding::Offset, DeltaEncoding::Reference] {
@@ -837,7 +902,7 @@ fn push_snapshot_decodes_bounded_offset_and_reference_delta_chains() {
         let blob = plant_delta_chain(
             fixture.root(),
             encoding,
-            &[crate::limits::MAX_OBJECT_BYTES, 8, 1],
+            &[crate::tests::support::TEST_OBJECT_BYTES, 8, 1],
         );
         let tip = commit_with_push_blob(&fixture, blob);
         let snapshot = crate::push_objects::PushObjectSnapshot::capture(
@@ -865,7 +930,7 @@ fn push_snapshot_rejects_oversized_selected_delta_dependencies() {
         let blob = plant_delta_chain(
             fixture.root(),
             encoding,
-            &[crate::limits::MAX_OBJECT_BYTES + 1, 8, 1],
+            &[crate::tests::support::TEST_OBJECT_BYTES + 1, 8, 1],
         );
         let tip = commit_with_push_blob(&fixture, blob);
         assert!(
@@ -884,7 +949,7 @@ fn push_snapshot_excludes_unchanged_oversized_fence_blobs() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository");
     let blob = repository
-        .blob(&vec![b'x'; crate::limits::MAX_OBJECT_BYTES + 1])
+        .blob(&vec![b'x'; crate::tests::support::TEST_OBJECT_BYTES + 1])
         .expect("existing large blob");
     let fence = commit_with_push_blob(&fixture, blob);
     let parent = repository.find_commit(fence).expect("fence commit");
@@ -1081,7 +1146,7 @@ async fn push_refuses_branch_side_resolution_that_drops_base_changes() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             crate::push_merge::DroppedBaseChanges {
                 file: "shared.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
@@ -1104,6 +1169,245 @@ async fn push_accepts_conflict_resolution_preserving_both_sides() {
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
         .await
         .expect("both sides push");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_accepts_reexpressed_branch_imports_preserving_base_lines() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(
+        &repository,
+        "use super::{\n    GitHubToolStartup, runtime_adapter_capabilities,\n};\n",
+        &[],
+    );
+    let branch = merge_test_commit(
+        &repository,
+        "use super::{\n    GitHubToolStartup, WebHttpConfiguration, ambient_database_environment,\n    runtime_adapter_capabilities,\n};\n",
+        &[ancestor],
+    );
+    let base = merge_test_commit(
+        &repository,
+        "use super::{\n    runtime_adapter_capabilities,\n};\n",
+        &[ancestor],
+    );
+    let merge = merge_test_commit(
+        &repository,
+        "use super::{\n    runtime_adapter_capabilities,\n};\nuse super::{\n    WebHttpConfiguration, ambient_database_environment,\n};\n",
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("base lines survive while branch imports are regrouped");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_refuses_rewriting_branch_text_outside_conflicts() {
+    for (case, ancestor_files, branch_files, base_files, merge_files) in [
+        (
+            "base leaves the branch path untouched",
+            vec![(b"shared.txt".as_slice(), "original\n")],
+            vec![(b"shared.txt".as_slice(), "branch\n")],
+            vec![
+                (b"shared.txt".as_slice(), "original\n"),
+                (b"base.txt".as_slice(), "base\n"),
+            ],
+            vec![
+                (b"shared.txt".as_slice(), "arbitrary\n"),
+                (b"base.txt".as_slice(), "base\n"),
+            ],
+        ),
+        (
+            "base lacks the branch-added file",
+            vec![],
+            vec![(b"branch.txt".as_slice(), "branch\n")],
+            vec![(b"base.txt".as_slice(), "base\n")],
+            vec![
+                (b"branch.txt".as_slice(), "arbitrary\n"),
+                (b"base.txt".as_slice(), "base\n"),
+            ],
+        ),
+        (
+            "the result omits the branch-added path entirely",
+            vec![],
+            vec![(b"branch.txt".as_slice(), "branch\n")],
+            vec![(b"base.txt".as_slice(), "base\n")],
+            vec![(b"base.txt".as_slice(), "base\n")],
+        ),
+        (
+            "parents touch separate hunks in one path",
+            vec![(
+                b"shared.txt".as_slice(),
+                "old base\nanchor one\nanchor two\nold branch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "old base\nanchor one\nanchor two\nbranch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "base\nanchor one\nanchor two\nold branch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "base\nanchor one\nanchor two\narbitrary\n",
+            )],
+        ),
+        (
+            "a conflicting hunk does not authorize rewriting an independent branch hunk",
+            vec![(
+                b"shared.txt".as_slice(),
+                "old conflict\nanchor one\nanchor two\nold branch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "branch conflict\nanchor one\nanchor two\nbranch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "base conflict\nanchor one\nanchor two\nold branch\n",
+            )],
+            vec![(
+                b"shared.txt".as_slice(),
+                "base conflict\nresolved conflict\nanchor one\nanchor two\narbitrary\n",
+            )],
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository");
+        let ancestor = merge_test_commit_files(&repository, &ancestor_files, &[]);
+        let branch = merge_test_commit_files(&repository, &branch_files, &[ancestor]);
+        let base = merge_test_commit_files(&repository, &base_files, &[ancestor]);
+        let merge = merge_test_commit_files(&repository, &merge_files, &[branch, base]);
+        let transport = RecordingPushTransport::default();
+        let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+        let result = executor
+            .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+            .await;
+
+        assert!(
+            matches!(result, Err(GitPushFailure::MergeDroppedBaseChanges(_))),
+            "{case}: {result:?}"
+        );
+        assert!(!transport.has_request(), "{case}");
+    }
+}
+
+#[tokio::test]
+async fn push_refuses_resolutions_reversing_base_line_changes() {
+    for (case, resolution) in [
+        ("dropped base addition", "branch regrouped\n"),
+        ("altered base addition", "base altered\nbranch regrouped\n"),
+        (
+            "restored base removal",
+            "base added\nbase removed\nbranch regrouped\n",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository");
+        let ancestor = merge_test_commit(&repository, "base removed\n", &[]);
+        let branch = merge_test_commit(&repository, "branch\n", &[ancestor]);
+        let base = merge_test_commit(&repository, "base added\n", &[ancestor]);
+        let merge = merge_test_commit(&repository, resolution, &[branch, base]);
+        let transport = RecordingPushTransport::default();
+        let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+        let result = executor
+            .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+            .await;
+
+        assert!(
+            matches!(result, Err(GitPushFailure::MergeDroppedBaseChanges(_))),
+            "{case}: {result:?}"
+        );
+        assert!(!transport.has_request(), "{case}");
+    }
+}
+
+#[tokio::test]
+async fn push_accepts_moved_base_added_lines_verbatim() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(&repository, "shared\n", &[]);
+    let branch = merge_test_commit(&repository, "branch\nshared\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "base added\nshared\n", &[ancestor]);
+    let merge = merge_test_commit(
+        &repository,
+        "branch regrouped\nbase added\nshared\n",
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("line offsets do not change verbatim preservation");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_refuses_dropping_a_line_the_base_moved() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(&repository, "moved\nshared\n", &[]);
+    let branch = merge_test_commit(&repository, "branch\nmoved\nshared\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "shared\nmoved\n", &[ancestor]);
+    let merge = merge_test_commit(&repository, "shared\nbranch\n", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert!(
+        matches!(result, Err(GitPushFailure::MergeDroppedBaseChanges(_))),
+        "{result:?}"
+    );
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn push_accepts_independent_branch_additions_matching_base_removed_text() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(
+        &repository,
+        "base old\nanchor one\nanchor two\nanchor three\n",
+        &[],
+    );
+    let branch = merge_test_commit(
+        &repository,
+        "base old\nanchor one\nanchor two\nanchor three\nbase old\nbranch\n",
+        &[ancestor],
+    );
+    let base = merge_test_commit(
+        &repository,
+        "base new\nanchor one\nanchor two\nanchor three\n",
+        &[ancestor],
+    );
+    let merge = merge_test_commit(
+        &repository,
+        "base new\nanchor one\nanchor two\nanchor three\nbase old\nbranch\n",
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("base replacement and the independent branch addition survive");
 
     assert_eq!(transport.request().commit(), merge.to_string());
 }
@@ -1204,7 +1508,7 @@ async fn merge_refusal_retains_only_the_first_dropped_hunk_per_file() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             crate::push_merge::DroppedBaseChanges {
                 file: "shared.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "-shared\n+base\n".to_owned(),
                 truncated: false,
             },
         ]))
@@ -1305,7 +1609,7 @@ async fn push_refuses_a_branch_rename_that_drops_the_base_edit() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: "new.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
@@ -1365,17 +1669,17 @@ async fn merge_refusal_distinguishes_non_utf8_paths_from_each_other_and_literal_
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: r#""a\\200""#.to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "-shared\n+base\n".to_owned(),
                 truncated: false,
             },
             DroppedBaseChanges {
                 file: r#""a\200""#.to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "-shared\n+base\n".to_owned(),
                 truncated: false,
             },
             DroppedBaseChanges {
                 file: r#""a\201""#.to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "-shared\n+base\n".to_owned(),
                 truncated: false,
             },
         ]))
@@ -1476,7 +1780,7 @@ async fn push_refuses_a_base_rename_that_drops_the_base_edit() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: "new.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
@@ -1634,7 +1938,7 @@ async fn push_refuses_divergent_parent_renames_dropping_base_content_at_the_bran
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: "branch.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
@@ -1719,7 +2023,7 @@ async fn push_refuses_divergent_parent_renames_that_drop_the_base_edit() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: "new.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
@@ -1747,7 +2051,7 @@ async fn push_refuses_dropped_base_changes_when_the_base_is_the_first_parent() {
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: "shared.txt".to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                first_dropped_hunk: "+base\n".to_owned(),
                 truncated: false,
             }
         ]))
@@ -1917,7 +2221,7 @@ async fn push_accepts_the_remaining_branch_removal_after_a_base_replacement() {
 }
 
 #[tokio::test]
-async fn push_refuses_a_merge_that_repeats_a_branch_effect() {
+async fn push_accepts_repeated_branch_lines_preserving_base_changes() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
     let ancestor = merge_test_commit(&repository, "old\n", &[]);
@@ -1931,17 +2235,8 @@ async fn push_refuses_a_merge_that_repeats_a_branch_effect() {
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
         .await;
 
-    assert_eq!(
-        result,
-        Err(GitPushFailure::MergeDroppedBaseChanges(vec![
-            DroppedBaseChanges {
-                file: "shared.txt".to_owned(),
-                first_dropped_hunk: "+branch\n+branch\n".to_owned(),
-                truncated: false,
-            }
-        ]))
-    );
-    assert!(!transport.has_request());
+    result.expect("base changes survive repeated branch lines");
+    assert_eq!(transport.request().commit(), merge.to_string());
 }
 
 #[tokio::test]
@@ -2179,7 +2474,7 @@ async fn push_accepts_nested_paths_within_the_merge_path_byte_budget() {
 }
 
 #[tokio::test]
-async fn push_accepts_a_renamed_branch_result_after_the_base_deletes_its_source() {
+async fn push_refuses_a_renamed_branch_result_restoring_base_deleted_lines() {
     for (case, branch_content) in [
         ("unchanged rename", "one\ntwo\nthree\nfour\nfive\nsix\n"),
         (
@@ -2209,8 +2504,57 @@ async fn push_accepts_a_renamed_branch_result_after_the_base_deletes_its_source(
             .execute_push(GitPushArguments::for_test(FIX_BRANCH))
             .await;
 
-        assert!(result.is_ok(), "{case}: {result:?}");
-        assert_eq!(transport.request().commit(), merge.to_string(), "{case}");
+        assert!(
+            matches!(result, Err(GitPushFailure::MergeDroppedBaseChanges(_))),
+            "{case}: {result:?}"
+        );
+        assert!(!transport.has_request(), "{case}");
+    }
+}
+
+#[tokio::test]
+async fn push_checks_base_removals_at_a_low_similarity_branch_rename() {
+    for (case, branch_content) in [
+        ("unchanged rename", "one\ntwo\nthree\nfour\nfive\nsix\n"),
+        (
+            "edited rename",
+            "one\ntwo\nthree\nfour\nfive\nsix\nbranch\n",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("repository");
+        let ancestor = merge_test_commit_files(
+            &repository,
+            &[(b"old.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")],
+            &[],
+        );
+        let branch =
+            merge_test_commit_files(&repository, &[(b"new.txt", branch_content)], &[ancestor]);
+        let base = merge_test_commit_files(&repository, &[(b"old.txt", "one\n")], &[ancestor]);
+        let merge = merge_test_commit_files(
+            &repository,
+            &[(b"new.txt", branch_content)],
+            &[branch, base],
+        );
+        let transport = RecordingPushTransport::default();
+        let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+        let result = executor
+            .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+            .await;
+
+        let Err(GitPushFailure::MergeDroppedBaseChanges(dropped)) = result else {
+            panic!("{case}: expected the base-side refusal, got {result:?}");
+        };
+        let destination = dropped
+            .iter()
+            .find(|dropped| dropped.file == "new.txt")
+            .expect("the renamed destination retains the source's base-side check");
+        assert_eq!(
+            destination.first_dropped_hunk, "-two\n-three\n-four\n-five\n-six\n",
+            "{case}: base removes these five fixture lines",
+        );
+        assert!(!transport.has_request(), "{case}");
     }
 }
 
@@ -2268,7 +2612,7 @@ async fn push_refuses_restoring_the_deleted_source_of_a_branch_rename() {
 
 #[tokio::test]
 async fn push_refuses_unsupported_merge_shape_before_an_oversized_parent_snapshot() {
-    use crate::limits::MAX_OBJECT_BYTES;
+    use crate::tests::support::TEST_OBJECT_BYTES as MAX_OBJECT_BYTES;
 
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
@@ -2299,4 +2643,226 @@ async fn push_refuses_unsupported_merge_shape_before_an_oversized_parent_snapsho
         Err(GitPushFailure::UnsupportedMergeShape { parents: 3 })
     );
     assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn merge_verification_rejects_a_dropped_nearly_disjoint_large_replacement() {
+    use std::io::{Seek, Write};
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let commit = |prefix: &str, parents: &[git2::Oid]| {
+        let mut file = std::io::BufWriter::new(tempfile::tempfile().expect("generated blob"));
+        for line in 0..100_000 {
+            if line == 50_000 {
+                writeln!(file, "shared middle line").expect("shared line");
+            } else {
+                writeln!(file, "{prefix}-{line:08}").expect("distinct line");
+            }
+        }
+        let mut file = file.into_inner().expect("flush");
+        let size = file.metadata().expect("metadata").len() as usize;
+        assert!(size > crate::limits::MAX_DIFF_BYTES);
+        file.rewind().expect("rewind");
+        let mut content = crate::streamed_object::ObjectContent {
+            file,
+            size,
+            kind: git2::ObjectType::Blob,
+        };
+        let oid = content
+            .store(
+                &fixture.root().join(".git/objects"),
+                git2::ObjectFormat::Sha1,
+                None,
+            )
+            .expect("publish blob");
+        let mut tree = repository.treebuilder(None).expect("tree");
+        tree.insert("shared.txt", oid, 0o100644).expect("file");
+        merge_test_commit_tree(&repository, tree.write().expect("tree id"), parents)
+    };
+    let ancestor = commit("old", &[]);
+    let branch = commit("old", &[ancestor]);
+    let base = commit("new", &[ancestor]);
+    let preserved = commit("new", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, preserved, branch, transport.clone());
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("base replacement survives");
+    assert!(transport.has_request());
+    let dropped = commit("old", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, dropped, branch, transport.clone());
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+    let Err(GitPushFailure::MergeDroppedBaseChanges(details)) = result else {
+        panic!("whole-object replacement must refuse: {result:?}");
+    };
+    assert_eq!(details.len(), 1);
+    assert!(details[0].first_dropped_hunk.starts_with("object "));
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn merge_verification_keeps_newline_heavy_replacements_atomic() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let old = "\n".repeat(256 * 1024);
+    let new = format!("{old}base change\n");
+    let ancestor = merge_test_commit(&repository, &old, &[]);
+    let branch = merge_test_commit(&repository, &old, &[ancestor]);
+    let base = merge_test_commit(&repository, &new, &[ancestor]);
+    let preserved = merge_test_commit(&repository, &new, &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, preserved, branch, transport.clone());
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("base replacement survives");
+    assert!(transport.has_request());
+
+    let dropped = merge_test_commit(&repository, &old, &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, dropped, branch, transport.clone());
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+    let Err(GitPushFailure::MergeDroppedBaseChanges(details)) = result else {
+        panic!("whole-object replacement must refuse: {result:?}");
+    };
+    assert_eq!(details.len(), 1);
+    assert!(details[0].first_dropped_hunk.starts_with("object "));
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn merge_verification_streams_long_lines_and_rejects_dropped_base_content() {
+    exercise_streamed_merge(256 * 1024).await;
+}
+
+#[tokio::test]
+#[ignore = "generates five 1 GB text blobs and verifies conflict regions and base-line preservation"]
+async fn merge_verification_streams_generated_gigabyte_text_blobs() {
+    exercise_streamed_merge(1_000_000_000).await;
+}
+
+async fn exercise_streamed_merge(bytes: u64) {
+    use std::io::Read;
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let commit = |prefix: &str, suffix: &str, parents: &[git2::Oid]| {
+        let mut reader = prefix
+            .as_bytes()
+            .chain(std::io::repeat(b'x').take(bytes))
+            .chain(suffix.as_bytes());
+        let mut content = crate::streamed_object::ObjectContent::decode(
+            &mut reader,
+            bytes as usize + prefix.len() + suffix.len(),
+            git2::ObjectType::Blob,
+            None,
+        )
+        .expect("streamed fixture blob");
+        let oid = content
+            .store(
+                &fixture.root().join(".git/objects"),
+                git2::ObjectFormat::Sha1,
+                None,
+            )
+            .expect("fixture blob publication");
+        let mut builder = repository.treebuilder(None).expect("tree builder");
+        builder
+            .insert("shared.txt", oid, 0o100644)
+            .expect("large text entry");
+        merge_test_commit_tree(&repository, builder.write().expect("tree"), parents)
+    };
+    let started = std::time::Instant::now();
+    let ancestor = commit(
+        "shared\nconflict old\nanchor one\nanchor two\n",
+        "ancestor\n",
+        &[],
+    );
+    let branch = commit(
+        "shared\nbranch original\nanchor one\nanchor two\n",
+        "ancestor\n",
+        &[ancestor],
+    );
+    let base = commit(
+        "shared\nbase conflict\nanchor one\nanchor two\n",
+        "base\n",
+        &[ancestor],
+    );
+    let merge = commit(
+        "shared\nbase conflict\nbranch regrouped\nanchor one\nanchor two\n",
+        "base\n",
+        &[branch, base],
+    );
+    eprintln!("merge scale elapsed {:?}", started.elapsed());
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("large base line survives and branch text is regrouped only inside the conflict");
+    assert_eq!(transport.request().commit(), merge.to_string());
+    let dropped = commit(
+        "shared\nbase conflict\nbranch regrouped\nanchor one\nanchor two\n",
+        "ancestor\n",
+        &[branch, base],
+    );
+    eprintln!("merge scale elapsed {:?}", started.elapsed());
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, dropped, branch, transport.clone());
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+    let Err(GitPushFailure::MergeDroppedBaseChanges(details)) = result else {
+        panic!("dropped large base line must refuse: {result:?}");
+    };
+    assert_eq!(details.len(), 1);
+    assert!(details[0].truncated);
+    assert!(details[0].first_dropped_hunk.len() <= crate::push_executor::MAX_MERGE_DETAIL_BYTES);
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn push_accepts_a_branch_rename_and_mode_change_carrying_both_edits() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit_files(
+        &repository,
+        &[(b"old.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")],
+        &[],
+    );
+    let commit = |path, content: &[u8], mode, parents: &[git2::Oid]| {
+        let mut tree = repository.treebuilder(None).expect("tree builder");
+        tree.insert(path, repository.blob(content).expect("blob"), mode)
+            .expect("file mode");
+        merge_test_commit_tree(&repository, tree.write().expect("tree"), parents)
+    };
+    let branch = commit(
+        "new.txt",
+        b"one\ntwo\nthree\nfour\nfive\nsix\nbranch\n",
+        0o100755,
+        &[ancestor],
+    );
+    let base = commit(
+        "old.txt",
+        b"one\ntwo\nthree\nfour\nfive\nsix\nbase\n",
+        0o100644,
+        &[ancestor],
+    );
+    let merge = commit(
+        "new.txt",
+        b"one\ntwo\nthree\nfour\nfive\nsix\nbase\nbranch\n",
+        0o100755,
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("rename, mode, and both edits survive");
+    assert_eq!(transport.request().commit(), merge.to_string());
 }

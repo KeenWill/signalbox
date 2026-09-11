@@ -11,17 +11,22 @@ use std::{
     env,
     error::Error,
     fs,
-    num::NonZeroU32,
+    io::{BufReader, Cursor},
+    num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use rust_decimal::Decimal;
 use signalbox_application::{
     ImportConversationError, ImportConversationOutcome, ImportConversationService,
     ImportedConversationConverter, ImportedConversationIdGenerator,
+    ImportedConversationStoreOutcome, StreamingResilientImportedConversationConverter,
 };
-use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
+use signalbox_conversation_import_claude_code::{
+    ClaudeCodeJsonlConverter, ResilientClaudeCodeJsonlConverter,
+};
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
     BlobDigest, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -33,20 +38,33 @@ use signalbox_domain::{
     ImportedTranscriptPosition,
 };
 use signalbox_persistence::{
+    MIGRATOR,
     conversation_import::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
-        corrupt_integration_imported_blob,
+        StreamingImportedConversationReport, corrupt_integration_imported_blob,
     },
     conversation_import_discovery::{
         ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
-        ImportedEntryWindowAnchor,
+        ImportedEntryContentProjection, ImportedEntryWindowAnchor,
     },
-    local_test_connection_options,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
+    disposable_test_container_labels, local_test_connection_options,
 };
 use sqlx::{PgPool, Transaction, postgres::PgPoolOptions, types::Uuid};
+use testcontainers_modules::{
+    postgres::Postgres,
+    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+};
+
+#[path = "../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+use postgres_test_image::POSTGRES_IMAGE_TAG;
 
 const ARBITRARY_LINEAGE_ENTRY_ID_START: u128 = 1;
+const MIGRATION_DATABASE_NAME: &str = "signalbox_conversation_import_migration";
+const MIGRATION_DATABASE_USER: &str = "signalbox";
+const MIGRATION_DATABASE_PASSWORD: &str = "signalbox-test-only";
 
 enum EntryIdentitySupply {
     Fixed(VecDeque<ImportedTranscriptEntryId>),
@@ -151,6 +169,29 @@ async fn migrated_postgres() -> Result<(TestDatabase, PgPool, String), Box<dyn E
     signalbox_persistence::test_support::postgres::migrated_postgres(4).await
 }
 
+async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(MIGRATION_DATABASE_NAME)
+        .with_user(MIGRATION_DATABASE_USER)
+        .with_password(MIGRATION_DATABASE_PASSWORD)
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url = format!(
+        "postgres://{MIGRATION_DATABASE_USER}:{MIGRATION_DATABASE_PASSWORD}@{host}:{port}/{MIGRATION_DATABASE_NAME}"
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    Ok((container, pool))
+}
+
 #[derive(Clone, Copy)]
 /// Named behavior facts returned by the plumbing-only resume fixture.
 ///
@@ -211,9 +252,10 @@ async fn insert_imported_source_scaffolding(
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
          VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 3,
-                 NULL, 'underivable')",
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(facts.conversation)
     .bind(vec![0x22_u8; 32])
@@ -944,6 +986,81 @@ async fn import_round_trip_fixture() -> Result<ImportRoundTripFixture, Box<dyn E
     })
 }
 
+/// dropped-record facts upgrade existing headers without mutating append-only rows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn dropped_record_migration_upgrades_existing_append_only_imports()
+-> Result<(), Box<dyn Error>> {
+    const MIGRATION_VERSION: i64 = 202609091460;
+    let (container, pool) = unmigrated_postgres().await?;
+    let previous = sqlx::migrate::Migrator::with_migrations(
+        MIGRATOR
+            .iter()
+            .filter(|migration| migration.version != MIGRATION_VERSION)
+            .cloned()
+            .collect(),
+    );
+    previous.run(&pool).await?;
+    sqlx::query(
+        "ALTER TABLE imported_conversation
+            ADD COLUMN dropped_record_count numeric(20,0),
+            ADD COLUMN first_dropped_record_position numeric(20,0)",
+    )
+    .execute(&pool)
+    .await?;
+    let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x777));
+    let mut importer = ImportConversationService::new(
+        FixedIds::new(&[0x777], [0x778]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    let outcome = importer
+        .execute(br#"{"type":"user","message":{"content":"migration fixture"}}"#)
+        .await?;
+    assert_eq!(
+        outcome,
+        ImportConversationOutcome::Inserted { conversation }
+    );
+    sqlx::query(
+        "ALTER TABLE imported_conversation
+            DROP COLUMN dropped_record_count,
+            DROP COLUMN first_dropped_record_position",
+    )
+    .execute(&pool)
+    .await?;
+
+    MIGRATOR.run(&pool).await?;
+
+    let facts: (Decimal, Option<Decimal>) = sqlx::query_as(
+        "SELECT dropped_record_count, first_dropped_record_position
+           FROM imported_conversation
+          WHERE imported_conversation_id = $1",
+    )
+    .bind(conversation.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(facts, (Decimal::ZERO, None));
+    let append_only = sqlx::query(
+        "UPDATE imported_conversation
+            SET dropped_record_count = 1,
+                first_dropped_record_position = 1
+          WHERE imported_conversation_id = $1",
+    )
+    .bind(conversation.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("the migration retains the imported-header append-only trigger");
+    assert!(
+        append_only
+            .to_string()
+            .contains("imported_conversation is append-only")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// exact reingestion resolves the immutable imported winner.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -962,6 +1079,33 @@ async fn exact_reingestion_resolves_the_immutable_winner() -> Result<(), Box<dyn
             conversation: fixture.winner
         }
     );
+
+    fixture.finish().await;
+    Ok(())
+}
+
+/// normalized inspection reads advance through bounded database pages.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn normalized_entry_pages_bound_and_advance_the_imported_transcript()
+-> Result<(), Box<dyn Error>> {
+    let fixture = import_round_trip_fixture().await?;
+    let limit = NonZeroUsize::new(1).expect("the fixture page limit is positive");
+    let discovery = ImportedConversationDiscoveryRepository::new(fixture.pool.clone());
+    let inventory = discovery
+        .entry_inventory(fixture.winner)
+        .await?
+        .expect("the imported conversation exists");
+
+    let first = discovery.entry_page(inventory, 0, limit, 16, 16).await?;
+    assert_eq!(first.items().len(), 1);
+    assert_eq!(first.items()[0].frontier.position, 1);
+    assert!(first.has_more());
+
+    let second = discovery.entry_page(inventory, 1, limit, 16, 16).await?;
+    assert_eq!(second.items().len(), 1);
+    assert_eq!(second.items()[0].frontier.position, 2);
+    assert!(!second.has_more());
 
     fixture.finish().await;
     Ok(())
@@ -1614,6 +1758,123 @@ async fn concurrent_reversed_raws_use_stable_blob_order() -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// concurrent streamed imports of one source resolve the durable winner.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_streamed_duplicates_return_inserted_and_already_imported()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let source = br#"{"type":"summary","value":"same"}"#.to_vec();
+    let first_repository = ImportedConversationRepository::new(pool.clone());
+    let second_repository = ImportedConversationRepository::new(pool.clone());
+    let first_source = source.clone();
+    let first = async move {
+        let candidate = ImportedConversationId::from_uuid(Uuid::from_u128(0x880));
+        let mut converter = ResilientClaudeCodeJsonlConverter;
+        let format = converter.format();
+        let records = converter.convert_resilient_from_reader(
+            candidate,
+            BufReader::new(Cursor::new(first_source)),
+            u64::MAX,
+            || ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x881)),
+        );
+        first_repository
+            .resolve_or_insert_stream(candidate, format, records)
+            .await
+    };
+    let second = async move {
+        let candidate = ImportedConversationId::from_uuid(Uuid::from_u128(0x890));
+        let mut converter = ResilientClaudeCodeJsonlConverter;
+        let format = converter.format();
+        let records = converter.convert_resilient_from_reader(
+            candidate,
+            BufReader::new(Cursor::new(source)),
+            u64::MAX,
+            || ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x891)),
+        );
+        second_repository
+            .resolve_or_insert_stream(candidate, format, records)
+            .await
+    };
+
+    let (first, second) = tokio::join!(first, second);
+    let reports = [
+        first.expect("the first streamed import resolves"),
+        second.expect("the second streamed import resolves"),
+    ];
+    let mut inserted = None;
+    let mut already_imported = None;
+    for report in &reports {
+        let StreamingImportedConversationReport::Imported { outcome, .. } = report else {
+            panic!("the valid source must produce an imported conversation")
+        };
+        match outcome {
+            ImportedConversationStoreOutcome::Inserted { conversation, .. } => {
+                inserted = Some(*conversation);
+            }
+            ImportedConversationStoreOutcome::AlreadyImported { conversation, .. } => {
+                already_imported = Some(*conversation);
+            }
+        }
+    }
+    assert_eq!(inserted, already_imported);
+    assert!(inserted.is_some());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// streamed staging needs no second connection and leaves no transaction open across publication.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn streamed_import_stages_without_a_long_lived_transaction() -> Result<(), Box<dyn Error>> {
+    let (container, migration_pool, database_url) = migrated_postgres().await?;
+    migration_pool.close().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?;
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let candidate = ImportedConversationId::from_uuid(Uuid::from_u128(0x8a0));
+    let source = concat!(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"one\"}}\n",
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"two\"}}"
+    );
+    let mut converter = ResilientClaudeCodeJsonlConverter;
+    let format = converter.format();
+    let mut next_entry = 0x8a1_u128;
+    let records = converter.convert_resilient_from_reader(
+        candidate,
+        BufReader::new(Cursor::new(source.as_bytes())),
+        u64::MAX,
+        move || {
+            let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(next_entry));
+            next_entry += 1;
+            identity
+        },
+    );
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(5),
+        repository.resolve_or_insert_stream(candidate, format, records),
+    )
+    .await
+    .expect("streamed import must not wait for another pool connection")
+    .expect("streamed import succeeds");
+    assert!(matches!(
+        report,
+        StreamingImportedConversationReport::Imported {
+            outcome: ImportedConversationStoreOutcome::Inserted { conversation, .. },
+            ..
+        } if conversation == candidate
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// overlapping imported-entry identity keys are acquired in one stable order even when transcript
 /// positions reverse them.
 #[tokio::test(flavor = "multi_thread")]
@@ -1697,9 +1958,10 @@ async fn late_entry_identity_constraint_is_typed_collision() -> Result<(), Box<d
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
          VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1,
-                 NULL, 'underivable')",
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0xa10))
     .bind(vec![0x10_u8; 32])
@@ -1765,9 +2027,10 @@ async fn incomplete_import_header_cannot_commit() -> Result<(), Box<dyn Error>> 
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
          VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1,
-                 NULL, 'underivable')",
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x400))
     .bind(vec![0_u8; 32])
@@ -1846,9 +2109,10 @@ async fn unsupported_format_version_pair_is_schema_rejected() -> Result<(), Box<
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
-         VALUES ($1, 1, 'claude_code_session_jsonl', 3, $2, 1, 1,
-                 NULL, 'underivable')",
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 4, $2, 1, 1,
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x4ff))
     .bind(vec![0_u8; 32])
@@ -1865,9 +2129,10 @@ async fn unsupported_format_version_pair_is_schema_rejected() -> Result<(), Box<
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
-         VALUES ($1, 1, 'codex_rollout_jsonl', 2, $2, 1, 1,
-                 NULL, 'underivable')",
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
+         VALUES ($1, 1, 'codex_rollout_jsonl', 3, $2, 1, 1,
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x4fe))
     .bind(vec![1_u8; 32])
@@ -2385,7 +2650,131 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
     assert!(!window.has_before);
     assert!(!window.has_after);
 
+    let inventory = discovery
+        .entry_inventory(conversation)
+        .await?
+        .ok_or("entry inventory fixture import must exist")?;
+    let page = discovery
+        .entry_page(
+            inventory,
+            0,
+            NonZeroUsize::new(3).ok_or("entry-page fixture bound must be nonzero")?,
+            8,
+            12,
+        )
+        .await?;
+    assert_eq!(page.items().len(), 3);
+    let projected = page
+        .items()
+        .iter()
+        .map(|entry| match &entry.content {
+            ImportedEntryContentProjection::Text(ImportedSourceAttestation::Attested(text)) => {
+                (text.leading_text.clone(), text.complete)
+            }
+            other => panic!("expected a text projection, found {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(projected[0], (String::from("first im"), false));
+    assert_eq!(projected[1], (String::from("seco"), false));
+    assert_eq!(projected[2], (String::new(), false));
+    assert!(!page.has_more());
+
     pool.close().await;
     drop(container);
+    Ok(())
+}
+
+/// Stores the supplied text bytes in the version-two attested-text envelope;
+/// the temporary column lets PostgreSQL compress the value before validation.
+async fn store_import_text_for_validation(
+    connection: &mut sqlx::PgConnection,
+    text: &[u8],
+) -> Result<(), sqlx::Error> {
+    sqlx::query("CREATE TEMP TABLE compressed_import_text (content_encoding bytea NOT NULL)")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "INSERT INTO compressed_import_text
+         SELECT decode('02010102', 'hex') || int8send(octet_length($1)::bigint) || $1",
+    )
+    .bind(text)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn compressed_import_text_preserves_nul_and_multibyte_utf8() -> Result<(), Box<dyn Error>> {
+    // Arbitrary repetition count large enough to exercise compressed storage.
+    const COMPRESSIBLE_REPETITIONS: usize = 32 * 1024;
+    let (_database, pool, _) = migrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    let text = "a\0é🦀".repeat(COMPRESSIBLE_REPETITIONS);
+    store_import_text_for_validation(&mut connection, text.as_bytes()).await?;
+    let compressed: bool = sqlx::query_scalar(
+        "SELECT pg_column_size(content_encoding) < octet_length(content_encoding)
+           FROM compressed_import_text",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    assert!(compressed, "the validator must receive compressed storage");
+    let kind: i16 = sqlx::query_scalar(
+        "SELECT imported_content_encoding_kind(content_encoding) FROM compressed_import_text",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    assert_eq!(kind, 1, "NUL and multibyte UTF-8 remain attested text");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn compressed_import_text_rejects_an_invalid_utf8_suffix() -> Result<(), Box<dyn Error>> {
+    // Arbitrary repetition count large enough to exercise compressed storage.
+    const COMPRESSIBLE_REPETITIONS: usize = 32 * 1024;
+    let (_database, pool, _) = migrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    let mut text = "a\0é🦀".repeat(COMPRESSIBLE_REPETITIONS).into_bytes();
+    text.push(0xff);
+    store_import_text_for_validation(&mut connection, &text).await?;
+    let error = sqlx::query_scalar::<_, i16>(
+        "SELECT imported_content_encoding_kind(content_encoding) FROM compressed_import_text",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .expect_err("an invalid UTF-8 suffix must fail after the compressed valid prefix");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514"),
+        "the imported-content constraint rejects malformed UTF-8"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn import_content_validation_survives_an_empty_restore_search_path()
+-> Result<(), Box<dyn Error>> {
+    const ARBITRARY_VALID_TEXT: &[u8] = b"a";
+    let (_database, pool, _) = migrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    store_import_text_for_validation(&mut connection, ARBITRARY_VALID_TEXT).await?;
+    sqlx::query("SET search_path = ''")
+        .execute(&mut *connection)
+        .await?;
+    let kind: i16 = sqlx::query_scalar(
+        "SELECT public.imported_content_encoding_kind(content_encoding)
+           FROM pg_temp.compressed_import_text",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    assert_eq!(
+        kind, 1,
+        "restore resolves the attested-text validator's helpers"
+    );
     Ok(())
 }

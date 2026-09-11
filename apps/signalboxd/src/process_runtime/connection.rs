@@ -40,9 +40,6 @@ pub(super) async fn serve_connections(
         crate::imported_source_blobs::ImportedSourceBlobStorage::new(
             dependencies.pool.clone(),
             dependencies.blob_store_registry.clone(),
-            dependencies
-                .model_configuration
-                .conversation_import_max_source_bytes(),
         ),
     );
     #[cfg(feature = "test-support")]
@@ -350,13 +347,9 @@ async fn serve_connection_io(
             continue;
         }
         let follows = matches!(request, ClientRequest::FollowSession { .. });
-        let import_limit = services
-            .model_configuration
-            .conversation_import_max_source_bytes();
         let import_requires_permit = conversation_import_request_requires_permit(
             &request,
             import_state,
-            import_limit,
             services
                 .blob_store_registry
                 .as_deref()
@@ -604,7 +597,6 @@ pub(super) async fn acquire_snapshot_reader_permit(
 pub(super) fn conversation_import_request_requires_permit(
     request: &ClientRequest,
     import_state: ConversationImportState,
-    limit: usize,
     max_blob_bytes: u64,
 ) -> bool {
     match import_state {
@@ -612,11 +604,8 @@ pub(super) fn conversation_import_request_requires_permit(
         ConversationImportState::Active => return false,
     }
     match request {
-        ClientRequest::ImportConversation { source, .. } => source.as_bytes().len() <= limit,
-        ClientRequest::BeginConversationImport {
-            declared_size_bytes,
-            ..
-        } => usize::try_from(declared_size_bytes.value()).is_ok_and(|size| size <= limit),
+        ClientRequest::ImportConversation { .. }
+        | ClientRequest::BeginConversationImport { .. } => true,
         ClientRequest::BeginBlobUpload {
             expected_length_bytes,
             ..
@@ -630,7 +619,9 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::ReadRunnerStatus { .. }
         | ClientRequest::RegisterProgram { .. }
         | ClientRequest::StartProgramRun { .. }
+        | ClientRequest::LaunchEvaluation { .. }
         | ClientRequest::ReadProgramRun { .. }
+        | ClientRequest::ReadEvaluationScorecard { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}
@@ -834,6 +825,7 @@ impl SnapshotReaderAdmission {
             ClientRequest::ListSessions {}
             | ClientRequest::ReadOperatorStatus {}
             | ClientRequest::ReadProgramRun { .. }
+        | ClientRequest::ReadEvaluationScorecard { .. }
             | ClientRequest::ReadRunnerStatus { .. }
             | ClientRequest::ReadGoal { .. }
             | ClientRequest::ReadTranscript { .. }
@@ -861,6 +853,7 @@ impl SnapshotReaderAdmission {
             | ClientRequest::ReadCredentialPoolPolicy { .. }
         | ClientRequest::RegisterProgram { .. }
         | ClientRequest::StartProgramRun { .. }
+        | ClientRequest::LaunchEvaluation { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReloadConfiguration { .. }
@@ -1103,7 +1096,7 @@ pub(super) struct PendingConversationImport {
     pub(super) format: ConversationImportFormat,
     pub(super) declared_size_bytes: u64,
     pub(super) actual_size_bytes: u64,
-    pub(super) source: Vec<u8>,
+    pub(super) source: tokio::fs::File,
     pub(super) import_permit: OwnedSemaphorePermit,
     pub(super) started_at: Instant,
     pub(super) idle_since: Instant,

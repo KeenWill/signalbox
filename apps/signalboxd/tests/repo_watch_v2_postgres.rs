@@ -56,10 +56,16 @@ use uuid::Uuid;
 
 #[path = "repo_watch_v2/checkout.rs"]
 mod checkout;
+#[path = "repo_watch_v2/observations.rs"]
+mod observations;
 #[path = "repo_watch_v2/provider_identity.rs"]
 mod provider_identity;
 #[path = "repo_watch_v2/retirement.rs"]
 mod retirement;
+#[path = "repo_watch_v2/retry.rs"]
+mod retry;
+#[path = "repo_watch_v2/workflows.rs"]
+mod workflows;
 
 // The configured merged-subject retention window is seven days.
 const MERGED_RETENTION: Duration = Duration::from_secs(604_800);
@@ -3025,6 +3031,65 @@ async fn webhook_delivery_status(
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn repository_watch_database_logins_survive_another_database_startup()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_runtime::connect_repository_watch_pool;
+    use sqlx::{Connection, PgConnection};
+
+    let (container, first_core, database_url) = unmigrated_postgres().await?;
+    migrate(&first_core).await?;
+    let first_module = connect_repository_watch_pool(&first_core)
+        .await
+        .expect("first database module login");
+    let first_options = first_module.connect_options().as_ref().clone();
+    first_module.close().await;
+
+    sqlx::query("CREATE DATABASE another_repository_watch")
+        .execute(&first_core)
+        .await?;
+    let second_core = PgPoolOptions::new()
+        .connect_with(
+            local_test_connection_options(&database_url)?.database("another_repository_watch"),
+        )
+        .await?;
+    migrate(&second_core).await?;
+    let second_module = connect_repository_watch_pool(&second_core)
+        .await
+        .expect("second database module login");
+    let second_login: String = sqlx::query_scalar("SELECT session_user")
+        .fetch_one(&second_module)
+        .await?;
+
+    // A fresh connection must still authenticate after the other startup rotated its secret.
+    let mut reconnected = PgConnection::connect_with(&first_options).await?;
+    let first_login: String = sqlx::query_scalar("SELECT session_user")
+        .fetch_one(&mut reconnected)
+        .await?;
+    assert_ne!(first_login, second_login);
+    sqlx::query("SET ROLE mod_repo_watch")
+        .execute(&mut reconnected)
+        .await?;
+    let module_user: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(&mut reconnected)
+        .await?;
+    assert_eq!(module_user, "mod_repo_watch");
+    assert!(
+        sqlx::query("SELECT * FROM public.session_lifecycle")
+            .fetch_all(&mut reconnected)
+            .await
+            .is_err(),
+        "reconnected module cannot read core session tables"
+    );
+    reconnected.close().await?;
+    second_module.close().await;
+    second_core.close().await;
+    first_core.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn composed_repository_watch_dispatches_and_reloads_its_running_listener()
 -> Result<(), Box<dyn Error>> {
     use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
@@ -3825,9 +3890,9 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     let push_credential = files.path().join("push-token");
     write_private_credential(&push_credential, b"")?;
     let replacement_source = runtime_configuration_source(&hook)?.replace(
-        "credential_file =",
+        "\ncredential_file =",
         &format!(
-            "push_credential_file = \"{}\"\ncredential_file =",
+            "\npush_credential_file = \"{}\"\ncredential_file =",
             push_credential.display()
         ),
     );
@@ -4178,6 +4243,24 @@ impl ConditionalPollFixture {
 impl signalbox_module_repo_watch_v2::poll_cache::ConditionalObservationRead
     for ConditionalPollFixture
 {
+    async fn rest_remaining(
+        &self,
+    ) -> Result<u64, signalbox_module_repo_watch_v2::provider::ObservationError> {
+        let page = self.conditional_page("/rate_limit", None).await?;
+        let signalbox_module_repo_watch_v2::github::ConditionalPage::Modified { body, .. } = page
+        else {
+            return Err(
+                signalbox_module_repo_watch_v2::provider::ObservationError::InvalidResponse,
+            );
+        };
+        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
+            signalbox_module_repo_watch_v2::provider::ObservationError::InvalidResponse
+        })?;
+        value["resources"]["core"]["remaining"]
+            .as_u64()
+            .ok_or(signalbox_module_repo_watch_v2::provider::ObservationError::InvalidResponse)
+    }
+
     async fn conditional_page(
         &self,
         path: &str,

@@ -21,6 +21,7 @@
 version = 1
 
 [numeric_bounds]
+max_git_object_bytes = "none"
 max_image_presentation_bytes = "none"
 max_image_request_bytes = "none"
 # Time to complete a client frame after its first byte arrives.
@@ -30,6 +31,10 @@ client_write_progress_deadline = "30s"
 # Seven days from authenticated webhook receipt to its durable expiry.
 repository_watch_webhook_retention = "604800s"
 repository_watch_poll_request_budget = 100
+# Guard reacquisition backoff and total recovery time; none keeps waiting.
+guard_recovery_initial_delay = "1s"
+guard_recovery_maximum_delay = "10s"
+guard_recovery_elapsed_bound = "none"
 # Physical database sessions established before daemon work begins.
 fenced_pool_min_connections = 48
 # Delay between checks that restore retired fenced pool sessions.
@@ -471,11 +476,6 @@ credential_pool = "anthropic-main"
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
 
-# Maximum exact bytes retained in memory while assembling one chunked
-# conversation import. Omit this table to use the 256 MiB default.
-[conversation_import]
-max_source_bytes = 268435456
-
 # Optional exact-origin restriction. Without this table, web_fetch admits every
 # origin permitted by its transport. An empty allowed_origins array denies all.
 # [web_fetch]
@@ -483,11 +483,36 @@ max_source_bytes = 268435456
 
 # Tool dependencies use the same closed mapping-table pattern as model
 # adapters. The two GitHub-backed families share one non-secret profile; the
-# credential value still arrives only through GITHUB_TOKEN_FILE. Workspace,
+# credential value comes from the declared GitHub profile. Workspace,
 # local Git, and execution tools pin this root for a session with no derived
 # directory, and pin /srv/signalbox/workspace.sessions/<session-uuid> for a
 # session that has one; conversation tools use daemon-composed application
 # reads over the configured database.
+# App credentials are read only when an installation token needs minting.
+[[credential_profiles]]
+name = "github-primary"
+adapter = "github"
+delivery = "github_app"
+app_id = 4890558
+installation_id = 160441975
+private_key_file = "/srv/signalbox/credentials/github-app.pem"
+
+# Token-file alternative: replace the App profile above with this profile.
+# [[credential_profiles]]
+# name = "github-primary"
+# adapter = "github"
+# delivery = "file"
+# file = "/srv/signalbox/credentials/github-token"
+
+# A watched repository can share the App profile and its push authority.
+# [repository_watch]
+# version = 1
+# signal_reviewers = []
+# [[repository_watch.repositories]]
+# repository = "owner/repository"
+# poll_interval_seconds = 60
+# credential_profile = "github-primary"
+
 [[tool_mappings]]
 family = "code_host"
 adapter = "github"
@@ -1030,3 +1055,13 @@ selection_id = "2669e033-22f8-4ea9-b046-cbf21fe8b2d7"
 [[aliases]]
 alias_id = "540ce009-c2ec-4a04-b823-c411ea189778"
 selection_id = "a5fec003-0edd-4118-96d1-18af31157bd3"
+
+# Optional repository observations; workflow mode defaults to false.
+# [repository_watch]
+# version = 1
+# workflows_enabled = false
+# signal_reviewers = ["example-reviewer"]
+# [[repository_watch.repositories]]
+# repository = "example/project"
+# poll_interval_seconds = 60
+# credential_file = "/etc/signalbox/repository-token"

@@ -1,6 +1,9 @@
 //! Revision diff properties.
 
-use std::{fs, os::unix::fs::symlink};
+use std::{
+    fs,
+    os::unix::fs::{PermissionsExt, symlink},
+};
 
 use git2::Repository;
 
@@ -34,6 +37,32 @@ fn revision_diff_uses_real_commits() {
             .expect("patch is text")
             .contains("+after")
     );
+}
+
+#[test]
+fn revision_diff_keeps_later_changes_after_a_large_mode_only_change() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let mode_path = fixture.root().join("a-mode.txt");
+    fs::write(&mode_path, vec![b'x'; crate::limits::MAX_DIFF_BYTES + 1])
+        .expect("blob beyond the preview prefix");
+    fs::set_permissions(&mode_path, fs::Permissions::from_mode(0o644)).expect("base mode");
+    let base = commit_all(&repository, "base modes");
+    fs::set_permissions(&mode_path, fs::Permissions::from_mode(0o755)).expect("executable mode");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("later content change");
+    let head = commit_all(&repository, "mode and later content change");
+
+    let diff = execute(
+        &fixture.executor(),
+        LocalOperation::Diff(GitDiffArguments::Revisions {
+            base: base.to_string(),
+            head: head.to_string(),
+        }),
+    );
+    let patch = diff["patch"].as_str().expect("patch text");
+    assert!(patch.contains("old mode 100644\nnew mode 100755"));
+    assert!(patch.contains(&format!("+{}", CHANGED_CONTENT.trim_end())));
+    assert_eq!(diff["truncated"], false);
 }
 
 #[test]

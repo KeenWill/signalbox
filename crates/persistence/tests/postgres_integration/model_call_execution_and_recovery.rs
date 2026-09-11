@@ -1379,6 +1379,86 @@ async fn unbounded_availability_attempts_keep_retrying_the_same_credential()
     Ok(())
 }
 
+/// A failed provider retry has no predecessor tool batch.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn availability_retry_can_fail_without_a_predecessor_tool_round() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _) = migrated_postgres().await?;
+    // Arbitrary identities isolate the two-call retry fixture.
+    let seed = 0x1534_6000_u128;
+    let (session, turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "retry-completion-pool",
+        &["retry-member"],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let mut repository = repository.with_same_credential_attempt_bound(None);
+    let (first, _) = prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
+    let successor_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 120));
+    let outcome = repository
+        .commit_observation(
+            session,
+            first
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::RateLimited,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    false,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                ),
+                successor_attempt,
+            },
+            |_| panic!("retry fixture has no steering"),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(_))
+    ));
+    expire_availability_backoff(&pool, successor_attempt).await?;
+    let (retry, _) = prepare_and_authorize_pool_call(&repository, session, seed + 200).await?;
+    let outcome = repository
+        .apply_terminal_observation(
+            session,
+            retry
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::Unrecognized,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    false,
+                ),
+            ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 221)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 222)),
+            )),
+            |_| panic!("retry fixture has no steering"),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::Failed(failed) = outcome else {
+        panic!("the definitive rejection must fail its turn");
+    };
+    assert_eq!(failed.turn(), turn);
+    let tool_rounds: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tool_round WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(tool_rounds, 0);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A transient successor's reset is also a credential-scoped durable
 /// exclusion, so another session cannot prepare that credential before reset.
 #[tokio::test(flavor = "multi_thread")]
@@ -2552,14 +2632,8 @@ async fn model_call_transactions_complete_first_reply() -> Result<(), Box<dyn Er
     )
     .execute(&pool)
     .await?;
-    assert!(matches!(
-        OutboxDispatcher::new(pool.clone())
-            .dispatch_next(|_| panic!("cross-wired terminal ownership must not be offered"))
-            .await,
-        Err(OutboxDispatchError::Corruption(
-            OutboxCorruption::InvalidTerminalEventCorrelation
-        ))
-    ));
+    assert_next_outbox_event_quarantined(&pool, OutboxCorruption::InvalidTerminalEventCorrelation)
+        .await?;
     sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -4489,6 +4563,7 @@ async fn startup_recovery_leaves_zero_failed_turns() -> Result<(), Box<dyn Error
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4003)),
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4004)),
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4005)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4006)),
             ],
             [
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5001)),
@@ -4496,6 +4571,7 @@ async fn startup_recovery_leaves_zero_failed_turns() -> Result<(), Box<dyn Error
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5003)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5004)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5005)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x5006)),
             ],
         )
         .with_reclassified_turns([TurnId::from_uuid(Uuid::from_u128(0x6202))]),

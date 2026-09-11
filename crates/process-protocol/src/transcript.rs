@@ -1164,6 +1164,11 @@ pub enum ToolBatchState {
         /// Exact ambiguous tool attempt.
         tool_attempt_id: CanonicalUuid,
     },
+    /// One delivered foreground child wait resumed its parent turn.
+    ChildWaitResumed {
+        /// Exact tool attempt that entered the durable wait.
+        tool_attempt_id: CanonicalUuid,
+    },
 }
 
 pub(crate) fn validate_delegation_transcript_entry(

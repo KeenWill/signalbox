@@ -94,32 +94,33 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{
     BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
     ClientRequest, CommandId, CommissionedSessionFence, ConversationImportFormat,
-    ConversationImportSource, ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
-    DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail, FastMode,
-    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
-    ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MetadataActor, ModelChangeAdjustment, ModelSelection,
-    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot,
-    OperatorStatusEndMessage, OperatorStatusMessage, ProtocolVersion, ReasoningLevel,
-    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
-    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
-    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
-    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
-    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
-    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionLifecycleEffect,
-    SessionMetadata, SessionPlacement, SettingOverlay, SystemPromptMember, SystemPromptText,
-    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UserAttachmentKind,
-    UserInputContent, UserInputPart, decode_server_line, encode_client_line,
+    ConversationImportRejectionClass, ConversationImportSource, ConversationOriginFilter,
+    ConversationSummary, CurrentModelCallState, DescendantTerminationScope, EffectiveModelSettings,
+    ErrorCode, ErrorDetail, FastMode, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
+    ImportedConversationSourceFormat, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
+    InputContent, InputDelivery, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MetadataActor,
+    ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
+    ModelSettingsPrecedence, ModelSettingsSnapshot, OperatorStatusEndMessage,
+    OperatorStatusMessage, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
+    ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
+    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
+    ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+    ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts,
+    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassTerminalOutcome,
+    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
+    ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame,
+    ServerMessage, SessionEvent, SessionLifecycleEffect, SessionMetadata, SessionPlacement,
+    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
+    TranscriptTextEntry, TurnState, UserAttachmentKind, UserInputContent, UserInputPart,
+    decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, AttachmentPreparingModelCallProvider, BlobStorageClass, BlobStoreRegistry,
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ExpiredPassRecoveryPolicy,
     FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
     PostgresProviderModelExecution, ProcessProviderTextDeltaSink, ProcessRuntime,
-    ProcessRuntimeError, ReportedUsageCompaction, ReportedUsageCompactionError,
-    SessionTemplateConfiguration, TurnLivenessNumericBounds, TurnLivenessRuntime,
+    ProcessRuntimeError, ReportedUsageCompaction, SessionTemplateConfiguration,
+    TurnLivenessNumericBounds, TurnLivenessRuntime,
 };
 use sqlx::PgPool;
 use tempfile::TempDir;
@@ -140,12 +141,14 @@ mod compaction;
 mod continuation_compaction;
 mod credential_exclusions;
 mod credential_pool;
+mod discovery;
 mod fixtures;
 mod fleet_soak;
 mod imported_conversations;
 mod input_admission;
 mod oauth;
 mod program;
+mod proposals;
 mod reconciliation;
 mod review_orchestration;
 mod runner_recovery;

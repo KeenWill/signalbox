@@ -869,14 +869,25 @@ where
             Ok(reason) => ToolApprovalDecision::Deny {
                 reason: Some(reason),
             },
-            Err(_) => {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
+            Err(error) => {
+                let protocol_error = match error.failure() {
+                    ToolDenialReasonFailure::TooLong { bytes } => {
+                        ProtocolError::invalid_tool_denial_reason(
+                            RejectionDetail::ToolDenialReasonTooLong {
+                                maximum_bytes: CanonicalU64::new(
+                                    ToolDenialReason::MAX_UTF8_BYTES as u64,
+                                ),
+                                actual_bytes: CanonicalU64::new(bytes as u64),
+                            },
+                        )
+                    }
+                    ToolDenialReasonFailure::Empty
+                    | ToolDenialReasonFailure::SurroundingWhitespace
+                    | ToolDenialReasonFailure::ContainsControl => {
+                        ProtocolError::without_detail(ErrorCode::InvalidRequest)
+                    }
+                };
+                return write_error(writer, version, request_id, protocol_error).await;
             }
         },
     };

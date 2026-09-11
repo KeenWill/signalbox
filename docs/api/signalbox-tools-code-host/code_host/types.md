@@ -307,6 +307,10 @@ impl GitHubCodeHostTransport {
     pub fn try_new(
         configured_bounds: CodeHostNumericBounds,
     ) -> result::Result<Self, GitHubCodeHostConstructionError>;
+    pub fn with_app(
+        self,
+        app: option::Option<sync::Arc<signalbox_github_transport::AppAuthentication>>,
+    ) -> Self;
     pub fn with_convergence_policy(
         self,
         policy: option::Option<signalbox_convergence::ConvergencePolicy>,
@@ -318,6 +322,7 @@ impl CodeHostTransport for GitHubCodeHostTransport {
         &mut self,
         operation: CodeHostOperation,
         credential: &signalbox_model_runtime::CredentialValue,
+        request_timeout: option::Option<time::Duration>,
     ) -> result::Result<CodeHostResult, CodeHostTransportFailure>;
 }
 ```

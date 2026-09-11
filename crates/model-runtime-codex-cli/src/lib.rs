@@ -20,7 +20,7 @@ mod oauth;
 mod runtime;
 mod translate;
 
-pub use translate::serialized_message_bytes;
+pub use translate::{serialized_message_bytes, serialized_request_bytes};
 mod wire;
 
 pub use config::CodexCliConfig;
@@ -29,7 +29,8 @@ pub use oauth::{
     OauthCredentialRoot, OauthDeliveryFuture, OauthDeliveryOutcome, OauthRecoveryFuture,
 };
 pub use runtime::{
-    CodexCliConstructionError, CodexCliPreparedRequest, CodexCliRuntime, CodexCliVersionProbe,
-    CodexCliVersionProbeError, DISABLED_CODEX_CLI_CAPABILITY_FEATURES, SUPPORTED_CODEX_CLI_VERSION,
+    CodexCliCapacityProbeError, CodexCliConstructionError, CodexCliPreparedRequest,
+    CodexCliRuntime, CodexCliVersionProbe, CodexCliVersionProbeError,
+    DISABLED_CODEX_CLI_CAPABILITY_FEATURES, SUPPORTED_CODEX_CLI_VERSION,
     probe_pinned_codex_cli_version, validate_model_settings, verify_pinned_codex_cli_version,
 };

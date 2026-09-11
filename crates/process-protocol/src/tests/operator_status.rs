@@ -57,15 +57,29 @@ fn operator_status_request_and_rows_round_trip_in_one_closed_vocabulary()
     )?;
     assert_server_message_round_trip(
         request(1)?,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::SessionSupervision(
+            Box::new(OperatorStatusSessionSupervisionMessage {
+                session_id: CanonicalUuid::from_uuid(uuid::Uuid::from_u128(0x2a)),
+                terminal: true,
+                failure_class: OperatorStatusSupervisionFailureClass::Corruption,
+                cause_code: String::from("durable_state_corruption"),
+            }),
+        ))),
+        r#"{"type":"operator_status","kind":"session_supervision","session_id":"00000000-0000-0000-0000-00000000002a","terminal":true,"failure_class":"corruption","cause_code":"durable_state_corruption"}"#,
+    )?;
+    assert_server_message_round_trip(
+        request(1)?,
         ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
             OperatorStatusEndMessage {
                 unavailable_component_count: CanonicalU64::new(1),
+                session_supervision_count: CanonicalU64::new(0),
                 repository_ingestion_count: CanonicalU64::new(0),
                 lifecycle_week_count: CanonicalU64::new(1),
                 lifecycle_deadline_violation_count: CanonicalU64::new(1),
+                outbox_quarantine_count: CanonicalU64::new(2),
             },
         )))),
-        r#"{"type":"operator_status","kind":"end","unavailable_component_count":"1","repository_ingestion_count":"0","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1"}"#,
+        r#"{"type":"operator_status","kind":"end","unavailable_component_count":"1","repository_ingestion_count":"0","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1","session_supervision_count":"0","outbox_quarantine_count":"2"}"#,
     )?;
     Ok(())
 }

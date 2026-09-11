@@ -104,7 +104,9 @@ event's two endpoints. Local Git produces the complete NUL-delimited path list,
 including deletions, without the GitHub changed-files API's list limits. A
 comparison API or fetch failure fails the job instead of returning an empty
 scope. The API digest fetches its exact event baseline for the baseline build.
-Contract checks inspect the current tree and need no history.
+Contract checks fetch depth-one trees for `main` and the pull request base
+branch because migration ordering checks compare against both baselines. They do
+not need the intervening commit history.
 
 Provider eligibility keeps its comparison code inline in the workflow: it reads
 proposed files without executing scripts from the proposed checkout. Fetch
@@ -135,3 +137,23 @@ and remote hits, actual executions, retries and execution seconds in its job
 summary. Cached historical test durations do not count as execution in this run.
 Missing results or an incomplete stream are labeled explicitly. Reporting is
 informational and cannot replace the suite command's exit status.
+
+Each PostgreSQL shard also samples its Docker daemon's running containers every
+five seconds and reports aggregate observed CPU and working-memory peaks. This
+captures test containers even when their cgroups are outside the runner pod. The
+report excludes the runner and Docker daemon; do not add it to pod totals
+without checking cgroup placement. Linux Docker memory statistics exclude
+inactive file cache. Short-lived containers and peaks between samples can be
+missed, and sampling failures are reported as gaps. Sampling errors do not
+change the suite command's exit status. Interrupted collection is unmeasured.
+Per-shard JSON sample artifacts are retained for seven days.
+
+## Bazel scratch
+
+The shared setup action allocates a unique directory under `RUNNER_TEMP` for
+Bazel outputs, the output user root (including the install base), repository
+downloads, and Bazelisk downloads. On self-hosted runners this is the mounted
+workspace scratch volume. GitHub-hosted jobs use their runner temporary storage.
+The runner clears temporary storage between jobs; these directories are not
+shared between jobs. Remote action and download caching still use the configured
+endpoint. The change applies to every caller of the action, including coverage.

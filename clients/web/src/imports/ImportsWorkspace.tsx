@@ -47,8 +47,10 @@ type ModelKind = 'direct' | 'alias'
 
 const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
   { value: EMPTY_FILTER, label: 'All sources' },
+  { value: 'claude_code_session_jsonl_v3', label: 'Claude Code, converter 3' },
   { value: 'claude_code_session_jsonl_v2', label: 'Claude Code, converter 2' },
   { value: 'claude_code_session_jsonl_v1', label: 'Claude Code, converter 1' },
+  { value: 'codex_rollout_jsonl_v2', label: 'Codex rollout, converter 2' },
   { value: 'codex_rollout_jsonl_v1', label: 'Codex rollout, converter 1' },
 ]
 
@@ -584,9 +586,9 @@ export function ImportsWorkspace({
                   />
                 </label>
                 <label className="source-session-filter-toggle">
-                  <span>Filter by source</span>
+                  <span>Filter by source session</span>
                   <input
-                    aria-label="Filter by source"
+                    aria-label="Filter by source session"
                     type="checkbox"
                     checked={sourceSessionFilterEnabled}
                     disabled={hasRetainedCommand}
@@ -724,11 +726,11 @@ export function ImportsWorkspace({
                         <dd>{byteLabel(descriptor.sizes.raw_source_bytes)}</dd>
                       </div>
                       <div>
-                        <dt>Processed records</dt>
+                        <dt>Processed records total</dt>
                         <dd>{byteLabel(descriptor.sizes.normalized_source_record_bytes)}</dd>
                       </div>
                       <div>
-                        <dt>Processed entries</dt>
+                        <dt>Processed entries total</dt>
                         <dd>{byteLabel(descriptor.sizes.normalized_entry_bytes)}</dd>
                       </div>
                       <div>
@@ -802,7 +804,7 @@ export function ImportsWorkspace({
                       )}
                     </div>
                     {retainedStorageFailed && (
-                      <p role="alert">Couldn't save the request. Nothing was sent.</p>
+                      <p role="alert">Request not sent: local save failed.</p>
                     )}
                     {retainedCommandNeedsAction && pendingCommand && (
                       <p role="alert">

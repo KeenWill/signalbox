@@ -42,7 +42,7 @@ untrusted until the registry has reparsed and cross-checked it.
 
 With `file_media = true` and blob storage configured, the daemon registers
 `file_inspect` and `file_read` as external-effect tools. Startup verifies the
-compiled text and image workers beside the daemon executable through
+compiled text, image and PDF workers beside the daemon executable through
 `/usr/bin/bwrap` and the delegated `SIGNALBOX_FILE_MEDIA_CGROUP_ROOT`. The
 resolver reuses `blob_read`'s projected-frontier attachment proof and completes
 catalog work before source or worker I/O. A digest outside that frontier is
@@ -86,10 +86,9 @@ Configuration can disable a provider or lower a bound; it cannot add a
 media-type mapping, an alias, an executable, or a precedence rule. Why:
 configuration must never become a source of type authority or executable code.
 
-The daemon derives probe byte counts from brokered reads. Registration order
-never settles conflicting probe claims; incompatible claims return ambiguity
-before validation envelopes are applied. Why: detection must give the same
-answer for any adapter set and any probe completion order.
+The daemon derives probe byte counts from brokered reads. The strongest probe
+candidate is validated; equal-strength candidates and unsuccessful validation
+return unknown bytes. Registration order never settles probe claims.
 
 The service repeats inspection for every read, and `file_read` accepts no
 model-supplied media type or reader identity. Why: no classification from an

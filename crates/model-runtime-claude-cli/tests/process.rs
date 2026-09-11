@@ -352,6 +352,83 @@ async fn tool_call_and_mcp_result_round_trip_returns_typed_proposal() {
 }
 
 #[tokio::test]
+async fn tool_acknowledgement_tail_returns_only_the_original_proposal() {
+    let result = execute_scenario("tool_acknowledgement_tail", OperationShape::Tool).await;
+    let completion = completed(&result.evidence);
+    let proposal = tool_call(&completion.content);
+
+    assert_eq!(completion.finish, CompletionFinish::ToolUse);
+    assert_eq!(
+        completion.message_id.as_ref().map(|id| id.as_str()),
+        Some(fixtures::MESSAGE_ID)
+    );
+    assert_eq!(completion.content.len(), 1);
+    assert_eq!(proposal.id.as_str(), fixtures::TOOL_ID);
+    assert_eq!(proposal.arguments_json, fixtures::TOOL_ARGUMENTS);
+    assert_eq!(observation_text(&result.observations), "");
+    assert_eq!(completion.usage, expected_usage());
+    let finishes = result
+        .observations
+        .iter()
+        .filter_map(|observation| match &observation.fact {
+            signalbox_model_runtime::ObservationFact::FinishReported(reason) => {
+                Some(reason.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finishes, vec![FinishReason::EndTurn]);
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn tool_acknowledgement_discards_thinking_before_its_text() {
+    let result = execute_scenario(
+        "tool_acknowledgement_thinking_then_text",
+        OperationShape::Tool,
+    )
+    .await;
+    let completion = completed(&result.evidence);
+    assert_eq!(completion.finish, CompletionFinish::ToolUse);
+    assert_eq!(completion.content.len(), 1);
+    assert_eq!(
+        tool_call(&completion.content).id.as_str(),
+        fixtures::TOOL_ID
+    );
+    assert_eq!(
+        completion.message_id.as_ref().map(|id| id.as_str()),
+        Some(fixtures::MESSAGE_ID)
+    );
+    assert!(!result.observations.iter().any(|observation| matches!(
+        observation.fact,
+        signalbox_model_runtime::ObservationFact::ThinkingDelta { .. }
+            | signalbox_model_runtime::ObservationFact::TextDelta { .. }
+    )));
+    assert_eq!(completion.usage, expected_usage());
+}
+
+#[tokio::test]
+async fn tool_acknowledgement_tail_rejects_incomplete_or_conflicting_evidence() {
+    for scenario in [
+        "tool_acknowledgement_thinking_only",
+        "tool_acknowledgement_tail_without_result",
+        "tool_acknowledgement_tail_reports_tool_use",
+        "tool_acknowledgement_tail_is_empty",
+        "tool_acknowledgement_tail_changes_model",
+        "tool_acknowledgement_tail_proposes_tool",
+    ] {
+        let result = execute_scenario(scenario, OperationShape::Tool).await;
+        assert!(
+            matches!(
+                boundary_loss(&result.evidence).cause,
+                LossCause::StreamProtocolViolation { .. }
+            ),
+            "{scenario}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn tool_arguments_preserve_the_provider_json_lexeme() {
     let result = execute_scenario("noncanonical_tool_arguments", OperationShape::Tool).await;
     let completion = completed(&result.evidence);
@@ -490,6 +567,26 @@ async fn success_rejects_every_contradictory_error_field_shape() {
     ));
     assert_eq!(errors.spawns, 1);
     assert_eq!(status.spawns, 1);
+}
+
+#[tokio::test]
+async fn native_stdin_size_rejection_preserves_request_too_large() {
+    let result = execute_scenario("piped_stdin_too_large", OperationShape::Text).await;
+    let TerminalEvidence::ProviderError(failure) = result.evidence else {
+        panic!("native stdin rejection must be a typed provider failure");
+    };
+    assert_eq!(failure.kind, ProviderErrorKind::RequestTooLarge);
+    assert_eq!(failure.usage, TokenUsage::unreported());
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn native_prompt_size_rejection_preserves_request_too_large() {
+    let result = execute_scenario("native_prompt_too_large", OperationShape::Text).await;
+    let failure = provider_error(&result.evidence);
+
+    assert_eq!(failure.kind, ProviderErrorKind::RequestTooLarge);
+    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]

@@ -48,41 +48,52 @@ summarized range. Attachments render as the bounded textual stubs
 Context compaction produces its summary through a dedicated physical model call
 with its own durable prepared, in-flight, and terminal lifecycle, separate from
 ordinary calls. The compaction call's own input budget is its context window
-less the output ceiling and the required prompt. Before tool results enter
-context, each result receives an equal share of the smaller of that safe-prefix
-budget and the producing call's remaining headroom, reserving the next
-response's output, the following call's output ceiling, the current result
-envelopes, and envelopes with empty-prefix markers for the maximum admitted next
-tool batch. Successful text and failure details share the same admission bound;
-typed failure kinds remain intact. Oversized text is truncated at a UTF-8
-boundary with an explicit marker naming the retained and dropped byte counts;
-JSON escaping and the marker count against the share. The admitted text is
-durable and used by ordinary rendering, compaction, and headroom accounting;
-exact executor text and failure details remain observation evidence. When even
-framing and empty-prefix markers or other indivisible content cannot fit the
-first safe prefix, no call is prepared and one transaction fails the turn as a
-last-resort compaction wall. Automatic compaction targets the first safe
-boundary at or beyond half the rendered bytes and falls back to the latest safe
-boundary that fits. At two points a headroom guard adds the newest reported
-input for the pinned target, a byte allowance for model-visible content that
-input does not cover, and the configured output reservation, and compares the
-sum with the configured context window. Queued-turn allowances measure each
-uncovered entry through the effective adapter's message serializer, including
-framing and content-free messages. Before activating a queued turn, the guard
-repeats automatic compaction until the continuation fits. Each attempt after the
-first must replace at least two visible entries, so the starting frontier member
-count bounds attempts across restarts. A failed attempt, an uncompactable
-prefix, or a summary and pending input that still exceed the window fails the
-queued turn with no ordinary call prepared. Inside the tool-result continuation
-transaction an exceeded bound commits the tool results, prepares no continuation
-call, and fails the turn with a headroom record. For a repository-watch-created
-session, the daemon queues at most one successor per such terminalization with
-the fixed input
-`Continue the unfinished repository-watch task from the compacted context.` and
-compacts the terminal frontier through the existing automatic compaction path
-using that successor's frozen direct model selection before activating it; the
-successor remains in the commissioned goal lineage when the terminal turn
-belongs to a goal.
+less the output ceiling and the serialized adapter request envelope, including
+the required prompt and JSON escaping. Before tool results enter context, each
+result receives an equal share of the smaller of that safe-prefix budget and the
+producing call's remaining headroom, reserving the next response's output, the
+following call's output ceiling, and every current result envelope, including
+inadmissible proposals. The next response receives a finite envelope allowance
+with empty-prefix markers for the configured request cap, or the default 32
+requests when unbounded. A later batch that exceeds this allowance and the
+remaining headroom requires compaction. Successful text and failure details
+share the same admission bound; typed failure kinds remain intact. Oversized
+text is truncated at a UTF-8 boundary with an explicit marker naming the
+retained and dropped byte counts; JSON escaping and the marker count against the
+share. The admitted text is durable and used by ordinary rendering, compaction,
+and headroom accounting; exact executor text and failure details remain
+observation evidence. During automatic compaction, when framing or an
+indivisible exchange exceeds the compaction input budget, source text is bounded
+with UTF-8-safe truncation and retained/dropped byte markers. The complete
+serialized request is measured when bounding that material. The automatic call
+summarizes that bounded material. Its summary text is bounded by the configured
+output reservation in bytes; headroom measures the admitted text separately from
+billed provider output. Automatic compaction targets the first safe boundary at
+or beyond half the rendered bytes, falls back to the latest fitting safe
+boundary, and includes the first indivisible exchange when none fits. A prefix
+summary absorbs the next complete exchange when one remains. Before activating a
+queued turn, the guard repeats compaction until its continuation fits. When only
+a summary remains, its replacement is bounded to half its bytes. If the one-byte
+summary still leaves insufficient headroom, the queued turn closes without
+another compaction call. A failed provider compaction closes the queued turn
+without preparing an ordinary call.
+
+A tool-result continuation exceeding reserved headroom commits its results and a
+compaction checkpoint while retaining the active turn. The daemon summarizes the
+checkpoint through its last safe boundary, then prepares the continuation from
+the results and appended summary after rechecking headroom including the frozen
+system prompt, tool definitions, summary preface, message framing, pending
+steering, every model-visible entry appended after the summary (including runner
+placement boundaries), and output reservation. Fixed request overhead reserves
+the largest supported reasoning and service-tier serialization for the selected
+fast mode. A placement boundary following a summary retains the summarized
+batch's complete-result authority. Admission retires the checkpoint when it
+prepares a call or parks for credential availability. Checkpoints schedule a
+follow-up eligibility pass and survive restarts; tool results are reused without
+execution. Successful compaction preserves the same turn and goal lineage for
+every session kind. A failed or refused automatic compaction, including failure
+before preparing its dedicated call, closes the active checkpoint, as does a
+one-byte summary that still lacks continuation headroom.
 
 Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen
@@ -316,11 +327,10 @@ unrelated model-call writers while the guard still prevents a
 credential/allocator cycle.
 
 A failure with retained execution evidence after its one reconciliation pass, an
-ambiguous commit outcome, an unwind, or cancellation raises the fatal signal and
-the process exits nonzero. Why: startup recovery is the one audited path that
-classifies an issued call from durable evidence, and a live process that cannot
-construct a trustworthy result must stop rather than improvise. Repeated
-same-incarnation reconciliation drains are exercised only by tests.
+ambiguous commit outcome, an unwind, or unexpected cancellation suspends only
+that session. The supervisor records the classified cause in its durable
+operator park. Other sessions remain eligible. Operator resume reconstitutes
+retained evidence before lifting the park and supplies no execution proof.
 
 An aggregate usage read consumes a bounded count of newest matching calls and
 returns a bounded count of groups, recording truncation when either bound is
@@ -547,8 +557,6 @@ rendering instead of inventing text.
 
 ## Planned
 
-- Session-scoped fatal execution parking and operator reconciliation; see
-  [daemon survival design](../design/daemon-survival.md).
 - Multipart attachment rendering ([design](../design/model-call-execution.md)).
 - The executable session-tool snapshot
   ([design](../design/model-call-execution.md)).

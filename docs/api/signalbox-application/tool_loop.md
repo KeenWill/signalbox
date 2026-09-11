@@ -2,6 +2,23 @@
 
 # tool_loop
 
+## ToolProposalLimits
+
+```rust
+pub struct ToolProposalLimits {
+    pub max_requests: option::Option<u64>,
+    pub max_argument_bytes: option::Option<u64>,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ToolProposalLimits {
+    pub const DEFAULT_MAX_REQUESTS: u64;
+    pub const DEFAULT_MAX_ARGUMENT_BYTES: u64;
+}
+impl default::Default for ToolProposalLimits {
+    fn default() -> Self;
+}
+```
+
 ## ToolInputSchema
 
 ```rust
@@ -19,7 +36,7 @@ impl ToolInputSchema {
 pub enum ToolInputSchemaFailure {
     NotJson,
     NotObject,
-    OutsideArgumentBound(signalbox_domain::ToolArgumentsFailure),
+    NormalizationFailed(signalbox_domain::ToolArgumentsFailure),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -423,9 +440,8 @@ pub enum ToolExecutionServiceOutcome {
     ContinuationCheckpointed(signalbox_domain::ModelCallId),
     ContinuationTargetUnavailable(boxed::Box<signalbox_domain::FailedModelCallTurn>),
     ContinuationPoolExhausted(boxed::Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
-    ContinuationContextCompactionRequired(
-        boxed::Box<signalbox_domain::ContextHeadroomExhaustedModelCallTurn>,
-    ),
+    ContinuationContextCompactionRequired(signalbox_domain::TurnId),
+    ContinuationContextCompactionFailed(boxed::Box<signalbox_domain::FailedModelCallTurn>),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

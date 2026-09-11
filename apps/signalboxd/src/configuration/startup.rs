@@ -7,7 +7,6 @@ pub(super) struct ParsedStartup {
     pub(super) global_model_settings: ModelSettingsOverlay,
     pub(super) model_settings_profiles: HashMap<Arc<str>, ModelSettingsOverlay>,
     pub(super) compaction_prompt: Arc<str>,
-    pub(super) conversation_import_max_source_bytes: usize,
     pub(super) file_media: bool,
     pub(super) blob_storage: Option<BlobStorageConfiguration>,
     pub(super) web_fetch_egress_policy: WebFetchEgressPolicy,
@@ -19,6 +18,7 @@ pub(super) struct ParsedStartup {
     pub(super) approval_judge_selection: Option<DirectModelSelection>,
     pub(super) convergence: Option<signalbox_convergence::ConvergencePolicy>,
     pub(super) workspace_instructions: WorkspaceInstructionConfiguration,
+    pub(super) tool_proposal_limits: signalbox_application::ToolProposalLimits,
     pub(super) mappings: HashMap<Arc<str>, AdapterMapping>,
     pub(super) session_credential_pin: SessionCredentialPin,
     pub(super) fallback_credential_profile: Arc<str>,
@@ -48,7 +48,6 @@ pub(super) fn parse_startup(
             "serving_targets",
             "aliases",
             "compaction",
-            "conversation_import",
             "web_fetch",
             "tool_mappings",
             "daemon_tools",
@@ -61,6 +60,7 @@ pub(super) fn parse_startup(
             "blob_storage",
             "file_media",
             "workspace_instructions",
+            "tool_proposals",
         ],
     )?;
     if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
@@ -83,33 +83,8 @@ pub(super) fn parse_startup(
         return Err(HubModelConfigurationError::InvalidCompactionPrompt);
     }
     let compaction_prompt: Arc<str> = Arc::from(compaction_prompt);
-    let conversation_import_max_source_bytes = document
-        .get("conversation_import")
-        .map(|item| {
-            let table = item
-                .as_table()
-                .ok_or(HubModelConfigurationError::InvalidConversationImportLimit)?;
-            reject_unknown_fields(table, &["max_source_bytes"])
-                .map_err(|_| HubModelConfigurationError::InvalidConversationImportLimit)?;
-            let value = table
-                .get("max_source_bytes")
-                .and_then(|item| item.as_integer())
-                .ok_or(HubModelConfigurationError::InvalidConversationImportLimit)?;
-            let value = usize::try_from(value)
-                .map_err(|_| HubModelConfigurationError::InvalidConversationImportLimit)?;
-            if value == 0 {
-                Err(HubModelConfigurationError::InvalidConversationImportLimit)
-            } else {
-                Ok(value)
-            }
-        })
-        .transpose()?
-        .unwrap_or(DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES);
-    let minimum_blob_bytes = u64::try_from(conversation_import_max_source_bytes)
+    let blob_storage = BlobStorageConfiguration::parse(document.get("blob_storage"))
         .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
-    let blob_storage =
-        BlobStorageConfiguration::parse(document.get("blob_storage"), minimum_blob_bytes)
-            .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
     let file_media = document
         .get("file_media")
         .map(|value| {
@@ -186,6 +161,7 @@ pub(super) fn parse_startup(
             .validate()
             .map_err(|_| HubModelConfigurationError::InvalidDocument)?;
     }
+    let tool_proposal_limits = parse_tool_proposal_limits(document.get("tool_proposals"))?;
     let workspace_instructions =
         parse_workspace_instruction_configuration(document.get("workspace_instructions"))?;
     let mapping_tables = document
@@ -380,7 +356,6 @@ pub(super) fn parse_startup(
         global_model_settings,
         model_settings_profiles,
         compaction_prompt,
-        conversation_import_max_source_bytes,
         blob_storage,
         file_media,
         web_fetch_egress_policy,
@@ -392,6 +367,7 @@ pub(super) fn parse_startup(
         approval_judge_selection,
         convergence,
         workspace_instructions,
+        tool_proposal_limits,
         mappings,
         session_credential_pin,
         fallback_credential_profile,

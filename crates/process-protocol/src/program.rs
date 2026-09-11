@@ -2,6 +2,24 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Corpus and trial selection submitted to daemon evaluation composition.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationInput {
+    pub corpus: crate::CanonicalBlobDigest,
+    pub format: EvaluationCorpusFormat,
+    pub cases: Vec<u32>,
+    pub repeats: u32,
+    pub recorded_responses: Option<crate::CanonicalBlobDigest>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationCorpusFormat {
+    Offline,
+    Live,
+}
+
 /// User-supplied executable selected at registration.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -32,6 +50,8 @@ pub enum ProgramGrant {
     EvalRecord,
     Blob,
     Register,
+    /// Checked repository-watch module operations.
+    RepoWatch,
 }
 
 /// Exact registration intent; native binary identity is supplied by the daemon.

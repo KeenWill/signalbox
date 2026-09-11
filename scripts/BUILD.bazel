@@ -97,13 +97,23 @@ py_test(
 )
 
 py_test(
+    name = "test_generate_git_scale",
+    size = "small",
+    srcs = ["test_generate_git_scale.py"],
+    data = ["//:tooling/generate-git-scale.py"],
+)
+
+py_test(
     name = "test_ci_revision_fetch",
     size = "small",
     srcs = ["test_ci_revision_fetch.py"],
     data = ["//:ci_comparison_workflows"],
     # The fixtures exercise shallow fetches with the host Git executable.
     tags = ["external"],
-    deps = [requirement("PyYAML")],
+    deps = [
+        ":check_migration_versions",
+        requirement("PyYAML"),
+    ],
 )
 
 py_library(
@@ -136,4 +146,17 @@ py_test(
 test_suite(
     name = "checker_tests",
     visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "measure_docker_resources",
+    srcs = ["measure_docker_resources.py"],
+    imports = ["."],
+)
+
+py_test(
+    name = "test_measure_docker_resources",
+    size = "small",
+    srcs = ["test_measure_docker_resources.py"],
+    deps = [":measure_docker_resources"],
 )

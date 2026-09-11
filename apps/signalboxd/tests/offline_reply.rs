@@ -41,7 +41,7 @@ use signalbox_model_runtime::{
 use signalbox_persistence::goal::GoalRecoveryProgress;
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    goal::{GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository},
+    goal::{GoalCommandHandlingOutcome, GoalRepository},
     goal_turn::GoalTurnCandidates,
     model_execution::PostgresModelCallRepository,
     process_read::{ProcessReadRepository, ProcessTranscriptEntry},
@@ -51,9 +51,8 @@ use signalbox_persistence::{
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
-    ActivatedTurnExecution, ActivatedTurnPass, CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED,
-    FatalExecutionSupervisor, GoalModeNumericBounds, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution,
+    ActivatedTurnExecution, ActivatedTurnPass, FatalExecutionSupervisor, GoalModeNumericBounds,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution,
 };
 use sqlx::{PgPool, types::Uuid};
 use tokio::time::timeout;
@@ -280,6 +279,69 @@ fn execution_failure_turn(goal: &Goal) -> TurnId {
     provenance.turn()
 }
 
+#[derive(Clone)]
+struct FailOneSession<Execution> {
+    inner: Execution,
+    failed_session: SessionId,
+}
+
+#[derive(Debug)]
+enum SelectiveExecutionFailure<Inner> {
+    Injected,
+    Inner(Inner),
+}
+
+impl<Inner: ClassifyOperatorFailure> ClassifyOperatorFailure for SelectiveExecutionFailure<Inner> {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Injected => OperatorFailureClass::CallerOrHubBug,
+            Self::Inner(error) => error.operator_failure_class(),
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::Injected => "injected_execution_failure",
+            Self::Inner(error) => error.operator_failure_cause_code(),
+        }
+    }
+}
+
+impl<Execution: ActivatedTurnExecution> ActivatedTurnExecution for FailOneSession<Execution> {
+    type Error = SelectiveExecutionFailure<Execution::Error>;
+
+    fn execute(
+        &self,
+        activated: Box<signalbox_domain::ActivatedTurn>,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let fail = activated.session() == self.failed_session;
+        let operation = self.inner.execute(activated);
+        async move {
+            if fail {
+                Err(SelectiveExecutionFailure::Injected)
+            } else {
+                operation.await.map_err(SelectiveExecutionFailure::Inner)
+            }
+        }
+    }
+}
+
+async fn wait_for_operator_park(pool: &PgPool, session: SessionId) {
+    let lifecycle =
+        signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(pool.clone());
+    loop {
+        if lifecycle
+            .load(session)
+            .await
+            .expect("lifecycle is readable")
+            .is_some_and(|record| record.state().is_parked())
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// the complete offline chain creates a session, submits input, lets the scheduler activate it,
 /// invokes the application provider port, and atomically persists the exact selection, resolved
 /// target, consumed frontier, Prepared-to-InFlight checkpoint sequence, assistant reply, and
@@ -288,10 +350,11 @@ fn execution_failure_turn(goal: &Goal) -> TurnId {
 /// provider-model spelling while the scripted response echoes that family's canonical dated form,
 /// so the chain also proves the provider-target normalization law of
 /// docs/spec/model-call-execution.md end to end: the call completes and the supervisor never raises
-/// a fatal signal.
+/// a process-wide fatal signal while a second session fails after activation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dyn Error>> {
+async fn fatal_session_supervision_parks_its_cause_while_another_turn_completes()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
     let mut create = CreateSessionService::new(
@@ -315,7 +378,7 @@ async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dy
     let mut submit = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
         SubmitInputRepository::new(pool.clone()),
-        nudge,
+        nudge.clone(),
         tool_dispatch_gate.clone(),
     );
     let submitted_content = UserContent::try_text(String::from("offline user request"))
@@ -339,6 +402,31 @@ async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dy
         panic!("the unique fixture input must create queued origin work")
     };
     let turn = origin.turn();
+
+    let CreateSessionOutcome::Applied(failed_created) = create
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )?)
+        .await?
+    else {
+        panic!("the second session is created");
+    };
+    let failed_session = failed_created.session();
+    submit
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            failed_session,
+            UserContent::try_text("fail this execution".to_owned())
+                .expect("the fixture text is nonempty"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+        )?)
+        .await?;
 
     let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0x2004));
     let target = ResolvedProviderTarget::naming(provider_identity);
@@ -367,8 +455,9 @@ async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dy
     )));
     let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
     let credential_reference = ModelCallCredentialReference::new("scripted-test");
-    let (execution, fatal_execution) = FatalExecutionSupervisor::new(
-        PostgresProviderModelExecution::new(
+    let (execution, fatal_execution) = FatalExecutionSupervisor::new(FailOneSession {
+        failed_session,
+        inner: PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(
                 pool.clone(),
                 targets.clone(),
@@ -384,7 +473,8 @@ async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dy
             None,
             Vec::new(),
         )),
-    );
+    });
+    let reporter = execution.recovery_reporter();
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
             UuidV7StartEligibleTurnIdGenerator,
@@ -397,18 +487,39 @@ async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dy
     let fatal_shutdown = fatal_execution.clone();
     let shutdown = async move {
         tokio::select! {
-            () = wait_for_terminal(&observation_pool, session, turn) => {}
-            () = fatal_shutdown.wait() => {}
+            () = async {
+                wait_for_terminal(&observation_pool, session, turn).await;
+                wait_for_operator_park(&observation_pool, failed_session).await;
+            } => {}
+            () = fatal_shutdown.wait_for_process_recovery() => {}
+        }
+    };
+    let scheduled = async {
+        tokio::select! {
+            result = scheduler.run_until(shutdown) => result,
+            () = reporter.park_failed_sessions(pool.clone(), nudge.clone()) => panic!("supervision must remain running"),
         }
     };
     assert_eq!(
-        timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
+        timeout(Duration::from_secs(10), scheduled).await?,
         SchedulerLoopExit::Shutdown
     );
-    assert!(
-        !fatal_execution.is_triggered(),
-        "post-activation execution failure must stop this isolated scheduler"
+    let parked =
+        signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(pool.clone())
+            .load(failed_session)
+            .await?
+            .expect("failed session remains available");
+    assert!(parked.state().is_parked());
+    assert_eq!(
+        parked.ownership(),
+        signalbox_domain::SessionOwnership::Unmonitored
     );
+    let cause = parked
+        .supervision_failure()
+        .expect("the operator sees durable failure evidence");
+    assert_eq!(cause.class, OperatorFailureClass::CallerOrHubBug);
+    assert_eq!(cause.cause_code, "injected_execution_failure");
+    assert!(cause.pending);
 
     let transcript = ProcessReadRepository::new(pool.clone())
         .read_transcript(session)
@@ -855,21 +966,10 @@ async fn an_unmonitored_sessions_failure_block_schedules_no_resumption()
     Ok(())
 }
 
-/// a goal turn whose durable recovery cause requires an operator is
-/// parked by the shared resume planner, not only by the direct disposition
-/// callback that reads the cause.
-///
-/// This drives the sequence that reaches `reconcile_success` with the cause
-/// already recorded: the turn terminalizes as a call-free compaction failure
-/// writing its `goal_execution_failure_recovery` row, the direct
-/// `block_execution_failure` callback never runs — which is what a daemon
-/// restart between the failing commit and the disposition future does — and the
-/// next pass reconciles the still-undisposed terminal turn. The appended block
-/// must carry the operator-required need, because planning it from block
-/// provenance alone armed a resume into the same impossible compaction.
+/// A recorded compaction failure follows ordinary automatic goal recovery.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_reconciled_success_parks_a_durably_non_resumable_failure()
+async fn s_goal_reconciled_compaction_failure_arms_automatic_resumption()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
@@ -933,8 +1033,8 @@ async fn s_goal_reconciled_success_parks_a_durably_non_resumable_failure()
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x2701)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x2702)),
             ),
-            TurnTerminalCause::ContextCompactionWall,
-            Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit),
+            TurnTerminalCause::ContextCompactionFailed,
+            None,
         )
         .await?;
 
@@ -946,7 +1046,7 @@ async fn s_goal_reconciled_success_parks_a_durably_non_resumable_failure()
         goal_repository
             .execution_failure_recovery_cause(session, attached_turn.turn())
             .await?,
-        Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit)
+        None
     );
 
     let (nudge, _work_source) =
@@ -969,7 +1069,7 @@ async fn s_goal_reconciled_success_parks_a_durably_non_resumable_failure()
     };
 
     assert_eq!(*reason, GoalBlockedReasonKind::ExecutionFailure);
-    assert_eq!(need.as_str(), CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED);
+    assert!(need.as_str().contains("automatic resumption is scheduled"));
     assert_eq!(execution_failure_turn(&goal), attached_turn.turn());
 
     pool.close().await;

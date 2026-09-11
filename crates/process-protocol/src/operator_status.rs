@@ -82,6 +82,27 @@ pub struct OperatorStatusLifecycleDeadlineViolationMessage {
     pub expired_for_seconds: Option<CanonicalU64>,
 }
 
+/// Failure classification retained for operator reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusSupervisionFailureClass {
+    Infrastructure,
+    CommitAmbiguous,
+    Corruption,
+    IdentityCollision,
+    Bug,
+}
+
+/// One session requiring operator reconciliation, including a terminal session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorStatusSessionSupervisionMessage {
+    pub session_id: CanonicalUuid,
+    pub terminal: bool,
+    pub failure_class: OperatorStatusSupervisionFailureClass,
+    pub cause_code: String,
+}
+
 /// Terminal counts for one coherent operator-status snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +112,9 @@ pub struct OperatorStatusEndMessage {
     pub lifecycle_week_count: CanonicalU64,
     /// The `nonterminal_past_deadline` alarm value, target zero.
     pub lifecycle_deadline_violation_count: CanonicalU64,
+    pub session_supervision_count: CanonicalU64,
+    /// Persistent undecodable outbox rows, with zero as the healthy value.
+    pub outbox_quarantine_count: CanonicalU64,
 }
 
 /// One process-local component that startup retained as unavailable.
@@ -113,6 +137,8 @@ pub enum OperatorStatusMessage {
     LifecycleWeek(Box<OperatorStatusLifecycleWeekMessage>),
     /// One owned non-terminal session past its armed-deadline obligation.
     LifecycleDeadlineViolation(Box<OperatorStatusLifecycleDeadlineViolationMessage>),
+    /// Pending session supervision evidence, including terminal operator items.
+    SessionSupervision(Box<OperatorStatusSessionSupervisionMessage>),
     /// Process-local ingestion evidence for one watched repository.
     RepositoryIngestion(Box<OperatorStatusRepositoryIngestion>),
     /// Completes the snapshot with its section counts.
@@ -163,7 +189,8 @@ pub(crate) fn validate_operator_status_message(
         }
         OperatorStatusMessage::Start {}
         | OperatorStatusMessage::End(_)
-        | OperatorStatusMessage::RepositoryIngestion(_) => true,
+        | OperatorStatusMessage::RepositoryIngestion(_)
+        | OperatorStatusMessage::SessionSupervision(_) => true,
     };
     if valid {
         Ok(())

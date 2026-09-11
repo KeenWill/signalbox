@@ -495,8 +495,12 @@ pub enum ImportedConversationSourceFormat {
     ClaudeCodeSessionJsonlV1,
     /// Claude Code session JSONL interpreted by converter version 2.
     ClaudeCodeSessionJsonlV2,
+    /// Claude Code session JSONL interpreted by converter version 3.
+    ClaudeCodeSessionJsonlV3,
     /// Codex rollout JSONL interpreted by converter version 1.
     CodexRolloutJsonlV1,
+    /// Codex rollout JSONL interpreted by converter version 2.
+    CodexRolloutJsonlV2,
 }
 
 /// One closed per-origin unified conversation summary.

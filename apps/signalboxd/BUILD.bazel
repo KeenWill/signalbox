@@ -4,6 +4,8 @@ load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_COMPILE_DATA = [
+    "//:config/approval-judge-eval-codex.example.toml",
+    "//:config/repository-watch-rules.example.toml",
     "//:config/session-templates.example.toml",
     "//:config/signalboxd.example.toml",
     "//crates/convergence:examples/repository.toml",
@@ -27,11 +29,13 @@ CRATE_DEPS = [
     "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
     "//crates/conversation-import-codex:signalbox_conversation_import_codex",
     "//crates/domain:signalbox_domain",
+    "//crates/file-media-adapter-pdf:signalbox_file_media_adapter_pdf",
     "//crates/file-media-adapters-image:signalbox_file_media_adapters_image",
     "//crates/file-media-adapters-text:signalbox_file_media_adapters_text",
     "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
     "//crates/file-media-provider-runtime:signalbox_file_media_provider_runtime",
     "//crates/file-media-runtime:signalbox_file_media_runtime",
+    "//crates/github-transport:signalbox_github_transport",
     "//crates/model-provider-runtime:signalbox_model_provider_runtime",
     "//crates/model-runtime:signalbox_model_runtime",
     "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
@@ -85,11 +89,13 @@ rust_library(
         "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
         "//crates/conversation-import-codex:signalbox_conversation_import_codex",
         "//crates/domain:signalbox_domain",
+        "//crates/file-media-adapter-pdf:signalbox_file_media_adapter_pdf",
         "//crates/file-media-adapters-image:signalbox_file_media_adapters_image",
         "//crates/file-media-adapters-text:signalbox_file_media_adapters_text",
         "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
         "//crates/file-media-provider-runtime:signalbox_file_media_provider_runtime",
         "//crates/file-media-runtime:signalbox_file_media_runtime",
+        "//crates/github-transport:signalbox_github_transport",
         "//crates/model-provider-runtime:signalbox_model_provider_runtime",
         "//crates/model-runtime:signalbox_model_runtime",
         "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
@@ -129,11 +135,7 @@ rust_binary(
 
 rust_binary(
     name = "signalbox-approval-judge-eval",
-    compile_data = CRATE_COMPILE_DATA + [
-        "//crates/approval-judge-eval:corpora/seed-responses-v1.json",
-        "//crates/approval-judge-eval:corpora/seed-scorecard-v1.json",
-        "//crates/approval-judge-eval:corpora/seed-v1.json",
-    ],
+    compile_data = CRATE_COMPILE_DATA,
     crate_features = CRATE_FEATURES,
     crate_root = "src/bin/signalbox-approval-judge-eval.rs",
     proc_macro_deps = CRATE_PROC_MACRO_DEPS,
@@ -168,10 +170,13 @@ rust_unit_test(
     crate_features = CRATE_FEATURES,
     data = [
         "Cargo.toml",
+        "//:config/approval-judge-eval-codex.example.toml",
+        "//:config/repository-watch-rules.example.toml",
         "//:config/session-templates.example.toml",
         "//:config/signalboxd.example.toml",
         "//crates/convergence:examples/repository.toml",
         "//crates/convergence:fixtures",
+        "//crates/file-media-adapter-pdf:signalbox-file-media-pdf-worker",
         "//crates/file-media-adapters-image:signalbox-file-media-image-worker",
         "//crates/file-media-adapters-text:signalbox-file-media-text-worker",
         "//crates/model-runtime-claude-cli:signalbox-claude-mcp-bridge",
@@ -180,6 +185,7 @@ rust_unit_test(
     env = {
         "NEXTEST_BIN_EXE_signalbox_claude_mcp_bridge": "$(rootpath //crates/model-runtime-claude-cli:signalbox-claude-mcp-bridge)",
         "NEXTEST_BIN_EXE_signalbox_file_media_image_worker": "$(rootpath //crates/file-media-adapters-image:signalbox-file-media-image-worker)",
+        "NEXTEST_BIN_EXE_signalbox_file_media_pdf_worker": "$(rootpath //crates/file-media-adapter-pdf:signalbox-file-media-pdf-worker)",
         "NEXTEST_BIN_EXE_signalbox_file_media_text_worker": "$(rootpath //crates/file-media-adapters-text:signalbox-file-media-text-worker)",
         "TMPDIR": "/tmp",
     },
@@ -389,6 +395,9 @@ rust_integration_test(
     srcs = glob(["tests/**/*.rs"]),
     args = ["--test-threads=4"],
     compile_data = [
+        "//crates/approval-judge-eval:corpora/seed-v1.json",
+        "//crates/approval-judge-eval:corpora/seed-responses-v1.json",
+        "//crates/approval-judge-eval:corpora/seed-scorecard-v1.json",
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
     ],
@@ -400,12 +409,14 @@ rust_integration_test(
         exclude = ["tests/**/*.rs"],
     ) + [
         ":approval-judge-eval",
+        ":signalbox-approval-judge-eval",
         ":signalbox-debug",
         ":signalboxd",
         "//:config/session-templates.example.toml",
     ],
     env = {
         "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_signalbox_approval_judge_eval": "$(rootpath :signalbox-approval-judge-eval)",
         "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
         "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
         "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
@@ -413,6 +424,7 @@ rust_integration_test(
     proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     rustc_env = {
         "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_signalbox-approval-judge-eval": "$(rootpath :signalbox-approval-judge-eval)",
         "CARGO_BIN_EXE_approval-judge-eval": "$(rootpath :approval-judge-eval)",
         "CARGO_BIN_EXE_signalbox-debug": "$(rootpath :signalbox-debug)",
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",

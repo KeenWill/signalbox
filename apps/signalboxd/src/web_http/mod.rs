@@ -527,7 +527,7 @@ fn production_router_with_budget(
     pool: Option<PgPool>,
     blobs: Option<WebBlobRuntime>,
     model_configuration: Option<HubModelConfiguration>,
-    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+    _blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     read_runtime: ProductionReadRuntime,
     eligibility_nudge: Option<signalbox_application::InProcessEligibilityNudge>,
 ) -> Router {
@@ -623,10 +623,9 @@ fn production_router_with_budget(
     // Imported-conversation reads need both a pool and hub model settings; the
     // bootstrap and session surfaces stay routable without either.
     let api = match (pool, model_configuration) {
-        (Some(pool), Some(model_configuration)) => api.nest(
-            "/imports",
-            web_imports::router(pool, model_configuration, blob_store_registry),
-        ),
+        (Some(pool), Some(model_configuration)) => {
+            api.nest("/imports", web_imports::router(pool, model_configuration))
+        }
         _ => api,
     };
     let api = api.fallback(api_not_found);

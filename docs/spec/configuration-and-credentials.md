@@ -64,8 +64,13 @@ TOML, whose checked-in example is `config/signalbox-runner.example.toml`. Its
 owner-only permissions, held under an exclusive lock for the process lifetime,
 and its `bubblewrap_path` must resolve to an executable regular file. Its
 `allowed_network_hosts` narrows a fixed host list and cannot add a hostname.
-Runner credential profiles are non-secret checked names the daemon grants and
-only the runner resolves.
+`sandboxed_exec` uses an isolated network namespace by default. A dispatched
+command that times out under that policy includes the `network_fence_active`
+diagnostic; this reports the configured fence without inferring network intent
+from the command or its arguments. Sandbox setup failures emit a categorical
+warning before command dispatch without logging argv or captured output. Runner
+credential profiles are non-secret checked names the daemon grants and only the
+runner resolves.
 
 The model catalog declares what the four adapters can serve; the daemon provides
 exactly `anthropic`, `openai`, `claude_cli`, and `codex_cli`, no adapter pins a
@@ -101,9 +106,14 @@ names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
 members are required except for the defaulted repository-watch poll request
 budget, while other tables carry their own configured limits. Numeric-bound
 duration policies use Jiff's friendly unsigned-duration syntax.
+`max_git_object_bytes` limits decoded Git object content, including packed delta
+dependencies; `"none"` leaves blob content unbounded. Commits, trees, and tags
+retain the Git family's 1 MiB structural metadata bound.
 `max_review_findings_per_run` must be finite and no greater than its domain
 bound. A finite `max_blob_replica_count` must admit the durable catalog's full
 store bound. Disabling reconciliation requires an unbounded nudge buffer.
+Conversation import admits no source-size setting; a `conversation_import` table
+is rejected by the closed top-level schema.
 `repository_watch_webhook_retention` must be positive and finite and governs
 authenticated webhook `expires_at` and merged-pull-request baseline retention as
 described in [repository watch](repo-watch.md). `codex_cli_version_probe_bound`
@@ -111,11 +121,20 @@ bounds a credential-free startup probe of the configured Codex executable. A
 missing or zero bound fails configuration before the socket opens. An
 unsuccessful or malformed probe, or an installed version outside the configured
 pin, leaves the Codex adapter unavailable while the daemon continues startup.
+The same bound limits each read-only Codex capacity probe for
+[parked credential waits](credential-availability.md).
 One valid document yields correlated immutable in-memory catalogs: the domain
 `ModelTargetCatalog` for execution-time target resolution and the
 `RuntimeModelCatalog` for the provider bridge. The optional
 `repository_watch_poll_request_budget` defaults to 100 and accepts integers from
 2 through 1,000, including the quota preflight request in each attempt.
+
+`guard_recovery_initial_delay` and `guard_recovery_maximum_delay` are positive
+durations, with the maximum no smaller than the initial delay.
+`guard_recovery_elapsed_bound` limits one guard-loss recovery episode, including
+pool shutdown and runtime reconstruction; `none` leaves it unbounded.
+[Turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md) owns
+reacquisition before admission resumes.
 
 The `[[tool_mappings]]` array composes the deployment-mapped tool families and
 binds one configured workspace root. Each session's workspace root is derived
@@ -142,6 +161,11 @@ policies. Optional `sandbox_rustup_home` and `sandbox_rustup_toolchain` set
 disabled, `CARGO_HOME` stays private and writable, and `npm_config_cache` is
 `/workspace/.npm`.
 
+The optional `[tool_proposals]` table sets `max_requests` and
+`max_argument_bytes` to nonnegative integers or `"none"`, with defaults of 32
+and 1048576. Exceeding either cap produces the per-request errors in
+[tool-loop](tool-loop.md).
+
 The optional `[tool_approval_postures]` table decides, per exact composed tool
 name, whether a request is approved by policy, judged by the approval judge, or
 parked for a person; a tool whose declaration always confirms keeps that
@@ -154,7 +178,9 @@ human wait when that wait first reaches the daemon. The optional
 delegated requests, and when it is absent the judge reuses the request-producing
 call's selection. The optional `[workspace_instructions]` table is either absent
 or present at version one, and its bounded `registered_roots` array names the
-instruction directories registered outside a session's workspace.
+instruction directories registered outside a session's workspace. Its entry,
+finding, source-byte, and elapsed discovery limits accept finite values or
+`"none"` ([workspace-instructions.md](workspace-instructions.md)).
 
 A credential profile names one account. Its `CredentialReference` is the
 non-secret name that appears in configuration, errors, logs, and durable
@@ -175,6 +201,25 @@ the Codex login directory; a configured home is an existing readable directory.
 An empty home makes that pool member unavailable. Delivery links the selected
 profile's `auth.json` into a private per-operation `CODEX_HOME` with an empty
 `config.toml`.
+
+GitHub integration profiles declare `adapter = "github"` without model billing
+or pool membership. `delivery = "file"` requires `file`;
+`delivery = "github_app"` requires positive `app_id` and `installation_id`
+integers and an absolute `private_key_file`. Validation names a missing or
+invalid App field. The `code_host` and `github` mappings use `github-primary`; a
+declared profile supplies that reference, otherwise `GITHUB_TOKEN_FILE` supplies
+it. Repository-watch entries select either `credential_file` or
+`credential_profile`.
+
+The App key is read at token minting under the credential-file admission rules,
+never at boot. The daemon signs an RS256 JWT with issuance sixty seconds in the
+past and expiry ten minutes in the future, exchanges it for an installation
+access token, and caches only that token and its expiry in memory. Requests
+refresh within sixty seconds of expiry; a 401 refreshes the rejected token and
+retries the request once. Concurrent requests share a refresh and reuse a token
+already refreshed for the same rejection. REST, GraphQL, and HTTPS Git requests
+through the profile authenticate as that installation. App key, JWT, and token
+material never enter logs or durable records.
 
 A Codex home pool declares one `codex_cli` subscription profile with
 `delivery = "codex_home"` and a distinct `codex_home` directory per
@@ -743,33 +788,39 @@ exists only for a profile whose value the daemon reads; a code-host tool instead
 resolves its fixed reference and builds its scrubber inside execution. Every
 provider-controlled text leaving such an adapter, and every checked string in a
 successful code-host result, is scrubbed of that value and its JSON-escaped form
-before it crosses into evidence. An `ambient` or `codex_home` profile gives the
-daemon no value; its output follows the
+before it crosses into evidence. CI job-log downloads also retain the scrubber
+for the App token used by the redirect response. Truncated logs and repository
+file selections scrub trailing prefixes of either response-credential spelling
+before applying the final text bound. An `ambient` or `codex_home` profile gives
+the daemon no value; its output follows the
 [runtime substrate](runtime-substrate.md).
 
 The GitHub and code-host adapters share `github-primary`, which needs API access
 to read pull requests, publish reviews and comments, reply to and resolve review
 threads, read repository files and directories, read checks and CI job logs, and
 rerun failed jobs. Neither adapter pushes Git changes. The repository-watch
-credential needs read access for polling and checkout provisioning; it does not
-need push or workflow-write authority. Classic `repo` is broader than read-only
-access, so a fine-grained read credential limits that role to the watched
-repositories. An optional absolute `push_credential_file` on
-`[[repository_watch.repositories]]` supplies a deployment-owned token with push
-authority; each push rereads it through `FileCredentialAccess` and passes
-authorization only in the child environment. Push credential files participate
-in the repository-watch credential isolation checks, including symlink and
-hard-link aliases of polling, push, and webhook credentials. The push family is
-registered from the configuration installed by durable reload recovery at
-startup; a repository-watch reload that adds or removes `push_credential_file`
-takes effect for registration at the next boot.
+credential needs read access for polling and checkout provisioning. Classic
+`repo` is broader than read-only access, so a fine-grained read credential
+limits that role to the watched repositories. An optional absolute
+`push_credential_file` on `[[repository_watch.repositories]]` supplies a
+deployment-owned token with push authority. An App-backed repository uses its
+installation token for pushes when no separate push file is configured. Git
+receives an `https://x-access-token:<token>@github.com/` URL rewrite only
+through the child environment; command arguments retain the public destination.
+Push credential files participate in the repository-watch credential isolation
+checks, including symlink and hard-link aliases of polling, push, and webhook
+credentials. The push family is registered from the configuration installed by
+durable reload recovery at startup; a repository-watch reload that adds or
+removes `push_credential_file` takes effect for registration at the next boot.
 
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
 true; false disables module polling, webhook listening, and command dispatch,
-including convergence-sweep target enrollment and session commissioning.
-Repository-watch duration fields accept integer seconds or Jiff's friendly
-unsigned-duration strings; rule cooldowns retain whole-second precision.
+including convergence-sweep target enrollment and session commissioning. The
+`workflows_enabled` boolean defaults to false and selects workflow-driven
+observations when true. Repository-watch duration fields accept integer seconds
+or Jiff's friendly unsigned-duration strings; rule cooldowns retain whole-second
+precision.
 
 The optional `[convergence]` table deserializes the
 [shared convergence policy](../../crates/convergence/README.md), including its
@@ -863,8 +914,6 @@ credential pool admission as [contention](credential-availability.md).
 
 ## Planned
 
-- Guard recovery initial and maximum backoff delays and an elapsed bound
-  admitting `none`; see [daemon survival design](../design/daemon-survival.md).
 - Input-modality declarations on model and serving-target records, and the blob
   catalog they feed: [design](../design/configuration-and-credentials.md).
 - Dated rate windows on a model entry; the present grammar admits one flat rate,

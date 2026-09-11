@@ -4,8 +4,19 @@
 version = 1
 
 [numeric_bounds]
+max_git_object_bytes = "none"
+max_image_presentation_bytes = "none"
+max_image_request_bytes = "none"
+# Time to complete a client frame after its first byte arrives.
+client_frame_deadline = "30s"
+# Time a client socket write may remain blocked without sending bytes.
+client_write_progress_deadline = "30s"
 # Seven days from authenticated webhook receipt to its durable expiry.
 repository_watch_webhook_retention = "604800s"
+# Guard reacquisition backoff and total recovery time; none keeps waiting.
+guard_recovery_initial_delay = "1s"
+guard_recovery_maximum_delay = "10s"
+guard_recovery_elapsed_bound = "none"
 # Physical database sessions established before daemon work begins.
 fenced_pool_min_connections = 48
 # Delay between checks that restore retired fenced pool sessions.

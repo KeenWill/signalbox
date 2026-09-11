@@ -18,7 +18,7 @@ use signalbox_application::{
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
-pub const WEB_CONTRACT_VERSION: &str = "2";
+pub const WEB_CONTRACT_VERSION: &str = "3";
 /// Stable name of the browser HTTP contract family.
 pub const WEB_CONTRACT_NAME: &str = "signalbox.web-http";
 
@@ -278,8 +278,12 @@ pub enum WebImportFormat {
     ClaudeCodeSessionJsonlV1,
     /// Claude Code JSONL interpreted by Signalbox converter version 2.
     ClaudeCodeSessionJsonlV2,
+    /// Claude Code JSONL interpreted by Signalbox converter version 3.
+    ClaudeCodeSessionJsonlV3,
     /// Codex rollout JSONL interpreted by Signalbox converter version 1.
     CodexRolloutJsonlV1,
+    /// Codex rollout JSONL interpreted by Signalbox converter version 2.
+    CodexRolloutJsonlV2,
 }
 
 /// Bounded imports catalog request carried as query parameters. An exact
@@ -1166,6 +1170,7 @@ pub enum WebTimelineToolBatchState {
     Proposed { frontier_id: WebSessionId },
     ResultsProjected { frontier_id: WebSessionId },
     RecoveryRequired { tool_attempt_id: WebSessionId },
+    ChildWaitResumed { tool_attempt_id: WebSessionId },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -3652,6 +3657,17 @@ function assertTimelineDetailPage(value) {{
             fail(
               `${{path}}.body.tools[0].evidence.state`,
               "ambiguous for the recovery target attempt",
+            );
+          }}
+          if (
+            physical !== null &&
+            item.body.state.type === "child_wait_resumed" &&
+            physical.attempt_id === item.body.state.tool_attempt_id &&
+            physical.state !== "awaiting_child"
+          ) {{
+            fail(
+              `${{path}}.body.tools[0].evidence.state`,
+              "awaiting_child for the resumed target attempt",
             );
           }}
           if (physical !== null) {{

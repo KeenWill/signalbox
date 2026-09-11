@@ -33,6 +33,7 @@ impl<FileSystem: signalbox_tools_workspace::WorkspaceFileSystem> LocalGitTools<F
         root_path: impl convert::AsRef<path::Path>,
         identity: GitIdentity,
     ) -> result::Result<Self, LocalGitToolsConstructionError>;
+    pub fn with_max_object_bytes(self, max_bytes: option::Option<usize>) -> Self;
     pub const fn object_format(&self) -> GitObjectFormat;
     pub const fn pinned_directories(&self) -> PinnedRepositoryDirectories;
     pub fn into_parts(

@@ -91,6 +91,7 @@ where
         commit: signalbox_domain::CommitSha,
         runner: ExecRunner,
         filesystem: &FileSystem,
+        max_git_object_bytes: Option<usize>,
     ) -> Result<
         signalbox_tools_git::GitPushExecutor<super::git_push::ProcessGitPushTransport<ExecRunner>>,
         DaemonToolsConstructionError,
@@ -105,14 +106,15 @@ where
         .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
         let transport = super::git_push::ProcessGitPushTransport {
             runner,
-            credential_file: repository
-                .push_credential_file()
-                .ok_or(DaemonToolsConstructionError::LocalGit)?
-                .to_owned(),
+            credentials:
+                crate::repo_watch_credentials::RepositoryWatchClientLoader::for_repository_push(
+                    repository,
+                ),
         };
         let (_, executor) =
             signalbox_tools_git::GitPushTools::try_new(filesystem, root, remote, transport)
                 .map_err(|_| DaemonToolsConstructionError::LocalGit)?
+                .with_max_object_bytes(max_git_object_bytes)
                 .into_parts();
         Ok(executor
             .with_branch_fence(branch.as_str().to_owned())
@@ -124,6 +126,7 @@ where
     /// The root stays construction input for each family exactly as before:
     /// the filesystem adapter is already bound to it, the execution suites
     /// capture its identity, and the Git suite validates its repository layout.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn try_new(
         filesystem: FileSystem,
         root: &Path,
@@ -131,6 +134,7 @@ where
         exec_runner: ExecRunner,
         cargo_registry_cache: Option<&Path>,
         sandbox: &signalbox_tools_exec::SandboxConfiguration,
+        max_git_object_bytes: Option<usize>,
         sandboxed_exec_timeout_bound: Option<Duration>,
     ) -> Result<Self, DaemonToolsConstructionError> {
         // Each family below resolves the same pathname independently, so a
@@ -153,6 +157,7 @@ where
                 );
                 DaemonToolsConstructionError::LocalGit
             })?;
+        let local_git = local_git.with_max_object_bytes(max_git_object_bytes);
         let git_object_format = local_git.object_format();
         let pinned_directories = local_git.pinned_directories();
         let sandboxed_exec = match cargo_registry_cache {
@@ -254,6 +259,7 @@ pub(super) struct ConfiguredWorkspaceComposition<
     pub(super) exec_runner: ExecRunner,
     pub(super) cargo_registry_cache: Option<PathBuf>,
     pub(super) sandbox: signalbox_tools_exec::SandboxConfiguration,
+    pub(super) max_git_object_bytes: Option<usize>,
     pub(super) sandboxed_exec_timeout_bound: Option<Duration>,
 }
 

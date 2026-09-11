@@ -1049,7 +1049,10 @@ final class ProcessImportedConversationViewModel: ObservableObject {
     do {
       let entries = try inventory.entries(in: offset..<min(offset + entryPageSize, inventory.entryCount))
       transcript = SignalboxImportedConversationTranscript(
-        importedConversationID: inventory.importedConversationID, entries: entries)
+        importedConversationID: inventory.importedConversationID,
+        dropFacts: inventory.dropFacts,
+        entries: entries
+      )
       entryOffset = offset
       entryPageErrorMessage = nil
     } catch { entryPageErrorMessage = error.localizedDescription }
@@ -1261,6 +1264,17 @@ private struct ProcessImportedConversationScreen: View {
           Section {
             LabeledContent("Source", value: sourceFormatLabel)
             LabeledContent("Entries", value: "\(viewModel.totalEntryCount)")
+            if transcript.dropFacts.droppedRecordCount.rawValue > 0 {
+              LabeledContent(
+                "Dropped records",
+                value: "\(transcript.dropFacts.droppedRecordCount.rawValue)"
+              )
+              .accessibilityIdentifier("imported-dropped-record-count")
+              if let first = transcript.dropFacts.firstDroppedRecordPosition {
+                LabeledContent("First dropped record", value: "#\(first.rawValue)")
+                  .accessibilityIdentifier("imported-first-dropped-record-position")
+              }
+            }
           }
           if let errorMessage = viewModel.errorMessage ?? viewModel.entryPageErrorMessage {
             Section {
@@ -1345,8 +1359,12 @@ private struct ProcessImportedConversationScreen: View {
       "Claude Code JSONL v1"
     case .claudeCodeSessionJSONLV2:
       "Claude Code JSONL v2"
+    case .claudeCodeSessionJSONLV3:
+      "Claude Code JSONL v3"
     case .codexRolloutJSONLV1:
       "Codex rollout JSONL v1"
+    case .codexRolloutJSONLV2:
+      "Codex rollout JSONL v2"
     case .unknown(let value):
       SignalboxProcessPresentation.retainedLabel(
         "Unrecognized format (\(value))"
@@ -2576,6 +2594,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         }
         applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
       case .resultsProjected:
+        if mutationBlocksByTurnID[turnID] == .unknownNestedState {
+          mutationBlocksByTurnID.removeValue(forKey: turnID)
+        }
+        applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
+      case .childWaitResumed:
         if mutationBlocksByTurnID[turnID] == .unknownNestedState {
           mutationBlocksByTurnID.removeValue(forKey: turnID)
         }

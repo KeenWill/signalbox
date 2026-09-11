@@ -333,6 +333,8 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(lastPage.count, 1)
     XCTAssertEqual(lastPage.first?.sourceSpeakerLabel, "Assistant")
     XCTAssertNotEqual(firstPage.first?.importedEntryID, lastPage.first?.importedEntryID)
+    XCTAssertEqual(inventory.dropFacts.droppedRecordCount.rawValue, 1)
+    XCTAssertEqual(inventory.dropFacts.firstDroppedRecordPosition?.rawValue, 2)
     XCTAssertThrowsError(try inventory.entries(in: 0..<(inventory.entryCount + 1)))
   }
 
@@ -3129,6 +3131,37 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       viewModel.latestDiagnostic,
       ProcessProjectionFixture.unknownToolBatchDiagnostic
     )
+  }
+
+  @MainActor
+  func testChildWaitResumedClearsUnknownToolBatchMutationGate() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.apply(.event(try ProcessProjectionFixture.activatedEvent()))
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.unknownToolBatchEvent(
+          cursor: ProcessProjectionFixture.bufferedTransitionCursor
+        )
+      )
+    )
+    XCTAssertFalse(viewModel.canStopAndSend)
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.childWaitResumedTrigger(
+          cursor: ProcessProjectionFixture.newerTransitionCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
+    XCTAssertTrue(viewModel.canStopAndSend)
   }
 
   @MainActor
@@ -7140,7 +7173,9 @@ private enum ProcessDriverFixture {
           "request_id":"1",
           "message":{
             "type":"imported_conversation_start",
-            "imported_conversation_id":"\(conversationID.rawValue)"
+            "imported_conversation_id":"\(conversationID.rawValue)",
+            "dropped_record_count":"0",
+            "first_dropped_record_position":null
           }
         }
         """.utf8
@@ -12632,6 +12667,25 @@ private enum ProcessProjectionFixture {
       }
       """,
       cursor: 2
+    )
+  }
+
+  static func childWaitResumedTrigger(
+    cursor: UInt64
+  ) throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_batch_transition",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "model_call_id":"\(ProcessDriverFixture.modelCall)",
+        "state":{
+          "type":"child_wait_resumed",
+          "tool_attempt_id":"\(reconciliationAttempt)"
+        }
+      }
+      """,
+      cursor: cursor
     )
   }
 

@@ -471,6 +471,7 @@ pub(crate) const fn program_capability_to_str(value: ProgramCapability) -> &'sta
         ProgramCapability::EvalRecord => "eval-record",
         ProgramCapability::Blob => "blob",
         ProgramCapability::Register => "register",
+        ProgramCapability::RepoWatch => "repo-watch",
     }
 }
 
@@ -487,6 +488,7 @@ pub(crate) fn program_capability_from_str(value: &str) -> Option<ProgramCapabili
         "eval-record" => Some(ProgramCapability::EvalRecord),
         "blob" => Some(ProgramCapability::Blob),
         "register" => Some(ProgramCapability::Register),
+        "repo-watch" => Some(ProgramCapability::RepoWatch),
         _ => None,
     }
 }
@@ -2956,6 +2958,30 @@ pub(crate) fn session_workspace_root_kind_from_str(
         "derived" => Some(signalbox_domain::SessionWorkspaceRootKind::Derived),
         "configured" => Some(signalbox_domain::SessionWorkspaceRootKind::Configured),
         "provisioned" => Some(signalbox_domain::SessionWorkspaceRootKind::Provisioned),
+        _ => None,
+    }
+}
+
+pub(crate) fn encode_evaluation_outcome(
+    outcome: &signalbox_domain::evaluation::EvaluationOutcome,
+) -> (&'static str, &serde_json::Value) {
+    use signalbox_domain::evaluation::EvaluationOutcome;
+    match outcome {
+        EvaluationOutcome::Verdict(evidence) => ("verdict", evidence),
+        EvaluationOutcome::Failed(evidence) => ("failed", evidence),
+        EvaluationOutcome::Ambiguous => ("ambiguous", &serde_json::Value::Null),
+    }
+}
+
+pub(crate) fn decode_evaluation_outcome(
+    kind: &str,
+    evidence: serde_json::Value,
+) -> Option<signalbox_domain::evaluation::EvaluationOutcome> {
+    use signalbox_domain::evaluation::EvaluationOutcome;
+    match kind {
+        "verdict" => Some(EvaluationOutcome::Verdict(evidence)),
+        "failed" => Some(EvaluationOutcome::Failed(evidence)),
+        "ambiguous" if evidence.is_null() => Some(EvaluationOutcome::Ambiguous),
         _ => None,
     }
 }

@@ -48,7 +48,7 @@ export const scenarios = [
   {
     id: 'approval',
     title: 'Approval required',
-    description: 'A pending tool operation needs operator attention.',
+    description: 'Tool approval required.',
     connection: 'connected',
     timelineTotal: 180,
     tableTotal: 240,
@@ -56,7 +56,7 @@ export const scenarios = [
   {
     id: 'recovery',
     title: 'Recovery',
-    description: 'Reconnecting without losing your place.',
+    description: 'Connection recovery.',
     connection: 'recovering',
     timelineTotal: 320,
     tableTotal: 200,
@@ -80,7 +80,7 @@ export const scenarios = [
   {
     id: 'search-usage',
     title: 'Search and usage',
-    description: 'Search and usage at scale.',
+    description: 'Search and usage across sessions.',
     connection: 'connected',
     timelineTotal: 1_000_000,
     tableTotal: 240,
@@ -96,7 +96,7 @@ export const scenarios = [
   {
     id: 'huge-source',
     title: 'Huge source',
-    description: 'Unrecognized records still display.',
+    description: 'Unrecognized record display.',
     connection: 'connected',
     timelineTotal: 20_000,
     tableTotal: 300,
@@ -128,7 +128,7 @@ export const scenarios = [
   {
     id: 'responsive',
     title: 'Responsive shell',
-    description: 'The same workspace at narrow and wide breakpoints.',
+    description: 'Workspace at narrow and wide widths.',
     connection: 'connected',
     timelineTotal: 200,
     tableTotal: 200,

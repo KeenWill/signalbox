@@ -169,7 +169,9 @@ pub struct WebBlobDescriptor {
 pub enum WebImportFormat {
     ClaudeCodeSessionJsonlV1,
     ClaudeCodeSessionJsonlV2,
+    ClaudeCodeSessionJsonlV3,
     CodexRolloutJsonlV1,
+    CodexRolloutJsonlV2,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
@@ -848,6 +850,7 @@ pub enum WebTimelineToolBatchState {
     Proposed { frontier_id: WebSessionId },
     ResultsProjected { frontier_id: WebSessionId },
     RecoveryRequired { tool_attempt_id: WebSessionId },
+    ChildWaitResumed { tool_attempt_id: WebSessionId },
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

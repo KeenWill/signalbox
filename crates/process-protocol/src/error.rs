@@ -248,6 +248,13 @@ pub enum RejectionDetail {
         /// Already-overridden tool request.
         tool_request_id: CanonicalUuid,
     },
+    /// A tool-denial reason exceeded its UTF-8 byte bound.
+    ToolDenialReasonTooLong {
+        /// Maximum admitted UTF-8 byte count.
+        maximum_bytes: CanonicalU64,
+        /// Observed UTF-8 byte count.
+        actual_bytes: CanonicalU64,
+    },
     /// The named delegation request belongs to another turn.
     DelegationRequestNotInTurn {
         /// Session the caller named.
@@ -365,16 +372,6 @@ pub enum RejectionDetail {
     ConversationImportAlreadyInProgress {},
     /// This connection has no in-progress conversation import.
     ConversationImportNotInProgress {},
-    /// The declared or observed source size exceeds the configured total bound.
-    ConversationImportSourceTooLarge {
-        /// Configured maximum assembled source size.
-        limit_bytes: CanonicalU64,
-        /// Exact total source size declared at begin.
-        declared_size_bytes: CanonicalU64,
-        /// Exact observed size at append or commit, or null at begin.
-        #[serde(deserialize_with = "deserialize_required_nullable")]
-        actual_size_bytes: Option<CanonicalU64>,
-    },
     /// The observed source size did not equal the size declared at begin.
     ConversationImportSourceSizeMismatch {
         /// Exact total source size declared at begin.
@@ -451,11 +448,14 @@ impl RejectionDetail {
         matches!(self, Self::BlobReadLengthOutOfRange { .. })
     }
 
+    pub(crate) const fn is_tool_denial_reason(self) -> bool {
+        matches!(self, Self::ToolDenialReasonTooLong { .. })
+    }
+
     pub(crate) const fn is_conversation_import(self) -> bool {
         match self {
             Self::ConversationImportAlreadyInProgress {}
             | Self::ConversationImportNotInProgress {}
-            | Self::ConversationImportSourceTooLarge { .. }
             | Self::ConversationImportSourceSizeMismatch { .. }
             | Self::ConversationImportConversionFailed { .. } => true,
             Self::BlobUploadAlreadyInProgress {}
@@ -493,6 +493,7 @@ impl RejectionDetail {
             | Self::ToolRequestNotDelegateDenied { .. }
             | Self::ToolRequestNotTerminallyDenied { .. }
             | Self::ToolDenialAlreadyOverridden { .. }
+            | Self::ToolDenialReasonTooLong { .. }
             | Self::DelegationRequestNotInTurn { .. }
             | Self::DelegationToolRequestNotExecutable { .. }
             | Self::DelegationSpawnConflict { .. }
@@ -594,6 +595,13 @@ pub(crate) fn validate_rejection_detail(
         RejectionDetail::DelegationDeliverySequenceExhausted { last, .. } => {
             last.value() == u64::MAX
         }
+        RejectionDetail::ToolDenialReasonTooLong {
+            maximum_bytes,
+            actual_bytes,
+        } => {
+            maximum_bytes.value() == signalbox_domain::ToolDenialReason::MAX_UTF8_BYTES as u64
+                && actual_bytes.value() > maximum_bytes.value()
+        }
         RejectionDetail::SessionNotFound { .. }
         | RejectionDetail::AttachmentBlobNotFound { .. }
         | RejectionDetail::AttachmentByteBudgetExceeded { .. }
@@ -638,7 +646,6 @@ pub(crate) fn validate_rejection_detail(
         | RejectionDetail::ImportedFrontierPositionOutOfRange { .. } => true,
         RejectionDetail::ConversationImportAlreadyInProgress {}
         | RejectionDetail::ConversationImportNotInProgress {}
-        | RejectionDetail::ConversationImportSourceTooLarge { .. }
         | RejectionDetail::ConversationImportSourceSizeMismatch { .. }
         | RejectionDetail::ConversationImportConversionFailed { .. }
         | RejectionDetail::BulkIngestAlreadyInProgress { .. }
@@ -663,21 +670,6 @@ pub(crate) fn validate_conversation_import_detail(
     let valid = match detail {
         RejectionDetail::ConversationImportAlreadyInProgress {}
         | RejectionDetail::ConversationImportNotInProgress {} => true,
-        RejectionDetail::ConversationImportSourceTooLarge {
-            limit_bytes,
-            declared_size_bytes,
-            actual_size_bytes,
-        } => {
-            limit_bytes.value() > 0
-                && match actual_size_bytes {
-                    Some(actual) => {
-                        actual.value() > limit_bytes.value()
-                            && (declared_size_bytes.value() <= limit_bytes.value()
-                                || declared_size_bytes == actual)
-                    }
-                    None => declared_size_bytes.value() > limit_bytes.value(),
-                }
-        }
         RejectionDetail::ConversationImportSourceSizeMismatch {
             declared_size_bytes,
             actual_size_bytes,
@@ -691,6 +683,7 @@ pub(crate) fn validate_conversation_import_detail(
             | ConversationImportRejectionClass::InvalidUtf8
             | ConversationImportRejectionClass::InvalidJson
             | ConversationImportRejectionClass::JsonDepthExceeded
+            | ConversationImportRejectionClass::RawRecordTooLarge
             | ConversationImportRejectionClass::TopLevelNotObject
             | ConversationImportRejectionClass::InvalidRecordType
             | ConversationImportRejectionClass::InvalidSourceMetadata
@@ -733,6 +726,7 @@ pub(crate) fn validate_conversation_import_detail(
         | RejectionDetail::ToolRequestNotDelegateDenied { .. }
         | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
         | RejectionDetail::ToolDenialAlreadyOverridden { .. }
+        | RejectionDetail::ToolDenialReasonTooLong { .. }
         | RejectionDetail::DelegationRequestNotInTurn { .. }
         | RejectionDetail::DelegationToolRequestNotExecutable { .. }
         | RejectionDetail::DelegationSpawnConflict { .. }

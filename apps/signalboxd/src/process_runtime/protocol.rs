@@ -33,9 +33,8 @@ pub(super) enum InternalDiagnostic {
     ReviewOrchestrationWorkflowCorruption,
     ReviewOrchestrationSessionCorruption,
     ReviewOrchestrationServiceContract,
-    ConversationImportAllocationFailure,
+    ConversationImportSpoolUnavailable,
     ConversationImportContractDefect,
-    ConversationImportWorkerTerminated,
     ImportedSessionDatabase,
     ImportedSessionCommitAmbiguous,
     ImportedSessionCommandKindMismatch,
@@ -113,12 +112,11 @@ impl InternalDiagnostic {
             | Self::SessionDefaultsCommitAmbiguous => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true,
             },
-            Self::ConversationImportAllocationFailure => OperatorFailureClass::Infrastructure {
+            Self::ConversationImportSpoolUnavailable => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
             Self::ReviewOrchestrationServiceContract
             | Self::ConversationImportContractDefect
-            | Self::ConversationImportWorkerTerminated
             | Self::ImportedSessionCommandKindMismatch
             | Self::ImportedSessionPreparation
             | Self::SessionCreationPreparation
@@ -183,9 +181,8 @@ impl InternalDiagnostic {
             }
             Self::ReviewOrchestrationSessionCorruption => "review_orchestration_session_corruption",
             Self::ReviewOrchestrationServiceContract => "review_orchestration_service_contract",
-            Self::ConversationImportAllocationFailure => "conversation_import_allocation_failure",
+            Self::ConversationImportSpoolUnavailable => "conversation_import_spool_unavailable",
             Self::ConversationImportContractDefect => "conversation_import_contract_defect",
-            Self::ConversationImportWorkerTerminated => "conversation_import_worker_terminated",
             Self::ImportedSessionDatabase => "imported_session_database",
             Self::ImportedSessionCommitAmbiguous => "imported_session_commit_ambiguous",
             Self::ImportedSessionCommandKindMismatch => "imported_session_command_kind_mismatch",
@@ -1535,6 +1532,14 @@ impl ProtocolError {
         }
     }
 
+    pub(super) const fn invalid_tool_denial_reason(detail: RejectionDetail) -> Self {
+        Self {
+            code: ErrorCode::InvalidRequest,
+            message: "tool denial reason was rejected",
+            detail: ErrorDetail::invalid_request(detail),
+        }
+    }
+
     pub(super) const fn mutation_definitely_unavailable() -> Self {
         Self::without_detail(ErrorCode::Unavailable)
     }
@@ -1893,6 +1898,11 @@ impl ProcessUpdateEvent {
                     }
                     DispatchedToolBatchState::RecoveryRequired { attempt } => {
                         ToolBatchState::RecoveryRequired {
+                            tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                        }
+                    }
+                    DispatchedToolBatchState::ChildWaitResumed { attempt } => {
+                        ToolBatchState::ChildWaitResumed {
                             tool_attempt_id: wire_uuid(attempt.into_uuid()),
                         }
                     }

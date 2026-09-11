@@ -28,18 +28,18 @@ pub use signalbox_domain::{
     PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionChange,
     ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
     RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
-    RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
-    RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId, RepoWatchRuleIdentityField,
-    RepoWatchRuleIdentityFieldDigest, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionFailureCause, SessionId,
-    SessionLifecycleCommand, SessionLifecycleOperation, SessionLifecycleState, SessionOwnership,
-    SessionOwnershipTransition, SessionParkCause, SessionParkResponder, SessionRecoveryOperation,
-    SessionRetirementCause, SessionRetryableCause, SessionStructuralCause,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
-    SessionTerminalOutcome, SessionWait, StartGate, StopStickiness, SubmitInput, ToolAttemptId,
-    ToolRequestId, TurnId, UserContent, UserContentPart, WorkflowName,
+    RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+    RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest,
+    RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest,
+    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug,
+    ReviewState, ReviewThreadId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionFailureCause, SessionId, SessionLifecycleCommand, SessionLifecycleOperation,
+    SessionLifecycleState, SessionOwnership, SessionOwnershipTransition, SessionParkCause,
+    SessionParkResponder, SessionRecoveryOperation, SessionRetirementCause, SessionRetryableCause,
+    SessionStructuralCause, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, SessionTerminalOutcome, SessionWait, StartGate, StopStickiness,
+    SubmitInput, ToolAttemptId, ToolRequestId, TurnId, UserContent, UserContentPart, WorkflowName,
 };
 pub use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::outbox::{
@@ -284,6 +284,11 @@ impl LifecycleEventSource {
         session: SessionId,
     ) -> Result<Option<OffsetDateTime>, OutboxDispatchError> {
         self.reader.session_terminal_at(session).await
+    }
+
+    /// Reports a durably completed configured push in the dispatched session.
+    pub async fn session_pushed(&self, session: SessionId) -> Result<bool, OutboxDispatchError> {
+        self.reader.session_pushed(session).await
     }
 
     /// Reads the next module-visible event without advancing its cursor.

@@ -50,6 +50,11 @@ pub enum HubModelConfigurationError {
     /// A credential profile named no delivery, or its delivery's own fields
     /// were absent or malformed.
     InvalidCredentialDelivery,
+    /// Required GitHub delivery field is absent or invalid.
+    InvalidGithubCredentialField {
+        /// Exact field to correct.
+        field: &'static str,
+    },
     /// One member's Codex home failed path/directory admission.
     InvalidCredentialHome {
         /// Non-secret profile reference identifying the failed member.
@@ -196,8 +201,6 @@ pub enum HubModelConfigurationError {
     InvalidLimit,
     /// The compaction prompt was empty, oversized, or contained NUL.
     InvalidCompactionPrompt,
-    /// The optional conversation-import byte bound was absent, zero, or invalid.
-    InvalidConversationImportLimit,
     /// The optional blob-store registry or its routes were malformed.
     InvalidBlobStorageConfiguration,
     /// The optional web-fetch table was malformed or named an invalid origin.
@@ -321,6 +324,7 @@ impl fmt::Display for HubModelConfigurationError {
             Self::DisagreeingCredentialBillingKind { .. } => {
                 "model configuration declares a billing kind its credential delivery cannot authenticate"
             }
+            Self::InvalidGithubCredentialField { field } => return write!(formatter, "GitHub credential field `{field}` is missing or invalid"),
             Self::InvalidCredentialDelivery => {
                 "model configuration contains an invalid credential delivery"
             }
@@ -426,9 +430,6 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidLimit => "model configuration contains an invalid token limit",
             Self::InvalidCompactionPrompt => {
                 "model configuration contains an invalid compaction prompt"
-            }
-            Self::InvalidConversationImportLimit => {
-                "model configuration contains an invalid conversation import byte limit"
             }
             Self::InvalidBlobStorageConfiguration => {
                 "model configuration contains invalid blob-storage settings"

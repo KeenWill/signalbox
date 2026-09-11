@@ -52,6 +52,12 @@ impl ModelRuntimeBuildError {
     }
 }
 
+impl From<crate::configuration::HubModelConfigurationError> for ModelRuntimeBuildError {
+    fn from(_: crate::configuration::HubModelConfigurationError) -> Self {
+        Self("continuation_request_measurement")
+    }
+}
+
 impl From<AnthropicConstructionError> for ModelRuntimeBuildError {
     fn from(error: AnthropicConstructionError) -> Self {
         Self(match error {

@@ -104,6 +104,8 @@ pub(super) fn assemble_tool_round(
                     return Err(ModelCallClosureError::FrontierDerivationFailed);
                 }
                 if proposal.is_suppressed() != (approval == InitialToolApproval::RuntimeSafetyDeny)
+                    || proposal.inadmissible_reason().is_some()
+                        != (approval == InitialToolApproval::Inadmissible)
                     || !initial_tool_approval_matches_posture(
                         dangerous_tool_auto_approval,
                         approval,
@@ -125,9 +127,10 @@ pub(super) fn assemble_tool_round(
                 );
                 match approval.resolution(request) {
                     Some(resolution) => automatic_approvals.push(resolution),
-                    None => {
+                    None if request_record.inadmissible_reason().is_none() => {
                         earliest_undecided.get_or_insert(request);
                     }
+                    None => {}
                 }
                 requests.push(request_record);
                 SemanticTranscriptEntry::from_validated_parts(
@@ -197,6 +200,7 @@ pub(super) fn initial_tool_approval_matches_posture(
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
             | InitialToolApproval::Delegated
+            | InitialToolApproval::Inadmissible
             | InitialToolApproval::RuntimeSafetyDeny
             | InitialToolApproval::UserOverride { .. },
         )
@@ -207,6 +211,7 @@ pub(super) fn initial_tool_approval_matches_posture(
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
             | InitialToolApproval::Delegated
+            | InitialToolApproval::Inadmissible
             | InitialToolApproval::RuntimeSafetyDeny
             | InitialToolApproval::UserOverride { .. },
         ) => true,
@@ -314,6 +319,8 @@ pub(super) fn assemble_stopped_tool_round(
                     return Err(ModelCallClosureError::FrontierDerivationFailed);
                 }
                 if proposal.is_suppressed() != (approval == InitialToolApproval::RuntimeSafetyDeny)
+                    || proposal.inadmissible_reason().is_some()
+                        != (approval == InitialToolApproval::Inadmissible)
                     || !initial_tool_approval_matches_posture(
                         dangerous_tool_auto_approval,
                         approval,
@@ -336,7 +343,11 @@ pub(super) fn assemble_stopped_tool_round(
                 closed_result_entries.push(SemanticTranscriptEntry::from_validated_parts(
                     closed_result_entry,
                     session,
-                    SemanticTranscriptEntryPayload::ToolClosed { request },
+                    if proposal.inadmissible_reason().is_some() {
+                        SemanticTranscriptEntryPayload::ToolInadmissible { request }
+                    } else {
+                        SemanticTranscriptEntryPayload::ToolClosed { request }
+                    },
                 ));
                 SemanticTranscriptEntry::from_validated_parts(
                     entry,

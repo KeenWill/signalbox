@@ -71,7 +71,8 @@ The transactional outbox is the only path from a committed transition to a
 client-visible event. Two header tables, one for core kinds and one for
 delegation kinds, feed one delivery sequence, and each event kind has a typed
 record table. Each consumer reads one event at a time through its own delivery
-cursor.
+cursor. An undecodable header or typed record remains unchanged while an
+immutable quarantine row records the decode error.
 
 ## Design decisions
 
@@ -332,7 +333,17 @@ the runtime. Fencing locks the singleton, waits on the prior generation's
 exclusive advisory lock until its pooled sessions end, and advances the row. It
 acquires the matching session-level lock before commit and holds it through
 construction of the new pool. `fenced_pool_options` caps connections at
-`FENCED_POOL_MAX_CONNECTIONS` and accepts an optional minimum.
+`FENCED_POOL_MAX_CONNECTIONS` and accepts an optional minimum. Construction
+monitors the exact singleton guard through a separate bootstrap connection; loss
+during fence initialization, advancement, or pool construction starts guard
+recovery before startup can be admitted.
+
+Guard reacquisition in one process closes the old pool before releasing its
+guard connection and advances the generation before constructing a replacement
+pool. A failed retirement does not retain the dedicated connection after the
+pool has drained. Guard checks continue during pool drain; observed loss starts
+the recovery clock while outstanding checkouts are still draining. The daemon
+never reuses a pool whose guard was lost.
 
 The bottom pull request of a stack that adds migrations declares a reserved
 prefix block in its description, and sibling stacks pick disjoint blocks.
@@ -519,16 +530,17 @@ ignore leaves the kind's storage version alone, while a new closed state or
 required column advances it, and a decoder that predates the advance rejects the
 record as unsupported.
 
-Dispatch locks the consumer's delivery cursor FOR UPDATE, reads exactly the next
-sequence and its typed record, and advances that cursor only when the consumer
-accepts, in the same transaction. A transaction that appends an event never
-advances a delivery cursor and one that advances a cursor never appends; the
-schema rejects both orders. An absent header for a sequence the allocator has
-already allocated fails the dispatch instead of reporting an idle queue, and a
-delivery cursor or any committed header beyond the allocator fails it too. A
-consumer retry or exit before the commit request leaves the prefix unchanged for
-redelivery, and a lost commit response is resolved by the next locked cursor
-read.
+Dispatch locks the consumer's delivery cursor FOR UPDATE and reads exactly the
+next sequence and its typed record. An accepted event advances the cursor in the
+same transaction. An undecodable event records its quarantine and advances that
+consumer's cursor atomically, logs on the first quarantine, then selection
+continues. A transaction that appends an event never advances a delivery cursor
+and one that advances a cursor never appends; the schema rejects both orders. An
+absent header for a sequence the allocator has already allocated fails the
+dispatch instead of reporting an idle queue, and a delivery cursor or any
+committed header beyond the allocator fails it too. A consumer retry or exit
+before the commit request leaves the valid event pending for redelivery, and a
+lost commit response is resolved by the next locked cursor read.
 
 Dispatch validates each record against durable state: an activation against the
 turn's attempt, a call transition against monotonic call state, and a terminal
@@ -663,8 +675,6 @@ retaining registration and history.
 
 ## Planned
 
-- Successive fenced runtime incarnations after database guard loss; see
-  [daemon survival design](../design/daemon-survival.md).
 - Retiring an unacknowledged workspace release:
   [persistence-protocol design](../design/persistence-protocol.md).
 - General runner operation-failure evidence stored before acknowledgement:

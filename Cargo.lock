@@ -1418,6 +1418,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "crc32fast",
+ "libz-sys",
  "miniz_oxide 0.9.1",
  "zlib-rs",
 ]
@@ -3536,6 +3537,8 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -4488,8 +4491,13 @@ dependencies = [
 name = "signalbox-github-transport"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
  "futures-util",
+ "http",
+ "jiff",
  "reqwest",
+ "ring",
+ "serde_json",
  "signalbox-egress-transport",
  "tokio",
 ]
@@ -4630,6 +4638,7 @@ version = "0.0.0"
 dependencies = [
  "expect-test",
  "expectable",
+ "futures-util",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -4646,6 +4655,7 @@ dependencies = [
  "testcontainers-modules",
  "tokio",
  "toml",
+ "tracing",
  "url",
  "uuid",
 ]
@@ -4802,6 +4812,8 @@ dependencies = [
  "signalbox-tool-contract",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4824,6 +4836,7 @@ name = "signalbox-tools-git"
 version = "0.0.0"
 dependencies = [
  "bstr",
+ "crc32fast",
  "flate2",
  "git2",
  "gix-hash",
@@ -5014,11 +5027,13 @@ dependencies = [
  "signalbox-conversation-import-codex",
  "signalbox-derive",
  "signalbox-domain",
+ "signalbox-file-media-adapter-pdf",
  "signalbox-file-media-adapters-image",
  "signalbox-file-media-adapters-text",
  "signalbox-file-media-processor-runtime",
  "signalbox-file-media-provider-runtime",
  "signalbox-file-media-runtime",
+ "signalbox-github-transport",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
  "signalbox-model-runtime-anthropic",

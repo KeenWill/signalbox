@@ -507,6 +507,7 @@ pub enum TimelineToolBatchState {
     Proposed { frontier_id: ContextFrontierId },
     ResultsProjected { frontier_id: ContextFrontierId },
     RecoveryRequired { attempt_id: ToolAttemptId },
+    ChildWaitResumed { attempt_id: ToolAttemptId },
 }
 
 /// Closed outcome of one explicit approval decision.

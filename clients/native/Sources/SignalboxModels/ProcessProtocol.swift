@@ -954,8 +954,8 @@ public struct SignalboxConversationCursor: Codable, Equatable, Sendable {
 }
 
 public enum SignalboxConversationImportFormat: String, Codable, Equatable, Sendable {
-  case claudeCodeSessionJSONLV2 = "claude_code_session_jsonl_v2"
-  case codexRolloutJSONLV1 = "codex_rollout_jsonl_v1"
+  case claudeCodeSessionJSONLV3 = "claude_code_session_jsonl_v3"
+  case codexRolloutJSONLV2 = "codex_rollout_jsonl_v2"
 }
 
 public enum SignalboxImportedSessionRelationship: String, Codable, Equatable, Sendable {
@@ -1041,6 +1041,48 @@ private struct SignalboxProcessServerWireFrame: Decodable {
   }
 }
 
+public struct SignalboxImportedConversationDropFacts: Equatable, Sendable {
+  public let droppedRecordCount: SignalboxCanonicalUInt64
+  public let firstDroppedRecordPosition: SignalboxCanonicalUInt64?
+
+  fileprivate init(
+    droppedRecordCount: SignalboxCanonicalUInt64,
+    firstDroppedRecordPosition: SignalboxCanonicalUInt64?
+  ) {
+    self.droppedRecordCount = droppedRecordCount
+    self.firstDroppedRecordPosition = firstDroppedRecordPosition
+  }
+}
+
+private func decodeImportedConversationDropFacts(
+  from decoder: Decoder,
+  payload: SignalboxTaggedPayload
+) throws -> SignalboxImportedConversationDropFacts {
+  try payload.requireFields(
+    ["dropped_record_count", "first_dropped_record_position"],
+    decoder: decoder
+  )
+  let count: SignalboxCanonicalUInt64 = try decoder.decode("dropped_record_count")
+  let first: SignalboxCanonicalUInt64? = try decoder.decodeIfPresent(
+    "first_dropped_record_position"
+  )
+  guard
+    (count.rawValue == 0) == (first == nil),
+    first.map({ $0.rawValue > 0 }) ?? true
+  else {
+    throw DecodingError.dataCorrupted(
+      .init(
+        codingPath: decoder.codingPath,
+        debugDescription: "Imported conversation drop facts are inconsistent."
+      )
+    )
+  }
+  return SignalboxImportedConversationDropFacts(
+    droppedRecordCount: count,
+    firstDroppedRecordPosition: first
+  )
+}
+
 public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case programRunCancellationReceipt(commandID: SignalboxCommandID, runID: SignalboxCanonicalUUID, outcome: SignalboxProgramCancellationOutcome)
   case programRegistered(registrationID: SignalboxCanonicalUUID)
@@ -1066,12 +1108,21 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case sessionMetadataPageEnd(SignalboxProcessSessionMetadataPageEnd)
   case sessionMetadata(SignalboxProcessSessionMetadataRead)
   case sessionMetadataReplaced(SignalboxProcessSessionMetadataRead)
-  case conversationImportInserted(importedConversationID: SignalboxCanonicalUUID)
-  case conversationImportAlreadyImported(importedConversationID: SignalboxCanonicalUUID)
+  case conversationImportInserted(
+    importedConversationID: SignalboxCanonicalUUID,
+    dropFacts: SignalboxImportedConversationDropFacts
+  )
+  case conversationImportAlreadyImported(
+    importedConversationID: SignalboxCanonicalUUID,
+    dropFacts: SignalboxImportedConversationDropFacts
+  )
   case conversationPageStart
   case conversationSummary(SignalboxConversationSummary)
   case conversationPageEnd(SignalboxConversationPageEnd)
-  case importedConversationStart(importedConversationID: SignalboxCanonicalUUID)
+  case importedConversationStart(
+    importedConversationID: SignalboxCanonicalUUID,
+    dropFacts: SignalboxImportedConversationDropFacts
+  )
   case importedConversationEntry(SignalboxImportedConversationEntry)
   case importedConversationEnd(SignalboxImportedConversationEnd)
   case modelAliasesStart
@@ -1175,11 +1226,29 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
       case "session_metadata_replaced":
         self = .sessionMetadataReplaced(try SignalboxProcessSessionMetadataRead(from: decoder))
       case "conversation_import_inserted":
+        try tagged.rejectUnadmittedFields(
+          [
+            "type", "imported_conversation_id", "dropped_record_count",
+            "first_dropped_record_position",
+          ],
+          decoder: decoder
+        )
         self = .conversationImportInserted(
-          importedConversationID: try decoder.decode("imported_conversation_id"))
+          importedConversationID: try decoder.decode("imported_conversation_id"),
+          dropFacts: try decodeImportedConversationDropFacts(from: decoder, payload: tagged)
+        )
       case "conversation_import_already_imported":
+        try tagged.rejectUnadmittedFields(
+          [
+            "type", "imported_conversation_id", "dropped_record_count",
+            "first_dropped_record_position",
+          ],
+          decoder: decoder
+        )
         self = .conversationImportAlreadyImported(
-          importedConversationID: try decoder.decode("imported_conversation_id"))
+          importedConversationID: try decoder.decode("imported_conversation_id"),
+          dropFacts: try decodeImportedConversationDropFacts(from: decoder, payload: tagged)
+        )
       case "conversation_page_start":
         try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
         self = .conversationPageStart
@@ -1193,11 +1262,15 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         self = .conversationPageEnd(try SignalboxConversationPageEnd(from: decoder))
       case "imported_conversation_start":
         try tagged.rejectUnadmittedFields(
-          ["type", "imported_conversation_id"],
+          [
+            "type", "imported_conversation_id", "dropped_record_count",
+            "first_dropped_record_position",
+          ],
           decoder: decoder
         )
         self = .importedConversationStart(
-          importedConversationID: try decoder.decode("imported_conversation_id")
+          importedConversationID: try decoder.decode("imported_conversation_id"),
+          dropFacts: try decodeImportedConversationDropFacts(from: decoder, payload: tagged)
         )
       case "imported_conversation_entry":
         self = .importedConversationEntry(
@@ -2148,14 +2221,18 @@ public struct SignalboxModelAliasSummary: Decodable, Equatable, Identifiable, Se
 public enum SignalboxImportedConversationSourceFormat: Decodable, Equatable, Sendable {
   case claudeCodeSessionJSONLV1
   case claudeCodeSessionJSONLV2
+  case claudeCodeSessionJSONLV3
   case codexRolloutJSONLV1
+  case codexRolloutJSONLV2
   case unknown(String)
 
   public var rawValue: String {
     switch self {
     case .claudeCodeSessionJSONLV1: return "claude_code_session_jsonl_v1"
     case .claudeCodeSessionJSONLV2: return "claude_code_session_jsonl_v2"
+    case .claudeCodeSessionJSONLV3: return "claude_code_session_jsonl_v3"
     case .codexRolloutJSONLV1: return "codex_rollout_jsonl_v1"
+    case .codexRolloutJSONLV2: return "codex_rollout_jsonl_v2"
     case .unknown(let value): return value
     }
   }
@@ -2165,7 +2242,9 @@ public enum SignalboxImportedConversationSourceFormat: Decodable, Equatable, Sen
     switch value {
     case "claude_code_session_jsonl_v1": self = .claudeCodeSessionJSONLV1
     case "claude_code_session_jsonl_v2": self = .claudeCodeSessionJSONLV2
+    case "claude_code_session_jsonl_v3": self = .claudeCodeSessionJSONLV3
     case "codex_rollout_jsonl_v1": self = .codexRolloutJSONLV1
+    case "codex_rollout_jsonl_v2": self = .codexRolloutJSONLV2
     default: self = .unknown(value)
     }
   }
@@ -4860,8 +4939,10 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
 
   private static func validDenialReason(_ reason: String) -> Bool {
     !reason.isEmpty
-      && reason.utf8.count <= 1_024
-      && reason.unicodeScalars.allSatisfy { $0.properties.generalCategory != .control }
+      && reason.utf8.count <= 4_096
+      && reason.unicodeScalars.allSatisfy {
+        $0.value == 0x0A || $0.properties.generalCategory != .control
+      }
       && reason.unicodeScalars.first.map { !isPOSIXWhitespace($0) } == true
       && reason.unicodeScalars.last.map { !isPOSIXWhitespace($0) } == true
   }
@@ -4930,6 +5011,7 @@ public enum SignalboxToolBatchState: Decodable, Equatable, Sendable {
   case proposed(frontierID: SignalboxCanonicalUUID)
   case resultsProjected(frontierID: SignalboxCanonicalUUID)
   case recoveryRequired(toolAttemptID: SignalboxCanonicalUUID)
+  case childWaitResumed(toolAttemptID: SignalboxCanonicalUUID)
   case unknown(kind: String, payload: [String: SignalboxJSONValue])
 
   public init(from decoder: Decoder) throws {
@@ -4944,6 +5026,9 @@ public enum SignalboxToolBatchState: Decodable, Equatable, Sendable {
     case "recovery_required":
       try tagged.rejectUnadmittedFields(["type", "tool_attempt_id"], decoder: decoder)
       self = .recoveryRequired(toolAttemptID: try decoder.decode("tool_attempt_id"))
+    case "child_wait_resumed":
+      try tagged.rejectUnadmittedFields(["type", "tool_attempt_id"], decoder: decoder)
+      self = .childWaitResumed(toolAttemptID: try decoder.decode("tool_attempt_id"))
     default:
       self = .unknown(kind: tagged.kind, payload: tagged.payload)
     }
@@ -5012,7 +5097,11 @@ public struct SignalboxProcessError: Decodable, Equatable, Sendable {
     message = try decoder.decode("message")
     let container = try decoder.container(keyedBy: CodingKeys.self)
     switch code {
-    case .rejected:
+    case .rejected, .invalidRequest:
+      if code == .invalidRequest && !container.contains(.detail) {
+        detail = nil
+        return
+      }
       guard container.contains(.detail) else {
         throw DecodingError.keyNotFound(
           CodingKeys.detail,
@@ -5050,7 +5139,7 @@ public struct SignalboxProcessError: Decodable, Equatable, Sendable {
         throw DecodingError.dataCorrupted(
           .init(
             codingPath: decoder.codingPath + [CodingKeys.detail],
-            debugDescription: "Only rejected errors admit detail."
+            debugDescription: "Only rejected and invalid request errors admit detail."
           )
         )
       }
@@ -5112,6 +5201,10 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
   case toolRequestNotInSession(
     sessionID: SignalboxCanonicalUUID,
     toolRequestID: SignalboxCanonicalUUID
+  )
+  case toolDenialReasonTooLong(
+    maximumBytes: SignalboxCanonicalUInt64,
+    actualBytes: SignalboxCanonicalUInt64
   )
   case defaultsVersionMismatch(
     sessionID: SignalboxCanonicalUUID, expected: SignalboxCanonicalUInt64,
@@ -5261,6 +5354,25 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
       self = .toolRequestNotInSession(
         sessionID: try decoder.decode("session_id"),
         toolRequestID: try decoder.decode("tool_request_id")
+      )
+    case "tool_denial_reason_too_long":
+      try tagged.rejectUnadmittedFields(
+        ["type", "maximum_bytes", "actual_bytes"],
+        decoder: decoder
+      )
+      let maximumBytes: SignalboxCanonicalUInt64 = try decoder.decode("maximum_bytes")
+      let actualBytes: SignalboxCanonicalUInt64 = try decoder.decode("actual_bytes")
+      guard maximumBytes.rawValue == 4_096, actualBytes.rawValue > maximumBytes.rawValue else {
+        throw DecodingError.dataCorrupted(
+          .init(
+            codingPath: decoder.codingPath,
+            debugDescription: "Tool denial reason bound evidence is inconsistent."
+          )
+        )
+      }
+      self = .toolDenialReasonTooLong(
+        maximumBytes: maximumBytes,
+        actualBytes: actualBytes
       )
     case "defaults_version_mismatch":
       try tagged.rejectUnadmittedFields(

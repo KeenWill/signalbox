@@ -37,8 +37,11 @@ pub mod ingest;
 mod kickoff;
 pub mod measurements;
 mod observation_decode;
+pub mod observation_workflow;
 pub mod poll_cache;
 pub mod provider;
+mod retry;
+pub mod workflow;
 
 use baseline::observation_payload;
 
@@ -561,6 +564,8 @@ impl WebhookDisposition {
 /// Module-local storage failure.
 #[derive(Debug)]
 pub enum StoreError {
+    /// An observation receipt is malformed, conflicting, or awaiting journal adoption.
+    InvalidObservationReceipt,
     /// Core terminal facts could not be read through the ownership seam.
     Lifecycle(signalbox_session_ownership::OutboxDispatchError),
     /// Persisted poll transport state is malformed or belongs to another reviewer set.
@@ -591,6 +596,8 @@ pub enum StoreError {
     InvalidRuleFieldInventory,
     /// Planned commands do not form one complete ordered rule/event batch.
     InvalidDispatchBatch,
+    /// A workflow input conflicts with its receipt or current rule/event context.
+    WorkflowInputRejected,
     /// Core could not encode or decode an exact retained command payload.
     InvalidRetainedCommand,
     /// A complete configured set repeated one repository-scoped rule identity.
@@ -600,6 +607,9 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::InvalidObservationReceipt => {
+                "repository-watch observation receipt conflicts or awaits adoption"
+            }
             Self::Lifecycle(_) => "repository-watch core terminal lookup failed",
             Self::InvalidPollCache => "repository-watch poll cache is invalid",
             Self::InvalidReloadIntent => "repository-watch reload intent is invalid",
@@ -627,6 +637,7 @@ impl fmt::Display for StoreError {
             Self::InvalidDispatchBatch => {
                 "repository-watch commands do not form one ordered dispatch batch"
             }
+            Self::WorkflowInputRejected => "repository-watch workflow input was rejected",
             Self::InvalidRetainedCommand => "repository-watch retained command payload is invalid",
             Self::DuplicateRuleIdentity => {
                 "repository-watch configured rule set repeats an identity"
@@ -639,7 +650,8 @@ impl Error for StoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Lifecycle(error) => Some(error),
-            Self::InvalidPollCache
+            Self::InvalidObservationReceipt
+            | Self::InvalidPollCache
             | Self::InvalidReloadIntent
             | Self::InvalidComparisonBaseline
             | Self::InvalidRetainedEvent => None,
@@ -653,6 +665,7 @@ impl Error for StoreError {
             | Self::ProjectionRepositoryMismatch
             | Self::InvalidRuleFieldInventory
             | Self::InvalidDispatchBatch
+            | Self::WorkflowInputRejected
             | Self::InvalidRetainedCommand
             | Self::DuplicateRuleIdentity => None,
         }
@@ -670,6 +683,7 @@ impl From<sqlx::Error> for StoreError {
 pub struct RepoWatchStore {
     pool: PgPool,
     measurements: measurements::Measurements,
+    observation_invocation: Option<std::sync::Arc<observation_workflow::ObservationInvocation>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -684,6 +698,7 @@ impl RepoWatchStore {
         Self {
             pool: module_pool,
             measurements: measurements::Measurements::default(),
+            observation_invocation: None,
         }
     }
 
@@ -878,6 +893,28 @@ impl RepoWatchStore {
             &comparison_baseline,
         )
         .await?;
+        let observation_receipt = observation_workflow::checked_receipt(
+            &mut transaction,
+            repository,
+            self.observation_invocation.as_deref(),
+        )
+        .await?;
+        let observation_after = if self.observation_invocation.is_some() {
+            Some(match observation_receipt {
+                Some(receipt) => {
+                    observation_workflow::ObservationResult::decode(&receipt.result)
+                        .ok_or(StoreError::InvalidObservationReceipt)?
+                        .after
+                }
+                None => {
+                    observation_workflow::observation_position(&mut transaction, repository)
+                        .await?
+                        .through
+                }
+            })
+        } else {
+            None
+        };
         upsert_repository(&mut transaction, repository_state, &comparison_baseline).await?;
         replace_pull_requests(&mut transaction, repository, pull_request_states).await?;
         let candidate_identity = frontier_candidate_identity(
@@ -972,7 +1009,27 @@ impl RepoWatchStore {
         .await?;
         if unchanged && projections_match {
             if events.is_empty() {
-                transaction.rollback().await?;
+                if let (Some(invocation), Some(after)) =
+                    (&self.observation_invocation, observation_after)
+                {
+                    let position =
+                        observation_workflow::observation_position(&mut transaction, repository)
+                            .await?;
+                    observation_workflow::retain_stage(
+                        &mut transaction,
+                        invocation,
+                        observation_workflow::ObservationResult {
+                            generation: position.generation,
+                            after,
+                            through: position.through,
+                            outcome: observation_workflow::ObservationOutcome::Partial,
+                        },
+                    )
+                    .await?;
+                    transaction.commit().await?;
+                } else {
+                    transaction.rollback().await?;
+                }
                 return Ok(FrontierEventAdmission::Unchanged);
             }
             if !events.is_empty() {
@@ -1079,6 +1136,19 @@ impl RepoWatchStore {
         if advanced.rows_affected() != 1 {
             transaction.rollback().await?;
             return Ok(FrontierEventAdmission::Stale);
+        }
+        if let (Some(invocation), Some(after)) = (&self.observation_invocation, observation_after) {
+            observation_workflow::retain_stage(
+                &mut transaction,
+                invocation,
+                observation_workflow::ObservationResult {
+                    generation: next_generation,
+                    after,
+                    through: repository_event_ordinal,
+                    outcome: observation_workflow::ObservationOutcome::Partial,
+                },
+            )
+            .await?;
         }
         transaction.commit().await?;
         Ok(FrontierEventAdmission::Committed {
@@ -2018,6 +2088,35 @@ impl RepoWatchStore {
         codec: &mut Codec,
         admission: Option<(&str, std::time::Duration)>,
     ) -> Result<DispatchAdmission, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let outcome = self
+            .record_commands_transaction(
+                &mut transaction,
+                planned,
+                issued_at,
+                codec,
+                admission,
+                None,
+            )
+            .await?;
+        if matches!(
+            outcome,
+            DispatchAdmission::Inserted | DispatchAdmission::Suppressed
+        ) {
+            transaction.commit().await?;
+        }
+        Ok(outcome)
+    }
+
+    async fn record_commands_transaction<Codec: SessionCommandCodec>(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        planned: &[PlannedCommand],
+        issued_at: OffsetDateTime,
+        codec: &mut Codec,
+        admission: Option<(&str, std::time::Duration)>,
+        retry: Option<&retry::RetryAdmission>,
+    ) -> Result<DispatchAdmission, StoreError> {
         let Some(first) = planned.first() else {
             return Err(StoreError::InvalidDispatchBatch);
         };
@@ -2040,28 +2139,49 @@ impl RepoWatchStore {
         {
             return Err(StoreError::InvalidDispatchBatch);
         }
-        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "SELECT pg_advisory_xact_lock(
                 hashtextextended(length($1)::text || ':' || $1 || $2, 0))",
         )
         .bind(first.repository().as_str())
         .bind(first.rule_id().as_str())
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         sqlx::query(
             "SELECT pg_advisory_xact_lock(
                 hashtextextended('dispatch:' || $1::text, 0))",
         )
         .bind(first.dispatch().into_uuid())
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
+        let retry_parent: Option<Uuid> = if let Some(retry) = retry {
+            if !self
+                .retry_still_due(transaction, first, retry, issued_at, admission)
+                .await?
+            {
+                return Ok(DispatchAdmission::Suppressed);
+            }
+            Some(retry.parent)
+        } else if !initial_batch {
+            sqlx::query_scalar("SELECT retry_of FROM dispatch_ledger WHERE dispatch_ref = $1 AND trigger_sequence IS NULL AND command_kind = 'create_session' ORDER BY action_ordinal LIMIT 1")
+                .bind(first.dispatch().into_uuid()).fetch_optional(&mut **transaction).await?.flatten()
+        } else {
+            None
+        };
+        let retry_event: Option<Vec<u8>> = if let Some(retry) = retry {
+            Some(retry.event.clone())
+        } else if retry_parent.is_some() {
+            sqlx::query_scalar("SELECT retry_event FROM dispatch_ledger WHERE dispatch_ref = $1 AND trigger_sequence IS NULL AND command_kind = 'create_session' ORDER BY action_ordinal LIMIT 1")
+                .bind(first.dispatch().into_uuid()).fetch_optional(&mut **transaction).await?.flatten()
+        } else {
+            None
+        };
         let retained_actions: Vec<(Uuid, Decimal, Uuid, String, Vec<u8>)> = sqlx::query_as(
             "SELECT dispatch_ref, action_ordinal, command_id, command_kind, command_payload
                FROM dispatch_ledger
               WHERE repository = $1 AND rule_id = $2 AND rule_revision = $3
                 AND event_id = $4 AND trigger_sequence IS NOT DISTINCT FROM $5
-                AND retirement_event_id IS NULL
+                AND retirement_event_id IS NULL AND retry_of IS NOT DISTINCT FROM $6
               ORDER BY action_ordinal",
         )
         .bind(first.repository().as_str())
@@ -2069,7 +2189,8 @@ impl RepoWatchStore {
         .bind(Decimal::from(first.rule_revision().get()))
         .bind(first.event_id().into_uuid())
         .bind(first.trigger_sequence().map(Decimal::from))
-        .fetch_all(&mut *transaction)
+        .bind(retry_parent)
+        .fetch_all(&mut **transaction)
         .await?;
         if retained_actions.len() == planned.len() {
             let mut commands = Vec::with_capacity(planned.len());
@@ -2079,7 +2200,6 @@ impl RepoWatchStore {
                 if ordinal != Decimal::from(planned.action_ordinal())
                     || kind != command_kind_storage(planned.command().kind())
                 {
-                    transaction.rollback().await?;
                     return Ok(DispatchAdmission::ConflictingReuse);
                 }
                 let command = codec
@@ -2088,7 +2208,6 @@ impl RepoWatchStore {
                 if command.command_id().into_uuid() != command_id
                     || command.kind() != planned.command().kind()
                 {
-                    transaction.rollback().await?;
                     return Err(StoreError::InvalidRetainedCommand);
                 }
                 commands.push(
@@ -2096,13 +2215,11 @@ impl RepoWatchStore {
                         .with_retained_command(RepoWatchDispatchId::from_uuid(dispatch), command),
                 );
             }
-            transaction.rollback().await?;
             return Ok(DispatchAdmission::Replayed {
                 commands: commands.into_boxed_slice(),
             });
         }
         if !retained_actions.is_empty() {
-            transaction.rollback().await?;
             return Ok(DispatchAdmission::ConflictingReuse);
         }
         let conflicting_dispatch: bool = sqlx::query_scalar(
@@ -2118,10 +2235,9 @@ impl RepoWatchStore {
         .bind(first.rule_id().as_str())
         .bind(Decimal::from(first.rule_revision().get()))
         .bind(first.event_id().into_uuid())
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if conflicting_dispatch {
-            transaction.rollback().await?;
             return Ok(DispatchAdmission::ConflictingReuse);
         }
         if first.trigger_sequence().is_some() {
@@ -2136,12 +2252,11 @@ impl RepoWatchStore {
             .bind(first.rule_id().as_str())
             .bind(Decimal::from(first.rule_revision().get()))
             .bind(first.event_id().into_uuid())
-            .fetch_all(&mut *transaction)
+            .fetch_all(&mut **transaction)
             .await?;
             if planned.iter().any(|command| {
                 !committed_origin_ordinals.contains(&Decimal::from(command.action_ordinal()))
             }) {
-                transaction.rollback().await?;
                 return Ok(DispatchAdmission::ConflictingReuse);
             }
         } else {
@@ -2162,17 +2277,16 @@ impl RepoWatchStore {
             .bind(first.repository().as_str())
             .bind(first.rule_id().as_str())
             .bind(first.event_id().into_uuid())
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?;
             if active_revision != Some(Decimal::from(first.rule_revision().get())) {
-                transaction.rollback().await?;
                 return Ok(DispatchAdmission::InactiveRule);
             }
         }
         if let Some((key, cooldown)) = admission {
             sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('singleton:' || length($1)::text || ':' || $1 || ':' || $2::text || ':' || $3, 0))")
                 .bind(first.rule_id().as_str()).bind(Decimal::from(first.rule_revision().get())).bind(key)
-                .execute(&mut *transaction).await?;
+                .execute(&mut **transaction).await?;
             let suppressed: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM dispatch_ledger
                  WHERE rule_id = $1 AND rule_revision = $2 AND singleton_key = $3
@@ -2180,10 +2294,11 @@ impl RepoWatchStore {
                      OR EXTRACT(EPOCH FROM ($4::timestamptz - COALESCE(singleton_released_at, settled_at))) < $5))")
                 .bind(first.rule_id().as_str()).bind(Decimal::from(first.rule_revision().get())).bind(key)
                 .bind(issued_at).bind(Decimal::from(cooldown.as_secs()))
-                .fetch_one(&mut *transaction).await?;
+                .fetch_one(&mut **transaction).await?;
             if suppressed {
-                advance_evaluation(&mut transaction, first).await?;
-                transaction.commit().await?;
+                if retry.is_none() {
+                    advance_evaluation(transaction, first).await?;
+                }
                 return Ok(DispatchAdmission::Suppressed);
             }
         }
@@ -2204,10 +2319,13 @@ impl RepoWatchStore {
                        ON repository.repository = event.repository WHERE event.event_id = $1",
                 )
                 .bind(command.event_id().into_uuid())
-                .fetch_one(&mut *transaction)
+                .fetch_one(&mut **transaction)
                 .await?;
-                let event = crate::event_decode::event(command.event_id(), &event_payload)
-                    .ok_or(StoreError::InvalidRetainedEvent)?;
+                let event = crate::event_decode::event(
+                    command.event_id(),
+                    retry_event.as_deref().unwrap_or(&event_payload),
+                )
+                .ok_or(StoreError::InvalidRetainedEvent)?;
                 let observation = baseline
                     .as_ref()
                     .map(|value| {
@@ -2224,8 +2342,8 @@ impl RepoWatchStore {
                     "INSERT INTO dispatch_ledger
                         (dispatch_ref, action_ordinal, command_id, repository, rule_id,
                          rule_revision, event_id, trigger_sequence, command_kind, command_payload,
-                         status, issued_at, singleton_key, kickoff_text)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12, $13)
+                         status, issued_at, singleton_key, kickoff_text, retry_of, retry_event)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12, $13, $14, $15)
                      ON CONFLICT DO NOTHING",
                 )
                 .bind(command.dispatch().into_uuid())
@@ -2241,20 +2359,20 @@ impl RepoWatchStore {
                 .bind(issued_at)
                 .bind(admission.map(|(key, _)| key))
                 .bind(kickoff)
-                .execute(&mut *transaction)
+                .bind(retry_parent)
+                .bind(&retry_event)
+                .execute(&mut **transaction)
                 .await?
                 .rows_affected()
                     == 1,
             );
         }
         if inserted_count == planned.len() {
-            if admission.is_some() {
-                advance_evaluation(&mut transaction, first).await?;
+            if admission.is_some() && retry.is_none() {
+                advance_evaluation(transaction, first).await?;
             }
-            transaction.commit().await?;
             return Ok(DispatchAdmission::Inserted);
         }
-        transaction.rollback().await?;
         Ok(DispatchAdmission::ConflictingReuse)
     }
 

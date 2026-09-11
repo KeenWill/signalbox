@@ -35,12 +35,11 @@ use crate::credential_pools::{
 };
 
 use super::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
-    DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS, FileCredentialAccess, HubModelConfiguration,
-    HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES, MIGRATED_ANTHROPIC_MODEL_FAMILY,
-    ModelAdapter, ModelCallInputUsage, RepositoryWatchWebhookMode, UnknownSessionModel,
-    absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference, validate_alias_count,
-    validate_model_count,
+    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS,
+    FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError,
+    MAX_COMPACTION_PROMPT_UTF8_BYTES, MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter,
+    ModelCallInputUsage, RepositoryWatchWebhookMode, UnknownSessionModel, absolute_search_entries,
+    credential_bytes, resolved_mcp_bridge_reference, validate_alias_count, validate_model_count,
 };
 
 const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
@@ -128,11 +127,15 @@ pub(crate) const CONFIGURATION: &str = r#"
 version = 1
 
 [numeric_bounds]
+max_git_object_bytes = "none"
 max_image_presentation_bytes = "none"
 max_image_request_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
 repository_watch_webhook_retention = "604800s"
+guard_recovery_initial_delay = "1s"
+guard_recovery_maximum_delay = "10s"
+guard_recovery_elapsed_bound = "none"
 fenced_pool_min_connections = 48
 fenced_pool_floor_reconciliation_interval = "5s"
 fenced_pool_floor_reconciliation_attempt_bound = "30s"
@@ -906,6 +909,50 @@ fn repository_watch_is_enabled_by_default() {
 }
 
 #[test]
+fn repository_observation_workflows_are_disabled_by_default() {
+    let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+        .expect("repository-watch configuration");
+    assert!(
+        !configured
+            .repository_watch()
+            .expect("configured watch")
+            .workflows_enabled()
+    );
+}
+
+#[test]
+fn repository_observation_workflows_can_be_selected_explicitly() {
+    let configured = HubModelConfiguration::parse(&configuration_with_repository_watch().replace(
+        "[repository_watch]\nversion = 1",
+        "[repository_watch]\nversion = 1\nworkflows_enabled = true",
+    ))
+    .expect("workflow repository-watch configuration");
+    assert!(
+        configured
+            .repository_watch()
+            .expect("configured watch")
+            .workflows_enabled()
+    );
+}
+
+#[test]
+fn repository_observation_workflows_reject_non_boolean_values() {
+    for value in ["1", "\"true\"", "[]"] {
+        let source = configuration_with_repository_watch().replace(
+            "[repository_watch]\nversion = 1",
+            &format!("[repository_watch]\nversion = 1\nworkflows_enabled = {value}"),
+        );
+        assert!(
+            matches!(
+                HubModelConfiguration::parse(&source),
+                Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            ),
+            "workflows_enabled must reject {value}"
+        );
+    }
+}
+
+#[test]
 fn repository_watch_can_be_disabled_explicitly() {
     let configured = HubModelConfiguration::parse(&configuration_with_repository_watch().replace(
         "[repository_watch]\nversion = 1",
@@ -977,11 +1024,11 @@ fn repository_watch_preserves_each_credential_file_reference() {
 
     assert_eq!(
         repositories[0].credential_file(),
-        Path::new(WATCH_CREDENTIAL_FILE)
+        Some(Path::new(WATCH_CREDENTIAL_FILE))
     );
     assert_eq!(
         repositories[1].credential_file(),
-        Path::new(SECOND_WATCH_CREDENTIAL_FILE)
+        Some(Path::new(SECOND_WATCH_CREDENTIAL_FILE))
     );
 }
 
@@ -2117,55 +2164,15 @@ fn approval_judge_rejects_an_unconfigured_direct_selection() {
 }
 
 #[test]
-fn conversation_import_bound_defaults_to_256_mib() {
-    let configuration =
-        HubModelConfiguration::parse(CONFIGURATION).expect("the canonical configuration is valid");
-
-    assert_eq!(
-        configuration.conversation_import_max_source_bytes(),
-        DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES
-    );
-}
-
-#[test]
-fn conversation_import_bound_accepts_an_explicit_positive_byte_count() {
-    let max_source_bytes = 1_048_576;
+fn conversation_import_table_is_an_unknown_top_level_field() {
     let configured = CONFIGURATION.replace(
         "[compaction]",
-        &format!("[conversation_import]\nmax_source_bytes = {max_source_bytes}\n\n[compaction]"),
-    );
-    let configuration =
-        HubModelConfiguration::parse(&configured).expect("the explicit import bound is valid");
-
-    assert_eq!(
-        configuration.conversation_import_max_source_bytes(),
-        max_source_bytes
-    );
-}
-
-#[test]
-fn conversation_import_bound_rejects_zero() {
-    let configured = CONFIGURATION.replace(
-        "[compaction]",
-        "[conversation_import]\nmax_source_bytes = 0\n\n[compaction]",
+        "[conversation_import]\nmax_source_bytes = 268435456\n\n[compaction]",
     );
 
     assert_eq!(
         HubModelConfiguration::parse(&configured).err(),
-        Some(HubModelConfigurationError::InvalidConversationImportLimit)
-    );
-}
-
-#[test]
-fn conversation_import_bound_rejects_unknown_fields() {
-    let configured = CONFIGURATION.replace(
-        "[compaction]",
-        "[conversation_import]\nmax_source_bytes = 1048576\nextra = 1\n\n[compaction]",
-    );
-
-    assert_eq!(
-        HubModelConfiguration::parse(&configured).err(),
-        Some(HubModelConfigurationError::InvalidConversationImportLimit)
+        Some(HubModelConfigurationError::UnknownField)
     );
 }
 
@@ -4838,6 +4845,54 @@ fn configured_openai_models_route_through_the_pinned_api_key_profile() {
 }
 
 #[test]
+fn continuation_overhead_covers_nondefault_reasoning_and_service_tier() {
+    use signalbox_model_runtime::{
+        ConversationMessage, ModelOperation, ModelSettings, OpenAiServiceTier, ReasoningLevel,
+        RequestedTarget, ResolvedTarget, ServiceTier,
+    };
+
+    let configuration =
+        HubModelConfiguration::parse(&format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}"))
+            .expect("fixture settings capabilities are valid");
+    let selection = DirectModelSelection::from_uuid(
+        Uuid::parse_str("10000000-0000-4000-8000-00000000000e").expect("fixture UUID is valid"),
+    );
+    let route = configuration
+        .resolve_direct_model(selection)
+        .expect("fixture route exists");
+    let definition = configuration
+        .runtime_models
+        .resolve(route.target())
+        .expect("fixture target exists");
+    let mut operation = ModelOperation::new(
+        (),
+        CredentialReference::new("continuation-measurement"),
+        RequestedTarget::new(definition.provider_model()),
+        ResolvedTarget::new(definition.provider_model()),
+        vec![ConversationMessage::user_text("Retained summary.")],
+        ModelSettings::new(definition.max_output_tokens()),
+    );
+    let omitted = signalbox_model_runtime_openai::serialized_request_bytes(&operation)
+        .expect("default settings serialize");
+    let allowance = configuration
+        .continuation_request_bytes(route.target(), ModelAdapter::OpenAi, &operation)
+        .expect("supported settings have an allowance");
+    // These are valid turn overrides even though neither is a configured default.
+    operation.settings.reasoning_level = Some(ReasoningLevel::Minimal);
+    operation.settings.service_tier = Some(ServiceTier::OpenAi(OpenAiServiceTier::Priority));
+    let request = signalbox_model_runtime_openai::serialized_request_bytes(&operation)
+        .expect("nondefault effective settings serialize");
+    assert!(
+        request > omitted,
+        "omitting these settings would admit an oversized request"
+    );
+    assert!(
+        allowance >= request,
+        "the allowance includes effective settings from turn overrides"
+    );
+}
+
+#[test]
 fn configuration_accepts_an_opaque_openai_profile_name() {
     let other_profile = "openai-secondary";
     let configuration = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}")
@@ -6249,6 +6304,84 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
 }
 
 #[test]
+fn checked_in_example_parses_unbounded_git_object_content() {
+    let configuration =
+        super::checked_in_example_configuration().expect("checked-in example parses");
+    assert_eq!(
+        configuration
+            .numeric_bounds()
+            .integer("max_git_object_bytes"),
+        Some(None)
+    );
+    let configured = CONFIGURATION.replace(
+        "max_git_object_bytes = \"none\"",
+        "max_git_object_bytes = 1048576",
+    );
+    let configuration =
+        HubModelConfiguration::parse(&configured).expect("finite Git object policy parses");
+    assert_eq!(
+        configuration
+            .numeric_bounds()
+            .integer("max_git_object_bytes"),
+        Some(Some(1048576))
+    );
+}
+
+#[test]
+fn repository_watch_and_tools_share_the_configured_app_cache() {
+    let source = configuration_with_repository_watch().replace(
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+        "credential_profile = \"github-primary\"",
+    );
+    let source = format!(
+        "{source}\n[[credential_profiles]]\nname = \"github-primary\"\nadapter = \"github\"\ndelivery = \"github_app\"\napp_id = 42\ninstallation_id = 73\nprivate_key_file = \"/unused/test-app-key.pem\"\n"
+    );
+    let configuration = HubModelConfiguration::parse(&source)
+        .expect("App profile and repository reference parse without key access");
+    let mut reloaded = HubModelConfiguration::parse(&source).expect("reload parses");
+    reloaded.reuse_github_credentials(&configuration);
+    let profile = configuration
+        .github_credential_profile("github-primary")
+        .expect("App profile");
+    let app = profile.authentication().expect("App authentication");
+    assert!(std::sync::Arc::ptr_eq(
+        &app,
+        &reloaded
+            .github_credential_profile("github-primary")
+            .expect("reloaded profile")
+            .authentication()
+            .expect("reloaded cache")
+    ));
+    let watch = configuration.repository_watch().expect("repository watch");
+    let repository = &watch.repositories()[0];
+    assert!(repository.admits_push());
+    assert!(repository.credential_file().is_none());
+    assert!(std::sync::Arc::ptr_eq(
+        &app,
+        &repository
+            .credential()
+            .authentication()
+            .expect("repository authentication")
+    ));
+    let access =
+        FileCredentialAccess::from_github(profile, CredentialReference::new("github-primary"));
+    assert!(std::sync::Arc::ptr_eq(
+        &app,
+        &access.github_app().expect("tool authentication")
+    ));
+}
+
+#[test]
+fn declared_github_token_file_preserves_polling_credential_isolation() {
+    let source = format!(
+        "{}\n[[credential_profiles]]\nname = \"github-primary\"\nadapter = \"github\"\ndelivery = \"file\"\nfile = \"{WATCH_CREDENTIAL_FILE}\"\n",
+        configuration_with_repository_watch()
+    );
+    let configuration = HubModelConfiguration::parse(&source).expect("token-file profile parses");
+    assert!(configuration.github_tool_credential_conflicts(Path::new("/unused/environment-token")));
+}
+
+#[test]
 fn file_media_requires_blob_storage_before_worker_startup() {
     let enabled = format!("file_media = true\n{CONFIGURATION}");
     assert_eq!(
@@ -6309,6 +6442,80 @@ fn human_approval_wait_rejects_zero_and_invalid_durations() {
             "{value}"
         );
     }
+}
+
+#[test]
+fn workspace_instruction_discovery_limits_accept_values_and_none() {
+    for (settings, expected) in [
+        (
+            r#"max_classified_entries = 3
+max_findings = 4
+max_candidate_source_bytes = 5
+max_elapsed = "6s""#,
+            signalbox_application::InstructionDiscoveryLimits {
+                classified_entries: Some(3),
+                findings: std::num::NonZeroUsize::new(4),
+                candidate_source_bytes: Some(5),
+                elapsed: Some(std::time::Duration::from_secs(6)),
+            },
+        ),
+        (
+            r#"max_classified_entries = "none"
+max_findings = "none"
+max_candidate_source_bytes = "none"
+max_elapsed = "none""#,
+            signalbox_application::InstructionDiscoveryLimits {
+                classified_entries: None,
+                findings: None,
+                candidate_source_bytes: None,
+                elapsed: None,
+            },
+        ),
+    ] {
+        let text = format!(
+            "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = []\n{settings}\n"
+        );
+        let configuration =
+            HubModelConfiguration::parse(&text).expect("configured discovery limits");
+        assert_eq!(configuration.workspace_instructions().limits(), expected);
+    }
+}
+
+#[test]
+fn tool_proposal_limits_use_defaults_values_and_none() {
+    let defaults = HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration");
+    assert_eq!(
+        defaults.tool_proposal_limits(),
+        signalbox_application::ToolProposalLimits::default()
+    );
+    let configured = HubModelConfiguration::parse(&format!(
+        "{CONFIGURATION}\n[tool_proposals]\nmax_requests = 5\nmax_argument_bytes = 2048\n"
+    ))
+    .expect("finite tool proposal limits");
+    assert_eq!(
+        configured.tool_proposal_limits(),
+        signalbox_application::ToolProposalLimits {
+            max_requests: Some(5),
+            max_argument_bytes: Some(2048),
+        }
+    );
+    let unbounded = HubModelConfiguration::parse(&format!("{CONFIGURATION}\n[tool_proposals]\nmax_requests = \"none\"\nmax_argument_bytes = \"none\"\n"))
+        .expect("unbounded tool proposals");
+    assert_eq!(
+        unbounded.tool_proposal_limits(),
+        signalbox_application::ToolProposalLimits {
+            max_requests: None,
+            max_argument_bytes: None,
+        }
+    );
+}
+
+#[test]
+fn workspace_instruction_finding_limit_rejects_zero() {
+    let text = format!(
+        "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = []\nmax_findings = 0\n"
+    );
+    assert!(HubModelConfiguration::parse(&text).is_err());
 }
 
 #[test]

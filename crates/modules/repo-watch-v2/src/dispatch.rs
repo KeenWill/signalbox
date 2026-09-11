@@ -78,6 +78,7 @@ impl RepoWatchStore {
              JOIN gh_event AS event ON event.repository = active.repository
               AND event.repository_event_ordinal > GREATEST(revision.activated_after_event_ordinal, COALESCE(cursor.event_ordinal, 0))
              WHERE active.repository = $1 AND active.rule_id = $2 AND active.active_revision = $3
+               AND cursor.effect_id IS NULL
              ORDER BY event.repository_event_ordinal LIMIT 1")
             .bind(repository.as_str()).bind(rule.id().as_str()).bind(Decimal::from(rule.version().get()))
             .fetch_optional(&self.pool).await?;
@@ -246,6 +247,7 @@ impl RepoWatchStore {
                  WHERE fact.repository = dispatched.repository
                    AND fact.pull_request_number = dispatched.pull_request_number
                    AND fact.repository_event_ordinal > dispatched.repository_event_ordinal
+                   AND (origin.retry_of IS NULL OR fact.recorded_at >= origin.issued_at)
                    AND fact.event_kind IN ('pull_request_closed', 'pull_request_merged')
                  ORDER BY fact.repository_event_ordinal LIMIT 1
              ) AS terminal ON true
@@ -285,9 +287,9 @@ impl RepoWatchStore {
                 "INSERT INTO dispatch_ledger (
                     dispatch_ref, action_ordinal, command_id, repository, rule_id, rule_revision,
                     event_id, command_kind, command_payload, status, issued_at,
-                    retirement_event_id, retirement_reason)
+                    retirement_event_id, retirement_reason, retry_of, retry_event)
                  SELECT dispatch_ref, action_ordinal, $2, repository, rule_id, rule_revision,
-                    event_id, 'lifecycle', $3, 'pending', $4, $5, $6
+                    event_id, 'lifecycle', $3, 'pending', $4, $5, $6, retry_of, retry_event
                  FROM dispatch_ledger WHERE command_id = $1
                  ON CONFLICT (dispatch_ref, action_ordinal) WHERE retirement_event_id IS NOT NULL DO NOTHING")
                 .bind(retirement.command_id).bind(command.command_id().into_uuid()).bind(payload)
@@ -305,11 +307,28 @@ impl RepoWatchStore {
         sink: &mut Sink,
         source: &LifecycleEventSource,
     ) -> Result<(), SubmissionError<Sink::Error>> {
+        self.submit_selected_pending(codec, sink, source, None)
+            .await
+    }
+
+    pub(crate) async fn submit_selected_pending<
+        Codec: SessionCommandCodec,
+        Sink: SessionCommandSink,
+    >(
+        &self,
+        codec: &mut Codec,
+        sink: &mut Sink,
+        source: &LifecycleEventSource,
+        dispatch: Option<signalbox_session_ownership::RepoWatchDispatchId>,
+    ) -> Result<(), SubmissionError<Sink::Error>> {
         for planned in self
             .recover_pending_commands(codec)
             .await
             .map_err(SubmissionError::Store)?
         {
+            if dispatch.is_some_and(|dispatch| planned.dispatch() != dispatch) {
+                continue;
+            }
             let id = planned.command().command_id();
             let retirement_session: Option<Uuid> = sqlx::query_scalar(
                 "SELECT origin.created_session_id FROM dispatch_ledger reaction
@@ -388,7 +407,7 @@ impl RepoWatchStore {
     }
 }
 
-fn singleton_key(
+pub(crate) fn singleton_key(
     scope: RepoWatchSingletonScope,
     event: &RepoWatchEvent,
     observation: Option<&RepoWatchObservation>,

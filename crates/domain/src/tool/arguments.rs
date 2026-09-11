@@ -4,9 +4,7 @@ use serde::{
     Deserialize, Serialize, Serializer, de::IgnoredAny, ser::SerializeMap, ser::SerializeSeq,
 };
 
-const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
-
-/// Which bounded representation normalized tool arguments carry.
+/// Which representation normalized tool arguments carry.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ToolArgumentsKind {
     /// Compact JSON with recursively lexical object keys.
@@ -15,7 +13,7 @@ pub enum ToolArgumentsKind {
     Undecodable,
 }
 
-/// One bounded normalized tool-argument value.
+/// One normalized tool-argument value.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct NormalizedToolArguments {
     pub(super) kind: ToolArgumentsKind,
@@ -28,12 +26,6 @@ impl NormalizedToolArguments {
     /// Syntactically valid JSON is compacted with recursively lexical object
     /// keys. Invalid JSON remains exact and is tagged `Undecodable`.
     pub fn try_from_provider_text(value: String) -> Result<Self, ToolArgumentsError> {
-        if value.len() > MAX_TOOL_ARGUMENT_BYTES {
-            return Err(ToolArgumentsError {
-                failure: ToolArgumentsFailure::TooLarge { bytes: value.len() },
-                value,
-            });
-        }
         if value.contains('\0') {
             return Err(ToolArgumentsError {
                 failure: ToolArgumentsFailure::ContainsNull,
@@ -41,7 +33,7 @@ impl NormalizedToolArguments {
             });
         }
 
-        // The byte cap does not bound JSON depth. Disabling serde_json's
+        // Disabling serde_json's
         // recursion limit is safe here only because serde_stacker grows the
         // parse and serialization stacks and iterative destruction below keeps
         // a deeply nested Value from overflowing the thread stack during Drop.
@@ -77,12 +69,6 @@ impl NormalizedToolArguments {
             value,
             failure: ToolArgumentsFailure::CanonicalizationFailed,
         })?;
-        if value.len() > MAX_TOOL_ARGUMENT_BYTES {
-            return Err(ToolArgumentsError {
-                failure: ToolArgumentsFailure::CanonicalTooLarge { bytes: value.len() },
-                value,
-            });
-        }
         Ok(Self {
             kind: ToolArgumentsKind::Json,
             value,
@@ -219,16 +205,6 @@ fn drop_json_value_iteratively(value: serde_json::Value) {
 /// Why tool-argument normalization or reconstitution failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolArgumentsFailure {
-    /// Provider text exceeded the admission bound.
-    TooLarge {
-        /// The observed UTF-8 byte count.
-        bytes: usize,
-    },
-    /// Canonical JSON exceeded the admission bound.
-    CanonicalTooLarge {
-        /// The canonical UTF-8 byte count.
-        bytes: usize,
-    },
     /// Provider text contained U+0000, which cannot enter durable text.
     ContainsNull,
     /// Serialization of an already-decoded JSON value unexpectedly failed.

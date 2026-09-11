@@ -284,6 +284,16 @@ where
     type Error = RepositoryAttemptError<Loader::Error>;
 
     async fn poll(&mut self, producer: EventProducer) -> Result<(), Self::Error> {
+        self.poll_outcome(producer).await.map(|_| ())
+    }
+}
+
+impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
+    /// Runs the existing bounded attempt and retains its measured outcome.
+    pub async fn poll_outcome(
+        &mut self,
+        producer: EventProducer,
+    ) -> Result<crate::measurements::PollOutcome, RepositoryAttemptError<Loader::Error>> {
         let attempt = crate::measurements::AttemptGuard::start(
             self.store.measurements.clone(),
             self.repository.clone(),
@@ -297,7 +307,7 @@ where
             Err(RepositoryAttemptError::Store(_)) => PollOutcome::StoreFailed,
             Err(RepositoryAttemptError::FrontierConflict) => PollOutcome::FrontierConflict,
         });
-        result.map(|_| ())
+        result
     }
 }
 

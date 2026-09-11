@@ -5,7 +5,6 @@ use crate::model_execution::ToolContinuationUsageLimitCatalog;
 use rust_decimal::Decimal;
 use signalbox_domain::{
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, ToolExecutionErrorDetail,
-    ToolUsingAssistantResponse,
 };
 use sqlx::{PgConnection, Row};
 
@@ -49,7 +48,8 @@ pub(super) async fn result_byte_limit(
     .bind(producing_call.into_uuid())
     // Result entry/attempt identities are assigned later; all UUID encodings
     // have the request ID's width. Reserve the widest physical position and
-    // the empty result envelope, without charging source response payloads.
+    // the empty result envelope for every persisted request, including
+    // inadmissible proposals, without charging source response payloads.
     .bind(Decimal::from(u64::MAX))
     .bind(truncation_marker(0, usize::MAX))
     .fetch_one(&mut *connection)
@@ -57,9 +57,10 @@ pub(super) async fn result_byte_limit(
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
         row.try_get("resolved_provider_model_identity_id")?,
     ));
-    let Some(prompt_bytes) = limits.iter().find_map(|((candidate, _), limit)| {
-        (*candidate == target).then_some(limit.compaction_prompt_bytes())
-    }) else {
+    let Some(limit) = limits
+        .iter()
+        .find_map(|((candidate, _), limit)| (*candidate == target).then_some(limit))
+    else {
         return Ok(None);
     };
     let number = |field: &'static str| -> Result<Option<u64>, ToolLoopRepositoryError> {
@@ -103,13 +104,17 @@ pub(super) async fn result_byte_limit(
     let minimum_failure_content =
         u64::try_from(row.try_get::<i64, _>("minimum_failure_content_bytes")?)
             .map_err(|_| ToolLoopCorruption::Inconsistent("tool failure content"))?;
-    let safe_prefix = window.saturating_sub(output).saturating_sub(prompt_bytes);
-    // The following response can admit more tools than the producing response.
-    // Reserve every envelope and an empty-prefix marker for that bounded batch.
+    let safe_prefix = window
+        .saturating_sub(output)
+        .saturating_sub(limit.compaction_prompt_bytes());
+    // This finite allowance uses the cap or default, not an unknown future count.
+    // A larger response that exhausts headroom takes the compaction path.
     let framing_per_result = framing
         .checked_div(count)
         .ok_or(ToolLoopCorruption::Inconsistent("empty tool result batch"))?;
-    let next_batch = (ToolUsingAssistantResponse::MAX_TOOL_COUNT as u64)
+    let next_batch = limit
+        .max_tool_requests()
+        .unwrap_or(signalbox_application::ToolProposalLimits::DEFAULT_MAX_REQUESTS)
         .saturating_mul(framing_per_result.saturating_add(minimum_failure_content));
     let headroom = window
         .saturating_sub(output.saturating_add(output))
@@ -139,7 +144,7 @@ pub(super) fn context_error_detail(text: &str, limit: usize) -> String {
 }
 
 /// The budget includes JSON string escaping and the truncation marker.
-/// A marker that cannot fit is retained for the compaction-wall fallback.
+/// A marker that cannot fit is retained for dedicated compaction.
 pub(super) fn context_text(text: &str, limit: usize) -> String {
     fn encoded_bytes(text: &str) -> usize {
         // A UTF-8 string always serializes; counting avoids allocating a JSON copy.

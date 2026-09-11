@@ -104,7 +104,6 @@ anchor, unless the anchor is a heading on the linking page.
 
 ## Design documents
 
-- [Daemon survival design](../design/daemon-survival.md)
 - [Sessions and the transcript design](../design/sessions-and-transcript.md)
 - [Session lifecycle design](../design/session-lifecycle.md)
 - [Turn lifecycle and scheduling design](../design/turn-lifecycle-and-scheduling.md)

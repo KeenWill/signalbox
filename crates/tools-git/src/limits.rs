@@ -10,12 +10,6 @@ pub(super) const MAX_IDENTITY_BYTES: usize = 256;
 
 pub(super) const MAX_STAGE_PATHS: usize = 256;
 
-pub(super) const MAX_STAGE_FILE_BYTES: usize = MAX_OBJECT_BYTES;
-
-pub(super) const MAX_STAGE_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-
-pub(super) const MAX_WORKTREE_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-
 pub(super) const MAX_REPOSITORY_CONFIG_BYTES: usize = 1024 * 1024;
 
 pub(super) const MAX_PACKED_REFS_BYTES: usize = 1024 * 1024;
@@ -28,19 +22,11 @@ pub(super) const MAX_INDEX_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) const MAX_INDEX_ENTRIES: usize = MAX_WORKTREE_INSPECTIONS;
 
-pub(super) const MAX_OBJECT_BYTES: usize = 1024 * 1024;
-
 pub(super) const MAX_LOOSE_OBJECT_HEADER_BYTES: usize = 128;
-
-pub(super) const MAX_PACK_FILE_BYTES: usize = MAX_OBJECT_DATABASE_BYTES;
-
-pub(super) const MAX_OBJECT_DATABASE_BYTES: usize = 128 * MAX_OBJECT_BYTES;
 
 pub(super) const MAX_REPOSITORY_INSPECTIONS: usize = 100_000;
 
-pub(super) const MAX_TREE_BLOB_BYTES: usize = 64 * MAX_OBJECT_BYTES;
-
-pub(super) const MAX_REFLOG_BYTES: usize = 64 * MAX_OBJECT_BYTES;
+pub(super) const MAX_REFLOG_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) const MAX_WORKTREE_INSPECTIONS: usize = 4096;
 
@@ -71,3 +57,15 @@ pub(super) const GITLINK_MODE: u32 = 0o160000;
 pub(super) const INDEX_ASSUME_VALID: u16 = 1 << 15;
 
 pub(super) const INDEX_SKIP_WORKTREE: u16 = 1 << 14;
+
+// libgit2 materializes metadata objects; blob contents use streamed I/O.
+pub(super) const MAX_METADATA_OBJECT_BYTES: usize = 1024 * 1024;
+
+pub(super) fn object_byte_limit(configured: Option<usize>, kind: git2::ObjectType) -> usize {
+    let configured = configured.unwrap_or(usize::MAX);
+    if kind == git2::ObjectType::Blob {
+        configured
+    } else {
+        configured.min(MAX_METADATA_OBJECT_BYTES)
+    }
+}

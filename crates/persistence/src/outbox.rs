@@ -63,10 +63,13 @@ use crate::runner_protocol::RunnerConnectionEpoch;
 const STORAGE_VERSION: i16 = 1;
 /// Session creation records include workflow provenance.
 const SESSION_CREATED_STORAGE_VERSION: i16 = 3;
+/// Tool-batch transitions include child-wait resumption.
+const TOOL_BATCH_TRANSITION_STORAGE_VERSION: i16 = 2;
 
 const fn storage_version_for(discriminator: OutboxEventDiscriminator) -> i16 {
     match discriminator {
         OutboxEventDiscriminator::SessionCreated => SESSION_CREATED_STORAGE_VERSION,
+        OutboxEventDiscriminator::ToolBatchTransition => TOOL_BATCH_TRANSITION_STORAGE_VERSION,
         OutboxEventDiscriminator::SessionStateChanged
         | OutboxEventDiscriminator::SessionTerminal
         | OutboxEventDiscriminator::AutomaticReconciliationExhausted
@@ -81,7 +84,6 @@ const fn storage_version_for(discriminator: OutboxEventDiscriminator) -> i16 {
         | OutboxEventDiscriminator::InputAccepted
         | OutboxEventDiscriminator::TurnActivated
         | OutboxEventDiscriminator::ModelCallTransition
-        | OutboxEventDiscriminator::ToolBatchTransition
         | OutboxEventDiscriminator::ToolApprovalDecided
         | OutboxEventDiscriminator::ContextCompacted
         | OutboxEventDiscriminator::RunnerStateTransition
@@ -639,6 +641,11 @@ pub enum DispatchedToolBatchState {
         /// Ambiguous tool attempt.
         attempt: ToolAttemptId,
     },
+    /// One delivered foreground child wait resumed its parent turn.
+    ChildWaitResumed {
+        /// Exact tool attempt that entered the durable wait.
+        attempt: ToolAttemptId,
+    },
 }
 
 /// Closed runner state carried by one dispatched session transition.
@@ -825,6 +832,28 @@ impl From<OutboxCorruption> for OutboxDispatchError {
     }
 }
 
+impl OutboxCorruption {
+    const fn quarantinable(self) -> bool {
+        matches!(
+            self,
+            Self::MissingCommittedEventHeader
+                | Self::InvalidAcceptancePosition
+                | Self::InvalidAcceptedInputContent
+                | Self::UnsupportedStorageVersion
+                | Self::UnsupportedEventKind
+                | Self::MissingTypedRecord
+                | Self::InvalidLifecycleEventCorrelation
+                | Self::InvalidTerminalEventCorrelation
+                | Self::InvalidModelCallState
+                | Self::InvalidDelegationEvent
+                | Self::InvalidModelSettingsEvent
+                | Self::InvalidRunnerEvent
+                | Self::InvalidLifecycleEvent
+                | Self::InvalidSettlementEvent
+        )
+    }
+}
+
 /// PostgreSQL-backed single-event transactional outbox dispatcher.
 ///
 /// Composition runs exactly one attempt loop. The database lock still
@@ -860,13 +889,36 @@ impl OutboxConsumerReader {
         .await?)
     }
 
-    /// Reads the next typed event without advancing the durable prefix.
+    /// Reports a durably completed configured push in a session's tool history.
+    pub async fn session_pushed(&self, session: SessionId) -> Result<bool, OutboxDispatchError> {
+        Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tool_attempt a JOIN tool_request r USING (request_id) WHERE a.session_id = $1 AND r.tool_name = 'git_push_configured' AND a.terminal_disposition_kind = 'completed')")
+            .bind(session_id_to_uuid(session)).fetch_one(&self.pool).await?)
+    }
+
+    /// Reads the next typed event without advancing its sequence. Undecodable
+    /// rows are quarantined while the consumer prefix advances past them.
     pub async fn read_next(&self) -> Result<Option<DispatchedOutboxEvent>, OutboxDispatchError> {
-        let mut transaction = self.pool.begin().await?;
-        let delivered = lock_consumer_cursor(&mut transaction, self.consumer).await?;
-        let event = load_next_event(&mut transaction, delivered).await?;
-        transaction.rollback().await?;
-        Ok(event)
+        loop {
+            let mut transaction = self.pool.begin().await?;
+            let delivered = lock_consumer_cursor(&mut transaction, self.consumer).await?;
+            match load_next_event(&mut transaction, delivered).await {
+                Ok(event) => {
+                    transaction.rollback().await?;
+                    return Ok(event);
+                }
+                Err(OutboxDispatchError::Corruption(error)) => {
+                    let Some(inserted) =
+                        quarantine_next_event(&mut transaction, self.consumer, delivered, error)
+                            .await?
+                    else {
+                        return Err(error.into());
+                    };
+                    transaction.commit().await?;
+                    log_quarantine(inserted, delivered + 1, error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Advances the durable prefix through the exact event just processed.
@@ -897,7 +949,8 @@ impl OutboxDispatcher {
     ///
     /// The consumer runs while the delivery-state row lock is held. Returning
     /// [`OutboxDeliveryDecision::Retry`] or ending before the commit request
-    /// leaves the prefix unchanged, so a later attempt offers the same event.
+    /// leaves that event pending, so a later attempt offers it again.
+    /// Undecodable preceding rows are quarantined and skipped first.
     /// A lost commit response is resolved by the next locked cursor read: a
     /// committed advance proceeds, while a rolled-back advance redelivers.
     pub async fn dispatch_next<Consumer>(
@@ -907,24 +960,87 @@ impl OutboxDispatcher {
     where
         Consumer: FnOnce(&DispatchedOutboxEvent) -> OutboxDeliveryDecision,
     {
-        let mut transaction = self.pool.begin().await?;
         let consumer = OutboxConsumer::ProcessProtocol;
-        let delivered = lock_consumer_cursor(&mut transaction, consumer).await?;
-        let event = load_next_event(&mut transaction, delivered).await?;
-        let Some(event) = event else {
-            transaction.rollback().await?;
-            return Ok(OutboxDispatchOutcome::Idle);
-        };
-        let next = event.sequence();
+        loop {
+            let mut transaction = self.pool.begin().await?;
+            let delivered = lock_consumer_cursor(&mut transaction, consumer).await?;
+            let event = match load_next_event(&mut transaction, delivered).await {
+                Ok(event) => event,
+                Err(OutboxDispatchError::Corruption(error)) => {
+                    let Some(inserted) =
+                        quarantine_next_event(&mut transaction, consumer, delivered, error).await?
+                    else {
+                        return Err(error.into());
+                    };
+                    transaction.commit().await?;
+                    log_quarantine(inserted, delivered + 1, error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let Some(event) = event else {
+                transaction.rollback().await?;
+                return Ok(OutboxDispatchOutcome::Idle);
+            };
+            let next = event.sequence();
 
-        if consume(&event) == OutboxDeliveryDecision::Retry {
-            transaction.rollback().await?;
-            return Ok(OutboxDispatchOutcome::Retry { sequence: next });
+            if consume(&event) == OutboxDeliveryDecision::Retry {
+                transaction.rollback().await?;
+                return Ok(OutboxDispatchOutcome::Retry { sequence: next });
+            }
+
+            advance_consumer_cursor(&mut transaction, consumer, delivered, next).await?;
+            transaction.commit().await?;
+            return Ok(OutboxDispatchOutcome::Delivered { sequence: next });
         }
+    }
+}
 
-        advance_consumer_cursor(&mut transaction, consumer, delivered, next).await?;
-        transaction.commit().await?;
-        Ok(OutboxDispatchOutcome::Delivered { sequence: next })
+async fn quarantine_next_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    consumer: OutboxConsumer,
+    delivered: u64,
+    error: OutboxCorruption,
+) -> Result<Option<bool>, OutboxDispatchError> {
+    if !error.quarantinable() {
+        return Ok(None);
+    }
+    let next = delivered
+        .checked_add(1)
+        .ok_or(OutboxCorruption::InvalidSequence)?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM outbox_event WHERE event_sequence = $1
+            UNION ALL
+            SELECT 1 FROM delegation_outbox_event WHERE event_sequence = $1)",
+    )
+    .bind(Decimal::from(next))
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !exists {
+        return Ok(None);
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO outbox_event_quarantine(event_sequence, decode_error)
+         VALUES ($1, $2) ON CONFLICT (event_sequence) DO NOTHING",
+    )
+    .bind(Decimal::from(next))
+    .bind(error.to_string())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected()
+        == 1;
+    advance_consumer_cursor(transaction, consumer, delivered, next).await?;
+    Ok(Some(inserted))
+}
+
+fn log_quarantine(inserted: bool, sequence: u64, error: OutboxCorruption) {
+    if inserted {
+        tracing::error!(
+            event_sequence = sequence,
+            decode_error = %error,
+            "outbox event quarantined"
+        );
     }
 }
 
@@ -1066,6 +1182,8 @@ pub(crate) async fn load_event_header(
     if storage_version != storage_version_for(discriminator)
         && !(matches!(discriminator, OutboxEventDiscriminator::SessionCreated)
             && storage_version == 2)
+        && !(matches!(discriminator, OutboxEventDiscriminator::ToolBatchTransition)
+            && storage_version == STORAGE_VERSION)
     {
         return Err(OutboxCorruption::UnsupportedStorageVersion.into());
     }
@@ -1681,6 +1799,23 @@ pub(crate) async fn load_event(
                                         event.tool_attempt_id
                                     AND recovery_request.producing_model_call_id =
                                         event.producing_model_call_id
+                                WHEN 'child_wait_resumed' THEN
+                                    event.frontier_id IS NULL
+                                    AND resumed_attempt.attempt_id =
+                                        event.tool_attempt_id
+                                    AND resumed_attempt.state_kind = 'terminal'
+                                    AND resumed_attempt.terminal_disposition_kind =
+                                        'awaiting_child'
+                                    AND resumed_request.producing_model_call_id =
+                                        event.producing_model_call_id
+                                    AND EXISTS (
+                                        SELECT 1
+                                          FROM turn_attempt AS continuation
+                                         WHERE continuation.continued_from_attempt_id =
+                                               resumed_attempt.issuing_turn_attempt_id
+                                           AND continuation.turn_id = event.turn_id
+                                           AND continuation.session_id = event.session_id
+                                    )
                                 ELSE false
                             END
                        FROM tool_batch_transition_outbox_event AS event
@@ -1710,6 +1845,12 @@ pub(crate) async fn load_event(
                        LEFT JOIN tool_request AS recovery_request
                          ON recovery_request.request_id =
                             recovery_attempt.request_id
+                       LEFT JOIN tool_attempt AS resumed_attempt
+                         ON resumed_attempt.attempt_id = event.tool_attempt_id
+                        AND resumed_attempt.turn_id = event.turn_id
+                        AND resumed_attempt.session_id = event.session_id
+                       LEFT JOIN tool_request AS resumed_request
+                         ON resumed_request.request_id = resumed_attempt.request_id
                       WHERE event.event_sequence = $1
                         AND event.session_id = $2",
             )
@@ -1733,6 +1874,11 @@ pub(crate) async fn load_event(
                 }
                 ("recovery_required", None, Some(attempt)) => {
                     DispatchedToolBatchState::RecoveryRequired {
+                        attempt: ToolAttemptId::from_uuid(attempt),
+                    }
+                }
+                ("child_wait_resumed", None, Some(attempt)) => {
+                    DispatchedToolBatchState::ChildWaitResumed {
                         attempt: ToolAttemptId::from_uuid(attempt),
                     }
                 }
@@ -3693,6 +3839,7 @@ pub(crate) enum ToolBatchOutboxState {
     Proposed(ContextFrontierId),
     ResultsProjected(ContextFrontierId),
     RecoveryRequired(ToolAttemptId),
+    ChildWaitResumed(ToolAttemptId),
 }
 
 /// Acquires the global append allocator at an explicit transaction boundary.
@@ -3977,6 +4124,9 @@ async fn append_tool_batch_transition(
         ToolBatchOutboxState::RecoveryRequired(attempt) => {
             ("recovery_required", None, Some(attempt))
         }
+        ToolBatchOutboxState::ChildWaitResumed(attempt) => {
+            ("child_wait_resumed", None, Some(attempt))
+        }
     };
     let event_sequence: Decimal = sqlx::query_scalar(
         "WITH header AS (
@@ -3995,7 +4145,7 @@ async fn append_tool_batch_transition(
          RETURNING event_sequence",
     )
     .bind(TOOL_BATCH_TRANSITION)
-    .bind(STORAGE_VERSION)
+    .bind(TOOL_BATCH_TRANSITION_STORAGE_VERSION)
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
     .bind(producing_call.into_uuid())
@@ -4060,11 +4210,12 @@ async fn append_tool_batch_transition(
            LEFT JOIN semantic_transcript_entry AS payload
              ON payload.source_session_id = member.source_session_id
             AND payload.semantic_entry_id = member.semantic_entry_id
-           LEFT JOIN tool_attempt AS attempt
-             ON attempt.attempt_id = CASE transition.transition_kind
-                 WHEN 'results_projected' THEN payload.tool_result_attempt_id
-                 WHEN 'recovery_required' THEN transition.tool_attempt_id
-             END
+             LEFT JOIN tool_attempt AS attempt
+               ON attempt.attempt_id = CASE transition.transition_kind
+                   WHEN 'results_projected' THEN payload.tool_result_attempt_id
+                   WHEN 'recovery_required' THEN transition.tool_attempt_id
+                   WHEN 'child_wait_resumed' THEN transition.tool_attempt_id
+               END
             AND attempt.request_id = request.request_id
             AND attempt.state_kind = 'terminal'
           WHERE transition.event_sequence = $1",

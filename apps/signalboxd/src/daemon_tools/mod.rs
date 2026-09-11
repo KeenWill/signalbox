@@ -154,6 +154,7 @@ impl<Clock>
         exec_supervisor_executable: &Path,
         cargo_registry_cache: Option<&Path>,
         sandbox: &signalbox_tools_exec::SandboxConfiguration,
+        max_git_object_bytes: Option<usize>,
         sandboxed_exec_timeout_bound: Option<std::time::Duration>,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
@@ -173,7 +174,11 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
         let code_host = CodeHostTools::try_new(code_host, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
-        let github = GitHubTools::try_new_production(github, github_egress_policy)
+        let github_transport = GitHubApiTransport::try_new()
+            .map_err(|_| DaemonToolsConstructionError::GitHub)?
+            .with_app(github.github_app());
+        let github = github.with_request_timeout(Some(github_transport.request_timeout()));
+        let github = GitHubTools::try_new(github, github_transport, github_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::GitHub)?;
         let workspace = PinnedWorkspaceFileSystem::try_new(workspace_root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
@@ -187,6 +192,7 @@ impl<Clock>
                 exec_runner.clone(),
                 cargo_registry_cache,
                 sandbox,
+                max_git_object_bytes,
                 sandboxed_exec_timeout_bound,
             )?,
             roots: SessionWorkspaceRoots::try_new(workspace_root)?,
@@ -194,6 +200,7 @@ impl<Clock>
             exec_runner,
             cargo_registry_cache: cargo_registry_cache.map(Path::to_path_buf),
             sandbox: sandbox.clone(),
+            max_git_object_bytes,
             sandboxed_exec_timeout_bound,
         };
         let conversations =
@@ -358,12 +365,14 @@ where
                 None,
                 &Default::default(),
                 None,
+                None,
             )?,
             roots: SessionWorkspaceRoots::try_new(workspace_root)?,
             git_identity,
             exec_runner,
             cargo_registry_cache: None,
             sandbox: Default::default(),
+            max_git_object_bytes: None,
             sandboxed_exec_timeout_bound: None,
         };
         let conversations = ConversationTools::try_new(conversation_port)

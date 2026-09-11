@@ -160,7 +160,7 @@ export class ProductRequestError extends Error {
 
 export class ProductTransportError extends Error {
   constructor(cause: unknown) {
-    super("Can't reach the Signalbox server.", { cause })
+    super('Signalbox daemon unreachable.', { cause })
     this.name = 'ProductTransportError'
   }
 }
@@ -842,7 +842,7 @@ const validateBootstrapSearchLimits = (bootstrap: WebContractBootstrap): WebCont
 const validateCurrentBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
   if (
     bootstrap.contract.name !== 'signalbox.web-http' ||
-    bootstrap.contract.version !== '2' ||
+    bootstrap.contract.version !== '3' ||
     bootstrap.limits.max_json_body_bytes !== MAX_PRODUCT_JSON_BYTES ||
     bootstrap.limits.max_ndjson_item_bytes !== MAX_NDJSON_ITEM_BYTES ||
     !bootstrap.capabilities.bounded_json ||
@@ -851,7 +851,7 @@ const validateCurrentBootstrap = (bootstrap: WebContractBootstrap): WebContractB
     (bootstrap.capabilities.blob_derivations && !bootstrap.capabilities.immutable_blob_content) ||
     (bootstrap.capabilities.image_derivatives && !bootstrap.capabilities.blob_derivations)
   ) {
-    throw new Error('bootstrap contradicted the fixed signalbox.web-http v2 contract')
+    throw new Error('bootstrap contradicted the fixed signalbox.web-http v3 contract')
   }
   return bootstrap
 }

@@ -290,6 +290,7 @@ pub(crate) struct RunningRuntime {
 pub(crate) enum BlobStorageFixtureMode {
     Disabled,
     Enabled,
+    EnabledWithMaximum(u64),
 }
 
 impl RunningRuntime {
@@ -317,6 +318,18 @@ impl RunningRuntime {
 
     pub(crate) async fn start_with_blob_storage() -> Result<Self, Box<dyn Error>> {
         Self::start_with_options(None, BlobStorageFixtureMode::Enabled, None, None).await
+    }
+
+    pub(crate) async fn start_with_blob_storage_maximum(
+        maximum_blob_bytes: u64,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_options(
+            None,
+            BlobStorageFixtureMode::EnabledWithMaximum(maximum_blob_bytes),
+            None,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn start_with_model_configuration(
@@ -351,6 +364,17 @@ impl RunningRuntime {
         Self::start_with_workflow_options(
             None,
             BlobStorageFixtureMode::Disabled,
+            None,
+            None,
+            WorkflowFixtureMode::Running,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_evaluation() -> Result<Self, Box<dyn Error>> {
+        Self::start_with_workflow_options(
+            None,
+            BlobStorageFixtureMode::Enabled,
             None,
             None,
             WorkflowFixtureMode::Running,
@@ -393,13 +417,22 @@ impl RunningRuntime {
         };
         let blob_storage_root = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
-            BlobStorageFixtureMode::Enabled => Some(BlobStorageFixture::create()?),
+            BlobStorageFixtureMode::Enabled | BlobStorageFixtureMode::EnabledWithMaximum(_) => {
+                Some(BlobStorageFixture::create()?)
+            }
         };
         let configuration = configuration_override.map_or_else(
             || {
                 blob_storage_root.as_ref().map_or_else(
                     || String::from(MODEL_CONFIGURATION),
-                    BlobStorageFixture::model_configuration,
+                    |fixture| {
+                        fixture.model_configuration_with_maximum(match blob_storage {
+                            BlobStorageFixtureMode::EnabledWithMaximum(maximum) => maximum,
+                            BlobStorageFixtureMode::Disabled | BlobStorageFixtureMode::Enabled => {
+                                21_474_836_480
+                            }
+                        })
+                    },
                 )
             },
             String::from,
@@ -407,7 +440,7 @@ impl RunningRuntime {
         let model_configuration = support::parse_model_configuration(&configuration)?;
         let blob_store_registry = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
-            BlobStorageFixtureMode::Enabled => {
+            BlobStorageFixtureMode::Enabled | BlobStorageFixtureMode::EnabledWithMaximum(_) => {
                 BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone())
                     .await?
                     .map(Arc::new)
@@ -420,7 +453,7 @@ impl RunningRuntime {
             pool.clone(),
             eligibility_nudge.clone(),
             InProcessToolDispatchGate::default(),
-            model_configuration,
+            model_configuration.clone(),
             template_configuration,
         );
         if let Some(compaction_model) = compaction_model {
@@ -439,6 +472,24 @@ impl RunningRuntime {
             WorkflowFixtureMode::Running | WorkflowFixtureMode::Stopped => {
                 let (service, workflows) =
                     signalboxd::workflows::WorkflowRuntime::new(pool.clone())?;
+                let workflows = if let Some(stores) = &blob_store_registry {
+                    let services = signalboxd::workflows::eval::EvalServices::new(
+                        pool.clone(),
+                        stores.clone(),
+                        Arc::new(
+                            signalbox_model_provider_runtime::RuntimeApprovalJudgeModel::new(
+                                ScriptedModel::<ModelCallId>::following([]),
+                                model_configuration.runtime_model_catalog(),
+                            ),
+                        ),
+                        signalboxd::workflows::eval::configured_binding(&model_configuration)
+                            .unwrap_or_else(|_| signalboxd::workflows::eval::recorded_binding()),
+                        Arc::new(model_configuration.clone()),
+                    );
+                    workflows.with_eval(move || Ok(services.clone()))
+                } else {
+                    workflows
+                };
                 runtime = runtime.with_workflows(service);
                 match programs {
                     WorkflowFixtureMode::Running => {
@@ -639,12 +690,16 @@ impl BlobStorageFixture {
     }
 
     pub(crate) fn model_configuration(&self) -> String {
+        self.model_configuration_with_maximum(21_474_836_480)
+    }
+
+    pub(crate) fn model_configuration_with_maximum(&self, maximum_blob_bytes: u64) -> String {
         format!(
             r#"{MODEL_CONFIGURATION}
 [blob_storage]
 version = 1
 staging_directory = "{}"
-max_blob_bytes = 21474836480
+max_blob_bytes = {maximum_blob_bytes}
 
 [[blob_storage.stores]]
 name = "primary"

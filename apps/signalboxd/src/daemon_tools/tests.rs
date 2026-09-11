@@ -119,6 +119,7 @@ fn local_git_construction_telemetry_omits_the_workspace_path() {
                 None,
                 &Default::default(),
                 None,
+                None,
             ),
             Err(DaemonToolsConstructionError::LocalGit)
         ));
@@ -214,6 +215,7 @@ impl CodeHostTransport for OfflineCodeHostTransport {
         &mut self,
         _operation: crate::CodeHostOperation,
         _credential: &CredentialValue,
+        _request_timeout: Option<std::time::Duration>,
     ) -> Result<crate::CodeHostResult, crate::CodeHostTransportFailure> {
         Err(crate::CodeHostTransportFailure::Rejected)
     }
@@ -223,11 +225,16 @@ impl CodeHostTransport for OfflineCodeHostTransport {
 struct OfflineGitHubTransport;
 
 impl GitHubTransport for OfflineGitHubTransport {
+    fn request_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
+    }
+
     async fn execute(
         &mut self,
         _operation: crate::GitHubOperation,
         _credential: &CredentialValue,
         _egress_policy: &GitHubEgressPolicy,
+        _request_timeout: std::time::Duration,
     ) -> Result<crate::GitHubResult, crate::GitHubTransportFailure> {
         Err(crate::GitHubTransportFailure::PreDispatchInfrastructure)
     }
@@ -324,6 +331,7 @@ fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
             None,
             &Default::default(),
             None,
+            None,
         )
         .expect("workspace-bound tools compile"),
         roots: SessionWorkspaceRoots::try_new(workspace).expect("session workspace roots derive"),
@@ -331,6 +339,7 @@ fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
         exec_runner: process_runner,
         cargo_registry_cache: None,
         sandbox: Default::default(),
+        max_git_object_bytes: None,
         sandboxed_exec_timeout_bound: None,
     };
     let conversations = ConversationTools::try_new(OfflineConversationPort)
@@ -415,6 +424,7 @@ fn production_constructor_matches_the_complete_mapped_catalog() {
         &std::env::current_exe().expect("test executable path is available"),
         None,
         &Default::default(),
+        None,
         None,
         WebFetchEgressPolicy::deny_all(),
     )

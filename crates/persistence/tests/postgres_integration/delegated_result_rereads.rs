@@ -915,6 +915,112 @@ async fn delegated_tool_crash_locks_parent_before_child_scheduler() -> Result<()
     Ok(())
 }
 
+/// Module restoration waits for the parent before holding a supervised child's terminal frontier.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn supervised_module_park_restoration_locks_parent_before_child() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_domain::{
+        DispatchingModule, LifecycleActor, SessionLifecycleState, SessionParkCause,
+        SessionParkResponder,
+    };
+    use signalbox_persistence::session_lifecycle::SessionLifecycleRepository;
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = prepare_delegated_tool_crash_fixture(&pool, 0xf100).await?;
+    assert!(fixture.parent.as_uuid() < fixture.child.as_uuid());
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    lifecycle
+        .adopt(fixture.child, LifecycleActor::Operator)
+        .await?;
+    let module = DispatchingModule::RepositoryWatch;
+    lifecycle
+        .park(
+            fixture.child,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module { module },
+            None,
+            LifecycleActor::Module { module },
+        )
+        .await?;
+    let failure = signalbox_persistence::startup::StartupScanRepositoryError::from(
+        signalbox_persistence::startup::StartupScanCorruption::Missing(
+            "fixture execution evidence",
+        ),
+    );
+    lifecycle
+        .record_supervision_failure(fixture.child, &failure)
+        .await?;
+    let mut parent_lock = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(fixture.parent.into_uuid())
+        .execute(&mut *parent_lock)
+        .await?;
+    let restore_pool = pool.clone();
+    let restored = tokio::spawn(async move {
+        signalbox_persistence::test_support::restore_module_park(
+            &restore_pool,
+            fixture.child,
+            module,
+        )
+        .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "module restoration waits for the parent endpoint"
+    );
+    sqlx::query("SET LOCAL lock_timeout = '250ms'")
+        .execute(&mut *parent_lock)
+        .await?;
+    let child: Uuid = sqlx::query_scalar(
+        "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE",
+    )
+    .bind(fixture.child.into_uuid())
+    .fetch_one(&mut *parent_lock)
+    .await?;
+    let scheduler: Uuid = sqlx::query_scalar(
+        "SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE",
+    )
+    .bind(fixture.child.into_uuid())
+    .fetch_one(&mut *parent_lock)
+    .await?;
+    assert_eq!(child, fixture.child.into_uuid());
+    assert_eq!(scheduler, child);
+    parent_lock.rollback().await?;
+    assert!(!restored.await??);
+    let parked = lifecycle.load(fixture.child).await?.unwrap();
+    assert_eq!(
+        parked.state(),
+        SessionLifecycleState::Parked {
+            cause: SessionParkCause::UnknownFailure,
+            responder: SessionParkResponder::Operator,
+            standing: None,
+        }
+    );
+    assert!(parked.supervision_failure().unwrap().pending);
+    let terminal: bool =
+        sqlx::query_scalar("SELECT state_kind = 'terminal' FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        !terminal,
+        "module restoration leaves supervised evidence for the operator"
+    );
+    lifecycle.resume(fixture.child).await?;
+    let resumed = lifecycle.load(fixture.child).await?.unwrap();
+    assert!(!resumed.state().is_parked());
+    assert!(!resumed.supervision_failure().unwrap().pending);
+    let terminal: bool =
+        sqlx::query_scalar("SELECT state_kind = 'terminal' FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(terminal);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// completing a delegated initial task atomically creates its typed returned result, parent update,
 /// and parent wake before commit.
 #[tokio::test(flavor = "multi_thread")]
@@ -1931,7 +2037,8 @@ async fn parent_only_interrupt_closes_foreground_wait_without_result() -> Result
 /// Successive foreground results reopen the same batch across more than one continued attempt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn successive_foreground_results_resume_the_same_tool_batch() -> Result<(), Box<dyn Error>> {
+async fn successive_foreground_results_resume_the_same_tool_batch_and_emit_transitions()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xab00;
     let child = Uuid::from_u128(seed + 0x101);
@@ -2193,6 +2300,7 @@ async fn successive_foreground_results_resume_the_same_tool_batch() -> Result<()
             SubmitInputAppliedResult::PendingSteering(_)
         ))
     ));
+    drain_outbox(&pool, |_| {}).await?;
 
     assert_eq!(
         repository.find_resumable_turn(fixture.session).await?,
@@ -2204,6 +2312,64 @@ async fn successive_foreground_results_resume_the_same_tool_batch() -> Result<()
             .resume_child_wait(fixture.session, fixture.turn, continuation)
             .await?
     );
+    let resumed_storage_version: i16 = sqlx::query_scalar(
+        "SELECT storage_version
+           FROM tool_batch_transition_outbox_event
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND transition_kind = 'child_wait_resumed'",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(resumed_storage_version, 2);
+    let unsupported_version = sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event (event_kind, storage_version, session_id)
+            VALUES ('tool_batch_transition', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO tool_batch_transition_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, producing_model_call_id, transition_kind, frontier_id,
+             tool_attempt_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $2, $3, 'child_wait_resumed', NULL, $4
+           FROM header",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.call.into_uuid())
+    .bind(await_attempt.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a child-wait resumption requires tool-batch storage version 2");
+    assert_eq!(
+        unsupported_version
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("tool_batch_transition_outbox_version_supported")
+    );
+    assert!(matches!(
+        OutboxDispatcher::new(pool.clone())
+            .dispatch_next(|event| {
+                assert_eq!(event.session(), Some(fixture.session));
+                assert_eq!(
+                    event.kind(),
+                    &DispatchedOutboxEventKind::ToolBatchTransition {
+                        turn: fixture.turn,
+                        producing_call: fixture.call,
+                        state: DispatchedToolBatchState::ChildWaitResumed {
+                            attempt: await_attempt,
+                        },
+                    }
+                );
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { .. }
+    ));
     let resumed = repository
         .load_active_batch(fixture.session, fixture.turn)
         .await?

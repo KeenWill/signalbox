@@ -87,8 +87,17 @@ use crate::{
     submit_input::{SubmitInputCorruption, SubmitInputRepositoryError},
 };
 
+/// Measures rendered entries following an active-turn summary.
+pub trait ToolContinuationEntryMeasurement: std::fmt::Debug + Send + Sync {
+    /// Returns adapter-serialized bytes for the operation's entries other than its summary.
+    fn additional_entry_bytes(
+        &self,
+        operation: &signalbox_application::PreparedModelOperation,
+    ) -> Option<u64>;
+}
+
 /// Immutable usage boundary for one resolved continuation mode.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ToolContinuationUsageLimit {
     target: ResolvedProviderTarget,
     fast_mode: FastMode,
@@ -96,6 +105,10 @@ pub struct ToolContinuationUsageLimit {
     context_window_tokens: u64,
     replays_provider_compaction: bool,
     compaction_prompt_bytes: u64,
+    max_tool_requests: Option<u64>,
+    request_overhead_bytes: u64,
+    steering_part_framing_bytes: u64,
+    entry_measurement: Option<std::sync::Arc<dyn ToolContinuationEntryMeasurement>>,
 }
 
 impl ToolContinuationUsageLimit {
@@ -113,7 +126,46 @@ impl ToolContinuationUsageLimit {
             context_window_tokens,
             replays_provider_compaction: false,
             compaction_prompt_bytes: 0,
+            max_tool_requests: Some(
+                signalbox_application::ToolProposalLimits::DEFAULT_MAX_REQUESTS,
+            ),
+            request_overhead_bytes: 0,
+            steering_part_framing_bytes: 0,
+            entry_measurement: None,
         }
+    }
+
+    /// Sets the configured cap used to reserve the next response's result envelopes.
+    #[must_use]
+    pub const fn with_max_tool_requests(mut self, maximum: Option<u64>) -> Self {
+        self.max_tool_requests = maximum;
+        self
+    }
+
+    pub(crate) const fn max_tool_requests(&self) -> Option<u64> {
+        self.max_tool_requests
+    }
+
+    /// Supplies the adapter measurement for model-visible entries after a summary.
+    #[must_use]
+    pub fn with_entry_measurement(
+        mut self,
+        measurement: std::sync::Arc<dyn ToolContinuationEntryMeasurement>,
+    ) -> Self {
+        self.entry_measurement = Some(measurement);
+        self
+    }
+
+    /// Reserves adapter-rendered fixed request material and each steering part's framing.
+    #[must_use]
+    pub const fn with_request_overhead(
+        mut self,
+        fixed_bytes: u64,
+        steering_part_bytes: u64,
+    ) -> Self {
+        self.request_overhead_bytes = fixed_bytes;
+        self.steering_part_framing_bytes = steering_part_bytes;
+        self
     }
 
     /// Reserves the configured summary prompt when bounding a tool-result batch.
@@ -123,7 +175,7 @@ impl ToolContinuationUsageLimit {
         self
     }
 
-    pub(crate) const fn compaction_prompt_bytes(self) -> u64 {
+    pub(crate) const fn compaction_prompt_bytes(&self) -> u64 {
         self.compaction_prompt_bytes
     }
 
@@ -134,15 +186,15 @@ impl ToolContinuationUsageLimit {
         self
     }
 
-    pub(crate) const fn max_output_tokens(self) -> u64 {
+    pub(crate) const fn max_output_tokens(&self) -> u64 {
         self.max_output_tokens
     }
 
-    pub(crate) const fn context_window_tokens(self) -> u64 {
+    pub(crate) const fn context_window_tokens(&self) -> u64 {
         self.context_window_tokens
     }
 
-    const fn replays_provider_compaction(self) -> bool {
+    const fn replays_provider_compaction(&self) -> bool {
         self.replays_provider_compaction
     }
 }
@@ -223,7 +275,7 @@ pub struct ReportedModelCallUsage {
     /// compaction, separate from billed usage.
     #[get(copy)]
     retained_output_tokens: Option<u64>,
-    /// Whether reported output became assistant transcript for the next call.
+    /// Whether reported output measures retained response material for the next call.
     #[get(copy)]
     output_is_retained: bool,
     /// Returns a conservative byte allowance for model-visible transcript
@@ -739,6 +791,7 @@ async fn terminalize_lifecycle(
     let rows = sqlx::query(
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal',
+                compaction_frontier_id = NULL,
                 terminal_frontier_id = $1,
                 active_phase_kind = NULL,
                 current_attempt_id = NULL,
@@ -992,7 +1045,7 @@ pub(crate) fn map_projected_membership_error(
     }
 }
 
-fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositoryError {
+pub(crate) fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositoryError {
     match error {
         SubmitInputRepositoryError::Database(error) => error.into(),
         SubmitInputRepositoryError::CommitAmbiguous(error) => {

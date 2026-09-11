@@ -19,7 +19,7 @@ declare module "@signalbox/program-sdk/v1" {
   }): (input: Uint8Array) => Promise<Uint8Array>;
 
   export type Capability = "time" | "random" | "sleep" | "subscribe" | "session"
-    | "judge" | "exec-stage" | "corpus" | "eval-record" | "blob" | "register";
+    | "judge" | "exec-stage" | "corpus" | "eval-record" | "blob" | "register" | "repo-watch";
   export type Delivery =
     | { kind: "answer"; payload: number[] }
     | { kind: "wake"; payload: number[] }
@@ -93,6 +93,7 @@ declare module "@signalbox/program-sdk/v1" {
   export interface EvalManifest {
     corpus: string; format: "offline" | "live"; cases: number[]; repeats: number;
     binding: JudgeBinding; postures: Record<string, string>; speculative_tools: string[];
+    recorded_responses: { disposition: ApprovalDisposition; rationale: string }[] | null;
   }
   export interface JudgeUsage {
     input_tokens: string | null; output_tokens: string | null;

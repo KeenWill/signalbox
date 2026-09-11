@@ -69,6 +69,31 @@ pub struct OperatorStatusLifecycleDeadlineViolationMessage {
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
 
+## OperatorStatusSupervisionFailureClass
+
+```rust
+pub enum OperatorStatusSupervisionFailureClass {
+    Infrastructure,
+    CommitAmbiguous,
+    Corruption,
+    IdentityCollision,
+    Bug,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## OperatorStatusSessionSupervisionMessage
+
+```rust
+pub struct OperatorStatusSessionSupervisionMessage {
+    pub session_id: CanonicalUuid,
+    pub terminal: bool,
+    pub failure_class: OperatorStatusSupervisionFailureClass,
+    pub cause_code: string::String,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## OperatorStatusEndMessage
 
 ```rust
@@ -77,6 +102,8 @@ pub struct OperatorStatusEndMessage {
     pub repository_ingestion_count: CanonicalU64,
     pub lifecycle_week_count: CanonicalU64,
     pub lifecycle_deadline_violation_count: CanonicalU64,
+    pub session_supervision_count: CanonicalU64,
+    pub outbox_quarantine_count: CanonicalU64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
@@ -99,6 +126,7 @@ pub enum OperatorStatusMessage {
     UnavailableComponent(boxed::Box<OperatorStatusUnavailableComponentMessage>),
     LifecycleWeek(boxed::Box<OperatorStatusLifecycleWeekMessage>),
     LifecycleDeadlineViolation(boxed::Box<OperatorStatusLifecycleDeadlineViolationMessage>),
+    SessionSupervision(boxed::Box<OperatorStatusSessionSupervisionMessage>),
     RepositoryIngestion(boxed::Box<OperatorStatusRepositoryIngestion>),
     End(boxed::Box<OperatorStatusEndMessage>),
 }

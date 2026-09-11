@@ -384,14 +384,17 @@ examined the material that could open a tool call, whether or not it accepted
 that material. A tool call an earlier record already established outranks the
 withholding in every adapter.
 
-OpenAI response events other than failed terminals must carry a consistent
-response id and reported model, and indexed item events must carry consistent
-item ids. Completed output items reject subsequent deltas. Completed content
-must preserve its observed text/refusal type and match its accumulated delta
-bytes; repeated completed snapshots must agree. Content-level done events supply
-completed snapshots. Completed function calls retain their call id, name, and
-status across snapshots. Content-part events require their part payload.
-Reported model and recognized terminal finish are retained before usage
+OpenAI response events other than failed terminals carry a consistent response
+id and reported model. Each output index binds one item id and kind to an open
+or done item state. Open content accumulates deltas and snapshot prefixes;
+content done freezes its type and bytes, and item done freezes its layout.
+Repeated snapshots preserve the frozen state; done items admit no further
+deltas. Every observed item must fit the terminal output. An incompatible event
+ends the stream with incomplete-stream evidence, retaining observed facts
+without announcing completion or refusal. Output-ceiling terminals retain
+completed and incomplete item content, including incomplete function arguments.
+Reasoning replay retains exact item-done bytes even when terminal ciphertext
+differs. Reported model and recognized terminal finish are retained before usage
 decoding. A terminal response supplies completion content and its response id
 becomes the provider message id. A bare `error` event or an HTTP-200 response
 with `status: failed` supplies definitive provider-error evidence without
@@ -399,8 +402,12 @@ non-acceptance proof. Failed status and error are classified before ancillary
 response fields. Claude Code CLI events stay bound to the initialized exchange:
 the first assistant event may name the provider-resolved model and every later
 assistant event must repeat that value, and a result carrying a different
-session id, or an assistant event carrying a different first message id, is a
-protocol violation.
+session id is a protocol violation. Assistant content retains its first message
+id. After every proposed tool has its bridge acknowledgement, one message with a
+distinct id, text and optional thinking blocks, and at least one text block may
+acknowledge the batch. Its content is discarded; the reported finish must be
+`end_turn`, while the effective completion of the original batch is `ToolUse`. A
+different message id outside that acknowledgement is a protocol violation.
 
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming

@@ -6,9 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use git2::{
-    CheckoutNotificationType, Index, IndexEntry, IndexTime, Mempack, Odb, build::CheckoutBuilder,
-};
+use git2::{Index, IndexEntry, IndexTime, Odb};
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, openat, renameat_with, statat};
 use rustix::io::dup;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -39,8 +37,8 @@ use crate::identity::GitIdentity;
 use crate::index_lock::{IndexLock, IndexSnapshot};
 use crate::layout::{valid_reference_name, validate_repository_layout};
 use crate::limits::{
-    GITLINK_MODE, INDEX_SKIP_WORKTREE, MAX_OBJECT_BYTES, MAX_REFERENCE_BYTES, MAX_REVISION_BYTES,
-    MAX_STAGE_FILE_BYTES, MAX_STAGE_TOTAL_BYTES, MAX_WORKTREE_INSPECTIONS, MAX_WORKTREE_PATH_BYTES,
+    GITLINK_MODE, INDEX_SKIP_WORKTREE, MAX_REFERENCE_BYTES, MAX_REVISION_BYTES,
+    MAX_WORKTREE_INSPECTIONS, MAX_WORKTREE_PATH_BYTES,
 };
 use crate::log::log;
 use crate::objects::{PackRoot, persist_objects};
@@ -57,7 +55,7 @@ use crate::rollback::{
     checkout_snapshot, checkout_tree_with_rollback, open_worktree_parent, restore_index,
     rollback_checkout_atomically, validate_checkout_path,
 };
-use crate::status::{blob_oid, status, tracked_directories};
+use crate::status::{status, tracked_directories};
 
 /// Executor for local Git operations only.
 #[derive(Debug)]
@@ -153,13 +151,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         }
         let mut repository = self.repository_authority.repository()?;
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
-        let persistent_object_database = Odb::new_ext(self.repository_authority.object_format)
-            .map_err(|_| LocalGitFailure::Operation)?;
-        pinned_objects.add_to(&persistent_object_database)?;
         let object_database = Odb::new_ext(self.repository_authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&object_database)?;
-        let mempack = object_database
+        let _mempack = object_database
             .add_new_mempack_backend(1000)
             .map_err(|_| LocalGitFailure::Operation)?;
         repository
@@ -172,12 +167,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             LocalOperation::Stage(arguments) => {
                 let result = LocalGitResult::Stage(self.stage_with_pinned_objects(
                     &repository,
-                    (
-                        &persistent_object_database,
-                        &object_database,
-                        &mempack,
-                        &pinned_objects,
-                    ),
+                    &pinned_objects,
                     arguments,
                     || {},
                     || {},
@@ -190,11 +180,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &self.identity,
                     arguments,
                     &self.repository_authority,
-                    (
-                        &persistent_object_database,
-                        &object_database,
-                        &pinned_objects,
-                    ),
+                    &pinned_objects,
                     || {
                         before_commit_publish();
                         pinned_objects.validate_live(&self.repository_authority)?;
@@ -207,7 +193,6 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 let result = LocalGitResult::BranchCreate(branch_create(
                     &repository,
                     &self.repository_authority,
-                    &object_database,
                     &pinned_objects,
                     arguments,
                     || {
@@ -306,26 +291,18 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         AfterPublish: FnOnce(),
     {
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
-        let persistent_object_database = Odb::new_ext(self.repository_authority.object_format)
-            .map_err(|_| LocalGitFailure::Operation)?;
-        pinned_objects.add_to(&persistent_object_database)?;
         let object_database = Odb::new_ext(self.repository_authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&object_database)?;
         repository
             .set_odb(&object_database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;
-        let mempack = object_database
+        let _mempack = object_database
             .add_new_mempack_backend(1000)
             .map_err(|_| LocalGitFailure::Operation)?;
         self.stage_with_pinned_objects(
             repository,
-            (
-                &persistent_object_database,
-                &object_database,
-                &mempack,
-                &pinned_objects,
-            ),
+            &pinned_objects,
             arguments,
             before_publish,
             after_publish,
@@ -335,7 +312,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     fn stage_with_pinned_objects<BeforePublish, AfterPublish>(
         &self,
         repository: &RepositoryShell,
-        object_databases: (&Odb<'_>, &Odb<'_>, &Mempack<'_>, &PinnedObjectDatabase),
+        pinned_objects: &PinnedObjectDatabase,
         arguments: GitStageArguments,
         before_publish: BeforePublish,
         after_publish: AfterPublish,
@@ -344,27 +321,21 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         BeforePublish: FnOnce(),
         AfterPublish: FnOnce(),
     {
-        let (persistent_object_database, object_database, _mempack, pinned_objects) =
-            object_databases;
         let (mut index_lock, mut index) =
             IndexLock::acquire_for_repository(&self.repository_authority)?;
         validate_index_entry_count(&index)?;
         let filemode = repository_filemode(repository)?;
         let mut planned = Vec::with_capacity(arguments.paths.len());
-        let mut total_bytes = 0_usize;
         for supplied in &arguments.paths {
             let path = checked_relative_path(supplied).map_err(|_| LocalGitFailure::Path)?;
-            match self
-                .filesystem
-                .read_file_prefix(&self.root, &path, MAX_STAGE_FILE_BYTES)
-            {
-                Ok(read) if read.truncated => return Err(LocalGitFailure::Operation),
-                Ok(read) => {
-                    total_bytes = total_bytes
-                        .checked_add(read.bytes.len())
-                        .filter(|total| *total <= MAX_STAGE_TOTAL_BYTES)
-                        .ok_or(LocalGitFailure::Operation)?;
-                    let observed_mode = if read.mode & 0o111 == 0 {
+            match crate::streamed_object::worktree_content(
+                &self.filesystem,
+                &self.root,
+                &path,
+                self.repository_authority.max_object_bytes,
+            ) {
+                Ok((content, mode)) => {
+                    let observed_mode = if mode & 0o111 == 0 {
                         0o100644
                     } else {
                         0o100755
@@ -373,7 +344,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     let mode = regular_file_mode(observed_mode, indexed_mode, filemode);
                     planned.push(PlannedStage::Add {
                         path,
-                        bytes: read.bytes,
+                        content,
                         mode,
                     });
                 }
@@ -420,13 +391,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         let mut written_objects = Vec::new();
         for operation in planned {
             match operation {
-                PlannedStage::Add { path, bytes, mode } => {
-                    // Path-aware blob writers reopen attribute files; insert
-                    // the already-bounded descriptor bytes without a second
-                    // model-writable pathname lookup.
-                    let oid = repository
-                        .blob(&bytes)
-                        .map_err(|_| LocalGitFailure::Operation)?;
+                PlannedStage::Add {
+                    path,
+                    mut content,
+                    mode,
+                } => {
+                    let oid = repository.store_content(&mut content)?;
                     written_objects.push(PackRoot::Object(oid));
                     let entry = IndexEntry {
                         ctime: IndexTime::new(0, 0),
@@ -436,8 +406,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                         mode,
                         uid: 0,
                         gid: 0,
-                        file_size: u32::try_from(bytes.len())
-                            .map_err(|_| LocalGitFailure::Operation)?,
+                        // The Git index records the low 32 bits of the file size.
+                        file_size: content.size as u32,
                         id: oid,
                         flags: 0,
                         flags_extended: 0,
@@ -462,8 +432,6 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         persist_objects(
             &self.repository_authority,
             repository,
-            persistent_object_database,
-            object_database,
             pinned_objects,
             &written_objects,
         )?;
@@ -724,17 +692,22 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         if entry.mode == GITLINK_MODE {
             return Err(LocalGitFailure::Operation);
         }
-        let read = self
-            .filesystem
-            .read_file_prefix(&self.root, path, MAX_OBJECT_BYTES)
-            .map_err(|error| match error {
-                WorkspaceResolveError::Rejected(_) => LocalGitFailure::Path,
-                WorkspaceResolveError::Io { .. } => LocalGitFailure::Operation,
-            })?;
-        if read.truncated || read.total_bytes != read.bytes.len() as u64 {
-            return Err(LocalGitFailure::Operation);
-        }
-        self.validate_clean_indexed_file(&read.bytes, read.mode, &entry, filemode)
+        let (mut content, mode) = crate::streamed_object::worktree_content(
+            &self.filesystem,
+            &self.root,
+            path,
+            self.repository_authority.max_object_bytes,
+        )
+        .map_err(|error| match error {
+            WorkspaceResolveError::Rejected(_) => LocalGitFailure::Path,
+            WorkspaceResolveError::Io { .. } => LocalGitFailure::Operation,
+        })?;
+        self.validate_clean_indexed_file(
+            content.oid(self.repository_authority.object_format)?,
+            mode,
+            &entry,
+            filemode,
+        )
     }
 
     fn validate_clean_checkout_ancestors(
@@ -763,17 +736,22 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     if entry.mode == GITLINK_MODE {
                         return Err(LocalGitFailure::Operation);
                     }
-                    let read = self
-                        .filesystem
-                        .read_file_prefix(&self.root, ancestor, MAX_OBJECT_BYTES)
-                        .map_err(|error| match error {
-                            WorkspaceResolveError::Rejected(_) => LocalGitFailure::Path,
-                            WorkspaceResolveError::Io { .. } => LocalGitFailure::Operation,
-                        })?;
-                    if read.truncated || read.total_bytes != read.bytes.len() as u64 {
-                        return Err(LocalGitFailure::Operation);
-                    }
-                    self.validate_clean_indexed_file(&read.bytes, read.mode, &entry, filemode)?;
+                    let (mut content, mode) = crate::streamed_object::worktree_content(
+                        &self.filesystem,
+                        &self.root,
+                        ancestor,
+                        self.repository_authority.max_object_bytes,
+                    )
+                    .map_err(|error| match error {
+                        WorkspaceResolveError::Rejected(_) => LocalGitFailure::Path,
+                        WorkspaceResolveError::Io { .. } => LocalGitFailure::Operation,
+                    })?;
+                    self.validate_clean_indexed_file(
+                        content.oid(self.repository_authority.object_format)?,
+                        mode,
+                        &entry,
+                        filemode,
+                    )?;
                 }
                 Err(WorkspaceResolveError::Rejected(_)) => return Err(LocalGitFailure::Path),
                 Ok(_) | Err(WorkspaceResolveError::Io { .. }) => {
@@ -808,14 +786,22 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 return Err(LocalGitFailure::Operation);
             }
             match entry_state {
-                WorktreeRollbackEntry::File { bytes, mode } => {
+                WorktreeRollbackEntry::File { hashes, mode } => {
                     let entry = current_index
                         .get_path(&entry_path, 0)
                         .ok_or(LocalGitFailure::Operation)?;
                     if entry.mode == GITLINK_MODE {
                         return Err(LocalGitFailure::Operation);
                     }
-                    self.validate_clean_indexed_file(&bytes, mode, &entry, filemode)?;
+                    self.validate_clean_indexed_file(
+                        hashes[match self.repository_authority.object_format {
+                            git2::ObjectFormat::Sha1 => 0,
+                            git2::ObjectFormat::Sha256 => 1,
+                        }],
+                        mode,
+                        &entry,
+                        filemode,
+                    )?;
                 }
                 WorktreeRollbackEntry::Directory => {}
                 WorktreeRollbackEntry::Missing => return Err(LocalGitFailure::Operation),
@@ -826,7 +812,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
 
     fn validate_clean_indexed_file(
         &self,
-        bytes: &[u8],
+        oid: git2::Oid,
         mode: u32,
         entry: &IndexEntry,
         filemode: bool,
@@ -837,7 +823,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             0o100755
         };
         let mode_changed = filemode && observed_mode != entry.mode;
-        if blob_oid(bytes, self.repository_authority.object_format)? != entry.id || mode_changed {
+        if oid != entry.id || mode_changed {
             Err(LocalGitFailure::Operation)
         } else {
             Ok(())
@@ -1098,6 +1084,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         arguments: GitBranchSwitchArguments,
     ) -> Result<BranchResult, LocalGitFailure> {
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
+        let database = Odb::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        pinned_objects.add_to(&database)?;
+        repository
+            .set_odb(&database, &pinned_objects)
+            .map_err(|_| LocalGitFailure::Operation)?;
         self.branch_switch_with_hooks(
             repository,
             &pinned_objects,
@@ -1451,7 +1443,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             })
             .collect::<Vec<_>>();
         let filemode = repository_filemode(repository)?;
+        let mut checkout_identities = crate::streamed_object::CheckoutIdentities::new();
         for path in &checkout_paths {
+            let identity = crate::streamed_object::capture_checkout_identity(
+                &self.repository_authority.root,
+                path,
+            )?;
             validate_checkout_path(
                 &self.filesystem,
                 &self.root,
@@ -1460,6 +1457,14 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 &target_tree,
             )?;
             self.validate_clean_checkout_path(path, &current_index, filemode, &checkout_paths)?;
+            if crate::streamed_object::capture_checkout_identity(
+                &self.repository_authority.root,
+                path,
+            )? != identity
+            {
+                return Err(LocalGitFailure::Operation);
+            }
+            checkout_identities.insert(path.clone(), identity);
         }
         let mut next_index = Index::new_ext(self.repository_authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -1507,35 +1512,6 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         index_lock.write(&mut next_index)?;
         let updated_paths = RefCell::new(BTreeSet::new());
         let updated_identities = RefCell::new(WorktreeRollbackIdentities::new());
-        let mut checkout = CheckoutBuilder::new();
-        checkout
-            .force()
-            .target_dir(&descriptor_path(&self.repository_authority.root))
-            .update_index(false)
-            .refresh(false)
-            .disable_pathspec_match(true)
-            .disable_filters(true);
-        for path in &checkout_paths {
-            checkout.path(path);
-        }
-        checkout
-            .notify_on(CheckoutNotificationType::UPDATED)
-            .notify(|_, path, _, _, _| {
-                let paths = if let Some(path) = path {
-                    BTreeSet::from([path.to_owned()])
-                } else {
-                    checkout_paths.clone()
-                };
-                paths.into_iter().fold(true, |captured, path| {
-                    updated_paths.borrow_mut().insert(path.clone());
-                    let current = capture_rollback_identity(&self.repository_authority.root, &path)
-                        .map(|identity| {
-                            updated_identities.borrow_mut().insert(path, identity);
-                        })
-                        .is_ok();
-                    captured && current
-                })
-            });
         let mut quarantined_directories = self.quarantine_checkout_directories(
             repository,
             &checkout_paths,
@@ -1544,6 +1520,15 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             &mut before_quarantine_snapshot,
         )?;
         post_quarantine();
+        let streamed_paths = checkout_paths
+            .iter()
+            .filter(|path| {
+                !quarantined_directories.iter().any(|transition| {
+                    path.starts_with(&transition.path) || transition.path.starts_with(path)
+                })
+            })
+            .cloned()
+            .collect();
         let checkout_result = checkout_tree_with_rollback(
             repository,
             current_tree.as_ref(),
@@ -1565,9 +1550,20 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                         .set_head("refs/heads/signalbox-pinned")
                         .map_err(|_| LocalGitFailure::Operation)?,
                 }
-                repository
-                    .checkout_tree(target_commit.as_object(), Some(&mut checkout))
-                    .map_err(|_| LocalGitFailure::Operation)
+                crate::streamed_object::checkout_paths(
+                    repository,
+                    &target_tree,
+                    &streamed_paths,
+                    &descriptor_path(&self.repository_authority.root),
+                    Some(&checkout_identities),
+                    |path, identity| {
+                        updated_paths.borrow_mut().insert(path.to_owned());
+                        updated_identities
+                            .borrow_mut()
+                            .insert(path.to_owned(), identity);
+                        Ok(())
+                    },
+                )
             },
         );
         if let Err(failure) = checkout_result {
@@ -1673,7 +1669,20 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 return Err(failure);
             }
         };
-        if checkout_identities != before_checkout_capture {
+        let target_directories = tracked_directories(&next_index);
+        let content_matches_target = checkout_state.iter().all(|(path, observed)| {
+            let entry = next_index.get_path(path, 0);
+            match observed {
+                WorktreeRollbackEntry::File { hashes, mode } => entry.is_some_and(|entry| {
+                    hashes.contains(&entry.id) && mode & 0o111 == entry.mode & 0o111
+                }),
+                WorktreeRollbackEntry::Directory => target_directories.contains(path),
+                WorktreeRollbackEntry::Missing => {
+                    entry.is_none() && !target_directories.contains(path)
+                }
+            }
+        });
+        if checkout_identities != before_checkout_capture || !content_matches_target {
             rollback_checkout_atomically(
                 repository,
                 current_tree.as_ref(),
@@ -1799,8 +1808,9 @@ impl LocalGitExecutor<LocalWorkspaceFileSystem> {
         let root_path = std::fs::canonicalize(root_path).expect("fixture root canonicalizes");
         let repository_identity = validate_repository_layout(&root_path, root.identity())
             .expect("fixture repository layout validates");
-        let repository_authority = PinnedRepository::open(&root_path, repository_identity)
+        let mut repository_authority = PinnedRepository::open(&root_path, repository_identity)
             .expect("fixture repository authority pins");
+        repository_authority.max_object_bytes = Some(crate::tests::support::TEST_OBJECT_BYTES);
         let detail = || {
             ToolExecutionErrorDetail::try_new("fixture Git operation failed".to_owned())
                 .expect("fixture detail constructs")
@@ -1822,7 +1832,7 @@ impl LocalGitExecutor<LocalWorkspaceFileSystem> {
 pub(super) enum PlannedStage {
     Add {
         path: PathBuf,
-        bytes: Vec<u8>,
+        content: crate::streamed_object::ObjectContent,
         mode: u32,
     },
     Remove {

@@ -544,7 +544,7 @@ function ArtifactMetadata({
           <dd>{renderer}</dd>
         </div>
         <div>
-          <dt>Type (as declared)</dt>
+          <dt>Declared media type</dt>
           <dd>{mediaType}</dd>
         </div>
         {byteLength !== undefined && (

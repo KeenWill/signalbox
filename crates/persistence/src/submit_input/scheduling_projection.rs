@@ -36,12 +36,12 @@ use signalbox_domain::{
     ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
     ContextFrontierId, ContinuationRoundReconstitutionInput, DelegatedTurnSchedulingFact,
     DelegationMessageId, DelegationOutcome, DelegationWaitMode, DeliveryRequest,
-    DirectModelSelection, FailedTurnExecutionReconstitutionInput, ModelCallId,
-    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
-    OriginConfiguration, PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput,
-    ProviderCompactionBlock, ProviderModelIdentity, ProviderReasoningItem,
-    ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, RunnerGeneration, RunnerId,
-    SemanticTranscriptEntryId,
+    DirectModelSelection, FailedTurnExecutionReconstitutionInput,
+    ImportedSessionSeedHeaderReconstitutionInput, ModelCallId, ModelCallReconstitutionInput,
+    ModelCallReconstitutionState, ModelSelectionOverride, OriginConfiguration,
+    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, ProviderCompactionBlock,
+    ProviderModelIdentity, ProviderReasoningItem, ResolvedContextFrontierReconstitutionInput,
+    ResolvedProviderTarget, RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
     SteeringContinuationRoundReconstitutionInput, SteeringReclassificationReason,
@@ -58,6 +58,13 @@ pub(crate) async fn load_scheduling_projection(
     connection: &mut PgConnection,
     session: Session,
 ) -> Result<AcceptedInputSchedulingProjection, SubmitInputRepositoryError> {
+    load_scheduling_projection_inner(connection, session, &[], true).await
+}
+
+pub(crate) async fn load_bounded_scheduling_projection(
+    connection: &mut PgConnection,
+    session: Session,
+) -> Result<AcceptedInputSchedulingProjection, SubmitInputRepositoryError> {
     load_scheduling_projection_with_semantic_frontiers(connection, session, &[]).await
 }
 
@@ -66,11 +73,34 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
     session: Session,
     supplemental_semantic_frontiers: &[ContextFrontierId],
 ) -> Result<AcceptedInputSchedulingProjection, SubmitInputRepositoryError> {
+    load_scheduling_projection_inner(connection, session, supplemental_semantic_frontiers, false)
+        .await
+}
+
+async fn load_scheduling_projection_inner(
+    connection: &mut PgConnection,
+    session: Session,
+    supplemental_semantic_frontiers: &[ContextFrontierId],
+    load_complete_imported_seed: bool,
+) -> Result<AcceptedInputSchedulingProjection, SubmitInputRepositoryError> {
     let session_id = session.id();
-    let imported_session = if matches!(
+    let imported_ancestry = matches!(
         session.creation_provenance().ancestry(),
         TranscriptAncestry::ImportedConversation { .. }
-    ) {
+    );
+    let load_complete_imported_seed = if imported_ancestry && !load_complete_imported_seed {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM context_compaction WHERE session_id = $1
+            )",
+        )
+        .bind(session_id_to_uuid(session_id))
+        .fetch_one(&mut *connection)
+        .await?
+    } else {
+        load_complete_imported_seed
+    };
+    let imported_session = if imported_ancestry && load_complete_imported_seed {
         Some(
             crate::create_session_from_imported_frontier::load_complete_current(
                 connection, &session,
@@ -81,21 +111,55 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
     } else {
         None
     };
+    let bounded_imported_seed = if imported_ancestry && !load_complete_imported_seed {
+        let row = sqlx::query_as::<_, (Uuid, Decimal)>(
+            "SELECT seed.seed_context_frontier_id, frontier.member_count
+               FROM imported_session_seed AS seed
+               JOIN context_frontier AS frontier
+                 ON frontier.owning_session_id = seed.session_id
+                AND frontier.context_frontier_id = seed.seed_context_frontier_id
+              WHERE seed.session_id = $1",
+        )
+        .bind(session_id_to_uuid(session_id))
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or(SubmitInputCorruption::Missing("imported scheduling seed"))?;
+        Some(ImportedSessionSeedHeaderReconstitutionInput::new(
+            session_id,
+            ContextFrontierId::from_uuid(row.0),
+            positive_u64_from_numeric(row.1)
+                .map_err(|_| SubmitInputCorruption::Inconsistent("imported seed member count"))?,
+        ))
+    } else {
+        None
+    };
     let inventory = sqlx::query_as::<_, StoredSchedulingInventoryCounts>(
         "SELECT
             (SELECT count(*)
                FROM queued_input_origin
               WHERE session_id = $1
-                AND goal_turn_is_scheduling_relevant(
-                    session_id, turn_id
-                )) AS queue_count,
+                AND (goal_turn_is_scheduling_relevant(session_id, turn_id)
+                     OR (priority_kind = 'interrupt_immediately_after'
+                         AND EXISTS (
+                            SELECT 1 FROM turn_lifecycle AS retired
+                             WHERE retired.session_id = queued_input_origin.session_id
+                               AND retired.turn_id = queued_input_origin.turn_id
+                               AND retired.state_kind = 'terminal'
+                               AND retired.terminal_disposition_kind = 'retired'
+                         )))) AS queue_count,
             (SELECT count(*)
                FROM turn_lifecycle
               WHERE session_id = $1
                 AND origin_kind = 'accepted_input'
-                AND goal_turn_is_scheduling_relevant(
-                    session_id, turn_id
-                )) AS lifecycle_count",
+                AND (goal_turn_is_scheduling_relevant(session_id, turn_id)
+                     OR (state_kind = 'terminal'
+                         AND terminal_disposition_kind = 'retired'
+                         AND EXISTS (
+                            SELECT 1 FROM queued_input_origin AS interrupt
+                             WHERE interrupt.session_id = turn_lifecycle.session_id
+                               AND interrupt.turn_id = turn_lifecycle.turn_id
+                               AND interrupt.priority_kind = 'interrupt_immediately_after'
+                         )))) AS lifecycle_count",
     )
     .bind(session_id_to_uuid(session_id))
     .fetch_one(&mut *connection)
@@ -231,9 +295,10 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
            ON runner_recovery_effect.turn_id = turn.turn_id
           AND runner_recovery_effect.session_id = turn.session_id
         WHERE queued.session_id = $1
-          AND goal_turn_is_scheduling_relevant(
-                queued.session_id, queued.turn_id
-          )
+          AND (goal_turn_is_scheduling_relevant(queued.session_id, queued.turn_id)
+               OR (turn.state_kind = 'terminal'
+                   AND turn.terminal_disposition_kind = 'retired'
+                   AND queued.priority_kind = 'interrupt_immediately_after'))
         ORDER BY queued.acceptance_position",
     )
     .bind(session_id_to_uuid(session_id))
@@ -1762,7 +1827,7 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
             manifest.manifest_hash_algorithm
                 AS instruction_manifest_hash_algorithm,
             manifest.manifest_hash AS instruction_manifest_hash,
-            discovery.scan_complete AS instruction_discovery_complete,
+            discovery.instruction_discovery_id,
             lifecycle.origin_kind AS turn_origin_kind,
             lifecycle.pinned_provider_model_identity_id,
             (attempt.continued_from_attempt_id IS NOT NULL)
@@ -2251,10 +2316,17 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
             ON delta.owning_session_id = frontier.owning_session_id
            AND delta.context_frontier_id =
                    frontier.context_frontier_id
+         WHERE $3::uuid IS NULL
+            OR frontier.context_frontier_id <> $3
          ORDER BY frontier.context_frontier_id, delta.member_position",
     )
     .bind(session_id_to_uuid(session_id))
     .bind(&required_frontier_ids)
+    .bind(
+        bounded_imported_seed
+            .as_ref()
+            .map(|seed| seed.seed_frontier().into_uuid()),
+    )
     .fetch_all(&mut *connection)
     .await?;
     struct StoredFrontierDelta {
@@ -3136,20 +3208,25 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
         return Err(SubmitInputCorruption::Missing("context frontier semantic entry").into());
     }
 
-    if required_frontier_ids
-        .iter()
-        .any(|frontier| !stored_frontiers.contains_key(frontier))
-    {
+    let bounded_seed_frontier = bounded_imported_seed
+        .as_ref()
+        .map(|seed| seed.seed_frontier().into_uuid());
+    if required_frontier_ids.iter().any(|frontier| {
+        Some(*frontier) != bounded_seed_frontier && !stored_frontiers.contains_key(frontier)
+    }) {
         return Err(SubmitInputCorruption::Missing("scheduling context frontier").into());
     }
     let mut children = BTreeMap::<Uuid, Vec<Uuid>>::new();
     let mut ready = VecDeque::new();
     for (frontier, stored) in &stored_frontiers {
         if let Some(prefix) = stored.prefix {
-            if !stored_frontiers.contains_key(&prefix) {
+            if Some(prefix) == bounded_seed_frontier {
+                ready.push_back(*frontier);
+            } else if !stored_frontiers.contains_key(&prefix) {
                 return Err(SubmitInputCorruption::Missing("context frontier prefix").into());
+            } else {
+                children.entry(prefix).or_default().push(*frontier);
             }
-            children.entry(prefix).or_default().push(*frontier);
         } else {
             ready.push_back(*frontier);
         }
@@ -3157,8 +3234,9 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
     let mut reconstructed = BTreeMap::<Uuid, ResolvedContextFrontierReconstitutionInput>::new();
     while let Some(frontier) = ready.pop_front() {
         let stored = &stored_frontiers[&frontier];
-        let prefix = stored
-            .prefix
+        let stored_prefix = stored.prefix;
+        let prefix = stored_prefix
+            .filter(|prefix| Some(*prefix) != bounded_seed_frontier)
             .map(|prefix| {
                 reconstructed
                     .get(&prefix)
@@ -3168,15 +3246,26 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
                     ))
             })
             .transpose()?;
-        let prefix_member_count = prefix.as_ref().map_or(0, |prefix| prefix.entry_count());
+        let prefix_member_count = match stored_prefix {
+            Some(prefix) if Some(prefix) == bounded_seed_frontier => bounded_imported_seed
+                .as_ref()
+                .map_or(0, |seed| seed.declared_member_count()),
+            Some(prefix) => {
+                u64::try_from(stored_frontiers[&prefix].declared_count).map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "context frontier prefix declared membership",
+                    )
+                })?
+            }
+            None => 0,
+        };
         let actual_count = prefix_member_count
-            .checked_add(stored.members.len())
+            .checked_add(u64::try_from(stored.members.len()).map_err(|_| {
+                SubmitInputCorruption::Inconsistent("context frontier declared membership")
+            })?)
             .ok_or(SubmitInputCorruption::Inconsistent(
                 "context frontier declared membership",
             ))?;
-        let actual_count = u64::try_from(actual_count).map_err(|_| {
-            SubmitInputCorruption::Inconsistent("context frontier declared membership")
-        })?;
         if stored.declared_count != Decimal::from(actual_count) {
             return Err(SubmitInputCorruption::Inconsistent(
                 "context frontier declared membership",
@@ -3186,8 +3275,11 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
         let mut members = Vec::with_capacity(stored.members.len());
         for (index, (position, source_session, semantic_entry)) in stored.members.iter().enumerate()
         {
-            let expected_position =
-                u64::try_from(prefix_member_count + index + 1).map_err(|_| {
+            let expected_position = u64::try_from(index)
+                .ok()
+                .and_then(|index| prefix_member_count.checked_add(index))
+                .and_then(|position| position.checked_add(1))
+                .ok_or({
                     SubmitInputCorruption::Inconsistent("context frontier contiguous membership")
                 })?;
             if *position != Decimal::from(expected_position) {
@@ -3219,8 +3311,13 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
     if reconstructed.len() != stored_frontiers.len() {
         return Err(SubmitInputCorruption::Inconsistent("context frontier prefix cycle").into());
     }
+    let supplied_seed_frontier = imported_session
+        .as_ref()
+        .map(|imported| imported.seed_snapshot().frontier().snapshot().into_uuid())
+        .or(bounded_seed_frontier);
     let snapshots = scheduling_frontier_ids
         .iter()
+        .filter(|frontier| Some(**frontier) != supplied_seed_frontier)
         .map(|frontier| {
             reconstructed
                 .get(frontier)
@@ -3259,6 +3356,9 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
     );
     if let Some(imported_session) = imported_session {
         input = input.with_imported_session(imported_session);
+    }
+    if let Some(imported_seed) = bounded_imported_seed {
+        input = input.with_bounded_imported_seed(imported_seed);
     }
     for preceding in preceding_non_accepted_terminals {
         input = input.with_preceding_non_accepted_terminal(

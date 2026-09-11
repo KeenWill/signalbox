@@ -34,11 +34,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Resolved host services; provider simulation is supplied only by tests.
+/// Resolved host services for provider and recorded-response evaluation.
 #[derive(Clone)]
 pub struct EvalServices {
-    registrations: ProgramRegistrationRepository,
-    journal: ProgramJournalRepository,
+    pub(super) recordings: signalbox_persistence::evaluation::EvaluationRepository,
+    pub(super) registrations: ProgramRegistrationRepository,
+    pub(super) journal: ProgramJournalRepository,
     blobs: Arc<dyn CorpusBlobs>,
     model: Arc<dyn ApprovalJudgeModel>,
     binding: JudgeBinding,
@@ -54,6 +55,7 @@ impl EvalServices {
         configuration: Arc<HubModelConfiguration>,
     ) -> Self {
         Self {
+            recordings: signalbox_persistence::evaluation::EvaluationRepository::new(pool.clone()),
             registrations: ProgramRegistrationRepository::new(pool.clone()),
             journal: ProgramJournalRepository::new(pool.clone()),
             blobs: Arc::new(CatalogBlobs {
@@ -66,7 +68,7 @@ impl EvalServices {
         }
     }
 
-    async fn manifest(&self, run: ProgramRunId) -> Result<EvalManifest, EvalFailure> {
+    pub(super) async fn manifest(&self, run: ProgramRunId) -> Result<EvalManifest, EvalFailure> {
         let bytes = self
             .registrations
             .input_for_run(run)
@@ -76,64 +78,25 @@ impl EvalServices {
         EvalManifest::decode(bytes.as_bytes()).map_err(failure)
     }
 
-    async fn corpus(&self, manifest: &EvalManifest) -> Result<CorpusAnswer, EvalFailure> {
+    pub(super) async fn corpus(
+        &self,
+        manifest: &EvalManifest,
+    ) -> Result<CorpusAnswer, EvalFailure> {
         let digest = manifest.corpus.parse().map_err(failure)?;
         let bytes = self.blobs.read(digest).await?;
         if BlobDigest::digest(&bytes) != digest {
             return Err(failure("corpus digest mismatch"));
         }
-        let cases: Vec<Case> = match manifest.format {
-            CorpusFormat::Offline => signalbox_approval_judge_eval::decode_corpus(&bytes)
-                .map_err(failure)?
-                .cases
-                .into_iter()
-                .map(Case::Offline)
-                .collect(),
-            CorpusFormat::Live => std::str::from_utf8(&bytes)
-                .map_err(failure)?
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(|line| serde_json::from_str(line).map(Case::Live))
-                .collect::<Result<_, _>>()
-                .map_err(failure)?,
-        };
-        let selected = manifest
-            .cases
-            .iter()
-            .map(|position| {
-                cases
-                    .get(*position as usize)
-                    .cloned()
-                    .ok_or_else(|| failure("selected corpus case missing"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut live_names = std::collections::BTreeSet::new();
-        for case in &selected {
-            if let Case::Live(case) = case
-                && !live_names.insert(&case.name)
-            {
-                return Err(failure("duplicate selected live case name"));
-            }
-        }
-        // Preflight every selected case before the first provider operation.
-        let rendered = selected
-            .iter()
-            .map(|case| render_eval_case(&eval_case(case)))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(failure)?;
-        let rendered = rendered
-            .into_iter()
-            .map(|payload| payload + "\n")
-            .collect::<String>();
-        Ok(CorpusAnswer {
-            cases: selected,
-            corpus_digest: stable_digest(&bytes),
-            rendered_digest: stable_digest(rendered.as_bytes()),
-        })
+        decode_selected(manifest, &bytes)
     }
 
     fn validate_binding(&self, manifest: &EvalManifest) -> Result<(), EvalFailure> {
-        if manifest.binding != self.binding {
+        let expected = if manifest.recorded_responses.is_some() {
+            recorded_binding()
+        } else {
+            self.binding.clone()
+        };
+        if manifest.binding != expected {
             return Err(failure("pinned judge binding is unavailable"));
         }
         Ok(())
@@ -151,15 +114,20 @@ impl EvalServices {
             BlobDigest::digest(render_eval_case(&case).map_err(failure)?.as_bytes()).to_string();
         let binding = ApprovalJudgeEvalBinding {
             selection: DirectModelSelection::from_uuid(
-                uuid::Uuid::parse_str(&self.binding.selection).map_err(failure)?,
+                uuid::Uuid::parse_str(&manifest.binding.selection).map_err(failure)?,
             ),
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
-                uuid::Uuid::parse_str(&self.binding.target).map_err(failure)?,
+                uuid::Uuid::parse_str(&manifest.binding.target).map_err(failure)?,
             )),
-            credential_reference: self.binding.credential_reference.clone(),
+            credential_reference: manifest.binding.credential_reference.clone(),
         };
         let observer = ObservedJudge {
-            model: self.model.clone(),
+            model: match &manifest.recorded_responses {
+                Some(responses) => Arc::new(
+                    super::replay::model(&responses[trial.trial as usize]).map_err(failure)?,
+                ),
+                None => self.model.clone(),
+            },
             call: Mutex::new(None),
         };
         let result = judge_eval_case(&observer, &binding, &case).await;
@@ -167,18 +135,19 @@ impl EvalServices {
         let failed = |cause: String, usage, provider_reported_model| JudgeAnswer::Failed {
             call: call.clone(),
             request_digest: request_digest.clone(),
-            binding: self.binding.clone(),
+            binding: manifest.binding.clone(),
             cause,
             provider_reported_model,
             usage: usage_record(usage),
         };
         Ok(match result {
             Ok(verdict) => {
-                if crate::usage_limits::approval_judge_usage_exceeds_configured_limits(
-                    &self.configuration,
-                    binding.target,
-                    verdict.usage,
-                ) != Some(false)
+                if manifest.recorded_responses.is_none()
+                    && crate::usage_limits::approval_judge_usage_exceeds_configured_limits(
+                        &self.configuration,
+                        binding.target,
+                        verdict.usage,
+                    ) != Some(false)
                 {
                     failed(
                         "usage_limit_exceeded".into(),
@@ -189,7 +158,7 @@ impl EvalServices {
                     JudgeAnswer::Verdict {
                         call: call.ok_or_else(|| failure("judge call identity missing"))?,
                         request_digest,
-                        binding: self.binding.clone(),
+                        binding: manifest.binding.clone(),
                         actual: verdict.recommendation.into(),
                         rationale: verdict.rationale,
                         provider_reported_model: verdict.provider_reported_model,
@@ -220,6 +189,17 @@ pub struct EvaluationEffects {
     rejected: bool,
 }
 impl EvaluationEffects {
+    pub(crate) fn recovery_for(request: &signalbox_domain::EffectRequest) -> EffectRecovery {
+        if request.capability() == ProgramCapability::Judge
+            && request.method() == "evaluate"
+            && decode::<TrialRequest>(request.payload().as_bytes()).is_ok()
+        {
+            EffectRecovery::Ambiguous
+        } else {
+            EffectRecovery::Idempotent
+        }
+    }
+
     pub fn new(services: EvalServices) -> Self {
         Self {
             services,
@@ -293,6 +273,9 @@ impl EvaluationEffects {
                 let corpus = self.corpus(&manifest).await?;
                 encode(&self.services.judge(&manifest, trial, corpus).await?).map_err(failure)?
             }
+            (ProgramCapability::EvalRecord, "seal") => {
+                encode(&self.services.seal(invocation).await?).map_err(failure)?
+            }
             (ProgramCapability::Blob, "read") => {
                 let input: BlobReadRequest = decode(bytes).map_err(failure)?;
                 let digest = input.digest.parse().map_err(failure)?;
@@ -310,14 +293,7 @@ impl EvaluationEffects {
 
 impl EffectExecutor for EvaluationEffects {
     fn recovery(&self, request: &signalbox_domain::EffectRequest) -> EffectRecovery {
-        if request.capability() == ProgramCapability::Judge
-            && request.method() == "evaluate"
-            && decode::<TrialRequest>(request.payload().as_bytes()).is_ok()
-        {
-            EffectRecovery::Ambiguous
-        } else {
-            EffectRecovery::Idempotent
-        }
+        Self::recovery_for(request)
     }
     fn adopt<'a>(
         &'a mut self,
@@ -346,15 +322,15 @@ impl EffectExecutor for EvaluationEffects {
     }
 }
 
-trait CorpusBlobs: Send + Sync {
+pub(super) trait CorpusBlobs: Send + Sync {
     fn read(
         &self,
         digest: BlobDigest,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, EvalFailure>> + Send + '_>>;
 }
-struct CatalogBlobs {
-    repository: BlobCatalogRepository,
-    stores: Arc<BlobStoreRegistry>,
+pub(super) struct CatalogBlobs {
+    pub(super) repository: BlobCatalogRepository,
+    pub(super) stores: Arc<BlobStoreRegistry>,
 }
 impl CorpusBlobs for CatalogBlobs {
     fn read(
@@ -477,7 +453,7 @@ fn judge_failure(error: &ApprovalJudgeModelError) -> &'static str {
 }
 
 // The live scorecard uses FNV-1a independently of the SHA-256 corpus identity.
-fn stable_digest(bytes: &[u8]) -> String {
+pub(super) fn stable_digest(bytes: &[u8]) -> String {
     let mut hash = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d_u128;
     for byte in bytes {
         hash ^= u128::from(*byte);
@@ -487,16 +463,16 @@ fn stable_digest(bytes: &[u8]) -> String {
 }
 
 #[derive(Debug)]
-enum EvalFailure {
+pub(crate) enum EvalFailure {
     Rejected(LiveDeliveryFailure),
     Infrastructure(LiveDeliveryFailure),
 }
 
-fn failure(error: impl std::fmt::Display) -> EvalFailure {
+pub(super) fn failure(error: impl std::fmt::Display) -> EvalFailure {
     EvalFailure::Rejected(LiveDeliveryFailure::new(error.to_string()))
 }
 
-fn infrastructure_failure(error: impl std::fmt::Display) -> EvalFailure {
+pub(super) fn infrastructure_failure(error: impl std::fmt::Display) -> EvalFailure {
     EvalFailure::Infrastructure(LiveDeliveryFailure::new(error.to_string()))
 }
 
@@ -507,9 +483,73 @@ fn blob_failure(error: BlobReadError) -> EvalFailure {
         | BlobReadError::Integrity
         | BlobReadError::Missing
         | BlobReadError::Corrupt => infrastructure_failure(message),
-        BlobReadError::NotFound | BlobReadError::RangeOutOfBounds { .. } => failure(message),
+        BlobReadError::NotFound | BlobReadError::RangeOutOfBounds => failure(message),
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+pub(super) fn decode_selected(
+    manifest: &EvalManifest,
+    bytes: &[u8],
+) -> Result<CorpusAnswer, EvalFailure> {
+    let selected = match manifest.format {
+        CorpusFormat::Offline => {
+            let cases = signalbox_approval_judge_eval::decode_corpus(bytes)
+                .map_err(failure)?
+                .cases;
+            manifest
+                .cases
+                .iter()
+                .map(|position| {
+                    cases
+                        .get(*position as usize)
+                        .cloned()
+                        .map(Case::Offline)
+                        .ok_or_else(|| failure("selected corpus case missing"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        CorpusFormat::Live => {
+            let lines = std::str::from_utf8(bytes)
+                .map_err(failure)?
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>();
+            manifest
+                .cases
+                .iter()
+                .map(|position| {
+                    let line = lines
+                        .get(*position as usize)
+                        .ok_or_else(|| failure("selected corpus case missing"))?;
+                    serde_json::from_str(line).map(Case::Live).map_err(failure)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    };
+    let mut live_names = std::collections::BTreeSet::new();
+    for case in &selected {
+        if let Case::Live(case) = case
+            && !live_names.insert(&case.name)
+        {
+            return Err(failure("duplicate selected live case name"));
+        }
+    }
+    // Preflight every selected case before the first provider operation.
+    let rendered = selected
+        .iter()
+        .map(|case| render_eval_case(&eval_case(case)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    let rendered = rendered
+        .into_iter()
+        .map(|payload| payload + "\n")
+        .collect::<String>();
+    Ok(CorpusAnswer {
+        cases: selected,
+        corpus_digest: stable_digest(bytes),
+        rendered_digest: stable_digest(rendered.as_bytes()),
+    })
+}

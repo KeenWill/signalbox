@@ -151,3 +151,88 @@ fn admission_errors_identify_the_reference_without_path_or_contents() {
     assert!(!diagnostic.contains(file.path().to_str().expect("fixture path")));
     assert!(!diagnostic.contains("synthetic-secret"));
 }
+
+#[tokio::test]
+async fn missing_app_key_is_unavailable_at_use_without_startup_failure() {
+    let directory = tempfile::tempdir().expect("test credential directory");
+    let document = format!(
+        r#"[[credential_profiles]]
+name = "github-primary"
+adapter = "github"
+delivery = "github_app"
+app_id = 42
+installation_id = 73
+private_key_file = "{}"
+"#,
+        directory.path().join("missing.pem").display()
+    );
+    let document = document
+        .parse::<toml_edit::DocumentMut>()
+        .expect("fixture TOML");
+    let profiles = crate::credential_pools::parse_github_credential_profiles(
+        document.get("credential_profiles"),
+    )
+    .expect("absent key does not reject configuration");
+    let profile = profiles.get("github-primary").expect("configured profile");
+    assert_eq!(
+        profile
+            .authentication()
+            .expect("App source")
+            .authorization(None)
+            .await,
+        Err(signalbox_github_transport::AppCredentialFailure::KeyUnreadable)
+    );
+    let reference = CredentialReference::new("github-primary");
+    let access = FileCredentialAccess::from_github(profile, reference.clone());
+    assert_eq!(access.credential_reference(), Some(reference.clone()));
+    let foreign = CredentialReference::new("unmapped-github-profile");
+    assert_eq!(
+        access
+            .resolve(&foreign)
+            .await
+            .expect_err("App access retains its reference boundary")
+            .failure,
+        CredentialAccessFailure::Unmapped
+    );
+    assert!(access.validate().is_ok());
+    assert_eq!(
+        access
+            .resolve(&reference)
+            .await
+            .expect_err("missing key is credential unavailability")
+            .failure,
+        CredentialAccessFailure::Unavailable
+    );
+}
+
+#[test]
+fn app_delivery_validation_names_each_missing_field() {
+    const APP_PROFILE: &str = r#"[[credential_profiles]]
+name = "github-primary"
+adapter = "github"
+delivery = "github_app"
+app_id = 42
+installation_id = 73
+private_key_file = "/unused/generated-test-key.pem"
+"#;
+    for field in ["app_id", "installation_id", "private_key_file"] {
+        let mut document = APP_PROFILE
+            .parse::<toml_edit::DocumentMut>()
+            .expect("fixture TOML");
+        document["credential_profiles"]
+            .as_array_of_tables_mut()
+            .expect("profiles")
+            .get_mut(0)
+            .expect("profile")
+            .remove(field);
+        let error = crate::credential_pools::parse_github_credential_profiles(
+            document.get("credential_profiles"),
+        )
+        .expect_err("missing field rejected");
+        assert_eq!(
+            error,
+            crate::HubModelConfigurationError::InvalidGithubCredentialField { field }
+        );
+        assert!(error.to_string().contains(field));
+    }
+}

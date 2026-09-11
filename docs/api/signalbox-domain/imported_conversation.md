@@ -170,6 +170,7 @@ impl ImportedConversationDisplayTitle {
         value: string::String,
     ) -> result::Result<Self, ImportedConversationDisplayTitleError>;
     pub fn derive(conversation: &ImportedConversation) -> option::Option<Self>;
+    pub fn derive_candidates(conversation: &ImportedConversation) -> [option::Option<Self>; 3];
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -226,6 +227,17 @@ impl ImportedConversationSourceDigest {
 }
 ```
 
+## ImportedConversationSourceDigestBuilder
+
+```rust
+pub struct ImportedConversationSourceDigestBuilder {/* private */}
+impl ImportedConversationSourceDigestBuilder {
+    pub fn new(format: ImportedConversationFormat, expected_records: u64) -> Self;
+    pub fn push(&mut self, hash: ImportedRawRecordHash) -> bool;
+    pub fn finish(self) -> option::Option<ImportedConversationSourceDigest>;
+}
+```
+
 ## ImportedTranscriptEntry
 
 ```rust
@@ -266,7 +278,9 @@ impl ImportedTranscriptFrontier {
 pub enum ImportedConversationFormat {
     ClaudeCodeSessionJsonlV1,
     ClaudeCodeSessionJsonlV2,
+    ClaudeCodeSessionJsonlV3,
     CodexRolloutJsonlV1,
+    CodexRolloutJsonlV2,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```

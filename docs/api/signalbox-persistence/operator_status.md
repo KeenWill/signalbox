@@ -8,6 +8,11 @@
 pub enum ProcessOperatorStatusItem {
     LifecycleWeek(lifecycle_metrics::LifecycleWeeklyMetrics),
     LifecycleDeadlineViolation(lifecycle_metrics::LifecycleDeadlineViolation),
+    SessionSupervision {
+        session: signalbox_domain::SessionId,
+        terminal: bool,
+        failure: session_lifecycle::SessionSupervisionFailureRecord,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -20,6 +25,8 @@ pub struct ProcessOperatorStatusCounts {/* private */}
 impl operator_status::ProcessOperatorStatusCounts {
     pub const fn lifecycle_weeks(self) -> u64;
     pub const fn lifecycle_deadline_violations(self) -> u64;
+    pub const fn session_supervision(self) -> u64;
+    pub const fn outbox_quarantines(self) -> u64;
 }
 ```
 

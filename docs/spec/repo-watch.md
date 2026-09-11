@@ -109,11 +109,21 @@ sessions to a task that waits for nudge capacity without blocking startup
 recovery. The task clears each removed-target handoff after its nudge is
 retained.
 
+The sweep scrubs the response-scoped App token and its JSON-escaped form before
+convergence evaluation and durable session input construction. Each convergence
+HTTP request establishes its configured deadline before credential resolution
+and dispatches with only the remaining budget.
+
 The daemon composes the repository-watch module when `[repository_watch]` is
 configured and enabled. Dispatch actions and lifecycle reactions are retained in
 strictly increasing, unique action-ordinal order. The module submitter recovers
 exact retained payloads and invokes core session handlers through the daemon's
 command adapter.
+
+`repository_watch.workflows_enabled` defaults to false. When true, the existing
+serialized poll/webhook worker admits finite `ObserveRepository` runs to the
+daemon workflow runner; rule evaluation, command submission and lifecycle
+reactions use the existing workers.
 
 ## Design decisions
 
@@ -177,9 +187,11 @@ pull-request same-repository head branches; prior completions for those branches
 remain comparison input. Each periodic attempt spends at most
 `numeric_bounds.repository_watch_poll_request_budget` REST and GraphQL requests,
 including its REST-quota preflight; the preflight requires that same number of
-remaining REST requests. Completed discovery, pull-request, and workflow stages
-commit independently. Discovery preserves committed branch heads; branch heads
-are refreshed after pending PR lifecycles and bases, before deriving
+remaining REST requests, read from the authenticated response's
+`x-ratelimit-remaining` header. With `github_app` delivery this is the App
+installation's rate limit. Completed discovery, pull-request, and workflow
+stages commit independently. Discovery preserves committed branch heads; branch
+heads are refreshed after pending PR lifecycles and bases, before deriving
 `base_advanced` facts. Budget exhaustion reports `partial` in logs and operator
 status and retains a durable `poll_cursor` with pending subjects and normalized
 unfinished pages; the next poll resumes those reads, and completion clears the
@@ -247,7 +259,13 @@ component; repository scope keys the repository; rule scope spans repositories.
 Each key belongs to one rule revision. A live dispatch suppresses later matching
 facts. Nonsticky session termination releases its action; cooldown begins when
 the last action releases. A sticky stop keeps redispatch suppressed for that
-key.
+key. After the latest dispatch ends nonsticky without a durably completed
+configured push, repository watch retries that rule and pull request after its
+cooldown while the latest observed matching condition remains: a conflicting
+merge, unresolved review threads, or failing checks. Retries use the current
+pull-request context, retain their preceding dispatch and evaluated event
+context, and pass through the existing singleton and dispatch admission limits;
+they do not create GitHub change events.
 
 Goal commissioning or resumption releases the dispatched session's held start
 gate. A user-stopped goal issues a parent-only sticky stop. An achieved session
@@ -256,14 +274,15 @@ event commissions a fresh session and goal under the rule's cooldown. A close or
 merge fact with a repository event ordinal after the dispatch event issues a
 parent-only sticky stop for its live dispatched session, with
 `pull_request_closed` or `pull_request_merged` retained as the ledger reason; an
-already terminal session is left alone. Reactions check durable core terminal
-facts before recording retirement or submitting its stop, including facts still
-pending at the module cursor. Retirement scans retain discovered terminal times
-on the dispatch ledger. A queued retirement whose session has ended is rejected
-locally as `session_already_terminal`. Reactions retain their original rule and
-action even after configuration removes the rule. The module commits lifecycle
-effects before advancing its application cursor; the daemon acknowledges the
-corresponding seam event afterward.
+already terminal session is left alone. For retries, the close or merge fact
+must also be recorded no earlier than dispatch issuance. Reactions check durable
+core terminal facts before recording retirement or submitting its stop,
+including facts still pending at the module cursor. Retirement scans retain
+discovered terminal times on the dispatch ledger. A queued retirement whose
+session has ended is rejected locally as `session_already_terminal`. Reactions
+retain their original rule and action even after configuration removes the rule.
+The module commits lifecycle effects before advancing its application cursor;
+the daemon acknowledges the corresponding seam event afterward.
 
 Pull-request dispatch atomically creates the session with a provisioning hold
 that public start and ownership releases cannot clear. Input accepted during
@@ -314,12 +333,56 @@ interruption of a live turn whose session is closing. Synchronous
 command-identity conflicts settle as rejected before submission continues to the
 next action.
 
+Checkout credential preparation, clone, fetch, checkout, and authentication
+refresh share one 300-second deadline. For App credentials, a clone or fetch
+rejected for authentication refreshes the retained token generation and retries
+once; bounded Git failure output is inspected only for that decision and is not
+persisted.
+
 Dispatched pull-request sessions whose watched repository configures
-`push_credential_file` can use `git_push_configured` for their retained head
-branch on `origin` at `https://github.com/<owner>/<repo>.git`; fork heads are
-unavailable because that destination is the watched repository.
+`push_credential_file` or a `github_app` credential profile can use
+`git_push_configured` for their retained head branch on `origin` at
+`https://github.com/<owner>/<repo>.git`; fork heads are unavailable because that
+destination is the watched repository.
+
+App credential preparation, push attempts, refresh, and remote confirmation
+share one 300-second deadline. An explicit Git authentication rejection
+refreshes the rejected token and retries the push once; concurrent callers share
+the replacement token.
 
 ## Boundary contracts
+
+The daemon's checked workflow adapters expose rule-event reads, evaluation
+commit and pending submission over the module store. The module revalidates the
+revision, next event, matcher plan and singleton context, then atomically
+commits commands, cursor and a nonmatch, suppression or dispatch receipt.
+Pending evaluation receipts live on the cursor; pending submission bindings and
+results live on the dispatch ledger. Acknowledgement atomically moves the
+completed binding to `workflow_effect_result` and releases the pending slot.
+Both bind stable effect identities to exact method/input bytes independently of
+runs; equal recovery adopts before configuration lookup and changed input
+conflicts, including after acknowledgement and later cursor advancement. Pending
+receipts remain discoverable for successor runs until durable journal adoption;
+an unadopted evaluation prevents selecting the next event for that revision
+through either the workflow reader or the existing evaluator. Submission uses
+the retained commands and existing sink, including checkout and pending
+follow-ups, before recording completion. Recovery adopts a completed submission
+or resumes its binding; an unanswered submission without a binding is ambiguous.
+
+`repo.observe` uses the same provider paging, conditional caches, reviewer
+invalidation and request ceilings. Each completed frontier stage atomically
+retains its stable effect identity, exact request and accepted event range on
+`repository_state`, including unchanged observations. The receipt accumulates
+completed stages and records the attempt's success, partial or failure outcome;
+interruption between stages retains a partial result. Observation execution and
+adoption serialize per repository. A successor adopts the receipt before
+provider configuration or another fetch, and exact durable journal delivery
+moves its binding to `workflow_effect_result` before releasing the pending slot
+for the next observation in either mode. Completed observation bindings remain
+recoverable after later observations; changed input conflicts. A finalized
+attempt with no committed frontier stage retains its result there directly. An
+unanswered effect without a receipt is ambiguous. Shutdown cancels admitted
+observation runs and drains their provider work.
 
 The v2 crate depends on the session ownership crate as its only Signalbox
 dependency. It consumes the seam's lifecycle events and emits only the seam's
@@ -329,13 +392,23 @@ tables, or name another module schema.
 The module retains an authenticated, HTTPS-only GitHub client for API-relative
 GET requests and GraphQL observation queries. It receives no database handle.
 The daemon's repository-specific client loader rereads the configured credential
-file on each load and returns only an authenticated client handle. Credential
-and client-construction failures have distinct redacted error classes.
+file on each load, or installs a sender that resolves the selected App profile's
+shared installation-token cache at request dispatch. It returns only an
+authenticated client handle. Credential and client-construction failures have
+distinct redacted error classes. App responses scrub the token used for that
+response, including its JSON-escaped form, from observation text, JSON member
+names, and retained validators before poll-cache and PR-state persistence.
 
-The module's dedicated PostgreSQL login role owns `mod_repo_watch`, has no
-membership path back to the core identity, and has no table privileges in
-`public`. Module SQL uses an unqualified search path confined to its schema.
-Core and other modules receive no privileges on the module tables.
+App-backed repository-watch and goal-verification clients resolve no credential
+during construction. Each observation request shares one 300-second budget
+across cache waits, token exchanges, authentication retries, and HTTP transport.
+
+The module authenticates through a database-specific PostgreSQL login and
+assumes the role owning `mod_repo_watch`. Startup rotates only that database's
+login secret. Neither role has a membership path back to the core identity or
+table privileges in `public`. Module SQL uses an unqualified search path
+confined to its schema. Core and other modules receive no privileges on the
+module tables.
 
 A created session indexes its retained rule revision, event, dispatch, and
 action ordinal, so lifecycle reaction planning survives rule removal and process

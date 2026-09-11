@@ -13,6 +13,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::io::stdin().read_to_string(&mut prompt)?;
     std::fs::write("fake-claude-prompt", &prompt)?;
     let scenario = scenario(&prompt)?;
+    if scenario == "piped_stdin_too_large" {
+        std::io::stderr().write_all(b"Error: piped stdin input exceeds a synthetic limit.\n")?;
+        std::process::exit(1);
+    }
     if scenario == "process_nonzero" {
         system_status(None)?;
         std::io::stderr().write_all(b"authentication failed for synthetic login\n")?;
@@ -69,6 +73,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     system_init(&arguments)?;
     match scenario.as_str() {
+        "native_prompt_too_large" => {
+            emit_json(&serde_json::json!({
+                "type": "result", "subtype": "success", "is_error": true,
+                "session_id": fixtures::SESSION_ID, "stop_reason": "stop_sequence",
+                "result": "Prompt is too long",
+                "usage": {"input_tokens": 0, "output_tokens": 0,
+                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+            }))?;
+        }
         "normal_completion" => {
             assistant_text(fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;
@@ -158,6 +171,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
             tool_result(fixtures::TOOL_ID)?;
             success("tool_use", Some(fixtures::TOOL_ARGUMENTS))?;
+        }
+        "tool_acknowledgement_tail" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
+        "tool_acknowledgement_thinking_then_text" | "tool_acknowledgement_thinking_only" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            emit_json(&serde_json::json!({
+                "type": "assistant", "parent_tool_use_id": null,
+                "message": {
+                    "id": fixtures::OTHER_MESSAGE_ID, "model": fixtures::MODEL,
+                    "role": "assistant", "content": [{
+                        "type": "thinking", "thinking": "synthetic acknowledgement reasoning",
+                        "signature": "synthetic-signature",
+                    }],
+                },
+            }))?;
+            if scenario == "tool_acknowledgement_thinking_then_text" {
+                assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            }
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
+        "tool_acknowledgement_tail_reports_tool_use" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            success("tool_use", Some(fixtures::ANSWER))?;
+        }
+        "tool_acknowledgement_tail_is_empty" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            emit_json(&serde_json::json!({
+                "type": "assistant", "parent_tool_use_id": null,
+                "message": {
+                    "id": fixtures::OTHER_MESSAGE_ID, "model": fixtures::MODEL,
+                    "role": "assistant", "content": [],
+                },
+            }))?;
+            success("end_turn", None)?;
+        }
+        "tool_acknowledgement_tail_without_result" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
+        "tool_acknowledgement_tail_changes_model" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            assistant_text_with_identity(
+                fixtures::OTHER_MESSAGE_ID,
+                fixtures::OTHER_RESOLVED_MODEL,
+                fixtures::ANSWER,
+            )?;
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
+        "tool_acknowledgement_tail_proposes_tool" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            assistant_tool_with_message_id(fixtures::OTHER_MESSAGE_ID)?;
+            success("tool_use", None)?;
         }
         "reserved_key_tool_arguments" => {
             assistant_tool_with_raw_arguments(

@@ -15,6 +15,7 @@ postgres-integration = ["dep:testcontainers-modules", "test-support"]
 test-support = []
 
 [dependencies]
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 signalbox-newtype = { path = "../newtype" }
 rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
 serde = { version = "1.0.219", features = ["derive"] }
@@ -40,6 +41,7 @@ tokio = { version = "1.53.0", default-features = false, features = [
     "sync",
     "time",
 ] }
+tracing = { version = "0.1.41", default-features = false }
 url = { version = "2.5.8", default-features = false, features = ["std"] }
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 testcontainers-modules = { version = "0.15.0", optional = true, default-features = false, features = [
@@ -60,8 +62,8 @@ expectable = { git = "https://github.com/KeenWill/expectable-rs", tag = "v0.1.0"
 tempfile = "3.25.0"
 
 [[test]]
-name = "approval_judge_eval_postgres"
-path = "tests/approval_judge_eval_postgres.rs"
+name = "evaluation_postgres"
+path = "tests/evaluation_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]

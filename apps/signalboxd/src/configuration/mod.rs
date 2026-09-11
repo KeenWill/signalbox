@@ -3,7 +3,9 @@
 mod billing;
 #[cfg(test)]
 mod checked_in_example;
+mod compaction_measurement;
 mod credential_files;
+pub(crate) use credential_files::read_github_app_key;
 mod error;
 mod model_routing;
 mod model_settings;
@@ -41,8 +43,8 @@ use model_routing::{
 use model_settings::{
     RuntimeCapabilityProjection, parse_model_capabilities, parse_model_settings_overlay,
     parse_model_settings_profiles, parse_provider_compaction_capability,
-    project_runtime_model_capabilities, record_reasoning_replay_family,
-    validate_adapter_model_settings,
+    project_runtime_model_capabilities, record_reasoning_replay_family, runtime_reasoning_level,
+    runtime_service_tier, validate_adapter_model_settings,
 };
 pub use numeric_bounds::NumericBoundsConfiguration;
 #[cfg(test)]
@@ -95,12 +97,12 @@ use toml_scalars::{
 };
 pub(crate) use toml_scalars::{reject_unknown_fields, required_string, validated_name};
 pub use tool_settings::{
-    DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES, DaemonToolConfiguration,
-    MAX_COMPACTION_PROMPT_UTF8_BYTES, WorkspaceInstructionConfiguration,
+    DaemonToolConfiguration, MAX_COMPACTION_PROMPT_UTF8_BYTES, WorkspaceInstructionConfiguration,
 };
 use tool_settings::{
     parse_approval_judge, parse_daemon_tool_settings, parse_git_identity,
-    parse_tool_approval_postures, parse_tool_mappings, parse_workspace_instruction_configuration,
+    parse_tool_approval_postures, parse_tool_mappings, parse_tool_proposal_limits,
+    parse_workspace_instruction_configuration,
 };
 
 #[derive(Clone)]
@@ -119,10 +121,10 @@ pub struct HubModelConfiguration {
     numeric_bounds: NumericBoundsConfiguration,
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
-    tool_continuation_usage_limits: Vec<ToolContinuationUsageLimit>,
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
+    github_credential_profiles: HashMap<String, crate::credential_pools::GithubCredentialProfile>,
     credential_profiles: HashMap<Arc<str>, CredentialProfile>,
     credential_pools: HashMap<Arc<str>, CredentialPool>,
     model_capabilities: ModelCapabilityCatalog,
@@ -146,7 +148,6 @@ pub struct HubModelConfiguration {
     claude_cli: Option<ClaudeCliConfiguration>,
     claude_cli_credential_profile: Option<Arc<str>>,
     compaction_prompt: Arc<str>,
-    conversation_import_max_source_bytes: usize,
     web_fetch_egress_policy: WebFetchEgressPolicy,
     daemon_tools: Option<DaemonToolConfiguration>,
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
@@ -157,6 +158,7 @@ pub struct HubModelConfiguration {
     blob_storage: Option<BlobStorageConfiguration>,
     file_media: bool,
     workspace_instructions: WorkspaceInstructionConfiguration,
+    tool_proposal_limits: signalbox_application::ToolProposalLimits,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -191,7 +193,6 @@ impl HubModelConfiguration {
             global_model_settings,
             model_settings_profiles,
             compaction_prompt,
-            conversation_import_max_source_bytes,
             blob_storage,
             file_media,
             web_fetch_egress_policy,
@@ -203,6 +204,7 @@ impl HubModelConfiguration {
             approval_judge_selection,
             convergence,
             workspace_instructions,
+            tool_proposal_limits,
             mappings,
             session_credential_pin,
             fallback_credential_profile,
@@ -211,9 +213,18 @@ impl HubModelConfiguration {
             claude_cli,
             claude_cli_credential_profile,
         } = startup::parse_startup(content, &document)?;
+        let github_credential_profiles = crate::credential_pools::parse_github_credential_profiles(
+            document.get("credential_profiles"),
+        )?;
         let repository_watch = document
             .get("repository_watch")
-            .map(|item| parse_repository_watch_configuration(item, &numeric_bounds))
+            .map(|item| {
+                parse_repository_watch_configuration(
+                    item,
+                    &numeric_bounds,
+                    &github_credential_profiles,
+                )
+            })
             .transpose()?;
         let models = document
             .get("models")
@@ -592,29 +603,6 @@ impl HubModelConfiguration {
         .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
-        let mut tool_continuation_usage_limits = Vec::with_capacity(routes.len().saturating_mul(2));
-        for route in routes.values() {
-            let definition = runtime_models
-                .resolve(route.target)
-                .ok_or(HubModelConfigurationError::ConflictingTarget)?;
-            for fast_mode in [FastMode::Disabled, FastMode::Enabled] {
-                let effective = runtime_models
-                    .effective_definition(definition, fast_mode)
-                    .ok_or(HubModelConfigurationError::ConflictingTarget)?;
-                let limit = ToolContinuationUsageLimit::new(
-                    route.target,
-                    fast_mode,
-                    u64::from(effective.max_output_tokens()),
-                    u64::from(effective.context_window_tokens()),
-                )
-                .with_compaction_prompt_bytes(compaction_prompt.len() as u64);
-                tool_continuation_usage_limits.push(if effective.provider_compaction_supported() {
-                    limit.with_provider_compaction_replay()
-                } else {
-                    limit
-                });
-            }
-        }
         let billing_rates = target_billing_rates
             .into_iter()
             .filter_map(|(target, rates)| rates.map(|rates| (target, rates)))
@@ -634,10 +622,10 @@ impl HubModelConfiguration {
             numeric_bounds,
             targets,
             runtime_models,
-            tool_continuation_usage_limits,
             direct_selections,
             aliases,
             routes,
+            github_credential_profiles,
             credential_profiles,
             credential_pools,
             model_capabilities,
@@ -655,7 +643,6 @@ impl HubModelConfiguration {
             claude_cli,
             claude_cli_credential_profile,
             compaction_prompt,
-            conversation_import_max_source_bytes,
             web_fetch_egress_policy,
             daemon_tools,
             tool_approval_postures,
@@ -666,6 +653,7 @@ impl HubModelConfiguration {
             blob_storage,
             file_media,
             workspace_instructions,
+            tool_proposal_limits,
         })
     }
 
@@ -744,8 +732,147 @@ impl HubModelConfiguration {
 
     /// Returns configured output reservations and context ceilings for every
     /// same-turn continuation mode.
-    pub fn tool_continuation_usage_limits(&self) -> Vec<ToolContinuationUsageLimit> {
-        self.tool_continuation_usage_limits.clone()
+    pub fn tool_continuation_usage_limits(
+        &self,
+        tools: &[signalbox_application::ToolDefinition],
+    ) -> Result<Vec<ToolContinuationUsageLimit>, HubModelConfigurationError> {
+        let tools = signalbox_model_provider_runtime::runtime_tool_definitions(tools)
+            .map_err(|_| HubModelConfigurationError::InvalidField)?;
+        let mut limits = Vec::with_capacity(self.routes.len().saturating_mul(2));
+        for route in self.routes.values() {
+            let selected = self
+                .runtime_models
+                .resolve(route.target)
+                .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+            for fast_mode in [FastMode::Disabled, FastMode::Enabled] {
+                let definition = self
+                    .runtime_models
+                    .effective_definition(selected, fast_mode)
+                    .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+                let mut operation = signalbox_model_runtime::ModelOperation::new(
+                    (),
+                    CredentialReference::new("continuation-measurement"),
+                    signalbox_model_runtime::RequestedTarget::new(definition.provider_model()),
+                    signalbox_model_runtime::ResolvedTarget::new(definition.provider_model()),
+                    vec![signalbox_model_runtime::ConversationMessage::user_text(
+                        format!(
+                            "{}\n",
+                            signalbox_model_provider_runtime::CONTEXT_SUMMARY_MESSAGE
+                        ),
+                    )],
+                    signalbox_model_runtime::ModelSettings::new(definition.max_output_tokens()),
+                );
+                // A nonempty placeholder retains the system envelope on every adapter.
+                operation.system = Some("x".to_owned());
+                operation.tools = tools.clone();
+                operation.settings.fast_mode = match fast_mode {
+                    FastMode::Disabled => signalbox_model_runtime::FastMode::Disabled,
+                    FastMode::Enabled => signalbox_model_runtime::FastMode::Enabled,
+                };
+                operation.provider_compaction_supported =
+                    definition.provider_compaction_supported();
+                let adapter = self
+                    .adapter_for_provider_model(definition.provider_model())
+                    .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+                let fixed = self.continuation_request_bytes(route.target, adapter, &operation)?;
+                let framing_sample = signalbox_model_runtime::ConversationMessage::user_text("x");
+                let framing = match adapter {
+                    ModelAdapter::Anthropic => {
+                        signalbox_model_runtime_anthropic::serialized_message_bytes(
+                            &framing_sample,
+                            definition.provider_compaction_supported(),
+                        )
+                    }
+                    ModelAdapter::OpenAi => {
+                        signalbox_model_runtime_openai::serialized_message_bytes(&framing_sample)
+                    }
+                    ModelAdapter::CodexCli => {
+                        signalbox_model_runtime_codex_cli::serialized_message_bytes(&framing_sample)
+                    }
+                    ModelAdapter::ClaudeCli => {
+                        signalbox_model_runtime_claude_cli::serialized_message_bytes(
+                            &framing_sample,
+                        )
+                    }
+                }
+                .ok_or(HubModelConfigurationError::InvalidField)?;
+                let limit = ToolContinuationUsageLimit::new(
+                    route.target,
+                    fast_mode,
+                    u64::from(definition.max_output_tokens()),
+                    u64::from(definition.context_window_tokens()),
+                )
+                .with_max_tool_requests(self.tool_proposal_limits.max_requests)
+                .with_compaction_prompt_bytes(self.compaction_prompt.len() as u64)
+                .with_request_overhead(
+                    fixed.saturating_sub(1) as u64,
+                    framing.saturating_sub(1) as u64,
+                )
+                .with_entry_measurement(Arc::new(
+                    compaction_measurement::ContinuationEntryMeasurement {
+                        adapter,
+                        models: self.runtime_models.clone(),
+                        replays_provider_compaction: definition.provider_compaction_supported(),
+                    },
+                ));
+                limits.push(if definition.provider_compaction_supported() {
+                    limit.with_provider_compaction_replay()
+                } else {
+                    limit
+                });
+            }
+        }
+        Ok(limits)
+    }
+
+    fn continuation_request_bytes(
+        &self,
+        target: ResolvedProviderTarget,
+        adapter: ModelAdapter,
+        operation: &signalbox_model_runtime::ModelOperation<()>,
+    ) -> Result<usize, HubModelConfigurationError> {
+        let mut operation = operation.clone();
+        let mut maximum = None;
+        // Session and turn overlays may select any supported setting, including
+        // clearing one. Shared targets must cover every selectable route.
+        for (selection, route) in &self.routes {
+            if route.target != target {
+                continue;
+            }
+            let capabilities = self
+                .model_capabilities
+                .resolve(*selection)
+                .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+            for reasoning in std::iter::once(None)
+                .chain(capabilities.reasoning_levels().iter().copied().map(Some))
+            {
+                operation.settings.reasoning_level = reasoning.map(runtime_reasoning_level);
+                for tier in std::iter::once(None)
+                    .chain(capabilities.service_tiers().iter().copied().map(Some))
+                {
+                    operation.settings.service_tier = tier.map(runtime_service_tier);
+                    let bytes = match adapter {
+                        ModelAdapter::Anthropic => {
+                            signalbox_model_runtime_anthropic::serialized_request_bytes(&operation)
+                        }
+                        ModelAdapter::OpenAi => {
+                            signalbox_model_runtime_openai::serialized_request_bytes(&operation)
+                        }
+                        ModelAdapter::CodexCli => {
+                            signalbox_model_runtime_codex_cli::serialized_request_bytes(&operation)
+                        }
+                        ModelAdapter::ClaudeCli => {
+                            signalbox_model_runtime_claude_cli::serialized_request_bytes(&operation)
+                        }
+                    };
+                    // An incompatible combination cannot produce a real request.
+                    if let Some(bytes) = bytes {
+                        maximum = Some(maximum.map_or(bytes, |prior: usize| prior.max(bytes)));
+                    }
+                }
+            }
+        }
+        maximum.ok_or(HubModelConfigurationError::InvalidField)
     }
 
     /// Returns the adapter route for one configured direct selection.
@@ -1206,16 +1333,10 @@ impl HubModelConfiguration {
         &self.numeric_bounds
     }
 
-    /// Returns the maximum assembled source bytes for one conversation import.
-    pub const fn conversation_import_max_source_bytes(&self) -> usize {
-        self.conversation_import_max_source_bytes
-    }
-
     /// Whether the compiled sandboxed file tools are enabled at startup.
     pub const fn file_media(&self) -> bool {
         self.file_media
     }
-
     /// Returns the validated blob-store registry and write routes, when enabled.
     pub const fn blob_storage(&self) -> Option<&BlobStorageConfiguration> {
         self.blob_storage.as_ref()
@@ -1252,6 +1373,11 @@ impl HubModelConfiguration {
     /// Returns explicitly configured daemon tool dependencies, when present.
     pub const fn daemon_tools(&self) -> Option<&DaemonToolConfiguration> {
         self.daemon_tools.as_ref()
+    }
+
+    /// Configured admission caps for each model response's tool proposals.
+    pub const fn tool_proposal_limits(&self) -> signalbox_application::ToolProposalLimits {
+        self.tool_proposal_limits
     }
 
     /// Returns explicit roots whose content is discoverable but not eligible by default.
@@ -1308,4 +1434,27 @@ pub(crate) fn checked_in_example_configuration()
         EXAMPLE_EXEC_SUPERVISOR,
         executable.to_string_lossy().as_ref(),
     ))
+}
+
+impl HubModelConfiguration {
+    pub(crate) fn reuse_github_credentials(&mut self, previous: &Self) {
+        for (name, profile) in &mut self.github_credential_profiles {
+            if let Some(old) = previous.github_credential_profiles.get(name)
+                && old == profile
+            {
+                *profile = old.clone();
+            }
+        }
+        if let Some(watch) = &mut self.repository_watch {
+            watch.reuse_github_credentials(&self.github_credential_profiles);
+        }
+    }
+
+    /// Looks up a configured GitHub integration profile.
+    pub fn github_credential_profile(
+        &self,
+        name: &str,
+    ) -> Option<&crate::credential_pools::GithubCredentialProfile> {
+        self.github_credential_profiles.get(name)
+    }
 }

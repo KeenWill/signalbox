@@ -1,5 +1,6 @@
 //! Descriptor-bound object capture for a push range; see git-authority-threat-model.md.
 
+use crate::streamed_object::{IO_BYTES, ObjectContent};
 use crate::{
     descriptor::{
         FileIdentity, FileSnapshotIdentity, descriptor_path, file_identity, file_snapshot_identity,
@@ -7,24 +8,26 @@ use crate::{
     failure::LocalGitFailure,
     layout::parse_full_object_id,
     limits::{
-        MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
-        MAX_REPOSITORY_INSPECTIONS, MAX_SHALLOW_ENTRIES,
+        MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_METADATA_OBJECT_BYTES, MAX_REPOSITORY_INSPECTIONS,
+        MAX_SHALLOW_ENTRIES,
     },
     pinning::{PinnedRepository, RepositoryShell},
 };
-use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+use flate2::read::ZlibDecoder;
 use git2::{ObjectFormat, ObjectType, Odb, Oid};
 use rustix::fs::{Mode, OFlags, openat};
-use sha1::Sha1;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashSet},
     fs::{self, File},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom},
     os::fd::AsFd,
     path::{Path, PathBuf},
     time::Instant,
 };
+
+// A full-size metadata object can be slightly larger after zlib framing and
+// stored-block overhead, but compressed metadata must still have its own bound.
+const MAX_COMPRESSED_METADATA_BYTES: u64 = (2 * MAX_METADATA_OBJECT_BYTES) as u64;
 
 pub(super) struct PushObjectSnapshot {
     pub(super) repository: RepositoryShell,
@@ -53,7 +56,7 @@ impl PushObjectSnapshot {
     ) -> Result<Self, LocalGitFailure> {
         let repository = authority.open_repository_shell()?;
         let database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
-        let mut source = ObjectSource::open(authority, deadline)?;
+        let mut source = ObjectSource::open(authority, Some(deadline))?;
         let mut excluded = BTreeSet::new();
         let mut boundaries = BTreeSet::new();
         if let Some(fence) = fence {
@@ -62,17 +65,18 @@ impl PushObjectSnapshot {
         }
         let mut commits = vec![target];
         let mut visited = BTreeSet::new();
-        let mut fence_ancestors: Option<BTreeSet<Oid>> = None;
+        let mut fence_ancestors: Option<(BTreeSet<Oid>, ObjectSource)> = None;
         let mut trees = Vec::new();
         while let Some(commit) = commits.pop() {
             source.check_deadline()?;
             if !visited.insert(commit) {
                 continue;
             }
-            if visited
-                .len()
-                .saturating_add(fence_ancestors.as_ref().map_or(0, BTreeSet::len))
-                > MAX_REPOSITORY_INSPECTIONS
+            if visited.len().saturating_add(
+                fence_ancestors
+                    .as_ref()
+                    .map_or(0, |(ancestors, _)| ancestors.len()),
+            ) > MAX_REPOSITORY_INSPECTIONS
             {
                 return Err(LocalGitFailure::Repository);
             }
@@ -81,7 +85,7 @@ impl PushObjectSnapshot {
             }
             if fence_ancestors
                 .as_ref()
-                .is_some_and(|ancestors| ancestors.contains(&commit))
+                .is_some_and(|(ancestors, _)| ancestors.contains(&commit))
             {
                 boundaries.insert(commit);
                 if boundaries.len() > MAX_SHALLOW_ENTRIES {
@@ -98,7 +102,7 @@ impl PushObjectSnapshot {
                 && fence_ancestors.is_none()
                 && let Some(fence) = fence
             {
-                fence_ancestors = Some(capture_fence_ancestors(authority, &mut source, fence)?);
+                fence_ancestors = Some(capture_fence_ancestors(authority, deadline, fence)?);
             }
             trees.push(commit.tree_id());
             commits.extend(commit.parent_ids());
@@ -139,17 +143,25 @@ impl PushObjectSnapshot {
                 return Err(LocalGitFailure::Repository);
             }
         }
+        if let Some((_, graph_source)) = &fence_ancestors {
+            graph_source.validate(authority)?;
+        }
         source.validate(authority)?;
+        source.publish_private_packs(&repository.path().join("objects/pack"))?;
         drop(database);
+        repository.retain_selected_source(source);
         Ok(Self { repository })
     }
 }
 
 fn capture_fence_ancestors(
     authority: &PinnedRepository,
-    source: &mut ObjectSource,
+    deadline: Instant,
     fence: Oid,
-) -> Result<BTreeSet<Oid>, LocalGitFailure> {
+) -> Result<(BTreeSet<Oid>, ObjectSource), LocalGitFailure> {
+    let graph = authority.open_repository_shell()?;
+    let database = graph.odb().map_err(|_| LocalGitFailure::Operation)?;
+    let mut source = ObjectSource::open(authority, Some(deadline))?;
     let mut pending = vec![fence];
     let mut ancestors = BTreeSet::new();
     while let Some(oid) = pending.pop() {
@@ -160,15 +172,13 @@ fn capture_fence_ancestors(
         if ancestors.len() > MAX_REPOSITORY_INSPECTIONS {
             return Err(LocalGitFailure::Repository);
         }
-        let graph = authority.open_repository_shell()?;
-        let database = graph.odb().map_err(|_| LocalGitFailure::Operation)?;
         source.capture(&database, oid)?;
         let commit = graph
             .find_commit(oid)
             .map_err(|_| LocalGitFailure::Operation)?;
         pending.extend(commit.parent_ids());
     }
-    Ok(ancestors)
+    Ok((ancestors, source))
 }
 
 fn retain_boundary(
@@ -212,7 +222,6 @@ fn retain_boundary(
 struct SourceFile {
     directory: usize,
     name: PathBuf,
-    file: Option<File>,
     identity: FileSnapshotIdentity,
 }
 
@@ -239,42 +248,48 @@ pub(super) struct ObjectSource {
     files: Vec<SourceFile>,
     packs: Vec<Pack>,
     format: ObjectFormat,
-    captured_bytes: usize,
-    deadline: Instant,
+    max_object_bytes: Option<usize>,
+    pub(super) directory: tempfile::TempDir,
+    private_directory: File,
+    deadline: Option<Instant>,
 }
 
 fn rejected<T>(_: T) -> LocalGitFailure {
     LocalGitFailure::Repository
 }
 
-fn open_child(root: &File, path: &Path) -> Result<File, LocalGitFailure> {
+fn open_child(root: &File, path: &Path) -> Result<Option<File>, LocalGitFailure> {
     let parent = path.parent().ok_or(LocalGitFailure::Repository)?;
-    let directory = openat(
+    let directory = match openat(
         root,
         parent,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
-    )
-    .map_err(rejected)?;
-    let file = File::from(
-        openat(
-            directory.as_fd(),
-            path.file_name().ok_or(LocalGitFailure::Repository)?,
-            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(rejected)?,
-    );
+    ) {
+        Ok(directory) => directory,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(rejected(error)),
+    };
+    let file = match openat(
+        directory.as_fd(),
+        path.file_name().ok_or(LocalGitFailure::Repository)?,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(file) => File::from(file),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(rejected(error)),
+    };
     if !file.metadata().map_err(rejected)?.is_file() {
         return Err(LocalGitFailure::Repository);
     }
-    Ok(file)
+    Ok(Some(file))
 }
 
 impl ObjectSource {
     pub(super) fn open(
         authority: &PinnedRepository,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<Self, LocalGitFailure> {
         authority.validate_object_layout()?;
         let objects = File::from(
@@ -296,6 +311,8 @@ impl ObjectSource {
             .map_err(rejected)?,
         );
         let pack_path = descriptor_path(&pack_directory);
+        let directory = tempfile::tempdir().map_err(rejected)?;
+        let private_directory = File::open(directory.path()).map_err(rejected)?;
         let mut source = Self {
             objects,
             directories: vec![SourceDirectory {
@@ -306,7 +323,9 @@ impl ObjectSource {
             files: Vec::new(),
             packs: Vec::new(),
             format: authority.object_format,
-            captured_bytes: 0,
+            max_object_bytes: authority.max_object_bytes,
+            directory,
+            private_directory,
             deadline,
         };
         let mut scanned = 0usize;
@@ -355,12 +374,8 @@ impl ObjectSource {
                 .checked_sub(width)
                 .ok_or(LocalGitFailure::Repository)?;
             let header = source.read(pack, 0, 12)?;
-            if end < 12
-                || &header[..4] != b"PACK"
-                || !matches!(&header[4..8], [0, 0, 0, 2] | [0, 0, 0, 3])
-                || u32::from_be_bytes(header[8..12].try_into().map_err(rejected)?) as usize != count
-                || source.read(pack, end, width)? != checksum.as_bytes()
-            {
+            crate::pack_read_bounds::validate_pack_header(&header, end, count)?;
+            if source.read(pack, end, width)? != checksum.as_bytes() {
                 return Err(LocalGitFailure::Repository);
             }
             source.packs.push(Pack {
@@ -379,7 +394,11 @@ impl ObjectSource {
 
     // Stop timed-out blocking work between bounded reads and decodes.
     fn check_deadline(&self) -> Result<(), LocalGitFailure> {
-        if Instant::now() >= self.deadline {
+        self.check_deadline_at(Instant::now())
+    }
+
+    pub(super) fn check_deadline_at(&self, now: Instant) -> Result<(), LocalGitFailure> {
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
             return Err(LocalGitFailure::Repository);
         }
         Ok(())
@@ -432,13 +451,29 @@ impl ObjectSource {
         self.files.push(SourceFile {
             directory,
             name: PathBuf::from(path.file_name().ok_or(LocalGitFailure::Repository)?),
-            file: Some(file),
             identity,
         });
         if self.files.len() > MAX_REPOSITORY_INSPECTIONS {
             return Err(LocalGitFailure::Repository);
         }
         Ok(index)
+    }
+
+    fn reopen_file(&self, source: usize) -> Result<File, LocalGitFailure> {
+        let entry = &self.files[source];
+        let file = File::from(
+            openat(
+                &self.directories[entry.directory].directory,
+                &entry.name,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(rejected)?,
+        );
+        if file_snapshot_identity(&file.metadata().map_err(rejected)?) != entry.identity {
+            return Err(LocalGitFailure::Repository);
+        }
+        Ok(file)
     }
 
     fn read(
@@ -448,16 +483,8 @@ impl ObjectSource {
         length: usize,
     ) -> Result<Vec<u8>, LocalGitFailure> {
         self.check_deadline()?;
-        if length > MAX_OBJECT_DATABASE_BYTES {
-            return Err(LocalGitFailure::Repository);
-        }
         let entry = &self.files[source];
-        let mut file = entry
-            .file
-            .as_ref()
-            .ok_or(LocalGitFailure::Repository)?
-            .try_clone()
-            .map_err(rejected)?;
+        let mut file = self.reopen_file(source)?;
         file.seek(SeekFrom::Start(offset as u64))
             .map_err(rejected)?;
         let mut bytes = vec![0; length];
@@ -468,77 +495,166 @@ impl ObjectSource {
         Ok(bytes)
     }
 
-    fn charge(&mut self, bytes: usize) -> Result<(), LocalGitFailure> {
-        self.captured_bytes = self
-            .captured_bytes
-            .checked_add(bytes)
-            .filter(|n| *n <= MAX_OBJECT_DATABASE_BYTES)
-            .ok_or(LocalGitFailure::Repository)?;
+    fn publish_private_packs(&self, destination: &Path) -> Result<(), LocalGitFailure> {
+        let mut objects = Vec::new();
+        for directory in fs::read_dir(self.directory.path()).map_err(rejected)? {
+            let directory = directory.map_err(rejected)?;
+            for entry in fs::read_dir(directory.path()).map_err(rejected)? {
+                self.check_deadline()?;
+                let entry = entry.map_err(rejected)?;
+                let hex = format!(
+                    "{}{}",
+                    directory.file_name().to_string_lossy(),
+                    entry.file_name().to_string_lossy()
+                );
+                let oid =
+                    parse_full_object_id(&hex, self.format).ok_or(LocalGitFailure::Repository)?;
+                objects.push(oid);
+                if objects.len() > MAX_REPOSITORY_INSPECTIONS {
+                    return Err(LocalGitFailure::Repository);
+                }
+            }
+        }
+        if !objects.is_empty() {
+            crate::streamed_object::write_pack(
+                &objects,
+                |oid| {
+                    self.check_deadline()?;
+                    let hex = oid.to_string();
+                    let path = self.directory.path().join(&hex[..2]).join(&hex[2..]);
+                    self.decode_loose(File::open(path).map_err(rejected)?)
+                },
+                self.format,
+                destination,
+                self.deadline,
+            )?;
+        }
         Ok(())
+    }
+
+    pub(super) fn contains(&mut self, oid: Oid) -> Result<bool, LocalGitFailure> {
+        self.check_deadline()?;
+        let hex = oid.to_string();
+        let mut present =
+            open_child(&self.objects, &PathBuf::from(&hex[..2]).join(&hex[2..]))?.is_some();
+        if !present {
+            for pack in &self.packs {
+                if self.packed_offset(pack, oid)?.is_some() {
+                    present = true;
+                    break;
+                }
+            }
+        }
+        if present {
+            let database = Odb::new_ext(self.format).map_err(rejected)?;
+            // A generated private copy does not establish that the live copy is valid.
+            self.capture_live(&database, oid)?;
+        }
+        Ok(present)
+    }
+
+    pub(super) fn attach(&self, database: &Odb<'_>) -> Result<(), LocalGitFailure> {
+        // libgit2 deduplicates disk backends by directory identity.
+        database
+            .add_disk_alternate(
+                descriptor_path(&self.private_directory)
+                    .to_str()
+                    .ok_or(LocalGitFailure::Repository)?,
+            )
+            .map_err(rejected)
+    }
+
+    pub(super) fn store(
+        &mut self,
+        database: &Odb<'_>,
+        content: &mut ObjectContent,
+    ) -> Result<Oid, LocalGitFailure> {
+        if content.size > crate::limits::object_byte_limit(self.max_object_bytes, content.kind) {
+            return Err(LocalGitFailure::Repository);
+        }
+        self.attach(database)?;
+        content.store(self.directory.path(), self.format, self.deadline)
+    }
+
+    pub(super) fn content(&self, oid: Oid) -> Result<Option<ObjectContent>, LocalGitFailure> {
+        let hex = oid.to_string();
+        let path = self.directory.path().join(&hex[..2]).join(&hex[2..]);
+        match File::open(path) {
+            Ok(file) => self.decode_loose(file).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(rejected(error)),
+        }
+    }
+
+    fn decode_loose(&self, file: File) -> Result<ObjectContent, LocalGitFailure> {
+        let compressed_size = file.metadata().map_err(rejected)?.len();
+        // The loose header reveals the object kind. Keep the compressed-input
+        // bound for metadata, and lift it only after identifying a blob.
+        let mut decoder = compressed_decoder(file, Some(MAX_COMPRESSED_METADATA_BYTES), || {
+            self.check_deadline()
+        });
+        let mut header = Vec::new();
+        loop {
+            let byte = byte(&mut decoder)?;
+            if byte == 0 {
+                break;
+            }
+            if header.len() == MAX_LOOSE_OBJECT_HEADER_BYTES {
+                return Err(LocalGitFailure::Repository);
+            }
+            header.push(byte);
+        }
+        let (kind, size) = std::str::from_utf8(&header)
+            .map_err(rejected)?
+            .split_once(' ')
+            .ok_or(LocalGitFailure::Repository)?;
+        let kind = ObjectType::from_str(kind)
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    ObjectType::Blob | ObjectType::Tree | ObjectType::Commit | ObjectType::Tag
+                )
+            })
+            .ok_or(LocalGitFailure::Repository)?;
+        if kind == ObjectType::Blob {
+            decoder.get_mut().remaining = None;
+        }
+        let declared = size;
+        let size = size.parse::<usize>().map_err(rejected)?;
+        if size.to_string() != declared
+            || size > crate::limits::object_byte_limit(self.max_object_bytes, kind)
+        {
+            return Err(LocalGitFailure::Repository);
+        }
+        let content = ObjectContent::decode(&mut decoder, size, kind, self.deadline)?;
+        if decoder.total_in() != compressed_size {
+            return Err(LocalGitFailure::Repository);
+        }
+        Ok(content)
     }
 
     pub(super) fn capture(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
         self.check_deadline()?;
+        self.attach(database)?;
         if database.exists(oid) {
             return Ok(());
         }
+        self.capture_live(database, oid)
+    }
+
+    fn capture_live(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
         let hex = oid.to_string();
         let path = PathBuf::from(&hex[..2]).join(&hex[2..]);
-        if open_child(&self.objects, &path).is_ok() {
-            let file = self.open_file(&path)?;
-            let length = usize::try_from(self.files[file].identity.length).map_err(rejected)?;
-            if length > MAX_OBJECT_BYTES * 2 {
+        if open_child(&self.objects, &path)?.is_some() {
+            let source = self.open_file(&path)?;
+            let file = self.reopen_file(source)?;
+            let mut content = self.decode_loose(file)?;
+            if self.store(database, &mut content)? != oid {
                 return Err(LocalGitFailure::Repository);
             }
-            self.charge(length)?;
-            let compressed = self.read(file, 0, length)?;
-            let mut decoder = ZlibDecoder::new(compressed.as_slice());
-            let mut content = Vec::new();
-            Read::by_ref(&mut decoder)
-                .take((MAX_OBJECT_BYTES + MAX_LOOSE_OBJECT_HEADER_BYTES + 1) as u64)
-                .read_to_end(&mut content)
-                .map_err(rejected)?;
-            let header = content
-                .iter()
-                .position(|b| *b == 0)
-                .filter(|n| *n <= MAX_LOOSE_OBJECT_HEADER_BYTES)
-                .ok_or(LocalGitFailure::Repository)?;
-            let (kind, size) = std::str::from_utf8(&content[..header])
-                .map_err(rejected)?
-                .split_once(' ')
-                .ok_or(LocalGitFailure::Repository)?;
-            let kind = ObjectType::from_str(kind).ok_or(LocalGitFailure::Repository)?;
-            let declared_size = size;
-            let size = declared_size.parse::<usize>().map_err(rejected)?;
-            if size.to_string() != declared_size
-                || !matches!(
-                    kind,
-                    ObjectType::Blob | ObjectType::Tree | ObjectType::Commit | ObjectType::Tag
-                )
-            {
-                return Err(LocalGitFailure::Repository);
-            }
-            if size > MAX_OBJECT_BYTES
-                || content.len() != header + 1 + size
-                || decoder.total_in() != length as u64
-            {
-                return Err(LocalGitFailure::Repository);
-            }
-            self.charge(size)?;
-            if database
-                .write(kind, &content[header + 1..])
-                .map_err(rejected)?
-                != oid
-            {
-                return Err(LocalGitFailure::Repository);
-            }
-            // Verified loose bytes are private now; retain their identity for final
-            // path validation without exhausting descriptors across long histories.
-            self.files[file].file = None;
-        } else {
-            self.capture_pack(database, oid)?;
+            return Ok(());
         }
-        Ok(())
+        self.capture_pack(database, oid)
     }
 
     fn read_u32(&self, source: usize, offset: usize) -> Result<u32, LocalGitFailure> {
@@ -592,9 +708,10 @@ impl ObjectSource {
             }
         }
         let (pack_index, mut offset) = location.ok_or(LocalGitFailure::Repository)?;
+        let pack_file = self.reopen_file(self.packs[pack_index].source)?;
         let mut selected = HashSet::new();
         let mut entries = Vec::new();
-        loop {
+        let mut content = loop {
             self.check_deadline()?;
             if !selected.insert(offset) || selected.len() > MAX_REPOSITORY_INSPECTIONS {
                 return Err(LocalGitFailure::Repository);
@@ -603,16 +720,10 @@ impl ObjectSource {
             if offset < 12 || offset >= pack.end {
                 return Err(LocalGitFailure::Repository);
             }
-            let mut file = self.files[pack.source]
-                .file
-                .as_ref()
-                .ok_or(LocalGitFailure::Repository)?
-                .try_clone()
-                .map_err(rejected)?;
+            let mut file = pack_file.try_clone().map_err(rejected)?;
             file.seek(SeekFrom::Start(offset as u64))
                 .map_err(rejected)?;
-            let remaining_budget = MAX_OBJECT_DATABASE_BYTES - self.captured_bytes;
-            let mut remaining = file.take((pack.end - offset).min(remaining_budget) as u64);
+            let mut remaining = file.take((pack.end - offset) as u64);
             let first = byte(&mut remaining)?;
             let kind = (first >> 4) & 7;
             let size = if first & 0x80 == 0 {
@@ -623,7 +734,15 @@ impl ObjectSource {
                     .and_then(|n| n.checked_add(usize::from(first & 15)))
                     .ok_or(LocalGitFailure::Repository)?
             };
-            if size > MAX_OBJECT_BYTES {
+            crate::pack_read_bounds::validate_decoded_size(size, self.max_object_bytes)?;
+            let object_kind = match kind {
+                1 => ObjectType::Commit,
+                2 => ObjectType::Tree,
+                3 | 6 | 7 => ObjectType::Blob,
+                4 => ObjectType::Tag,
+                _ => return Err(LocalGitFailure::Repository),
+            };
+            if size > crate::limits::object_byte_limit(self.max_object_bytes, object_kind) {
                 return Err(LocalGitFailure::Repository);
             }
             let base = match kind {
@@ -657,71 +776,39 @@ impl ObjectSource {
                 }
                 _ => return Err(LocalGitFailure::Repository),
             };
-            let mut decoder = ZlibDecoder::new(remaining);
-            let mut content = Vec::new();
-            Read::by_ref(&mut decoder)
-                .take(size as u64 + 1)
-                .read_to_end(&mut content)
-                .map_err(rejected)?;
-            if content.len() != size {
+            if let Some(base) = base {
+                entries.push((pack.end as u64 - remaining.limit(), size));
+                offset = base;
+            } else {
+                let mut decoder =
+                    compressed_decoder(remaining, compressed_metadata_limit(object_kind), || {
+                        self.check_deadline()
+                    });
+                break ObjectContent::decode(&mut decoder, size, object_kind, self.deadline)?;
+            }
+        };
+        let pack = &self.packs[pack_index];
+        while let Some((offset, size)) = entries.pop() {
+            self.check_deadline()?;
+            let limit = crate::limits::object_byte_limit(self.max_object_bytes, content.kind);
+            if size > limit {
                 return Err(LocalGitFailure::Repository);
             }
-            self.charge(decoder.total_in() as usize)?;
-            self.charge(size)?;
-            if base.is_some() {
-                let mut header = content.as_slice();
-                let base_size = variable_size(&mut header)?;
-                let target_size = variable_size(&mut header)?;
-                if base_size > MAX_OBJECT_BYTES || target_size > MAX_OBJECT_BYTES {
-                    return Err(LocalGitFailure::Repository);
-                }
-                self.charge(target_size)?;
-            }
-            entries.push((kind, content));
-            match base {
-                Some(base) => offset = base,
-                None => break,
-            }
+            let mut file = pack_file.try_clone().map_err(rejected)?;
+            file.seek(SeekFrom::Start(offset)).map_err(rejected)?;
+            let mut decoder = compressed_decoder(
+                file.take(pack.end as u64 - offset),
+                compressed_metadata_limit(content.kind),
+                || self.check_deadline(),
+            );
+            let delta = ObjectContent::decode(&mut decoder, size, ObjectType::Blob, self.deadline)?;
+            drop(decoder);
+            content = content.apply_delta(delta.file, Some(limit), self.deadline)?;
         }
-        // Emit the selected dependency chain base-first with new OFS_DELTA offsets.
-        let mut pack = b"PACK\0\0\0\x02".to_vec();
-        pack.extend_from_slice(&(entries.len() as u32).to_be_bytes());
-        let mut previous_offset = 0;
-        for (kind, content) in entries.into_iter().rev() {
-            self.check_deadline()?;
-            let offset = pack.len();
-            let mut size = content.len();
-            let first = ((if kind >= 6 { 6 } else { kind }) << 4) | (size & 15) as u8;
-            size >>= 4;
-            pack.push(first | if size == 0 { 0 } else { 128 });
-            while size != 0 {
-                let part = (size & 127) as u8;
-                size >>= 7;
-                pack.push(part | if size == 0 { 0 } else { 128 });
-            }
-            if kind >= 6 {
-                let mut distance = offset - previous_offset;
-                let mut encoded = vec![(distance & 127) as u8];
-                while distance > 127 {
-                    distance = (distance >> 7) - 1;
-                    encoded.push(128 | (distance & 127) as u8);
-                }
-                pack.extend(encoded.into_iter().rev());
-            }
-            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(&content).map_err(rejected)?;
-            pack.extend(encoder.finish().map_err(rejected)?);
-            previous_offset = offset;
-        }
-        let checksum = match self.format {
-            ObjectFormat::Sha1 => Sha1::digest(&pack).to_vec(),
-            ObjectFormat::Sha256 => Sha256::digest(&pack).to_vec(),
-        };
-        pack.extend_from_slice(&checksum);
-        let mut writer = database.packwriter().map_err(rejected)?;
-        writer.write_all(&pack).map_err(rejected)?;
-        writer.commit().map_err(rejected)?;
-        if !database.exists(oid) {
+        if file_snapshot_identity(&pack_file.metadata().map_err(rejected)?)
+            != self.files[pack.source].identity
+            || self.store(database, &mut content)? != oid
+        {
             return Err(LocalGitFailure::Repository);
         }
         Ok(())
@@ -774,13 +861,58 @@ impl ObjectSource {
             if file_snapshot_identity(&current.metadata().map_err(rejected)?) != entry.identity {
                 return Err(LocalGitFailure::Repository);
             }
-            if let Some(file) = &entry.file
-                && file_snapshot_identity(&file.metadata().map_err(rejected)?) != entry.identity
-            {
-                return Err(LocalGitFailure::Repository);
-            }
         }
         Ok(())
+    }
+}
+
+// zlib can consume arbitrarily many empty blocks before returning one decoded
+// byte, so deadlines and metadata input bounds belong beneath its input buffer.
+fn compressed_metadata_limit(kind: ObjectType) -> Option<u64> {
+    (kind != ObjectType::Blob).then_some(MAX_COMPRESSED_METADATA_BYTES)
+}
+
+fn compressed_decoder<R, C>(
+    reader: R,
+    remaining: Option<u64>,
+    check: C,
+) -> ZlibDecoder<CompressedInput<R, C>>
+where
+    R: Read,
+    C: FnMut() -> Result<(), LocalGitFailure>,
+{
+    ZlibDecoder::new(CompressedInput {
+        reader,
+        remaining,
+        check,
+    })
+}
+
+struct CompressedInput<R, C> {
+    reader: R,
+    remaining: Option<u64>,
+    check: C,
+}
+
+impl<R: Read, C: FnMut() -> Result<(), LocalGitFailure>> Read for CompressedInput<R, C> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        (self.check)().map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let mut count = buffer.len().min(IO_BYTES);
+        if let Some(remaining) = self.remaining {
+            if remaining == 0 {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            count = count.min(remaining as usize);
+        }
+        let count = self.reader.read(&mut buffer[..count])?;
+        if let Some(remaining) = &mut self.remaining {
+            *remaining -= count as u64;
+        }
+        (self.check)().map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
+        Ok(count)
     }
 }
 
@@ -804,4 +936,134 @@ fn variable_size(reader: &mut impl Read) -> Result<usize, LocalGitFailure> {
         }
     }
     Err(LocalGitFailure::Repository)
+}
+
+#[cfg(test)]
+mod compressed_deadline_tests {
+    use super::*;
+    use std::{cell::Cell, io::Cursor};
+
+    // RFC 1950/1951 stored blocks: a valid zlib stream with a long run of
+    // non-final, empty blocks between the prefix and suffix output.
+    fn empty_blocks_between_count(prefix: &[u8], suffix: &[u8], empty_blocks: usize) -> Vec<u8> {
+        let mut compressed = vec![0x78, 0x01];
+        let mut block = |bytes: &[u8], final_block: bool| {
+            let length = u16::try_from(bytes.len()).expect("stored-block size");
+            compressed.push(u8::from(final_block));
+            compressed.extend_from_slice(&length.to_le_bytes());
+            compressed.extend_from_slice(&(!length).to_le_bytes());
+            compressed.extend_from_slice(bytes);
+        };
+        for page in prefix.chunks(u16::MAX as usize) {
+            block(page, false);
+        }
+        for _ in 0..empty_blocks {
+            block(&[], false);
+        }
+        block(suffix, true);
+        let (mut a, mut b) = (1u32, 0u32);
+        for &byte in prefix.iter().chain(suffix) {
+            a = (a + u32::from(byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        compressed.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        compressed
+    }
+
+    fn empty_blocks_between(prefix: &[u8], suffix: &[u8]) -> Vec<u8> {
+        empty_blocks_between_count(prefix, suffix, IO_BYTES)
+    }
+
+    struct CountedInput<'a> {
+        reader: Cursor<Vec<u8>>,
+        consumed: &'a Cell<usize>,
+    }
+    impl Read for CountedInput<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.reader.read(buffer)?;
+            self.consumed.set(self.consumed.get() + count);
+            Ok(count)
+        }
+    }
+
+    fn assert_empty_blocks_stop_at_deadline(prefix: &[u8], suffix: &[u8]) {
+        let compressed = empty_blocks_between(prefix, suffix);
+        let mut decoded = Vec::new();
+        ZlibDecoder::new(compressed.as_slice())
+            .read_to_end(&mut decoded)
+            .expect("valid stream, not corrupt data");
+        assert_eq!(decoded, [prefix, suffix].concat());
+
+        let consumed = Cell::new(0);
+        let expires_after = Cell::new(usize::MAX);
+        let reader = CountedInput {
+            reader: Cursor::new(compressed),
+            consumed: &consumed,
+        };
+        let mut decoder = compressed_decoder(reader, None, || {
+            if consumed.get() >= expires_after.get() {
+                Err(LocalGitFailure::Repository)
+            } else {
+                Ok(())
+            }
+        });
+        let mut decoded_prefix = vec![0; prefix.len()];
+        decoder
+            .read_exact(&mut decoded_prefix)
+            .expect("prefix before deadline");
+        assert_eq!(decoded_prefix, prefix);
+        // Expire while one decoder read consumes empty blocks, without sleeps
+        // or dependence on the speed of the host's decompressor.
+        expires_after.set(consumed.get() + IO_BYTES);
+        let mut output = [0];
+        let failure = decoder
+            .read(&mut output)
+            .expect_err("deadline inside compressed input");
+        assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+        assert!(consumed.get() <= expires_after.get());
+        assert_eq!(output, [0], "no suffix output reached the caller");
+    }
+
+    #[test]
+    fn loose_header_read_stops_inside_empty_deflate_blocks() {
+        assert_empty_blocks_stop_at_deadline(&[], b"blob 1\0x");
+    }
+
+    #[test]
+    fn packed_output_read_stops_inside_empty_deflate_blocks_between_pages() {
+        let prefix = vec![b'x'; IO_BYTES];
+        assert_empty_blocks_stop_at_deadline(&prefix, b"base tail");
+    }
+
+    #[test]
+    fn compressed_metadata_has_an_independent_input_bound() {
+        // Each empty stored block occupies five compressed bytes. Put the
+        // suffix beyond the metadata budget without increasing decoded size.
+        let empty_blocks = MAX_COMPRESSED_METADATA_BYTES as usize / 5 + 1;
+        let compressed = empty_blocks_between_count(&[], b"x", empty_blocks);
+        let consumed = Cell::new(0);
+        let reader = CountedInput {
+            reader: Cursor::new(compressed.clone()),
+            consumed: &consumed,
+        };
+        let mut metadata =
+            compressed_decoder(reader, compressed_metadata_limit(ObjectType::Tree), || {
+                Ok(())
+            });
+        let failure = metadata
+            .read_to_end(&mut Vec::new())
+            .expect_err("compressed metadata bound");
+        assert_eq!(failure.kind(), io::ErrorKind::InvalidData);
+        assert!(consumed.get() <= MAX_COMPRESSED_METADATA_BYTES as usize);
+
+        let mut blob = compressed_decoder(
+            compressed.as_slice(),
+            compressed_metadata_limit(ObjectType::Blob),
+            || Ok(()),
+        );
+        let mut decoded = Vec::new();
+        blob.read_to_end(&mut decoded)
+            .expect("blob compressed input remains unbounded");
+        assert_eq!(decoded, b"x");
+    }
 }

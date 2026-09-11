@@ -45,6 +45,19 @@ admission. A released wait that selects no member or wait fails through a fresh
 attempt, retaining a predecessor provider cause exactly when its chain issued a
 call.
 
+GitHub App delivery failures are credential unavailability at use and do not
+prevent daemon startup. Missing, unreadable, or invalid private keys,
+installations GitHub cannot find, and rejected token exchanges retain distinct
+sanitized failure classes. Installation tokens refresh within sixty seconds of
+expiry or after a 401, with one retry and shared concurrent refresh; these
+integration credentials do not participate in model-pool selection or
+quarantine.
+
+Installation-token preparation and refresh use the caller's configured request
+deadline. Credential preparation, destination resolution, shared-cache waits,
+and transport dispatch consume the same request budget. Token-exchange responses
+larger than 64 KiB are rejected as credential unavailability before decoding.
+
 ## Design decisions
 
 A rejected daemon-owned OAuth refresh or a credential-home identity that failed
@@ -136,11 +149,14 @@ A transient successor commit writes a credential-scoped durable exclusion whose
 reset equals the successor's durable retry deadline. Every session's call
 preparation skips that credential until the reset passes; after it passes, the
 member is admitted again. A chain exclusion is written when a failure rotates
-the pool and removes that member for the remainder of the turn. If another
-durable action excludes a retry successor's credential before preparation, that
-successor fails instead of selecting another member; when a fallback member
-remains admissible, the failure keeps the generic failed projection and records
-no pool exhaustion.
+the pool and removes that member for the remainder of the turn. A quota rotation
+uses the current headroom exclusion instead when the reported capacity already
+excludes that member, allowing a parked turn to resume after capacity returns.
+Rotation prefers another admissible member over the restored predecessor. If
+another durable action excludes a retry successor's credential before
+preparation, that successor fails instead of selecting another member; when a
+fallback member remains admissible, the failure keeps the generic failed
+projection and records no pool exhaustion.
 
 A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially
@@ -195,7 +211,9 @@ call its producer and evidence are pre-call exhaustion's; with a predecessor
 call its cause is that provider failure, never pool exhaustion. An accepted stop
 instead consumes the wait, opens a fresh immediate successor with its applied
 interrupt proof, ends it AfterCancellation(Cancelled), and appends TurnCancelled
-after the wait frontier while reclassifying pending steering.
+after the wait frontier while reclassifying pending steering. The wait-release
+proof admits a call-free prepared successor over a completed tool-result
+frontier for both normal admission and cancellation.
 
 A due deadline makes a wait eligible. Commit-time wait notifications nudge the
 scheduler; periodic invocation recovery also nudges eligible waits, including
@@ -203,9 +221,20 @@ deadlines and dropped hints, without a configured reconciliation sweep. A
 durable member-availability update or a successful operator clear grants
 eligibility to waits naming that member in the same transaction. Eligibility
 prepares no call and consumes no wait. Startup alone leaves exhausted waits
-unchanged; deadline-free waits have no timer. Pooled capacity observations and
-wait admission acquire the model-call order guard, profile action locks and
-invocation-capacity locks before updating waits.
+unchanged; deadline-free waits have no expiry timer. Pooled capacity
+observations and wait admission acquire the model-call order guard, profile
+action locks and invocation-capacity locks before updating waits.
+
+The daemon re-reads Codex account capacity for configured `codex_home` members
+whose live waits retain a headroom exclusion, using the reconciliation-sweep
+interval (or the invocation-recovery interval when absent) and the Codex CLI
+probe bound. This read starts no model thread or turn. A successful out-of-call
+observation has no model-call provenance and follows the same newest-observation
+and transactional wake rules. Nonempty capacity notifications merge sparse
+windows and supersede a pending read response; probes without usable evidence
+retain the prior observation and retry on the next pass. An external quota reset
+can therefore release a parked wait before its previously observed reset
+deadline.
 
 Contended-wait: no member is admitted and at least one otherwise-admissible
 member is skipped only for its configured invocation bound. Either exhaustion

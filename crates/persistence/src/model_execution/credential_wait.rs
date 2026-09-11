@@ -150,7 +150,7 @@ pub(super) async fn park_initial(
         &ended,
     )
     .await?;
-    let rows = sqlx::query("UPDATE turn_lifecycle SET active_phase_kind = 'awaiting_credential_availability', current_attempt_id = NULL, active_tool_round_call_id = NULL WHERE turn_id = $1 AND session_id = $2 AND state_kind = 'active' AND active_phase_kind = 'running' AND current_attempt_id = $3")
+    let rows = sqlx::query("UPDATE turn_lifecycle SET active_phase_kind = 'awaiting_credential_availability', current_attempt_id = NULL, active_tool_round_call_id = NULL, compaction_frontier_id = NULL WHERE turn_id = $1 AND session_id = $2 AND state_kind = 'active' AND active_phase_kind = 'running' AND current_attempt_id = $3")
         .bind(execution.turn().into_uuid()).bind(execution.session().into_uuid()).bind(ended.id().into_uuid())
         .execute(&mut *connection).await?.rows_affected();
     require_single(rows, "credential wait phase")?;
