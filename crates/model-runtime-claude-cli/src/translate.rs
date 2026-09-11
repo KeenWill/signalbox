@@ -2,12 +2,14 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::value::RawValue;
 use signalbox_model_runtime::{
     ConversationMessage, ConversationRole, MessagePart, ModelOperation, PreparationDefect,
     PreparationFailure, ToolChoice,
 };
+use uuid::Uuid;
 
 use crate::bridge::{Catalog, CatalogTool, TOOL_PREFIX, valid_mcp_tool_name};
 
@@ -21,13 +23,14 @@ pub fn serialized_request_bytes<C>(operation: &ModelOperation<C>) -> Option<usiz
         translated
             .prompt
             .len()
+            .saturating_add(translated.history.len())
             .saturating_add(serde_json::to_vec(&translated.catalog).ok()?.len()),
     )
 }
 
 pub(crate) struct TranslatedOperation {
     pub(crate) prompt: Vec<u8>,
-    pub(crate) input_format: crate::image::InputFormat,
+    pub(crate) history: Vec<u8>,
     pub(crate) catalog: Catalog,
     pub(crate) tool_requirement: ToolRequirement,
 }
@@ -42,7 +45,6 @@ pub(crate) enum ToolRequirement {
 #[derive(Serialize)]
 struct PromptRequest<'a> {
     system: &'a Option<String>,
-    messages: Vec<PromptMessage<'a>>,
     settings: PromptSettings<'a>,
     declared_tools: Vec<&'a str>,
     tool_choice: PromptToolChoice<'a>,
@@ -115,11 +117,12 @@ pub(crate) fn translate<C>(
     })?;
     validate_settings(operation)?;
 
-    let messages = operation
-        .messages
-        .iter()
-        .map(render_message)
-        .collect::<Result<Vec<_>, _>>()?;
+    let image_limit = signalbox_model_runtime::image_request_byte_limit(
+        operation,
+        &crate::image::image_presentation_capability(),
+    )
+    .map_err(TranslationError::Failure)?;
+    let history = render_history(&operation.messages)?;
     let mut catalog_tools = operation
         .tools
         .iter()
@@ -170,7 +173,6 @@ pub(crate) fn translate<C>(
     };
     let request = PromptRequest {
         system: &operation.system,
-        messages,
         settings: PromptSettings {
             max_output_tokens: operation.settings.max_output_tokens,
             temperature: operation.settings.temperature,
@@ -190,14 +192,13 @@ pub(crate) fn translate<C>(
             }
         }),
     };
-    let request_json = serde_json::to_string(&request).map_err(|error| {
-        TranslationError::Defect(PreparationDefect::SerializationFailed {
-            detail: error.to_string(),
-        })
-    })?;
+    let request_json = serde_json::to_string(&request).map_err(serialization_failed)?;
     let prompt = format!(
         "Act only as the model for this stateless request. The complete ordered \
-         context is the JSON below. Tools are available only through the \
+         context is restored in native history. Each history message contains \
+         its canonical JSON and any attached images. The JSON below contains \
+         request controls. Produce the next assistant response to the \
+         canonical conversation under these controls. Tools are available only through the \
          Signalbox MCP server; never write a tool call as prose. An MCP result \
          saying Signalbox recorded a proposal is an acknowledgement, not the \
          real tool result: after it, end the turn without inventing tool output \
@@ -208,16 +209,85 @@ pub(crate) fn translate<C>(
     )
     .into_bytes();
 
-    let (prompt, input_format) =
-        crate::image::encode_input(operation, prompt).map_err(TranslationError::Failure)?;
+    if image_limit.is_some_and(|limit| prompt.len().saturating_add(history.len()) > limit) {
+        return Err(TranslationError::Failure(
+            PreparationFailure::UnsupportedOperation {
+                detail: String::from("encoded Claude image request exceeds its presentation bound"),
+            },
+        ));
+    }
     Ok(TranslatedOperation {
-        input_format,
+        history,
         prompt,
         catalog: Catalog {
             tools: catalog_tools,
         },
         tool_requirement,
     })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryRecord<'a> {
+    parent_uuid: Option<String>,
+    uuid: String,
+    session_id: &'a str,
+    timestamp: &'a str,
+    is_sidechain: bool,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    message: NativeMessage,
+}
+
+#[derive(Serialize)]
+struct NativeMessage {
+    role: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    content: Vec<crate::image::InputPart>,
+}
+
+fn native_message(message: &ConversationMessage) -> Result<NativeMessage, TranslationError> {
+    let rendered = render_message(message)?;
+    let text = serde_json::to_string(&rendered).map_err(serialization_failed)?;
+    Ok(NativeMessage {
+        role: rendered.role,
+        id: match message.role {
+            ConversationRole::User => None,
+            ConversationRole::Assistant => Some(format!("msg_{}", Uuid::now_v7().simple())),
+        },
+        content: crate::image::message_content(message, text),
+    })
+}
+
+fn serialization_failed(error: serde_json::Error) -> TranslationError {
+    TranslationError::Defect(PreparationDefect::SerializationFailed {
+        detail: error.to_string(),
+    })
+}
+
+fn render_history(messages: &[ConversationMessage]) -> Result<Vec<u8>, TranslationError> {
+    let session_id = Uuid::now_v7().to_string();
+    let timestamp = DateTime::<Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(SecondsFormat::Millis, true);
+    let mut parent_uuid = None;
+    let mut bytes = Vec::new();
+    for message in messages {
+        let message = native_message(message)?;
+        let row = HistoryRecord {
+            parent_uuid,
+            uuid: Uuid::now_v7().to_string(),
+            session_id: &session_id,
+            timestamp: &timestamp,
+            is_sidechain: false,
+            kind: message.role,
+            message,
+        };
+        serde_json::to_writer(&mut bytes, &row).map_err(serialization_failed)?;
+        bytes.push(b'\n');
+        parent_uuid = Some(row.uuid);
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn qualified_tool_name(name: &str) -> String {
@@ -390,7 +460,7 @@ pub(crate) enum TranslationError {
     Defect(PreparationDefect),
 }
 
-/// Measures one array-framed history message through the adapter's request serializer.
+/// Measures one native history record through the adapter's request serializer.
 /// Returns `None` for a message the adapter cannot render.
 pub fn serialized_message_bytes(message: &ConversationMessage) -> Option<usize> {
     let mut projected = message.clone();
@@ -402,21 +472,39 @@ pub fn serialized_message_bytes(message: &ConversationMessage) -> Option<usize> 
                 usize::try_from(reference.byte_length.get()).ok()?,
             ),
             MessagePart::Image(image) => (image.media_type.clone(), image.bytes.len()),
-            _ => continue,
+            MessagePart::Text(_)
+            | MessagePart::ToolCall(_)
+            | MessagePart::ToolResult(_)
+            | MessagePart::Thinking { .. }
+            | MessagePart::RedactedThinking { .. }
+            | MessagePart::ProviderReasoning { .. }
+            | MessagePart::ProviderCompaction { .. } => continue,
         };
-        // Reserve base64, its wire envelope, and the image's prompt location label.
-        image_bytes = image_bytes
-            .checked_add(length.checked_add(2)?.checked_div(3)?.checked_mul(4)?)?
-            .checked_add(1024)?;
+        // The empty-image record includes its envelope; reserve the base64 payload.
+        image_bytes =
+            image_bytes.checked_add(length.checked_add(2)?.checked_div(3)?.checked_mul(4)?)?;
         *part = MessagePart::Image(signalbox_model_runtime::ImageInput {
             media_type,
             bytes: std::sync::Arc::from([]),
         });
     }
-    let rendered = render_message(&projected).ok()?;
-    serde_json::to_vec(&[rendered])
+    let message = native_message(&projected).ok()?;
+    let identity = Uuid::now_v7().to_string();
+    let timestamp = DateTime::<Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(SecondsFormat::Millis, true);
+    let record = HistoryRecord {
+        parent_uuid: Some(identity.clone()),
+        uuid: identity.clone(),
+        session_id: &identity,
+        timestamp: &timestamp,
+        is_sidechain: false,
+        kind: message.role,
+        message,
+    };
+    serde_json::to_vec(&record)
         .ok()?
         .len()
+        .checked_add(1)?
         .checked_add(image_bytes)
 }
 
@@ -428,28 +516,149 @@ mod tests {
         ResolvedTarget,
     };
 
+    // Arbitrary text occupying a non-image part of the fixture.
+    const IMAGE_CONTEXT: &str = "synthetic image context";
+
     #[test]
-    fn measured_growth_covers_appended_message_array_separators() {
-        let mut operation = operation_with_message(ConversationMessage::user_text("baseline"));
-        let baseline = translate(&operation)
-            .expect("baseline renders")
-            .prompt
-            .len();
-        let mut allowance = 0;
-        for text in ["first appended input", "second appended input"] {
-            let message = ConversationMessage::user_text(text);
-            allowance += super::serialized_message_bytes(&message).expect("input renders");
-            operation.messages.push(message);
-            let growth = translate(&operation)
-                .expect("appended input renders")
-                .prompt
-                .len()
-                - baseline;
-            assert!(
-                allowance >= growth,
-                "allowance {allowance} must cover serialized growth {growth}"
-            );
-        }
+    fn measured_growth_covers_escaped_native_history_records() {
+        let mut operation =
+            operation_with_message(ConversationMessage::user_text("\"baseline\"\n"));
+        let baseline = super::serialized_request_bytes(&operation).expect("baseline renders");
+        let message = ConversationMessage::user_text("\"appended\"\n\\");
+        let allowance = super::serialized_message_bytes(&message).expect("input renders");
+        operation.messages.push(message);
+        let growth =
+            super::serialized_request_bytes(&operation).expect("appended input renders") - baseline;
+        assert!(
+            growth > 0,
+            "the complete measured request includes appended history"
+        );
+        assert!(
+            allowance >= growth,
+            "message allowance must cover native framing and escaping"
+        );
+    }
+
+    #[test]
+    fn image_history_preserves_bytes_and_counts_controls_against_the_request_bound() {
+        use signalbox_model_runtime::{ConversationRole, ImageInput, MessagePart};
+        let mut operation = operation_with_message(ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::Image(ImageInput {
+                media_type: "image/png".into(),
+                bytes: std::sync::Arc::from([1_u8, 2, 3]),
+            })],
+        });
+        operation.image_presentation = Some(crate::image::image_presentation_capability());
+        let translated = translate(&operation).expect("image history renders");
+        let row: serde_json::Value =
+            serde_json::from_slice(&translated.history).expect("one native row");
+        assert_eq!(
+            row["message"]["content"][2],
+            serde_json::json!({
+                "type":"image", "source":{"type":"base64","media_type":"image/png","data":"AQID"}
+            })
+        );
+        let complete_bytes = translated.history.len() + translated.prompt.len();
+        operation.image_presentation = Some(
+            crate::image::image_presentation_capability().limited_by(u64::MAX, complete_bytes - 1),
+        );
+        assert!(
+            translate(&operation).is_err(),
+            "history plus request controls exceed the presentation limit"
+        );
+    }
+
+    #[test]
+    fn native_images_keep_their_message_and_part_positions() {
+        use signalbox_model_runtime::{ConversationRole, ImageInput, MessagePart};
+        let first = ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![
+                MessagePart::Text(String::from(IMAGE_CONTEXT)),
+                MessagePart::Image(ImageInput {
+                    media_type: "image/png".into(),
+                    bytes: std::sync::Arc::from([1_u8, 2, 3]),
+                }),
+            ],
+        };
+        let second = ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![
+                MessagePart::Image(ImageInput {
+                    media_type: "image/jpeg".into(),
+                    bytes: std::sync::Arc::from([4_u8, 5, 6]),
+                }),
+                MessagePart::Text(String::from(IMAGE_CONTEXT)),
+            ],
+        };
+        let mut operation = operation_with_message(first);
+        operation.messages.push(second);
+        operation.image_presentation = Some(crate::image::image_presentation_capability());
+        let translated = translate(&operation).expect("ordered image history renders");
+        let rows: Vec<serde_json::Value> = translated
+            .history
+            .split(|byte| *byte == b'\n')
+            .filter(|row| !row.is_empty())
+            .map(|row| serde_json::from_slice(row).expect("native history record is JSON"))
+            .collect();
+        assert_eq!(rows.len(), operation.messages.len());
+        assert_eq!(
+            rows[0]["message"]["content"][1]["text"],
+            "Image for parts[1] in this history message:"
+        );
+        assert_eq!(rows[0]["message"]["content"][2]["source"]["data"], "AQID");
+        assert_eq!(
+            rows[1]["message"]["content"][1]["text"],
+            "Image for parts[0] in this history message:"
+        );
+        assert_eq!(rows[1]["message"]["content"][2]["source"]["data"], "BAUG");
+    }
+
+    #[test]
+    fn image_history_rejects_source_bytes_over_the_presentation_bound() {
+        use signalbox_model_runtime::{ConversationRole, ImageInput, MessagePart};
+        let mut operation = operation_with_message(ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::Image(ImageInput {
+                media_type: "image/png".into(),
+                bytes: std::sync::Arc::from([1_u8, 2, 3]),
+            })],
+        });
+        operation.image_presentation =
+            Some(crate::image::image_presentation_capability().limited_by(2, usize::MAX));
+        assert!(
+            translate(&operation).is_err(),
+            "source image exceeds its three-byte fixture's two-byte bound"
+        );
+    }
+
+    #[test]
+    fn measured_growth_includes_appended_native_image_payload() {
+        use signalbox_model_runtime::{ConversationRole, ImageInput, MessagePart};
+        let mut operation = operation_with_message(ConversationMessage::user_text(IMAGE_CONTEXT));
+        operation.image_presentation = Some(crate::image::image_presentation_capability());
+        let baseline = super::serialized_request_bytes(&operation).expect("baseline renders");
+        let message = ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::Image(ImageInput {
+                media_type: "image/png".into(),
+                bytes: std::sync::Arc::from([1_u8, 2, 3]),
+            })],
+        };
+        let allowance =
+            super::serialized_message_bytes(&message).expect("image measurement renders");
+        operation.messages.push(message);
+        let growth =
+            super::serialized_request_bytes(&operation).expect("image history renders") - baseline;
+        assert!(
+            growth > 0,
+            "the complete request includes native image bytes"
+        );
+        assert!(
+            allowance >= growth,
+            "the message allowance covers base64 and native history framing"
+        );
     }
 
     fn operation_with_message(message: ConversationMessage) -> ModelOperation<()> {

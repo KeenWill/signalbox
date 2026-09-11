@@ -4567,6 +4567,7 @@ name = "signalbox-model-runtime-claude-cli"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "chrono",
  "rustix 1.1.4",
  "semver",
  "serde",
@@ -4575,6 +4576,7 @@ dependencies = [
  "signalbox-test-bin",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
