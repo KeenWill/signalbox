@@ -5792,10 +5792,22 @@ async fn instruction_discovery_refuses_a_lost_derived_binding() {
         .await
         .expect("the derived root binds");
     fs::remove_dir_all(&derived).expect("the bound derived root is removed");
+    let output = tempfile::NamedTempFile::new().expect("capture workspace resolution failure");
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(output.reopen().expect("capture writer"))
+        .finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
     let after_removal = resolver.resolve(first).await;
+    let diagnostic = fs::read_to_string(output.path()).expect("read captured diagnostic");
 
     assert_eq!(initially_bound, derived);
     assert_eq!(after_removal, Err(WorkspaceInstructionRootResolutionError));
+    assert!(diagnostic.contains("workspace instruction root resolution failed"));
+    assert!(diagnostic.contains("failure=UnresolvableRoot"));
+    assert!(diagnostic.contains(&first.into_uuid().to_string()));
+    assert!(!diagnostic.contains(&parent.path().display().to_string()));
 }
 
 /// Instruction discovery revalidates the pathname against the pinned tool
