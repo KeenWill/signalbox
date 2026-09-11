@@ -449,9 +449,7 @@ impl ConfigurationReload {
         let prior = self.restore(&intent.prior_snapshot).map_err(|_| {
             ReloadRepositoryError::Corruption("prior reload snapshot cannot be restored")
         })?;
-        let changed_profiles =
-            changed_codex_homes(prior.models.source(), replacement.models.source())
-                .map_err(|_| ReloadRepositoryError::Corruption("profile reload snapshot"))?;
+        let changed_profiles = changed_codex_homes(&prior.models, &replacement.models);
         Arc::make_mut(&mut replacement.models).reuse_github_credentials(&self.catalogs().models);
         let prepared_watch = if let Some(watch) = &self.watch {
             let prepared = match watch.prepare_reload(replacement.clone()).await {
@@ -730,33 +728,26 @@ fn startup_sections(models: &HubModelConfiguration) -> Result<toml::Table, Reloa
     Ok(source)
 }
 
-fn changed_codex_homes(prior: &str, replacement: &str) -> Result<Vec<String>, ReloadResult> {
-    fn homes(source: &str) -> Result<std::collections::BTreeMap<String, String>, ReloadResult> {
-        let source: toml::Table = toml::from_str(source)
-            .map_err(|_| failure(ReloadPhase::Validate, "model source is invalid"))?;
-        Ok(source
-            .get("credential_profiles")
-            .and_then(toml::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|profile| {
-                profile.get("delivery").and_then(toml::Value::as_str) == Some("codex_home")
-            })
-            .filter_map(|profile| {
-                Some((
-                    profile.get("name")?.as_str()?.to_owned(),
-                    profile.get("codex_home")?.as_str()?.to_owned(),
-                ))
-            })
-            .collect())
-    }
-    let prior = homes(prior)?;
-    Ok(homes(replacement)?
+fn changed_codex_homes(
+    prior: &HubModelConfiguration,
+    replacement: &HubModelConfiguration,
+) -> Vec<String> {
+    replacement
+        .credential_invocation_registrations()
         .into_iter()
-        .filter_map(|(profile, path)| {
-            (prior.get(&profile).is_some_and(|old| old != &path)).then_some(profile)
+        .filter_map(|(name, _)| {
+            use crate::credential_pools::CredentialDelivery::CodexHome;
+            match (
+                prior.credential_profile(&name)?.delivery(),
+                replacement.credential_profile(&name)?.delivery(),
+            ) {
+                (CodexHome { path: old, .. }, CodexHome { path: new, .. }) if old != new => {
+                    Some(name)
+                }
+                _ => None,
+            }
         })
-        .collect())
+        .collect()
 }
 
 fn failure(phase: ReloadPhase, reason: &str) -> ReloadResult {
@@ -790,22 +781,20 @@ mod tests {
     #[test]
     fn codex_home_replacement_survives_retained_reload_without_reloading_other_profile_fields() {
         let source = include_str!("../../../config/signalboxd.example.toml").replace(
-            "delivery = \"ambient\"",
-            "delivery = \"codex_home\"\ncodex_home = \"/tmp/codex-home-before\"",
+            "\ndelivery = \"ambient\"\n",
+            "\ndelivery = \"codex_home\"\ncodex_home = \"/tmp/codex-home-before\"\n",
         );
         let replacement = source.replace("/tmp/codex-home-before", "/tmp/codex-home-after");
         let before = HubModelConfiguration::parse(&source).expect("initial home catalog");
         let after = HubModelConfiguration::parse(&replacement).expect("replacement home catalog");
         assert_eq!(startup_sections(&before), startup_sections(&after));
-        assert_eq!(
-            changed_codex_homes(&source, &replacement).unwrap(),
-            ["codex-ambient"]
-        );
-        assert!(
-            changed_codex_homes(&replacement, &replacement)
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(changed_codex_homes(&before, &after), ["codex-ambient"]);
+        assert!(changed_codex_homes(&after, &after).is_empty());
+        let equivalent =
+            source.replace("/tmp/codex-home-before", "/tmp/unused/../codex-home-before");
+        let equivalent =
+            HubModelConfiguration::parse(&equivalent).expect("equivalent normalized home");
+        assert!(changed_codex_homes(&before, &equivalent).is_empty());
         let identity_change = replacement.replace("codex-ambient", "another-codex-profile");
         let identity_change =
             HubModelConfiguration::parse(&identity_change).expect("other profile");
@@ -828,7 +817,7 @@ mod tests {
         )
         .expect("home change restores from durable intent");
         assert_eq!(
-            changed_codex_homes(&source, restored.models.source()).unwrap(),
+            changed_codex_homes(&before, &restored.models),
             ["codex-ambient"]
         );
     }

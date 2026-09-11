@@ -127,6 +127,59 @@ async fn authentication_wait_requires_a_changed_profile_and_replays_release_once
     else {
         panic!("released call must authorize")
     };
+    let rejected_again = repository
+        .commit_observation(
+            session,
+            authorized
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::CredentialRejected,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    false,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 170)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 171)),
+                ),
+                successor_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(SEED + 172)),
+            },
+            |_| panic!("no steering in this fixture"),
+        )
+        .await?;
+    let Some(ModelCallObservationCommitOutcome::CredentialWait(second_wait)) = rejected_again
+    else {
+        panic!("another rejection must park the retained turn again")
+    };
+    reloads
+        .finish_profile_reload(changed, &[MEMBER.to_owned()])
+        .await?;
+    let eligible: bool = sqlx::query_scalar("SELECT credential_wait_is_eligible($1)")
+        .bind(second_wait.attempt().into_uuid())
+        .fetch_one(&pool)
+        .await?;
+    assert!(
+        !eligible,
+        "replaying an old reload cannot release a newer rejection"
+    );
+    let changed_again = ReloadConfiguration {
+        command_id: DurableCommandId::from_uuid(Uuid::from_u128(SEED + 180)),
+    };
+    reloads.claim(changed_again, Ok(&intent)).await?;
+    reloads
+        .finish_profile_reload(changed_again, &[MEMBER.to_owned()])
+        .await?;
+    let PrepareInitialModelCallOutcome::Checkpointed(call) =
+        prepare_wait_admission(&repository, session, SEED + 190).await?
+    else {
+        panic!("a new profile replacement releases the new rejection")
+    };
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(session, call).await?
+    else {
+        panic!("the next released call must authorize")
+    };
     let completed = repository
         .commit_observation(
             session,
