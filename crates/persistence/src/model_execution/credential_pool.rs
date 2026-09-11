@@ -318,7 +318,7 @@ pub(super) async fn load_durable_pool_exclusions(
            FROM credential_pool_chain_exclusion AS chain
           WHERE session_id = $1
             AND turn_id = $2
-            AND NOT EXISTS (SELECT 1 FROM credential_authentication_release released
+            AND NOT EXISTS (SELECT 1 FROM credential_pool_exclusion_release released
                             WHERE released.predecessor_model_call_id = chain.predecessor_model_call_id)",
     )
     .bind(session_id_to_uuid(session))

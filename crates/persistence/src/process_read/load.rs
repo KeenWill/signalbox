@@ -58,6 +58,7 @@ pub(super) async fn open_transcript_in_transaction(
     mut transaction: Transaction<'static, Postgres>,
     requested_session: SessionId,
     automatic_reconciliation_attempt_budget: Option<Option<u32>>,
+    after_frontier: Option<ContextFrontierId>,
 ) -> Result<ProcessTranscriptReader, ProcessReadError> {
     let stored_cursor: Option<Decimal> = sqlx::query_scalar(
         "SELECT last_sequence
@@ -105,6 +106,7 @@ pub(super) async fn open_transcript_in_transaction(
         model_calls_complete: false,
         entry_count: None,
         next_entry_index: 0,
+        after_frontier,
         summary: None,
         automatic_reconciliation_attempt_budget,
     })
@@ -497,6 +499,7 @@ pub(super) async fn open_transcript_entry_cursor(
     transaction: &mut Transaction<'static, Postgres>,
     session: SessionId,
     frontier: ContextFrontierId,
+    after_entry_count: u64,
 ) -> Result<u64, ProcessReadError> {
     let stored_member_count: Option<Decimal> = sqlx::query_scalar(
         "SELECT member_count
@@ -677,10 +680,12 @@ pub(super) async fn open_transcript_entry_cursor(
                     delegated_result.spawning_tool_request_id
             AND result_event.event_ordinal = delegated_result.event_ordinal
             AND result_event.event_kind = delegated_result.event_kind
+          WHERE member.member_position > $3
           ORDER BY member.member_position",
     )
     .bind(session_id_to_uuid(session))
     .bind(frontier.into_uuid())
+    .bind(Decimal::from(after_entry_count))
     .execute(&mut **transaction)
     .await?;
     Ok(member_count)

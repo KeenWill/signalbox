@@ -576,15 +576,23 @@ working_directory = {home:?}
     else {
         panic!("zero capacity parks")
     };
+    let reload = signalboxd::configuration_reload::ConfigurationReload::new(
+        runtime.pool.clone(),
+        configuration.clone(),
+        signalboxd::SessionTemplateConfiguration::default(),
+        fixture.path().join("models.toml"),
+        fixture.path().join("templates.toml"),
+        None,
+    )
+    .map_err(|error| std::io::Error::other(format!("reload fixture: {error:?}")))?;
     let refresh = CodexCapacityRefresh::new(
         runtime.pool.clone(),
-        &configuration,
+        reload,
         Some(ReconciliationSweepInterval::try_new(
             Duration::from_millis(10),
         )?),
         Duration::from_secs(5),
-    )?
-    .expect("configured Codex observer");
+    );
     let (shutdown, receiver) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(async move { refresh.run(receiver).await });
     wait_for_capacity_observation(&runtime.pool, PROFILE, initial, 0).await?;

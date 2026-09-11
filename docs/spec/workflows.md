@@ -83,13 +83,13 @@ terminal outcome.
 A journaled `run_cancel` delivery is terminal: the host returns the cancelled
 outcome and creates no isolate.
 
-Cancel authority is user authority. Cancel is a command with ordinary durable
-command identity ([identity and commands](../spec/identity-and-commands.md)),
-and its wire message pair belongs to
-[process protocol](../spec/process-protocol.md). An applied cancel is journaled
-as one `run_cancel` delivery that carries the command identity and no request
-ordinal, so a cancelled run replays to its cancellation however many requests
-were outstanding.
+Cancel authority is user authority or an approved session tool with a stop
+grant. Cancel is a command with ordinary durable command identity
+([identity and commands](../spec/identity-and-commands.md)), and its wire
+message pair belongs to [process protocol](../spec/process-protocol.md). An
+applied cancel is journaled as one `run_cancel` delivery that carries the
+command identity and no request ordinal, so a cancelled run replays to its
+cancellation however many requests were outstanding.
 
 Successful completion records result bytes in a `Terminal` request and an
 immediately following `Answer` acknowledgement. A terminal request emitted with
@@ -167,6 +167,34 @@ identity. Successful cancellation receipts carry frame-bounded result prefixes
 with typed byte-extent markers; stored results remain complete. Native and
 JavaScript runtime input decoders check the encoded input before program code
 runs.
+
+## Session tools
+
+`workflow_list { after }` enumerates retained registered runs in run-identity
+order with registration identity, name, revision, state, started and terminal
+times, and `own_run` for runs the caller started or replayed. Responses fit the
+tool-result bound and return an exclusive `next_after` cursor, null at the end.
+`workflow_read { run_id }` returns registration identity, journal length, and
+the socket run view with input-first byte prefixes and extents bounded by the
+serialized tool-result ceiling.
+
+`workflow_start { name, revision, input }` resolves a registration and starts a
+new run with exact input bytes. `workflow_replay { run_id }` starts a new run
+pinned to the source run's registration and complete retained input.
+`workflow_stop { run_id }` uses the cancellation receipt algebra.
+`workflow_register { name, revision, source_path, artifact_path, grants }`
+registers JavaScript source bytes and emitted UTF-8 artifact text from confined
+workspace paths. Each file read is limited by the existing process-frame
+ceiling; an oversized file receives a typed tool failure. The source/artifact
+snapshot is retained per logical request before registration.
+
+Mutation identities derive from the daemon-minted logical tool request,
+independently of physical attempts. Equal retries return the same run admission,
+registration or cancellation receipt; conflicting reuse retains the socket
+error. Socket and session adapters share the registration, start, read and
+cancellation implementations in `process_runtime/program.rs`. Session tools
+expose no native registration. [Tool loop](tool-loop.md) owns their grants and
+approval postures.
 
 ## Native programs
 

@@ -47,8 +47,8 @@ ever, and a second command is rejected.
 The daemon composes one process-lifetime immutable registry from the implemented
 tool families in `apps/signalboxd/src/daemon_tools/`: basic, blob-read, web,
 code-host, workspace, conversation, plan, session-delegation, goal-declaration,
-local Git, and execution tools. The workspace, conversation, local Git,
-execution, and mapped GitHub families are composed only under the complete
+local Git, workflow, and execution tools. The workspace, conversation, local
+Git, execution, and mapped GitHub families are composed only under the complete
 mapped composition
 ([configuration-and-credentials](configuration-and-credentials.md)), and
 blob-read is composed only when blob storage is configured. Each family's crate
@@ -179,7 +179,9 @@ two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
 the parent count before capturing the push snapshot or traversing ancestry.
 Non-merge pushes are unaffected.
 
-The seven local Git tools perform no remote operation.
+The seven local Git tools perform no remote operation. `git_log` limits its
+returned page to `max_entries`; merge ancestry traversal is independent of
+worktree inspection limits.
 
 The daemon-local registry supplies no runner execution path.
 
@@ -220,7 +222,9 @@ resumes from durable wait and result rows and cannot duplicate an external
 effect. A batch can retain multiple foreground waits; continuation and
 interruption associate delivered child results with their await requests in
 proposal order. The next model call closes that batch across the intervening
-child-wait attempts, including when an ordinary tool follows the final wait.
+child-wait attempts, including when an ordinary tool follows the final wait. A
+delegated turn waiting on its own child remains interruptible and closable
+without a live model call.
 
 The error kind set stays closed; a family whose failures do not fit maps into it
 and may fix the detail to its own closed token vocabulary.
@@ -331,9 +335,10 @@ and the interrupt remains the proof-bearing authority for ending the turn. An
 interrupt alone against an approval wait is not a denial and does not bypass the
 decision command. A committed session closure first records core-issued
 lifecycle-closure denials for the outstanding approval waits, then applies its
-interrupt. A cancelled judge call discards late provider completions and
-failures, retaining its cancellation and unreported usage without changing the
-decision.
+interrupt. A logically terminated delegated turn's judge call is cancelled
+before authorization or acceptance of a provider completion or failure. A
+cancelled judge call discards late provider completions and failures, retaining
+its cancellation and unreported usage without changing the decision.
 
 Recorded overrides are frozen into each prepared model call in the same
 transaction as the blanket posture. Two things retire an override: the consuming
@@ -376,8 +381,11 @@ use the same bound workspace.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
-correlated with that exact attempt. A tool that executes and exits nonzero
-returns bounded structured `ExecutionFailed` evidence and is `KnownFailed`. A
+correlated with that exact attempt. Delegated turns retain the same recovery
+evidence for automatic reconciliation and explicit stop without erasing the
+physical ambiguity. Automatic reconciliation publishes an unavailable child
+result and wakes the parent. A tool that executes and exits nonzero returns
+bounded structured `ExecutionFailed` evidence and is `KnownFailed`. A
 supervisor-reported sandbox timeout or cancellation retains its bounded output
 without requiring a launcher completion record. Output admission applies the
 size, U+0000, credential-redaction, and correlation checks before durable
@@ -597,16 +605,36 @@ complete locked relationship inventory for request and child uniqueness.
 The daemon nudges the child for eligibility after its spawn commits, retaining
 the hint until a full nudge buffer has capacity.
 
+The workflow family exposes `workflow_list`, `workflow_read`, `workflow_start`,
+`workflow_stop`, `workflow_replay` and `workflow_register`. List and read
+default to automatic approval and are effect-free; mutations default to
+delegated approval. Each template's `workflow_tools` operation entry selects
+`auto`, `delegated` or `human` posture. List, read and stop require
+`enabled = true`; start, replay and register require `names`, an exact
+registration-name list or `"*"`. Absent grants refuse with
+`workflow_grant_denied`, retained as an ordinary typed tool failure
+independently of approval. Grants and postures resolve from the retained
+template snapshot keyed by the session's template name and content digest, which
+includes the workflow policy. A session without a retained policy snapshot has
+no workflow grants. Reloading the catalog cannot change a live session's grants
+or postures; each proposed call freezes its selected posture. The judge receives
+the configured operation grant, or an explicit statement that no grant is
+configured, alongside the ordinary request context. [Workflows](workflows.md)
+owns run views, registration and mutation receipts.
+
 ## Planned
 
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
+
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a `ToolInadmissible`
   result entry; see [tool-loop design](../design/tool-loop.md).
+
 - Instruction admission: the commit-result and continuation transactions append
   an `InstructionAdmission` and a successor instruction manifest for a
   successful `instructions_read`; see
   [tool-loop design](../design/tool-loop.md).
+
 - Runner-locus execution rules: the lost-lease retry exception and the runner
   approval ladder; see [runner protocol design](../design/runner-protocol.md).
 

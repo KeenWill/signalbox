@@ -1425,3 +1425,95 @@ fn completed_reasoning_suffix_rejects_a_different_producing_call() {
         .reconstitute()
         .expect_err("reasoning from another call cannot occupy the completed suffix");
 }
+
+/// A cancellation without a foreground wait retains its physical-attempt requirement.
+#[test]
+fn cancelled_turn_without_a_wait_requires_its_ended_attempt() {
+    let session = current_session();
+    let cancelled = accepted_origin(1);
+    let successor = accepted_origin(2);
+    let origin_entry = semantic_entry(30);
+    let cancellation_marker = semantic_entry(31);
+    let starting_frontier = frontier(40);
+    let terminal_frontier = frontier(41);
+    let attempt = turn_attempt_id(50);
+    let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+        successor.position(),
+        cancelled.turn(),
+    );
+    let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+        command_id(60),
+        session.id(),
+        cancelled.turn(),
+        successor.accepted_input(),
+        successor.turn(),
+        successor_order,
+    )
+    .expect("the fixture interrupt is exactly correlated");
+    let terminal_record = cancelled.record(
+        &session,
+        AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
+            starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+            starting_frontier: starting_frontier.id(),
+            terminal_execution: {
+                let mut execution = CancelledTurnExecutionReconstitutionInput::new(
+                    cancelled.turn(),
+                    attempt,
+                    TerminalAttemptEndReconstitutionInput::after_cancellation(
+                        CancellationStopDisposition::Cancelled,
+                        interrupt,
+                    ),
+                    None,
+                    interrupt,
+                );
+                execution.ended_attempt = None;
+                execution.attempt_end = None;
+                execution
+            },
+            terminal_frontier: terminal_frontier.id(),
+        },
+    );
+    let successor_delivery = DeliveryRequest::Interrupt {
+        expected_active_turn: cancelled.turn(),
+        descendant_scope: DescendantTerminationScope::ParentAlone,
+        configuration: PerInputConfigurationChoices::new(
+            SessionConfigurationDefaultsVersion::first(),
+            ModelSelectionOverride::UseSessionDefault,
+        ),
+    };
+    let successor_record = successor.record_with(
+        &session,
+        OriginRecordFacts {
+            order: successor_order,
+            delivery: successor_delivery,
+            state: AcceptedInputTurnSchedulingRecordState::Queued,
+        },
+    );
+    let cancellation_entry = SemanticTranscriptEntryReconstitutionInput::new(
+        cancellation_marker.id(),
+        session.id(),
+        InitialSemanticTranscriptEntryPayload::TurnCancelled {
+            turn: cancelled.turn(),
+        },
+    );
+    let input = AcceptedInputSchedulingReconstitutionInput::new(
+        session.clone(),
+        vec![terminal_record, successor_record],
+        vec![cancelled.entry(&session, origin_entry), cancellation_entry],
+        vec![
+            starting_frontier.snapshot(&session, &[origin_entry]),
+            terminal_frontier.snapshot(&session, &[origin_entry, cancellation_marker]),
+        ],
+        None,
+    );
+
+    let error = input
+        .reconstitute()
+        .expect_err("an ordinary cancellation cannot omit its ended attempt");
+    assert_eq!(
+        error.failure(),
+        &AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
+            turn: cancelled.turn(),
+        }
+    );
+}

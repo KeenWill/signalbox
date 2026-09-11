@@ -124,6 +124,7 @@ struct ToolApprovalDecidedRow {
 #[derive(sqlx::FromRow)]
 struct TurnCancelledOutboxRow {
     turn_id: Uuid,
+    terminal_attempt_id: Option<Uuid>,
     cancellation_entry_id: Uuid,
     terminal_frontier_id: Uuid,
 }
@@ -861,12 +862,29 @@ pub struct OutboxDispatcher {
 pub struct OutboxConsumerReader {
     pool: PgPool,
     consumer: OutboxConsumer,
+    through: Option<u64>,
 }
 
 impl OutboxConsumerReader {
     /// Binds the reader to one compiled-in consumer's durable prefix.
     pub const fn new(pool: PgPool, consumer: OutboxConsumer) -> Self {
-        Self { pool, consumer }
+        Self {
+            pool,
+            consumer,
+            through: None,
+        }
+    }
+
+    /// Captures the committed frontier so a drain leaves later events for another pass.
+    pub async fn through_current_frontier(&self) -> Result<Self, OutboxDispatchError> {
+        let mut transaction = self.pool.begin().await?;
+        let through = load_allocated_sequence(&mut transaction).await?;
+        transaction.rollback().await?;
+        Ok(Self {
+            pool: self.pool.clone(),
+            consumer: self.consumer,
+            through: Some(through),
+        })
     }
 
     /// Reads the durable terminal time independently of the consumer cursor.
@@ -882,6 +900,30 @@ impl OutboxConsumerReader {
         .await?)
     }
 
+    /// Reads the latest terminal turn of each idle ordinary dispatch without advancing delivery.
+    pub async fn completed_ordinary_dispatches(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<DispatchedOutboxEvent>, OutboxDispatchError> {
+        let mut transaction = self.pool.begin().await?;
+        let sequences = crate::session_lifecycle_command::ordinary::completed_turn_sequences(
+            &mut transaction,
+            sessions,
+        )
+        .await?;
+        let mut events = Vec::with_capacity(sequences.len());
+        for sequence in sequences {
+            let sequence = decode_nonnegative_sequence(sequence)?;
+            let (_, beyond_allocated, event) = load_event(&mut transaction, sequence).await?;
+            if beyond_allocated {
+                return Err(OutboxCursorCorruption::EventBeyondAllocatedSequence.into());
+            }
+            events.push(event.ok_or(OutboxRowCorruption::MissingCommittedEventHeader)?);
+        }
+        transaction.rollback().await?;
+        Ok(events)
+    }
+
     /// Reports a durably completed configured push in a session's tool history.
     pub async fn session_pushed(&self, session: SessionId) -> Result<bool, OutboxDispatchError> {
         Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tool_attempt a JOIN tool_request r USING (request_id) WHERE a.session_id = $1 AND r.tool_name = 'git_push_configured' AND a.terminal_disposition_kind = 'completed')")
@@ -894,6 +936,10 @@ impl OutboxConsumerReader {
         loop {
             let mut transaction = self.pool.begin().await?;
             let delivered = lock_consumer_cursor(&mut transaction, self.consumer).await?;
+            if self.through.is_some_and(|through| delivered >= through) {
+                transaction.rollback().await?;
+                return Ok(None);
+            }
             match load_next_event(&mut transaction, delivered).await {
                 Ok(event) => {
                     transaction.rollback().await?;
@@ -2623,6 +2669,7 @@ async fn load_turn_terminal(
         TurnDispositionStorageKind::Cancelled => {
             let row: Option<TurnCancelledOutboxRow> = sqlx::query_as(
                 "SELECT event.turn_id AS turn_id,
+                        turn.terminal_attempt_id AS terminal_attempt_id,
                         event.cancellation_entry_id AS cancellation_entry_id,
                         event.terminal_frontier_id AS terminal_frontier_id
                    FROM turn_terminal_outbox_event AS event
@@ -2650,7 +2697,7 @@ async fn load_turn_terminal(
                     AND terminal_member.source_session_id = event.session_id
                     AND terminal_member.semantic_entry_id =
                         event.cancellation_entry_id
-                   JOIN turn_attempt AS terminal_attempt
+                   LEFT JOIN turn_attempt AS terminal_attempt
                      ON terminal_attempt.turn_attempt_id =
                         turn.terminal_attempt_id
                     AND terminal_attempt.turn_id = event.turn_id
@@ -2683,6 +2730,13 @@ async fn load_turn_terminal(
                     AND event.session_id = $2
                     AND event.disposition_kind = 'cancelled'
                     AND (
+                        terminal_attempt.turn_attempt_id IS NOT NULL
+                        OR (
+                            turn.terminal_attempt_id IS NULL
+                            AND turn.terminal_model_call_id IS NULL
+                        )
+                    )
+                    AND (
                         (
                             turn.terminal_model_call_id IS NULL
                             AND terminal_call.model_call_id IS NULL
@@ -2705,6 +2759,24 @@ async fn load_turn_terminal(
             .fetch_optional(&mut **transaction)
             .await?;
             let row = row.ok_or(OutboxRowCorruption::InvalidTerminalEventCorrelation)?;
+            if row.terminal_attempt_id.is_none() {
+                match crate::tool_loop::load_cancelled_foreground_wait(
+                    transaction,
+                    SessionId::from_uuid(stored_session),
+                    TurnId::from_uuid(row.turn_id),
+                    ContextFrontierId::from_uuid(row.terminal_frontier_id),
+                )
+                .await
+                {
+                    Ok(_) => {}
+                    Err(crate::tool_loop::ToolLoopRepositoryError::Database { source, .. }) => {
+                        return Err(source.into());
+                    }
+                    Err(_) => {
+                        return Err(OutboxRowCorruption::InvalidTerminalEventCorrelation.into());
+                    }
+                }
+            }
             (
                 row.turn_id,
                 DispatchedTurnTerminalDisposition::Cancelled {

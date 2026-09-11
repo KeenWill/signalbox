@@ -54,6 +54,13 @@ impl EvalServices {
         binding: JudgeBinding,
         configuration: Arc<HubModelConfiguration>,
     ) -> Self {
+        // Evaluation workers own their reactors; their connections must not
+        // return to the caller's pool when those workers stop.
+        let pool = pool
+            .options()
+            .clone()
+            .min_connections(0)
+            .connect_lazy_with(pool.connect_options().as_ref().clone());
         Self {
             recordings: signalbox_persistence::evaluation::EvaluationRepository::new(pool.clone()),
             registrations: ProgramRegistrationRepository::new(pool.clone()),

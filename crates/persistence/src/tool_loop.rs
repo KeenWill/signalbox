@@ -4,6 +4,7 @@
 //! scheduler lock before asking the domain aggregate for authority. Executor
 //! work remains outside database transactions.
 
+pub(crate) mod checkpoint;
 mod file_visibility;
 mod media_reference;
 mod placement_loss;
@@ -1533,80 +1534,21 @@ impl PostgresToolLoopRepository {
                 if checkpoint.is_some() && compacted.is_none() && !compaction_failed {
                     return Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(turn));
                 }
-                let mut boundaries = Vec::new();
-                let result_count = batch.yielded_snapshot().entry_count() + batch.requests().len();
-                let mut result_frontier = checkpoint.map_or(identities.result_frontier(),
-                    signalbox_domain::ContextFrontierId::from_uuid);
-                let result_entries = if checkpoint.is_some() {
-                    let mut snapshot = load_snapshot(&mut transaction, session, result_frontier).await?;
-                    while snapshot.entry_count() > result_count {
-                        boundaries.push(snapshot.clone());
-                        let prefix: Uuid = sqlx::query_scalar(
-                            "SELECT prefix_context_frontier_id FROM context_frontier WHERE context_frontier_id = $1",
-                        ).bind(result_frontier.into_uuid()).fetch_one(&mut *transaction).await?;
-                        result_frontier = signalbox_domain::ContextFrontierId::from_uuid(prefix);
-                        snapshot = load_snapshot(&mut transaction, session, result_frontier).await?;
-                    }
-                    snapshot.ordered_entries().skip(batch.yielded_snapshot().entry_count())
-                        .map(|entry| entry.entry()).collect()
+                let mut projection = if let Some(frontier) = compacted.or(checkpoint) {
+                    checkpoint::load_result_projection(
+                        &mut transaction,
+                        &batch,
+                        signalbox_domain::ContextFrontierId::from_uuid(frontier),
+                        None,
+                    ).await?
                 } else {
-                    identities.result_entries().to_vec()
+                    checkpoint::prepare_results(
+                        &mut transaction,
+                        &batch,
+                        identities.result_entries().to_vec(),
+                        identities.result_frontier(),
+                    ).await?
                 };
-                let mut child_outcomes = BTreeMap::new();
-                for request in batch.requests() {
-                    if let Some(ReconstitutedToolAttempt::Ended(attempt)) =
-                        batch.attempt(request.id())
-                        && let ToolAttemptEnd::AwaitingChild {
-                            spawning_request,
-                            child,
-                        } = attempt.end()
-                    {
-                        child_outcomes.insert(
-                            request.id(),
-                            load_foreground_delegation_outcome(
-                                &mut transaction,
-                                session,
-                                request.id(),
-                                *spawning_request,
-                                *child,
-                            )
-                            .await?,
-                        );
-                    }
-                }
-                let mut projection = batch
-                    .prepare_delegation_result_projection(
-                        result_entries.clone(),
-                        result_frontier,
-                        child_outcomes,
-                    )
-                    .map_err(|_| {
-                        ToolLoopRepositoryError::InvalidTransition(
-                            "tool batch is not ready for continuation",
-                        )
-                    })?;
-                boundaries.reverse();
-                if let Some(frontier) = compacted {
-                    boundaries.push(load_snapshot(&mut transaction, session,
-                        signalbox_domain::ContextFrontierId::from_uuid(frontier)).await?);
-                }
-                if !boundaries.is_empty() {
-                    let loaded = crate::session::load_session_from_connection(&mut transaction, session)
-                        .await.map_err(|error| match error {
-                            crate::session::SessionRepositoryError::Database(error) => ToolLoopRepositoryError::from(error),
-                            crate::session::SessionRepositoryError::Corruption(_) => ToolLoopCorruption::Inconsistent("compaction session").into(),
-                        })?.ok_or(ToolLoopCorruption::Missing("compaction session"))?;
-                    let scheduling = Box::pin(crate::submit_input::load_scheduling_projection(&mut transaction, loaded))
-                        .await.map_err(crate::model_execution::map_scheduling_error).map_err(map_model_call_error)?;
-                    for snapshot in boundaries {
-                        let reference = snapshot.ordered_entries().last()
-                            .ok_or(ToolLoopCorruption::Missing("checkpoint boundary entry"))?;
-                        let entry = scheduling.semantic_entry(reference).cloned()
-                            .ok_or(ToolLoopCorruption::Missing("checkpoint boundary entry"))?;
-                        projection = projection.with_context_boundary(entry, snapshot)
-                            .map_err(|_| ToolLoopCorruption::Inconsistent("checkpoint boundary projection"))?;
-                    }
-                }
                 let pending_inputs: Vec<Uuid> = sqlx::query_scalar(
                     "SELECT accepted_input_id FROM accepted_input
                       WHERE session_id = $1 AND expected_active_turn_id = $2
@@ -2454,6 +2396,71 @@ pub(crate) async fn load_terminal_result_attempts(
         request_count,
     )
     .await
+}
+
+/// Loads the yielded foreground wait closed by the terminal tool-result suffix.
+pub(crate) async fn load_cancelled_foreground_wait(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    terminal_frontier: signalbox_domain::ContextFrontierId,
+) -> Result<EndedToolAttempt, ToolLoopRepositoryError> {
+    let (boundary, count) =
+        load_tool_round_result_window(connection, session, turn, terminal_frontier, Decimal::ONE)
+            .await?
+            .ok_or(ToolLoopCorruption::Missing(
+                "cancelled foreground wait window",
+            ))?;
+    let rows = sqlx::query(
+        "SELECT attempt.*
+           FROM resolve_context_frontier_members($1, $2) AS member
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+           JOIN session_delegation_wait AS wait
+             ON wait.awaiting_tool_request_id = entry.tool_result_request_id
+            AND wait.parent_session_id = $1 AND wait.parent_turn_id = $5
+            AND wait.wait_mode = 'foreground'
+           JOIN tool_attempt AS attempt
+             ON attempt.request_id = wait.awaiting_tool_request_id
+            AND attempt.session_id = wait.parent_session_id
+            AND attempt.turn_id = wait.parent_turn_id
+            AND attempt.wait_spawning_request_id = wait.spawning_tool_request_id
+            AND attempt.wait_child_session_id = wait.child_session_id
+           JOIN turn_attempt AS issuing ON issuing.turn_attempt_id = attempt.issuing_turn_attempt_id
+            AND issuing.session_id = $1 AND issuing.turn_id = $5
+            AND issuing.state_kind = 'ended'
+            AND issuing.end_variant = 'without_stop'
+            AND issuing.end_disposition = 'yielded_to_durable_wait'
+          WHERE member.member_position > $3 AND member.member_position <= $3 + $4
+            AND entry.payload_kind IN ('tool_closed_by_turn_end', 'delegation_result')
+            AND attempt.state_kind = 'terminal'
+            AND attempt.terminal_disposition_kind = 'awaiting_child'
+            AND NOT EXISTS (
+                SELECT 1 FROM turn_attempt AS continuation
+                 WHERE continuation.continued_from_attempt_id = issuing.turn_attempt_id
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(terminal_frontier.into_uuid())
+    .bind(boundary)
+    .bind(count)
+    .bind(turn_id_to_uuid(turn))
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut rows = rows.into_iter();
+    let row = rows
+        .next()
+        .ok_or(ToolLoopCorruption::Missing("cancelled foreground wait"))?;
+    if rows.next().is_some() {
+        return Err(ToolLoopCorruption::Inconsistent("multiple cancelled foreground waits").into());
+    }
+    match decode_attempt(row)? {
+        ReconstitutedToolAttempt::Ended(attempt) => Ok(attempt),
+        ReconstitutedToolAttempt::Current(_) => {
+            Err(ToolLoopCorruption::Inconsistent("cancelled foreground wait state").into())
+        }
+    }
 }
 
 async fn load_window_result_attempts(

@@ -28,6 +28,7 @@ use crate::{
     child_lifecycle_terminalization, command_identity,
     connection::ProcessClient,
     error::ClientError,
+    follow_status::{refresh_terminal_transcript, refresh_transcript},
     presentation::{ChatTurnStatus, Output},
     read_session_defaults, read_session_summaries, read_snapshot, selection_display, stop_turn,
     submit_input, terminal_snapshot_selection,
@@ -391,17 +392,25 @@ impl ChatTurns {
         false
     }
 
+    fn approval_decided(&mut self, turn_id: CanonicalUuid, tool_request_id: CanonicalUuid) -> bool {
+        if self.active_turn == Some(turn_id) && self.approval_request == Some(tool_request_id) {
+            self.approval_request = None;
+            return true;
+        }
+        false
+    }
+
     fn resynchronize(
         &mut self,
-        snapshot: &mut crate::transcript::TranscriptSnapshot,
+        snapshot: &crate::transcript::TranscriptSnapshot,
     ) -> Result<(), ClientError> {
-        match snapshot.active_turn()? {
-            Some(turn_id) => {
-                self.awaited_turn = Some(turn_id);
-                self.active_turn = Some(turn_id);
-                self.approval_request = match snapshot.turn_state(turn_id)? {
-                    Some(TurnState::ActiveAwaitingToolApproval { tool_request_id }) => {
-                        Some(tool_request_id)
+        match snapshot.current_active_turn() {
+            Some(turn) => {
+                self.awaited_turn = Some(turn.turn_id);
+                self.active_turn = Some(turn.turn_id);
+                self.approval_request = match &turn.state {
+                    TurnState::ActiveAwaitingToolApproval { tool_request_id } => {
+                        Some(*tool_request_id)
                     }
                     _ => None,
                 };
@@ -409,7 +418,9 @@ impl ChatTurns {
             None => {
                 self.active_turn = None;
                 self.approval_request = None;
-                self.awaited_turn = snapshot.first_queued_turn()?;
+                self.awaited_turn = snapshot
+                    .current_first_queued_turn()
+                    .map(|turn| turn.turn_id);
             }
         }
         Ok(())
@@ -615,7 +626,7 @@ where
             RequestWait::Complete(result) => result?,
             RequestWait::Exit => return Ok(()),
         };
-        turns.resynchronize(&mut snapshot)?;
+        turns.resynchronize(&snapshot)?;
         interrupts.reset();
         let mut observed_cursor = snapshot.cursor();
         output.followed_snapshot(&mut snapshot, &mut displayed_entries)?;
@@ -640,24 +651,24 @@ where
                                 update_turns_from_event(&mut turns, &event, session_id);
                             if let Some(selection) = terminal_snapshot_selection(&event, session_id)
                             {
-                                let mut refreshed = match await_request(
+                                match await_request(
                                     output,
                                     &mut interrupts,
                                     turns.status(),
                                     RequestKind::ReadOnly,
-                                    transcript(client, session_id),
+                                    refresh_terminal_transcript(client, session_id, &mut snapshot),
                                 )
                                 .await?
                                 {
                                     RequestWait::Complete(result) => result?,
                                     RequestWait::Exit => return Ok(()),
-                                };
+                                }
                                 output.terminal_material(
-                                    &mut refreshed,
+                                    &mut snapshot,
                                     &mut displayed_entries,
                                     selection,
                                 )?;
-                                turns.resynchronize(&mut refreshed)?;
+                                turns.resynchronize(&snapshot)?;
                                 render_approval_wait(&turns, output)?;
                             }
                             match turn_effect {
@@ -668,6 +679,7 @@ where
                                         output,
                                         &mut interrupts,
                                         &mut turns,
+                                        &mut snapshot,
                                         session_id,
                                     )
                                     .await?
@@ -1325,9 +1337,8 @@ fn update_turns_from_event(
 ) -> TurnEventEffect {
     if child_lifecycle_terminalization(event, session_id) {
         // The cascade terminalized this session's own delegated turn without
-        // naming it. The caller's refresh resynchronizes the tracked turn from
-        // the authoritative snapshot, so this reports only that the chat must
-        // reset its interrupt offer and render the resulting status.
+        // naming it. The caller's suffix refresh resynchronizes the tracked turn
+        // from the bounded authoritative current-turn projection.
         return TurnEventEffect::Ready;
     }
     match event {
@@ -1362,7 +1373,14 @@ fn update_turns_from_event(
                 TurnEventEffect::None
             }
         }
-        SessionEvent::ToolApprovalDecided { .. } => TurnEventEffect::ApprovalDecided,
+        SessionEvent::ToolApprovalDecided {
+            turn_id,
+            tool_request_id,
+            ..
+        } => {
+            turns.approval_decided(*turn_id, *tool_request_id);
+            TurnEventEffect::ApprovalDecided
+        }
         SessionEvent::AutomaticReconciliationExhausted { .. }
         | SessionEvent::SessionCreated {}
         | SessionEvent::SessionModelSettingsChanged { .. }
@@ -1412,22 +1430,22 @@ async fn refresh_approval_after_decision(
     output: &mut Output<'_>,
     interrupts: &mut ChatInterrupts,
     turns: &mut ChatTurns,
+    snapshot: &mut crate::transcript::TranscriptSnapshot,
     session_id: CanonicalUuid,
 ) -> Result<bool, ClientError> {
-    let mut snapshot = match await_request(
+    match await_request(
         output,
         interrupts,
         turns.status(),
         RequestKind::ReadOnly,
-        transcript(client, session_id),
+        refresh_transcript(client, session_id, snapshot),
     )
     .await?
     {
-        RequestWait::Complete(Ok(snapshot)) => snapshot,
-        RequestWait::Complete(Err(error)) => return Err(error),
+        RequestWait::Complete(result) => result?,
         RequestWait::Exit => return Ok(false),
-    };
-    turns.resynchronize(&mut snapshot)?;
+    }
+    turns.resynchronize(snapshot)?;
     interrupts.reset();
     render_chat_status(turns, output, session_id)?;
     Ok(true)
@@ -2008,7 +2026,7 @@ mod tests {
         const FIRST_CONTENT: &str = "first queued input";
         const SECOND_CONTENT: &str = "second queued input";
         let first_turn = CanonicalUuid::from_uuid(Uuid::from_u128(FIRST_TURN_IDENTITY));
-        let mut snapshot = crate::transcript::TranscriptSnapshot::from_messages(
+        let snapshot = crate::transcript::TranscriptSnapshot::from_messages(
             SECOND_POSITION,
             [
                 ServerMessage::TranscriptTurn {
@@ -2039,7 +2057,7 @@ mod tests {
         let mut turns = ChatTurns::default();
 
         turns
-            .resynchronize(&mut snapshot)
+            .resynchronize(&snapshot)
             .expect("queued snapshot resynchronizes");
 
         assert_eq!(turns.status(), Some(ChatTurnStatus::Queued(first_turn)));
@@ -2047,35 +2065,19 @@ mod tests {
     }
 
     #[test]
-    fn approval_phase_refresh_replaces_the_exact_request_identity() {
+    fn current_turn_projection_discovers_a_new_approval_wait() {
         const TURN_IDENTITY: u128 = 41;
-        const FIRST_REQUEST_IDENTITY: u128 = 42;
-        const SECOND_REQUEST_IDENTITY: u128 = 43;
+        const REQUEST_IDENTITY: u128 = 42;
         const ACCEPTANCE_POSITION: u64 = 1;
         let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(TURN_IDENTITY));
-        let first_request = CanonicalUuid::from_uuid(Uuid::from_u128(FIRST_REQUEST_IDENTITY));
-        let second_request = CanonicalUuid::from_uuid(Uuid::from_u128(SECOND_REQUEST_IDENTITY));
-        let mut first_snapshot = crate::transcript::TranscriptSnapshot::from_messages(
+        let tool_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(REQUEST_IDENTITY));
+        let snapshot = crate::transcript::TranscriptSnapshot::from_messages(
             ACCEPTANCE_POSITION,
             [ServerMessage::TranscriptTurn {
                 turn_id,
                 acceptance_position: CanonicalU64::new(ACCEPTANCE_POSITION),
                 model_settings: None,
-                state: TurnState::ActiveAwaitingToolApproval {
-                    tool_request_id: first_request,
-                },
-            }],
-        )
-        .expect("fixture snapshot");
-        let mut second_snapshot = crate::transcript::TranscriptSnapshot::from_messages(
-            ACCEPTANCE_POSITION,
-            [ServerMessage::TranscriptTurn {
-                turn_id,
-                acceptance_position: CanonicalU64::new(ACCEPTANCE_POSITION),
-                model_settings: None,
-                state: TurnState::ActiveAwaitingToolApproval {
-                    tool_request_id: second_request,
-                },
+                state: TurnState::ActiveAwaitingToolApproval { tool_request_id },
             }],
         )
         .expect("fixture snapshot");
@@ -2083,41 +2085,61 @@ mod tests {
         turns.activated(turn_id);
 
         turns
-            .resynchronize(&mut first_snapshot)
-            .expect("first approval phase");
+            .resynchronize(&snapshot)
+            .expect("approval projection resynchronizes");
+
         assert_eq!(
             turns.status(),
             Some(ChatTurnStatus::AwaitingApproval {
                 turn_id,
-                tool_request_id: first_request,
+                tool_request_id,
             })
         );
         assert_eq!(turns.controllable_turn(), None);
-        turns
-            .resynchronize(&mut second_snapshot)
-            .expect("second approval phase");
-        assert_eq!(
-            turns.status(),
-            Some(ChatTurnStatus::AwaitingApproval {
-                turn_id,
-                tool_request_id: second_request,
-            })
-        );
     }
 
     #[test]
-    fn external_approval_decision_requests_authoritative_chat_refresh() {
+    fn approval_decision_refreshes_to_the_current_active_state() {
         const TURN_IDENTITY: u128 = 44;
         const REQUEST_IDENTITY: u128 = 45;
         const COMMAND_IDENTITY: u128 = 46;
+        const ATTEMPT_IDENTITY: u128 = 47;
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(TURN_IDENTITY));
+        let tool_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(REQUEST_IDENTITY));
+        let approval_snapshot = crate::transcript::TranscriptSnapshot::from_messages(
+            1,
+            [ServerMessage::TranscriptTurn {
+                turn_id,
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::ActiveAwaitingToolApproval { tool_request_id },
+            }],
+        )
+        .expect("approval snapshot");
+        let active_snapshot = crate::transcript::TranscriptSnapshot::from_messages(
+            2,
+            [ServerMessage::TranscriptTurn {
+                turn_id,
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::ActiveRunning {
+                    current_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(ATTEMPT_IDENTITY)),
+                    current_model_call: None,
+                },
+            }],
+        )
+        .expect("active snapshot");
         let mut turns = ChatTurns::default();
+        turns
+            .resynchronize(&approval_snapshot)
+            .expect("approval projection resynchronizes");
 
         assert_eq!(
             update_turns_from_event(
                 &mut turns,
                 &SessionEvent::ToolApprovalDecided {
-                    turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(TURN_IDENTITY)),
-                    tool_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(REQUEST_IDENTITY)),
+                    turn_id,
+                    tool_request_id,
                     decision: signalbox_process_protocol::ToolApprovalEventDecision::Approve {},
                     decider: signalbox_process_protocol::ToolApprovalEventDecider::User {
                         command_id: CanonicalUuid::from_uuid(Uuid::from_u128(COMMAND_IDENTITY)),
@@ -2128,6 +2150,48 @@ mod tests {
             ),
             TurnEventEffect::ApprovalDecided
         );
+        turns
+            .resynchronize(&active_snapshot)
+            .expect("post-decision projection resynchronizes");
+
+        assert_eq!(turns.status(), Some(ChatTurnStatus::Active(turn_id)));
+    }
+
+    #[test]
+    fn completed_turn_projection_clears_cached_active_state() {
+        const TURN_IDENTITY: u128 = 48;
+        const FRONTIER_IDENTITY: u128 = 49;
+        const ATTEMPT_IDENTITY: u128 = 50;
+        const CALL_IDENTITY: u128 = 51;
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(TURN_IDENTITY));
+        let snapshot = crate::transcript::TranscriptSnapshot::from_messages(
+            2,
+            [ServerMessage::TranscriptTurn {
+                turn_id,
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::Completed {
+                    terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        FRONTIER_IDENTITY,
+                    )),
+                    terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        ATTEMPT_IDENTITY,
+                    )),
+                    terminal_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        CALL_IDENTITY,
+                    )),
+                },
+            }],
+        )
+        .expect("completed snapshot");
+        let mut turns = ChatTurns::default();
+        turns.activated(turn_id);
+
+        turns
+            .resynchronize(&snapshot)
+            .expect("completed projection resynchronizes");
+
+        assert_eq!(turns.status(), None);
     }
 
     #[test]
@@ -2209,12 +2273,30 @@ mod tests {
     }
 
     #[test]
-    fn cascade_terminalizing_this_chat_renders_authoritative_ready_state() {
+    fn cascade_refresh_recovers_current_subsequent_work() {
         const SPAWNING_REQUEST_IDENTITY: u128 = 71;
         const PARENT_SESSION_IDENTITY: u128 = 72;
         const COMMAND_IDENTITY: u128 = 73;
         const DELEGATED_TURN_IDENTITY: u128 = 74;
+        const SUBSEQUENT_TURN_IDENTITY: u128 = 75;
+        const SUBSEQUENT_INPUT_IDENTITY: u128 = 76;
         let delegated_turn = CanonicalUuid::from_uuid(Uuid::from_u128(DELEGATED_TURN_IDENTITY));
+        let subsequent_turn = CanonicalUuid::from_uuid(Uuid::from_u128(SUBSEQUENT_TURN_IDENTITY));
+        let snapshot = crate::transcript::TranscriptSnapshot::from_messages(
+            2,
+            [ServerMessage::TranscriptTurn {
+                turn_id: subsequent_turn,
+                acceptance_position: CanonicalU64::new(2),
+                model_settings: None,
+                state: TurnState::Queued {
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        SUBSEQUENT_INPUT_IDENTITY,
+                    )),
+                    content: UserInputContent::text(String::from("subsequent work")),
+                },
+            }],
+        )
+        .expect("post-cascade snapshot");
         let mut turns = ChatTurns::default();
         turns.activated(delegated_turn);
 
@@ -2240,6 +2322,14 @@ mod tests {
                 followed_session(),
             ),
             TurnEventEffect::Ready
+        );
+        turns
+            .resynchronize(&snapshot)
+            .expect("post-cascade projection resynchronizes");
+
+        assert_eq!(
+            turns.status(),
+            Some(ChatTurnStatus::Queued(subsequent_turn))
         );
     }
 

@@ -168,6 +168,29 @@ impl RepoWatchStore {
         Ok(true)
     }
 
+    /// Applies the captured lifecycle prefix before retained commands are replayed.
+    pub async fn drain_lifecycle<Factory: LifecycleCommandFactory, Codec: SessionCommandCodec>(
+        &self,
+        factory: &mut Factory,
+        codec: &mut Codec,
+        source: &LifecycleEventSource,
+    ) -> Result<(), StoreError> {
+        let source = source
+            .through_current_frontier()
+            .await
+            .map_err(StoreError::Lifecycle)?;
+        while let Some(event) = source.next().await.map_err(StoreError::Lifecycle)? {
+            self.react_to_lifecycle(&event, factory, codec, &source)
+                .await?;
+            source
+                .acknowledge(&event)
+                .await
+                .map_err(StoreError::Lifecycle)?;
+        }
+        self.react_to_pull_request_lifecycle(factory, codec, &source)
+            .await
+    }
+
     /// Applies one lifecycle fact and commits any reaction before acknowledging its source.
     pub async fn react_to_lifecycle<
         Factory: LifecycleCommandFactory,
@@ -235,6 +258,57 @@ impl RepoWatchStore {
             event.sequence(),
         )
         .await?;
+        Ok(())
+    }
+
+    /// Retains a nonsticky stop after an ordinary dispatch exhausts its accepted work.
+    pub async fn react_to_ordinary_dispatch_completion<
+        Factory: LifecycleCommandFactory,
+        Codec: SessionCommandCodec,
+    >(
+        &self,
+        factory: &mut Factory,
+        codec: &mut Codec,
+        source: &LifecycleEventSource,
+    ) -> Result<(), StoreError> {
+        let sessions: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT created_session_id FROM dispatch_ledger
+             WHERE command_kind = 'create_session' AND created_session_id IS NOT NULL
+               AND session_terminal_at IS NULL ORDER BY created_session_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let sessions: Vec<SessionId> = sessions.into_iter().map(SessionId::from_uuid).collect();
+        for event in source
+            .completed_ordinary_dispatches(&sessions)
+            .await
+            .map_err(StoreError::Lifecycle)?
+        {
+            let session = event.session().ok_or(StoreError::InvalidRetainedEvent)?;
+            let origin = self
+                .reaction_origin_for_session(session)
+                .await?
+                .ok_or(StoreError::InvalidRetainedCommand)?;
+            let planned = plan_retained_lifecycle_reaction(
+                &event,
+                &origin,
+                factory.lifecycle(
+                    session,
+                    SessionLifecycleOperation::Stop {
+                        sticky: StopStickiness::Redispatchable,
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                ),
+            )
+            .map_err(|_| StoreError::InvalidDispatchBatch)?;
+            if matches!(
+                self.record_commands(&[planned], event.recorded_at(), codec)
+                    .await?,
+                DispatchAdmission::ConflictingReuse
+            ) {
+                return Err(StoreError::InvalidDispatchBatch);
+            }
+        }
         Ok(())
     }
 

@@ -318,12 +318,34 @@ projection or spool failure before transmission returns `unavailable` and
 exposes no partial snapshot. Every bounded sequence read is a start message, its
 items, and an end message carrying the count. A session metadata page orders its
 summaries by strictly increasing session identity, continuing after the
-requested cursor. The terminal client spools each complete snapshot or page into
-an owner-private anonymous temporary file. A client treats a snapshot or page as
-authoritative only after the end message arrives and its counts, indices,
-fragment sequence, session, and cursor validate. Snapshot deduplication uses the
-complete semantic identity of source session and entry; a second occurrence of
-that key fails the snapshot.
+requested cursor.
+
+`read_transcript` carries required nullable `after_frontier`. Null requests a
+full snapshot, while a frontier requests the semantic transcript suffix after
+that acknowledged prefix. The snapshot start echoes `after_frontier`, and the
+snapshot end names the resulting current frontier. An unknown frontier, a
+frontier owned by another session, or a same-session frontier that is not a
+prefix of the current transcript returns `resync_required` before any snapshot
+frame.
+
+A full transcript snapshot emits every turn, terminal model-call usage in its
+required order, the model-call section end, and every semantic entry. A suffix
+snapshot emits only entries after the acknowledged frontier, preserving their
+global zero-based entry indices. It also emits the current active turn and the
+earliest queued turn when present, and omits historical terminal turns,
+model-call usage, and the model-call section end. Snapshot-end turn and entry
+counts name only records emitted in that snapshot.
+
+The terminal client spools each complete snapshot or page into an owner-private
+anonymous temporary file. A client treats a snapshot or page as authoritative
+only after the end message arrives and its counts, indices, fragment sequence,
+session, cursor, frontier, and acknowledgement echo validate. A valid suffix
+appends its contiguous entries directly to the retained transcript spool and
+replaces the bounded active and queued turn projection. A failed or truncated
+suffix leaves the retained acknowledgement unchanged. `resync_required` causes a
+full read whose completed snapshot replaces the retained transcript and bounded
+turn state. Snapshot deduplication uses the complete semantic identity of source
+session and entry; a second occurrence of that key fails the snapshot.
 
 The imported-conversation read is `imported_conversation_start` naming the
 inspected conversation, one `imported_conversation_entry` per normalized entry,
@@ -363,15 +385,16 @@ prove an authorized executable attempt that is not awaiting approval, denied,
 closed, or ended. A foreground await subscribes before registering its durable
 wait and queries durable delivery before blocking, so a completion cannot be
 lost; a disconnect or daemon shutdown abandons only the socket wait, never the
-durable child wait. An `already_terminal` disposition requires the
-relationship's pre-existing immutable child result and never creates or replaces
-it. `delivery_sequence` is allocated under the recipient session lock and is
-unique and gap-free per recipient across messages and background deliveries. The
-internal `delegation_wake` outbox event is a scheduler signal, not a
-session-follow update; a client observes the durable result instead. A stopped
-or cancelled `child_lifecycle_disposition` caused by a parent cascade is emitted
-on both the parent and child streams; every other typed update has one recipient
-stream.
+durable child wait. An `already_terminal` disposition requires either the
+relationship's pre-existing immutable child result or its delegated initial
+turn's reconciliation-required terminal lifecycle evidence. It never creates or
+replaces a child result. `delivery_sequence` is allocated under the recipient
+session lock and is unique and gap-free per recipient across messages and
+background deliveries. The internal `delegation_wake` outbox event is a
+scheduler signal, not a session-follow update; a client observes the durable
+result instead. A stopped or cancelled `child_lifecycle_disposition` caused by a
+parent cascade is emitted on both the parent and child streams; every other
+typed update has one recipient stream.
 
 An import begin declares the format and the exact total byte count, and commit
 requires the assembled count to equal the declared count before conversion.
@@ -468,7 +491,8 @@ identity and digest. The activation transaction captures each repository's
 current event tail and retains it for idempotent replay. Before replay activates
 any retained effects, startup validates the retained reloadable snapshot
 together with the on-disk startup-only sections; incompatibility fails startup
-and leaves the intent pending. Startup replays any undelivered intent from its
+and leaves the intent pending. Reloadable sections from the file are not
+validated independently. Startup replays any undelivered intent from its
 retained payload even if the configuration files changed, before terminalizing
 its claim.
 
@@ -710,8 +734,8 @@ state only after those checks pass.
 
 Credential admission waits project the active turn state
 `active_awaiting_credential_availability`, carrying the call-free ended
-`wait_attempt_id` and the closed `contended` or `exhausted` cause. The terminal
-client keeps following that turn.
+`wait_attempt_id` and the closed `contended`, `exhausted`, or
+`network_unavailable` cause. The terminal client keeps following that turn.
 
 A terminal credential wait release after a provider call projects
 `failed_after_credential_wait`, naming the fresh call-free terminal attempt and

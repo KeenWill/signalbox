@@ -52,5 +52,13 @@ impl session_lifecycle_command::SessionLifecycleCommandRepository {
         session_lifecycle_command::SessionLifecycleCommandHandlingOutcome,
         session_lifecycle_command::SessionLifecycleCommandRepositoryError,
     >;
+    pub async fn close_completed_ordinary_dispatch(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<
+        session_lifecycle_command::SessionLifecycleCommandHandlingOutcome,
+        session_lifecycle_command::SessionLifecycleCommandRepositoryError,
+    >;
 }
 ```

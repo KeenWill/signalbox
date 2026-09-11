@@ -2,7 +2,10 @@ import { useMutation } from '@tanstack/react-query'
 import { ArrowUp } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { invokeCommand } from './commands'
-import type { WebSubmitInputRequest } from './generated/web-contract.mjs'
+import type {
+  WebSessionTimelineDescriptor,
+  WebSubmitInputRequest,
+} from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import {
   MAX_SESSION_MESSAGE_LENGTH,
@@ -23,12 +26,14 @@ export function SessionComposer({
   sessionId,
   activeState,
   stateUnavailable,
+  supervision,
   onAccepted,
   onEscape,
 }: {
   sessionId: string
   activeState: string | null | undefined
   stateUnavailable: boolean
+  supervision: WebSessionTimelineDescriptor['supervision']
   onAccepted: () => Promise<unknown>
   onEscape: () => void
 }) {
@@ -135,20 +140,22 @@ export function SessionComposer({
               : 'Retry message'}
         </button>
         <span role="status">
-          {newInputBlocked
-            ? capacityNotice
-            : pending?.phase === 'unconfirmed'
-              ? 'Delivery unconfirmed'
-              : pending?.phase === 'sending'
-                ? 'Sending…'
-                : notice ||
-                  (stateUnavailable
-                    ? 'Session unavailable'
-                    : activeState === undefined
-                      ? 'Connecting…'
-                      : activeState === null
-                        ? ''
-                        : `Turn: ${enumLabel(activeState)}`)}
+          {supervision?.pending
+            ? 'Session recovery required'
+            : newInputBlocked
+              ? capacityNotice
+              : pending?.phase === 'unconfirmed'
+                ? 'Delivery unconfirmed'
+                : pending?.phase === 'sending'
+                  ? 'Sending…'
+                  : notice ||
+                    (stateUnavailable
+                      ? 'Session unavailable'
+                      : activeState === undefined
+                        ? 'Connecting…'
+                        : activeState === null
+                          ? ''
+                          : `Turn: ${enumLabel(activeState)}`)}
         </span>
       </div>
     </form>

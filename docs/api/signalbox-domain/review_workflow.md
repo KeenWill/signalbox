@@ -390,7 +390,9 @@ impl ReviewFindingPendingExternalLinkRef {
 
 ```rust
 pub enum ReviewFindingEventKind {
-    Accepted,
+    Accepted {
+        confidence: ReviewJudgeConfidence,
+    },
     Rejected {
         reason: ReviewText,
     },
@@ -455,6 +457,7 @@ impl ReviewFinding {
         event: ReviewFindingEvent,
     ) -> result::Result<Self, ReviewFindingTransitionError>;
     pub const fn proposal(&self) -> &ReviewFindingProposal;
+    pub fn judge_confidence(&self) -> option::Option<ReviewJudgeConfidence>;
     pub fn events(&self) -> &[ReviewFindingEvent];
     pub const fn status(&self) -> ReviewFindingStatus;
 }
@@ -552,6 +555,84 @@ impl ReviewFindingTransitionError {
         option::Option<ReviewFindingEvent>,
         ReviewFindingTransitionFailure,
     );
+}
+```
+
+## ReviewBarCategory
+
+```rust
+pub enum ReviewBarCategory {
+    FalseStatement,
+    BrokenReference,
+    Contradiction,
+    UndecidedAsCommitted,
+    FailingGate,
+    OwnBehaviorDefect,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewBarCategory {
+    pub const fn key(self) -> &'static str;
+    pub fn from_key(key: &str) -> option::Option<Self>;
+}
+```
+
+## ReviewDeclineClass
+
+```rust
+pub enum ReviewDeclineClass {
+    HypotheticalHardening,
+    InventoryRestoration,
+    ScopeExpansion,
+    PreExistingOutOfScope,
+    DesignDocumentDemand,
+    StyleOrProse,
+    SpecSentenceWrong,
+    Duplicate,
+    Other,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewDeclineClass {
+    pub const fn key(self) -> &'static str;
+    pub fn from_key(key: &str) -> option::Option<Self>;
+}
+```
+
+## ReviewJudgeConfidence
+
+```rust
+pub struct ReviewJudgeConfidence(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ReviewJudgeConfidence {
+    pub const fn try_new(value: u8) -> option::Option<Self>;
+    pub const fn get(self) -> u8;
+    pub const fn policy_confidence(self) -> ReviewConfidence;
+}
+```
+
+## ReviewBarVerdict
+
+```rust
+pub enum ReviewBarVerdict {
+    Accept(ReviewBarCategory),
+    None(ReviewDeclineClass),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewJudgment
+
+```rust
+pub struct ReviewJudgment {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewJudgment {
+    pub const fn new(
+        verdict: ReviewBarVerdict,
+        confidence: ReviewJudgeConfidence,
+        reason: ReviewText,
+    ) -> Self;
+    pub const fn verdict(&self) -> ReviewBarVerdict;
+    pub const fn confidence(&self) -> ReviewJudgeConfidence;
+    pub const fn reason(&self) -> &ReviewText;
 }
 ```
 
@@ -843,7 +924,9 @@ pub enum ReviewFindingEventType {
 
 ```rust
 pub enum ReviewFindingEventResultKind {
-    Accepted,
+    Accepted {
+        confidence: ReviewJudgeConfidence,
+    },
     Rejected {
         reason: ReviewText,
     },

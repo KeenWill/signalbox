@@ -19,10 +19,27 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct TranscriptSnapshot {
     cursor: u64,
+    after: Option<TranscriptAcknowledgement>,
+    frontier: Option<CanonicalUuid>,
+    entry_count: u64,
     runner: Option<RunnerProjection>,
     workspace_root_kind: Option<signalbox_process_protocol::SessionWorkspaceRootKind>,
     repository_watch: Option<signalbox_process_protocol::RepositoryWatchProvenance>,
+    current_active_turn: Option<TranscriptTurn>,
+    first_queued_turn: Option<TranscriptTurn>,
     spool: File,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptAcknowledgement {
+    frontier: CanonicalUuid,
+    entry_count: u64,
+}
+
+impl TranscriptAcknowledgement {
+    pub(crate) const fn frontier(self) -> CanonicalUuid {
+        self.frontier
+    }
 }
 
 impl TranscriptSnapshot {
@@ -35,6 +52,34 @@ impl TranscriptSnapshot {
         self.cursor
     }
 
+    pub(crate) fn acknowledgement(&self) -> Option<TranscriptAcknowledgement> {
+        self.frontier.map(|frontier| TranscriptAcknowledgement {
+            frontier,
+            entry_count: self.entry_count,
+        })
+    }
+
+    pub(crate) fn append_suffix(&mut self, mut suffix: Self) -> Result<(), ClientError> {
+        if suffix.after != self.acknowledgement() || suffix.entry_count < self.entry_count {
+            return Err(ClientError::Protocol(
+                "transcript suffix did not continue the retained snapshot",
+            ));
+        }
+        self.spool.seek(SeekFrom::End(0))?;
+        suffix.spool.seek(SeekFrom::Start(0))?;
+        io::copy(&mut suffix.spool, &mut self.spool)?;
+        self.spool.flush()?;
+        self.cursor = suffix.cursor;
+        self.frontier = suffix.frontier;
+        self.entry_count = suffix.entry_count;
+        self.runner = suffix.runner;
+        self.workspace_root_kind = suffix.workspace_root_kind;
+        self.repository_watch = suffix.repository_watch;
+        self.current_active_turn = suffix.current_active_turn;
+        self.first_queued_turn = suffix.first_queued_turn;
+        Ok(())
+    }
+
     pub(crate) const fn runner(&self) -> Option<&RunnerProjection> {
         self.runner.as_ref()
     }
@@ -43,6 +88,14 @@ impl TranscriptSnapshot {
         &self,
     ) -> Option<&signalbox_process_protocol::RepositoryWatchProvenance> {
         self.repository_watch.as_ref()
+    }
+
+    pub(crate) const fn current_active_turn(&self) -> Option<&TranscriptTurn> {
+        self.current_active_turn.as_ref()
+    }
+
+    pub(crate) const fn current_first_queued_turn(&self) -> Option<&TranscriptTurn> {
+        self.first_queued_turn.as_ref()
     }
 
     pub(crate) fn replay(&mut self) -> Result<SnapshotReplay<'_>, ClientError> {
@@ -62,20 +115,6 @@ impl TranscriptSnapshot {
                 && turn.turn_id == selected_turn
             {
                 return Ok(Some(turn.state));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Returns the first acceptance-ordered queued turn, or `None` when no
-    /// turn is queued.
-    pub(crate) fn first_queued_turn(&mut self) -> Result<Option<CanonicalUuid>, ClientError> {
-        let mut replay = self.replay()?;
-        for record in &mut replay {
-            if let SnapshotRecord::Turn(turn) = record?
-                && matches!(turn.state, TurnState::Queued { .. })
-            {
-                return Ok(Some(turn.turn_id));
             }
         }
         Ok(None)
@@ -123,7 +162,27 @@ impl TranscriptSnapshot {
         let request_id = RequestId::try_new(1)
             .map_err(|_| ClientError::Protocol("test request identity was invalid"))?;
         let mut spool = tempfile::tempfile()?;
+        let mut current_active_turn = None;
+        let mut first_queued_turn = None;
         for message in messages {
+            if let ServerMessage::TranscriptTurn {
+                turn_id,
+                acceptance_position,
+                state,
+                ..
+            } = &message
+            {
+                let turn = TranscriptTurn {
+                    turn_id: *turn_id,
+                    acceptance_position: acceptance_position.value(),
+                    state: state.clone(),
+                };
+                if turn_state_is_active(state) {
+                    current_active_turn = Some(turn);
+                } else if turn_state_is_queued(state) && first_queued_turn.is_none() {
+                    first_queued_turn = Some(turn);
+                }
+            }
             let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request_id, message)
                 .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
             append_frame(&mut spool, &frame)?;
@@ -131,9 +190,14 @@ impl TranscriptSnapshot {
         spool.flush()?;
         Ok(Self {
             cursor,
+            after: None,
+            frontier: None,
+            entry_count: 0,
             runner,
             workspace_root_kind: None,
             repository_watch: None,
+            current_active_turn,
+            first_queued_turn,
             spool,
         })
     }
@@ -232,6 +296,15 @@ pub(crate) async fn read_snapshot(
     connection: &mut Connection,
     expected_session: CanonicalUuid,
 ) -> Result<TranscriptSnapshot, ClientError> {
+    read_snapshot_after(client, connection, expected_session, None).await
+}
+
+pub(crate) async fn read_snapshot_after(
+    client: &mut ProcessClient,
+    connection: &mut Connection,
+    expected_session: CanonicalUuid,
+    expected_after: Option<TranscriptAcknowledgement>,
+) -> Result<TranscriptSnapshot, ClientError> {
     let (session_id, cursor, runner, repository_watch, workspace_root_kind) =
         match connection.message().await? {
             ServerMessage::TranscriptSnapshotStart {
@@ -240,13 +313,18 @@ pub(crate) async fn read_snapshot(
                 runner,
                 repository_watch,
                 workspace_root_kind,
-            } if session_id == expected_session => (
-                session_id,
-                cursor.value(),
-                runner,
-                repository_watch,
-                workspace_root_kind,
-            ),
+                after_frontier,
+            } if session_id == expected_session
+                && after_frontier == expected_after.map(TranscriptAcknowledgement::frontier) =>
+            {
+                (
+                    session_id,
+                    cursor.value(),
+                    runner,
+                    repository_watch,
+                    workspace_root_kind,
+                )
+            }
             ServerMessage::Error {
                 code,
                 message,
@@ -267,10 +345,13 @@ pub(crate) async fn read_snapshot(
     let mut prior_acceptance_position = None;
     let mut turn_count = 0_u64;
     let mut model_call_count = 0_u64;
-    let mut entry_count = 0_u64;
+    let retained_entry_count = expected_after.map_or(0, |after| after.entry_count);
+    let mut emitted_entry_count = 0_u64;
     let mut model_calls_started = false;
-    let mut model_calls_ended = false;
+    let mut model_calls_ended = expected_after.is_some();
     let mut entries_started = false;
+    let mut current_active_turn = None;
+    let mut first_queued_turn = None;
     loop {
         let frame = connection.frame().await?;
         match frame.message().clone() {
@@ -279,7 +360,9 @@ pub(crate) async fn read_snapshot(
                 acceptance_position,
                 state,
                 ..
-            } if !model_calls_started && !entries_started => {
+            } if !entries_started
+                && (expected_after.is_some() || (!model_calls_started && !model_calls_ended)) =>
+            {
                 let position = acceptance_position.value();
                 if position == 0
                     || prior_acceptance_position.is_some_and(|prior| prior >= position)
@@ -306,9 +389,36 @@ pub(crate) async fn read_snapshot(
                     )
                     .await?;
                 }
+                let turn = TranscriptTurn {
+                    turn_id,
+                    acceptance_position: position,
+                    state: state.clone(),
+                };
+                if turn_state_is_active(&state) {
+                    if current_active_turn.replace(turn).is_some() {
+                        return Err(ClientError::Protocol(
+                            "snapshot repeated the current active turn projection",
+                        ));
+                    }
+                } else if turn_state_is_queued(&state) {
+                    if expected_after.is_some() && first_queued_turn.is_some() {
+                        return Err(ClientError::Protocol(
+                            "snapshot repeated the first queued turn projection",
+                        ));
+                    }
+                    if first_queued_turn.is_none() {
+                        first_queued_turn = Some(turn);
+                    }
+                } else if expected_after.is_some() {
+                    return Err(ClientError::Protocol(
+                        "transcript suffix carried historical turn metadata",
+                    ));
+                }
                 prior_acceptance_position = Some(position);
-                model_call_order.push_turn(turn_id)?;
-                append_frame(&mut spool, &frame)?;
+                if expected_after.is_none() {
+                    model_call_order.push_turn(turn_id)?;
+                    append_frame(&mut spool, &frame)?;
+                }
                 turn_count = turn_count
                     .checked_add(1)
                     .ok_or(ClientError::Protocol("snapshot turn count overflowed"))?;
@@ -351,14 +461,18 @@ pub(crate) async fn read_snapshot(
                 ..
             } if model_calls_ended => {
                 entries_started = true;
-                require_entry_index(entry_index.value(), entry_count)?;
+                require_entry_index(
+                    entry_index.value(),
+                    retained_entry_count,
+                    emitted_entry_count,
+                )?;
                 if !entry_ids.insert(entry_key(source_session_id, entry_id))? {
                     return Err(ClientError::Protocol(
                         "snapshot repeated a source-qualified entry identity",
                     ));
                 }
                 append_frame(&mut spool, &frame)?;
-                entry_count = entry_count
+                emitted_entry_count = emitted_entry_count
                     .checked_add(1)
                     .ok_or(ClientError::Protocol("snapshot entry count overflowed"))?;
             }
@@ -369,14 +483,18 @@ pub(crate) async fn read_snapshot(
                 ..
             } if model_calls_ended => {
                 entries_started = true;
-                require_entry_index(entry_index.value(), entry_count)?;
+                require_entry_index(
+                    entry_index.value(),
+                    retained_entry_count,
+                    emitted_entry_count,
+                )?;
                 if !entry_ids.insert(entry_key(source_session_id, entry_id))? {
                     return Err(ClientError::Protocol(
                         "snapshot repeated a source-qualified entry identity",
                     ));
                 }
                 append_frame(&mut spool, &frame)?;
-                entry_count = entry_count
+                emitted_entry_count = emitted_entry_count
                     .checked_add(1)
                     .ok_or(ClientError::Protocol("snapshot entry count overflowed"))?;
             }
@@ -387,7 +505,11 @@ pub(crate) async fn read_snapshot(
                 ..
             } if model_calls_ended => {
                 entries_started = true;
-                require_entry_index(entry_index.value(), entry_count)?;
+                require_entry_index(
+                    entry_index.value(),
+                    retained_entry_count,
+                    emitted_entry_count,
+                )?;
                 if !entry_ids.insert(entry_key(source_session_id, entry_id))? {
                     return Err(ClientError::Protocol(
                         "snapshot repeated a source-qualified entry identity",
@@ -395,7 +517,7 @@ pub(crate) async fn read_snapshot(
                 }
                 append_frame(&mut spool, &frame)?;
                 read_content(connection, &mut spool, entry_index.value()).await?;
-                entry_count = entry_count
+                emitted_entry_count = emitted_entry_count
                     .checked_add(1)
                     .ok_or(ClientError::Protocol("snapshot entry count overflowed"))?;
             }
@@ -404,18 +526,32 @@ pub(crate) async fn read_snapshot(
                 cursor: ending_cursor,
                 turn_count: ending_turn_count,
                 entry_count: ending_entry_count,
+                frontier,
             } if ending_session == session_id
                 && ending_cursor.value() == cursor
                 && model_calls_ended
                 && ending_turn_count.value() == turn_count
-                && ending_entry_count.value() == entry_count =>
+                && ending_entry_count.value() == emitted_entry_count =>
             {
+                let entry_count = retained_entry_count
+                    .checked_add(emitted_entry_count)
+                    .ok_or(ClientError::Protocol("snapshot entry count overflowed"))?;
+                if frontier.is_some() != (entry_count != 0) {
+                    return Err(ClientError::Protocol(
+                        "snapshot frontier did not match its retained entry count",
+                    ));
+                }
                 spool.flush()?;
                 return Ok(TranscriptSnapshot {
                     cursor,
+                    after: expected_after,
+                    frontier,
+                    entry_count,
                     runner,
                     workspace_root_kind,
                     repository_watch,
+                    current_active_turn,
+                    first_queued_turn,
                     spool,
                 });
             }
@@ -559,14 +695,43 @@ fn snapshot_record(message: ServerMessage) -> Result<SnapshotRecord, ClientError
     }
 }
 
-fn require_entry_index(index: u64, entry_count: u64) -> Result<(), ClientError> {
-    if index == entry_count {
+fn require_entry_index(
+    index: u64,
+    retained_entry_count: u64,
+    emitted_entry_count: u64,
+) -> Result<(), ClientError> {
+    if retained_entry_count
+        .checked_add(emitted_entry_count)
+        .is_some_and(|expected| index == expected)
+    {
         Ok(())
     } else {
         Err(ClientError::Protocol(
             "snapshot entry indices were not contiguous",
         ))
     }
+}
+
+fn turn_state_is_queued(state: &TurnState) -> bool {
+    matches!(
+        state,
+        TurnState::Queued { .. }
+            | TurnState::QueuedDelegated { .. }
+            | TurnState::QueuedDelegationWake { .. }
+    )
+}
+
+fn turn_state_is_active(state: &TurnState) -> bool {
+    matches!(
+        state,
+        TurnState::ActiveAwaitingCredentialAvailability { .. }
+            | TurnState::ActiveRunning { .. }
+            | TurnState::ActiveAwaitingModelCallRecovery { .. }
+            | TurnState::ActiveAwaitingToolApproval { .. }
+            | TurnState::ActiveAwaitingChild { .. }
+            | TurnState::ActiveAwaitingToolRecovery { .. }
+            | TurnState::ActiveAwaitingRunnerRecovery { .. }
+    )
 }
 
 fn uuid_key(value: CanonicalUuid) -> [u8; 16] {
