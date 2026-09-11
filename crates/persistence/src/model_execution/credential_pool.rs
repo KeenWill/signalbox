@@ -663,11 +663,13 @@ pub(super) async fn select_runtime_pool_credential(
                                 .flatten();
                             match policy.tie_break {
                                 CredentialPoolRuntimeTieBreak::FirstListed => {
-                                    (0, std::cmp::Reverse(None))
+                                    (0, false, std::cmp::Reverse(None))
                                 }
-                                CredentialPoolRuntimeTieBreak::LeastUsed => {
-                                    (member.priority().get(), std::cmp::Reverse(remaining))
-                                }
+                                CredentialPoolRuntimeTieBreak::LeastUsed => (
+                                    member.priority().get(),
+                                    remaining.is_some(),
+                                    std::cmp::Reverse(remaining),
+                                ),
                             }
                         })
                 })

@@ -258,9 +258,9 @@ reported duration and reset instant. The latest observation time wins across
 calls; an absent snapshot preserves the retained evidence.
 
 A member's headroom is the minimum of its primary and secondary windows. An
-expired or missing reset means unknown capacity. `least_used` prefers members
-with known capacity. Ties break by configured order. Within an equal priority,
-`least_used` prefers greater headroom. A member's `headroom_reserve_percent`
+expired or missing reset means unknown capacity. Within an equal priority,
+`least_used` samples members with unknown capacity in configured order before
+preferring greater known headroom. A member's `headroom_reserve_percent`
 overrides the pool reserve; a known headroom at or below the reserve excludes
 that member from selection. A retained observation at or below the reserve fires
 `on_headroom_low` under the call's frozen policy; with no reserve, the trigger
@@ -435,9 +435,9 @@ not wait for the capacity read; a rejected or unanswered read supplies no new
 evidence. A notification carrying a window supersedes an outstanding read, whose
 reply is consumed without emitting evidence. A read reply received after turn
 completion still supplies capacity evidence unless superseded. Members without
-retained evidence have unknown capacity: `least_used` falls back to configured
-order within equal priorities, reserves do not exclude them, and headroom
-actions do not fire.
+retained evidence have unknown capacity: `least_used` samples them in configured
+order before members with retained evidence, reserves do not exclude them, and
+headroom actions do not fire.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under
