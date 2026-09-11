@@ -2471,12 +2471,12 @@ fn sandbox_process_result(
         return result;
     }
     let outcome = match result.outcome {
-        ProcessOutcome::TimedOut => ProcessOutcome::TimedOut,
-        ProcessOutcome::Exited { .. }
-        | ProcessOutcome::SpawnFailed { .. }
-        | ProcessOutcome::SupervisionFailed { .. } => ProcessOutcome::SpawnFailed {
-            reason: ProcessSpawnFailure::SandboxSetup,
-        },
+        ProcessOutcome::TimedOut | ProcessOutcome::SupervisionFailed { .. } => result.outcome,
+        ProcessOutcome::Exited { .. } | ProcessOutcome::SpawnFailed { .. } => {
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxSetup,
+            }
+        }
     };
     sandbox_setup_failure(
         outcome,
@@ -2502,7 +2502,7 @@ fn sandbox_setup_failure(
     };
     tracing::warn!(
         outcome = outcome_kind,
-        "sandbox setup failed before command dispatch"
+        "sandbox command dispatch could not be confirmed"
     );
     ExecResult {
         confinement: ExecutionConfinement::SandboxSetupFailed,
@@ -4715,6 +4715,23 @@ mod tests {
         assert_eq!(result.outcome, ProcessOutcome::TimedOut);
     }
 
+    #[test]
+    fn lost_sandbox_dispatch_capture_preserves_supervision_failure() {
+        let failure = ProcessOutcome::SupervisionFailed {
+            reason: ProcessSupervisionFailure::Wait,
+        };
+        let result = sandbox_process_result(
+            discarded_process_result(failure),
+            EXEC_CAPTURE_BYTES,
+            SandboxNetwork::None,
+        );
+
+        assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
+        assert_eq!(result.outcome, failure);
+        assert_eq!(result.stdout.completeness, CaptureCompleteness::Truncated);
+        assert_eq!(result.stderr.completeness, CaptureCompleteness::Truncated);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn outer_esrch_is_process_absence_evidence() {
@@ -5021,7 +5038,7 @@ mod tests {
         assert_eq!(result.outcome, ProcessOutcome::TimedOut);
         assert_eq!(observation.recorded_requests(), Vec::new());
         let telemetry = captured.text();
-        assert!(telemetry.contains("sandbox setup failed before command dispatch"));
+        assert!(telemetry.contains("sandbox command dispatch could not be confirmed"));
         assert!(telemetry.contains("outcome=\"timed_out\""));
         assert!(!telemetry.contains("private-program-name"));
         assert!(!telemetry.contains("private-argument-value"));
