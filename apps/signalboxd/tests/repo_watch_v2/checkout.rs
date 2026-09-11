@@ -1226,9 +1226,6 @@ impl CheckoutFixture {
     ) -> Result<Self, Box<dyn Error>> {
         let (container, core, url) = postgres().await?;
         migrate(&core).await?;
-        sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-            .execute(&core)
-            .await?;
         let module = module_pool(&url).await?;
         let store = RepoWatchStore::new(module.clone());
         let files = tempfile::tempdir()?;

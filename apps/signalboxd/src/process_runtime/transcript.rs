@@ -2037,6 +2037,9 @@ pub(super) fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                     signalbox_domain::CredentialAvailabilityWaitCause::Exhausted => {
                         signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted
                     }
+                    signalbox_domain::CredentialAvailabilityWaitCause::NetworkUnavailable => {
+                        signalbox_process_protocol::CredentialAvailabilityWaitCause::NetworkUnavailable
+                    }
                 },
             }
         }

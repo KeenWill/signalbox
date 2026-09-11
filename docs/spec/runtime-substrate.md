@@ -131,6 +131,13 @@ announcing that another model continued the turn is evidence the resolved target
 did not serve it; the marker crosses the boundary only through the reported
 identity, and this layer has no substitution variant of its own.
 
+The Claude adapter supplies its instructions and the operation's system prompt
+through a private native system-prompt file. Transcript data retains its roles
+in native history; request controls remain user input, preceded by an explicit
+request for the next assistant response. Request measurement includes the system
+prompt, history and controls; the support files share the one-shot process
+lifetime.
+
 A subprocess adapter cannot observe or govern the wrapped client's internal HTTP
 attempts; they are provider-internal, like server-side attempts behind one
 direct request.
@@ -423,9 +430,11 @@ and every later non-diagnostic assistant event must repeat that value, and a
 result carrying a different session id is a protocol violation. Assistant
 content retains its first message id. After every proposed tool has its bridge
 acknowledgement, one message with a distinct id, text and optional thinking
-blocks, and at least one text block may acknowledge the batch. Its content is
+blocks, and at least one text block may acknowledge the batch. Thinking-only
+attempts may change message identity before the first text block. Its content is
 discarded; the reported finish must be `end_turn`, while the effective
-completion of the original batch is `ToolUse`.
+completion of the original batch is `ToolUse`. A different message id outside
+that acknowledgement is a protocol violation.
 
 Claude native refusal notifications and text-only API-error diagnostics stay
 bound to the initialized session and are nonterminal. Diagnostics report the

@@ -292,9 +292,6 @@ async fn module_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
 async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn Error>> {
     let (container, core_pool, database_url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let module_pool = module_pool(&database_url).await?;
     let store = RepoWatchStore::new(module_pool.clone());
 
@@ -2477,9 +2474,6 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
     let source = signalbox_session_ownership::LifecycleEventSource::new(core_pool.clone());
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     sqlx::query("CREATE FUNCTION reject_redundant_cursor_update() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN IF NEW.event_ordinal = OLD.event_ordinal THEN RAISE EXCEPTION 'redundant evaluation cursor update'; END IF; RETURN NEW; END $$")
@@ -2707,9 +2701,6 @@ async fn undecodable_event_is_quarantined_and_next_event_is_evaluated() -> Resul
 {
     let (_container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("dispatch/project"))?;
@@ -4421,9 +4412,6 @@ async fn undated_compact_entries_do_not_reopen_ordinary_pull_requests() -> Resul
     use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
@@ -4729,9 +4717,6 @@ async fn completed_polls_prune_terminal_and_expired_subject_pages() -> Result<()
     use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
@@ -5012,9 +4997,6 @@ async fn achieved_goal_rearms_on_a_new_review_event() -> Result<(), Box<dyn Erro
     };
     let (_container, core, url) = postgres().await?;
     migrate(&core).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let source = signalbox_session_ownership::LifecycleEventSource::new(core.clone());
@@ -5176,9 +5158,6 @@ async fn labeled_webhook_dispatches_without_a_poll() -> Result<(), Box<dyn Error
     use signalbox_module_repo_watch_v2::poll_cache::observe_webhook_pulls;
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
@@ -5364,9 +5343,6 @@ async fn backlog_larger_than_the_request_budget_drains_across_restarted_polls()
 -> Result<(), Box<dyn Error>> {
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
@@ -5414,9 +5390,6 @@ async fn backlog_larger_than_the_request_budget_drains_across_restarted_polls()
 async fn completing_a_partial_poll_clears_its_durable_cursor() -> Result<(), Box<dyn Error>> {
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
@@ -5467,9 +5440,6 @@ async fn webhook_refresh_replaces_a_partial_polls_older_pull_without_duplicate_e
     use signalbox_module_repo_watch_v2::poll_cache::{observe_webhook_pulls, poll_with_cache};
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
@@ -5553,9 +5523,6 @@ async fn poll_preflight_requires_the_configured_attempt_budget() -> Result<(), B
     use signalbox_module_repo_watch_v2::{poll_cache::poll_with_cache, provider::ObservationError};
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
@@ -5590,9 +5557,6 @@ async fn poll_preflight_requires_the_configured_attempt_budget() -> Result<(), B
 async fn review_thread_delivery_queues_its_pull_request() -> Result<(), Box<dyn Error>> {
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
@@ -5632,9 +5596,6 @@ async fn failed_webhook_pull_is_suspended_without_blocking_other_subjects()
     use signalbox_module_repo_watch_v2::poll_cache::{observe_webhook_pulls, poll_with_cache};
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
@@ -5755,9 +5716,6 @@ async fn coalesced_unseen_pull_snapshot_dispatches_its_label_and_retains_all_fac
     use signalbox_module_repo_watch_v2::poll_cache::observe_webhook_pulls;
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
@@ -5899,9 +5857,6 @@ async fn base_advancement_uses_refreshed_pull_lifecycles_and_bases() -> Result<(
     use signalbox_module_repo_watch_v2::poll_cache::poll_with_cache;
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
@@ -5966,9 +5921,6 @@ async fn reopening_a_closed_pull_does_not_repeat_its_initial_snapshot_facts()
     use signalbox_module_repo_watch_v2::poll_cache::observe_webhook_pulls;
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let repository = RepositorySlug::try_new(String::from("example/project"))?;
     let mut io = ConditionalPollFixture::new();

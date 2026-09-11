@@ -172,9 +172,6 @@ async fn fixture(
     Box<dyn Error>,
 > {
     let (database, core, url) = postgres().await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core)
-        .await?;
     let module = module_pool(&url).await?;
     let store = RepoWatchStore::new(module.clone());
     let repository = RepositorySlug::try_new("receipt/project".into())?;
