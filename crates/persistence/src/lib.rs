@@ -45,6 +45,7 @@ pub mod program_registration;
 pub mod program_session;
 pub mod replace_session_defaults;
 pub mod repo_watch_command;
+mod review_judgment;
 pub mod review_orchestration;
 pub mod review_workflow;
 mod review_workflow_command;

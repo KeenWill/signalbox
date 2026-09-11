@@ -1143,6 +1143,7 @@ async fn build_submission(
                 converted.push(ApplicationPlanMember::new(
                     finding.proposal().reference(),
                     disposition,
+                    decode_judgment(member.judgment)?,
                 ));
             }
             Ok(ClientSubmission::JudgmentPlan(ReviewJudgmentPlan::new(
@@ -1798,6 +1799,34 @@ const fn internal(cause: ReviewOrchestrationInternalCause) -> ReviewOrchestratio
         session_id: None,
         cause,
     }
+}
+
+fn decode_judgment(
+    value: signalbox_process_protocol::ReviewJudgmentResult,
+) -> Result<signalbox_domain::ReviewJudgment, ReviewOrchestrationRuntimeError> {
+    use signalbox_domain::{
+        ReviewBarCategory, ReviewBarVerdict, ReviewDeclineClass, ReviewJudgeConfidence,
+        ReviewJudgment,
+    };
+    let invalid = || ReviewOrchestrationRuntimeError::InvalidRequest;
+    let verdict = match (value.bar_category.as_str(), value.decline_class.as_deref()) {
+        ("none", Some(class)) => {
+            ReviewBarVerdict::None(ReviewDeclineClass::from_key(class).ok_or_else(invalid)?)
+        }
+        (category, None) => {
+            ReviewBarVerdict::Accept(ReviewBarCategory::from_key(category).ok_or_else(invalid)?)
+        }
+        _ => return Err(invalid()),
+    };
+    let confidence = u8::try_from(value.confidence.value())
+        .ok()
+        .and_then(ReviewJudgeConfidence::try_new)
+        .ok_or_else(invalid)?;
+    Ok(ReviewJudgment::new(
+        verdict,
+        confidence,
+        ReviewText::try_new(value.reason).map_err(|_| invalid())?,
+    ))
 }
 
 #[cfg(test)]
