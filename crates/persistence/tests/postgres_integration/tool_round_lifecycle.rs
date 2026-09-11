@@ -1645,6 +1645,21 @@ async fn interrupt_reuses_results_checkpointed_for_compaction() -> Result<(), Bo
     .fetch_one(&pool)
     .await?;
     assert_eq!(terminal, (String::from("cancelled"), true));
+    let activation = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            fixture.session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x60)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x61)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x62)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x63)),
+            ),
+        )
+        .await?;
+    assert!(
+        activation.is_some(),
+        "interrupt successor remains activatable"
+    );
     pool.close().await;
     drop(container);
     Ok(())
@@ -1833,6 +1848,21 @@ async fn interrupt_retains_completed_tool_compaction() -> Result<(), Box<dyn Err
         "SELECT semantic_entry_id FROM semantic_transcript_entry WHERE source_session_id = $1 AND payload_kind = 'context_summary'",
     ).bind(fixture.session.into_uuid()).fetch_all(&pool).await?;
     assert_eq!(summaries, vec![summary_entry.into_uuid()]);
+    let activation = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            fixture.session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x60)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x61)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x62)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x63)),
+            ),
+        )
+        .await?;
+    assert!(
+        activation.is_some(),
+        "interrupt successor remains activatable"
+    );
     pool.close().await;
     drop(container);
     Ok(())

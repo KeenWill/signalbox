@@ -2261,6 +2261,7 @@ fn reconstitute_inner(
                                 &assistant_by_call,
                                 &snapshots,
                                 &semantic_entries,
+                                &compaction_chain,
                             )
                             .is_some()
                     });
@@ -2754,6 +2755,7 @@ fn reconstitute_inner(
                         &assistant_by_call,
                         &snapshots,
                         &semantic_entries,
+                        &compaction_chain,
                     )
                     .is_some_and(|producing_call| {
                         named_tool_round_producer.is_none_or(|named| named == producing_call)
