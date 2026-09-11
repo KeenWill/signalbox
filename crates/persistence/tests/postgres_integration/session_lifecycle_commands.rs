@@ -2345,3 +2345,215 @@ async fn lifecycle_stop_settles_a_delegated_foreground_child_wait() -> Result<()
     drop(container);
     Ok(())
 }
+
+/// A late completion of a stopped descendant retains cancellation instead of
+/// trying to reconstitute the logically terminated tool batch.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn descendant_stop_cancels_the_in_flight_approval_judge() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, prepared) = prepared_stop_bound_child_judge(&pool).await?;
+    let judges = fixture.repository.approval_judge_repository();
+    let _authorized = authorized_approval_judge(judges.authorize(&prepared).await?);
+    let stop = SessionLifecycleCommand::new(
+        DurableCommandId::from_uuid(next_test_submit_uuid()),
+        fixture.parent,
+        SessionLifecycleOperation::Stop {
+            sticky: StopStickiness::Redispatchable,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+        },
+    );
+    let stopped = recorded(&pool, stop).await?;
+    assert_eq!(
+        stopped,
+        SessionLifecycleCommandResult::Applied(SessionLifecycleApplication::Closed {
+            outcome: SessionTerminalOutcome::Stopped {
+                sticky: StopStickiness::Redispatchable
+            },
+        })
+    );
+    let logical_terminal: bool = sqlx::query_scalar(
+        "SELECT delegation_runtime_terminal FROM turn_lifecycle WHERE session_id=$1 AND turn_id=$2",
+    )
+    .bind(fixture.child.into_uuid())
+    .bind(fixture.authorized.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(logical_terminal);
+    let late_usage = ProviderReportedTokenUsage::unreported().with_input_tokens(Some(1));
+    let completed = judges
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?,
+            late_usage,
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(next_test_submit_uuid()),
+                SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                ContextFrontierId::from_uuid(next_test_submit_uuid()),
+            ),
+            |_| panic!("a stopped child cannot append an approval result"),
+        )
+        .await?;
+    assert_eq!(completed, CompleteApprovalJudgeOutcome::Cancelled);
+    judges
+        .fail(
+            &prepared,
+            FailedApprovalJudgeDisposition::KnownFailed,
+            late_usage,
+        )
+        .await?;
+    let retained: (String, String, Option<Decimal>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, input_tokens
+         FROM tool_approval_judge_model_call WHERE model_call_id=$1",
+    )
+    .bind(prepared.call().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        retained,
+        (String::from("terminal"), String::from("cancelled"), None)
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Builds a delegated approval wait whose bound relationship stops with its parent.
+async fn prepared_stop_bound_child_judge(
+    pool: &PgPool,
+) -> Result<(AuthorizedDelegatedModelCallFixture, PreparedApprovalJudge), Box<dyn Error>> {
+    // Arbitrary identity namespace for this independent delegation fixture.
+    let seed = 0x12ff_6000;
+    let fixture = authorize_delegated_model_call_fixture(pool, seed).await?;
+    sqlx::query("ALTER TABLE session_delegation DISABLE TRIGGER session_delegation_is_append_only")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_delegation SET policy_kind = 'bound',
+         on_parent_stopped = 'stop', on_parent_cancelled = 'cancel'
+         WHERE spawning_tool_request_id = $1",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation ENABLE TRIGGER session_delegation_is_append_only")
+        .execute(pool)
+        .await?;
+    let request = ToolRequestId::from_uuid(next_test_submit_uuid());
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from("current_time")).expect("fixture tool name"),
+                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                    .expect("fixture arguments"),
+            ),
+        )])
+        .expect("one tool call forms a response");
+    fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            fixture
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+                    response,
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
+                }),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                    request,
+                    InitialToolApproval::Delegated,
+                )],
+                ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                None,
+            )),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?;
+    let judges = fixture.repository.approval_judge_repository();
+    let judge_call = ModelCallId::from_uuid(next_test_submit_uuid());
+    let prepared = ready_approval_judge(
+        judges
+            .prepare(fixture.child, fixture.authorized.turn(), judge_call, None)
+            .await?,
+    );
+    Ok((fixture, prepared))
+}
+
+/// A stop between preparation and authorization prevents a provider send.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn descendant_stop_cancels_the_prepared_approval_judge() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, prepared) = prepared_stop_bound_child_judge(&pool).await?;
+    let judges = fixture.repository.approval_judge_repository();
+    recorded(
+        &pool,
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(next_test_submit_uuid()),
+            fixture.parent,
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Redispatchable,
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        ),
+    )
+    .await?;
+    assert_eq!(
+        judges.authorize(&prepared).await?,
+        AuthorizeApprovalJudgeOutcome::NoSend
+    );
+    let retained: (String, String) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind FROM tool_approval_judge_model_call WHERE model_call_id=$1",
+    ).bind(prepared.call().into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(
+        retained,
+        (String::from("terminal"), String::from("cancelled"))
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A late failure discards usage when its delegated turn has already stopped.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn descendant_stop_cancels_the_failed_approval_judge() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, prepared) = prepared_stop_bound_child_judge(&pool).await?;
+    let judges = fixture.repository.approval_judge_repository();
+    let _authorized = authorized_approval_judge(judges.authorize(&prepared).await?);
+    recorded(
+        &pool,
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(next_test_submit_uuid()),
+            fixture.parent,
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Redispatchable,
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        ),
+    )
+    .await?;
+    judges
+        .fail(
+            &prepared,
+            FailedApprovalJudgeDisposition::KnownFailed,
+            ProviderReportedTokenUsage::unreported().with_input_tokens(Some(1)),
+        )
+        .await?;
+    let retained: (String, String, Option<Decimal>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, input_tokens FROM tool_approval_judge_model_call WHERE model_call_id=$1",
+    ).bind(prepared.call().into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(
+        retained,
+        (String::from("terminal"), String::from("cancelled"), None)
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

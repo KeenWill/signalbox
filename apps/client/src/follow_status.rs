@@ -12,9 +12,56 @@ pub(crate) async fn transcript(
     session_id: CanonicalUuid,
 ) -> Result<TranscriptSnapshot, ClientError> {
     let mut connection = client
-        .request(ClientRequest::ReadTranscript { session_id })
+        .request(ClientRequest::ReadTranscript {
+            session_id,
+            after_frontier: None,
+        })
         .await?;
     read_snapshot(client, &mut connection, session_id).await
+}
+
+pub(crate) async fn refresh_terminal_transcript(
+    client: &mut ProcessClient,
+    session_id: CanonicalUuid,
+    snapshot: &mut TranscriptSnapshot,
+) -> Result<(), ClientError> {
+    *snapshot = transcript(client, session_id).await?;
+    Ok(())
+}
+
+pub(crate) async fn refresh_transcript(
+    client: &mut ProcessClient,
+    session_id: CanonicalUuid,
+    snapshot: &mut TranscriptSnapshot,
+) -> Result<(), ClientError> {
+    let Some(acknowledgement) = snapshot.acknowledgement() else {
+        *snapshot = transcript(client, session_id).await?;
+        return Ok(());
+    };
+    let mut connection = client
+        .request(ClientRequest::ReadTranscript {
+            session_id,
+            after_frontier: Some(acknowledgement.frontier()),
+        })
+        .await?;
+    match crate::transcript::read_snapshot_after(
+        client,
+        &mut connection,
+        session_id,
+        Some(acknowledgement),
+    )
+    .await
+    {
+        Ok(suffix) => snapshot.append_suffix(suffix),
+        Err(ClientError::Remote {
+            code: ErrorCode::ResyncRequired,
+            ..
+        }) => {
+            *snapshot = transcript(client, session_id).await?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) async fn follow(
@@ -46,9 +93,9 @@ pub(crate) async fn follow(
                         observed_cursor = cursor.value();
                         output.event(observed_cursor, session_id, &event)?;
                         if let Some(selection) = terminal_snapshot_selection(&event, session_id) {
-                            let mut refreshed = transcript(client, session_id).await?;
+                            refresh_terminal_transcript(client, session_id, &mut snapshot).await?;
                             output.terminal_material(
-                                &mut refreshed,
+                                &mut snapshot,
                                 &mut displayed_entries,
                                 selection,
                             )?;

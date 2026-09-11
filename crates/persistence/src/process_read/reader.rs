@@ -5,9 +5,10 @@ use super::turn_decode::decode_transcript_turn;
 use super::turn_facts::{
     decode_model_call_usage, load_next_model_call_usage, load_next_transcript_turn,
 };
-use super::{ProcessReadCorruption, ProcessReadError};
+use super::{ProcessReadCorruption, ProcessReadError, decode_nonnegative};
 use crate::credential_pool_exhaustion::CredentialPoolEvidenceError;
 use crate::mapping::session_id_to_uuid;
+use rust_decimal::Decimal;
 use signalbox_domain::{ContextFrontierId, ModelCallId, SessionId, TurnId};
 use sqlx::types::Uuid;
 use sqlx::{Postgres, Row, Transaction};
@@ -36,6 +37,7 @@ pub struct ProcessTranscriptReader {
     pub(super) model_calls_complete: bool,
     pub(super) entry_count: Option<u64>,
     pub(super) next_entry_index: u64,
+    pub(super) after_frontier: Option<ContextFrontierId>,
     pub(super) summary: Option<ProcessTranscriptSummary>,
     pub(super) automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 }
@@ -171,12 +173,52 @@ impl ProcessTranscriptReader {
             )
             .await?;
             self.latest_frontier = latest_frontier;
-            self.entry_count = Some(match latest_frontier {
+            let after_entry_count = if let Some(after_frontier) = self.after_frontier {
+                let Some(current_frontier) = latest_frontier else {
+                    return Err(ProcessReadError::ResyncRequired);
+                };
+                let acknowledged: Option<(Decimal, bool)> = sqlx::query_as(
+                    "SELECT member_count,
+                            context_frontier_preserves_prefix($1, $2, $3)
+                       FROM context_frontier
+                      WHERE owning_session_id = $1
+                        AND context_frontier_id = $2",
+                )
+                .bind(session_id_to_uuid(session))
+                .bind(after_frontier.into_uuid())
+                .bind(current_frontier.into_uuid())
+                .fetch_optional(&mut **self.transaction_mut()?)
+                .await?;
+                let Some((member_count, preserves_prefix)) = acknowledged else {
+                    return Err(ProcessReadError::ResyncRequired);
+                };
+                let after_entry_count =
+                    decode_nonnegative(member_count, "acknowledged frontier member count")?;
+                if !preserves_prefix {
+                    return Err(ProcessReadError::ResyncRequired);
+                }
+                after_entry_count
+            } else {
+                0
+            };
+            let entry_count = match latest_frontier {
                 Some(frontier) => {
-                    open_transcript_entry_cursor(self.transaction_mut()?, session, frontier).await?
+                    let entry_count = open_transcript_entry_cursor(
+                        self.transaction_mut()?,
+                        session,
+                        frontier,
+                        after_entry_count,
+                    )
+                    .await?;
+                    if after_entry_count > entry_count {
+                        return Err(ProcessReadError::ResyncRequired);
+                    }
+                    entry_count
                 }
                 None => 0,
-            });
+            };
+            self.next_entry_index = after_entry_count;
+            self.entry_count = Some(entry_count);
         }
 
         let entry_count = self
@@ -218,6 +260,7 @@ impl ProcessTranscriptReader {
             turn_count: self.turn_count,
             model_call_count: self.model_call_count,
             entry_count,
+            frontier: self.latest_frontier,
         });
         Ok(None)
     }

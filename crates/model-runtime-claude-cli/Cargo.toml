@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 base64 = "0.23.0"
+chrono = { version = "0.4.41", default-features = false, features = ["std"] }
+uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 semver = "1.0.27"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.140", features = ["arbitrary_precision", "raw_value"] }
