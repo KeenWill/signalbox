@@ -546,6 +546,12 @@ body continuations.
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
 
+The descriptor also includes retained supervision class, sanitized cause, and
+pending reconciliation state, independently of lifecycle reconstruction and
+transcript detail decoding. Pending supervision displays recovery required in
+the session header and composer status. Reconciled evidence remains visible.
+Transcript corruption checks and command admission remain unchanged.
+
 The session timeline descriptor reports the first and latest addresses, the item
 and projected-size facts, the active and queued turn counts, and the observation
 cursor, all from one snapshot. The timeline sequence is allocated once across
@@ -737,8 +743,6 @@ closed.
 
 ## Planned
 
-- Browser supervision evidence remains readable when transcript detail fails
-  ([design](../design/web-session-supervision.md)).
 - Instruction-aware defaults replacement, rejecting a model selection whose
   targets lack instruction transport or capacity for the session's admitted set
   ([design](../design/sessions-and-transcript.md)).

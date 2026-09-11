@@ -2424,6 +2424,7 @@ test("generated descriptor decoder rejects a fact beyond u64", () => {
       decodeWebSessionTimelineDescriptor({
         workspace_root_kind: null,
         session_id: "00000000-0000-0000-0000-000000000991",
+        supervision: null,
         repository_watch: null,
         sizes: {
           item_count: "18446744073709551616",
@@ -3082,6 +3083,7 @@ test("generated descriptor decoder rejects an invalid session ID", () => {
       decodeWebSessionTimelineDescriptor({
         workspace_root_kind: null,
         session_id: "not-a-uuid",
+        supervision: null,
         repository_watch: null,
         sizes: {
           item_count: "1",
@@ -3394,6 +3396,7 @@ test("repository watch provenance preserves exact ledger identities and rejects 
   const descriptor = {
     workspace_root_kind: null,
     session_id: "00000000-0000-0000-0000-000000000001",
+    supervision: null,
     repository_watch: {
       dispatch_id: "00000000-0000-0000-0000-000000000063",
       event_id: "00000000-0000-0000-0000-000000000064",
@@ -3475,4 +3478,22 @@ test("goal stop accounting fields require explicit presence", () => {
     delete malformed.items[0].body.event[field];
     assert.throws(() => decodeWebSessionTimelineDetailPage(malformed));
   }
+});
+
+
+test("session supervision preserves retained evidence and rejects unknown classes", () => {
+  const descriptor = {
+    workspace_root_kind: null, repository_watch: null,
+    session_id: "00000000-0000-0000-0000-000000000001",
+    supervision: { class: "corruption", cause_code: "durable_state_corruption", pending: true },
+    sizes: { item_count: "1", projected_text_bytes: "0", projected_structured_bytes: "96", referenced_blob_count: "0", referenced_blob_bytes: "0" },
+    first_address: { event_sequence: "1" }, latest_address: { event_sequence: "1" },
+    work: { active_turn_count: "1", queued_turn_count: "0" }, observed_through: "1",
+  };
+  assert.deepEqual(decodeWebSessionTimelineDescriptor(descriptor).supervision, descriptor.supervision);
+  const reconciled = { ...descriptor.supervision, pending: false };
+  assert.deepEqual(decodeWebSessionTimelineDescriptor({ ...descriptor, supervision: reconciled }).supervision, reconciled);
+  assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, supervision: { ...descriptor.supervision, class: "unknown" } }));
+  const { supervision, ...missing } = descriptor;
+  assert.throws(() => decodeWebSessionTimelineDescriptor(missing));
 });

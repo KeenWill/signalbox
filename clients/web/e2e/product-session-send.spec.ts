@@ -25,6 +25,7 @@ async function sessionApi(
   origin: WebRepositoryWatchProvenance | null = null,
 ) {
   const state = {
+    supervision: null as WebSessionTimelineDescriptor['supervision'],
     active: busy,
     grown: false,
     observed: false,
@@ -158,6 +159,7 @@ async function sessionApi(
     return route.fulfill({
       json: {
         session_id: selectedSessionId,
+        supervision: state.supervision,
         repository_watch: origin,
         workspace_root_kind: null,
         sizes: {
@@ -563,6 +565,7 @@ test('keeps earlier text reachable after live appending evicts a text-page entry
     route.fulfill({
       json: {
         session_id: sessionId,
+        supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
         sizes: {
@@ -790,4 +793,60 @@ test('replaces the sent notice when followed work starts', async ({ page }) => {
   api.grow()
   await expect(composer.getByRole('status')).toHaveText('Turn: Running')
   await expect(composer.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
+})
+
+for (const viewport of [
+  { name: 'desktop', width: 1440, height: 1000 },
+  { name: 'phone', width: 390, height: 844 },
+]) {
+  test(`shows supervision beside an unavailable transcript at ${viewport.name} size`, async ({
+    page,
+    browserName,
+  }) => {
+    await page.setViewportSize(viewport)
+    const api = await sessionApi(page, true)
+    api.state.supervision = {
+      class: 'corruption',
+      cause_code: 'durable_state_corruption',
+      pending: true,
+    }
+    await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) =>
+      route.fulfill({
+        status: 500,
+        json: {
+          error: { code: 'session_projection_failed', message: 'Session projection failed' },
+        },
+      }),
+    )
+    await page.goto(`/sessions?workspace=true&session=${sessionId}`)
+    const supervision = page.getByRole('region', { name: 'Session supervision' })
+    await expect(supervision).toContainText('Operator reconciliation pending')
+    await expect(supervision).toContainText('corruption')
+    await expect(supervision).toContainText(api.state.supervision.cause_code)
+    await expect(page.getByText('Recovery required', { exact: true })).toBeVisible()
+    await expect(
+      page.getByRole('region', { name: 'Transcript text' }).getByRole('alert'),
+    ).toContainText('Transcript failed to load')
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Session recovery required' }),
+    ).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
+    if (browserName === 'chromium')
+      await expect(page).toHaveScreenshot(`session-supervision-${viewport.name}.png`, {
+        fullPage: true,
+      })
+    api.grow()
+  })
+}
+
+test('retains reconciled supervision without showing recovery pending', async ({ page }) => {
+  const api = await sessionApi(page)
+  api.state.supervision = { class: 'infrastructure', cause_code: 'infrastructure', pending: false }
+  await openSession(page)
+  await expect(page.getByRole('region', { name: 'Session supervision' })).toContainText(
+    'Operator reconciliation recorded',
+  )
+  await expect(page.getByText('Recovery required', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Inactive', { exact: true })).toBeVisible()
+  api.grow()
 })
