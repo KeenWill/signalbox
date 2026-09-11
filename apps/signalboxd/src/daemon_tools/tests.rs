@@ -6557,8 +6557,106 @@ fn a_directory_another_session_bound_is_refused() {
     assert!(another_session_bound(
         &bindings,
         second,
-        FIXTURE_BOUND_IDENTITY
+        FIXTURE_BOUND_IDENTITY,
+        |_| true
     ));
+}
+
+/// The recorded identity represents inode reuse after a deleted checkout's
+/// executors were evicted; no filesystem allocator behavior is required.
+#[test]
+fn a_removed_workspace_without_retained_executors_does_not_reserve_recycled_inodes() {
+    let parent = tempfile::tempdir().expect("fixture parent exists");
+    let configured = configured_workspace(parent.path());
+    let first = session(FIRST_SESSION_IDENTITY);
+    let second = session(SECOND_SESSION_IDENTITY);
+    let roots = derivation(&configured);
+    provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+    let derived = roots.derived_path(first);
+    let mut state = retained_workspaces::SessionWorkspaceState::<RetainedFixture>::new();
+    state.bindings.insert(
+        first,
+        RecordedSessionBinding::DerivedRoot {
+            identity: FIXTURE_BOUND_IDENTITY,
+            parent: FIXTURE_PARENT_IDENTITY,
+        },
+    );
+    fs::remove_dir_all(derived).expect("the old checkout is removed");
+
+    assert!(!state.refuses_shared_workspace(&roots, second, FIXTURE_BOUND_IDENTITY));
+    assert!(matches!(
+        state.bindings.get(&first),
+        Some(RecordedSessionBinding::DerivedRoot { .. })
+    ));
+    assert!(matches!(
+        decide_session_root(state.bindings.get(&first).cloned(), &roots.resolve(first)),
+        SessionRootDecision::Unresolvable
+    ));
+}
+
+#[test]
+fn a_removed_workspace_with_retained_executors_still_reserves_its_identity() {
+    const RETAINED_MARKER: u32 = 1;
+    let parent = tempfile::tempdir().expect("fixture parent exists");
+    let configured = configured_workspace(parent.path());
+    let first = session(FIRST_SESSION_IDENTITY);
+    let second = session(SECOND_SESSION_IDENTITY);
+    let roots = derivation(&configured);
+    let mut state = retained_workspaces::SessionWorkspaceState::new();
+    state.bindings.insert(
+        first,
+        RecordedSessionBinding::DerivedRoot {
+            identity: FIXTURE_BOUND_IDENTITY,
+            parent: FIXTURE_PARENT_IDENTITY,
+        },
+    );
+    state
+        .retained
+        .retain(first, RetainedFixture::in_flight(RETAINED_MARKER));
+
+    assert!(state.refuses_shared_workspace(&roots, second, FIXTURE_BOUND_IDENTITY));
+}
+
+#[test]
+fn an_existing_workspace_without_retained_executors_still_reserves_its_identity() {
+    let parent = tempfile::tempdir().expect("fixture parent exists");
+    let configured = configured_workspace(parent.path());
+    let first = session(FIRST_SESSION_IDENTITY);
+    let second = session(SECOND_SESSION_IDENTITY);
+    let roots = derivation(&configured);
+    provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+    let mut state = retained_workspaces::SessionWorkspaceState::<RetainedFixture>::new();
+    state.bindings.insert(
+        first,
+        RecordedSessionBinding::DerivedRoot {
+            identity: FIXTURE_BOUND_IDENTITY,
+            parent: FIXTURE_PARENT_IDENTITY,
+        },
+    );
+
+    assert!(state.refuses_shared_workspace(&roots, second, FIXTURE_BOUND_IDENTITY));
+}
+
+#[test]
+fn an_unresolvable_workspace_without_retained_executors_still_reserves_its_identity() {
+    let parent = tempfile::tempdir().expect("fixture parent exists");
+    let configured = configured_workspace(parent.path());
+    let first = session(FIRST_SESSION_IDENTITY);
+    let second = session(SECOND_SESSION_IDENTITY);
+    let roots = derivation(&configured);
+    fs::create_dir_all(&roots.derived_parent).expect("derived parent exists");
+    fs::write(roots.derived_path(first), FIRST_SESSION_MARKER)
+        .expect("non-directory workspace exists");
+    let mut state = retained_workspaces::SessionWorkspaceState::<RetainedFixture>::new();
+    state.bindings.insert(
+        first,
+        RecordedSessionBinding::DerivedRoot {
+            identity: FIXTURE_BOUND_IDENTITY,
+            parent: FIXTURE_PARENT_IDENTITY,
+        },
+    );
+
+    assert!(state.refuses_shared_workspace(&roots, second, FIXTURE_BOUND_IDENTITY));
 }
 
 /// A session resuming the directory it bound itself is not a collision.
@@ -6576,7 +6674,8 @@ fn the_directory_a_session_bound_itself_is_not_a_collision() {
     assert!(!another_session_bound(
         &bindings,
         first,
-        FIXTURE_BOUND_IDENTITY
+        FIXTURE_BOUND_IDENTITY,
+        |_| true
     ));
 }
 
@@ -6597,7 +6696,8 @@ fn a_repository_another_session_bound_is_refused() {
     assert!(another_session_bound(
         &bindings,
         second,
-        FIXTURE_SHARED_ADMINISTRATION_IDENTITY
+        FIXTURE_SHARED_ADMINISTRATION_IDENTITY,
+        |_| true
     ));
 }
 
@@ -6620,7 +6720,8 @@ fn a_worktree_over_another_session_administration_directory_is_refused() {
     assert!(another_session_bound(
         &bindings,
         second,
-        FIXTURE_WORKTREE_OVER_BOUND_ADMINISTRATION_IDENTITY
+        FIXTURE_WORKTREE_OVER_BOUND_ADMINISTRATION_IDENTITY,
+        |_| true
     ));
 }
 
@@ -6641,7 +6742,8 @@ fn an_administration_directory_over_another_session_worktree_is_refused() {
     assert!(another_session_bound(
         &bindings,
         second,
-        FIXTURE_ADMINISTRATION_OVER_BOUND_WORKTREE_IDENTITY
+        FIXTURE_ADMINISTRATION_OVER_BOUND_WORKTREE_IDENTITY,
+        |_| true
     ));
 }
 
@@ -6661,7 +6763,8 @@ fn a_workspace_sharing_no_directory_is_admitted() {
     assert!(!another_session_bound(
         &bindings,
         second,
-        FIXTURE_OTHER_IDENTITY
+        FIXTURE_OTHER_IDENTITY,
+        |_| true
     ));
 }
 
@@ -6676,7 +6779,8 @@ fn a_configured_binding_is_not_a_derived_collision() {
     assert!(!another_session_bound(
         &bindings,
         second,
-        FIXTURE_BOUND_IDENTITY
+        FIXTURE_BOUND_IDENTITY,
+        |_| true
     ));
 }
 
@@ -6979,12 +7083,14 @@ fn linked_worktrees_sharing_common_administration_cannot_bind_separate_sessions(
     assert!(another_session_bound(
         &bindings,
         second_session,
-        second_identity
+        second_identity,
+        |_| true
     ));
     assert!(!another_session_bound(
         &bindings,
         first_session,
-        first_identity
+        first_identity,
+        |_| true
     ));
 }
 

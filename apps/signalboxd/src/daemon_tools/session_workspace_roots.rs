@@ -398,12 +398,14 @@ pub(super) fn another_session_bound(
     bindings: &BTreeMap<SessionId, RecordedSessionBinding>,
     session: SessionId,
     composed: ComposedWorkspaceIdentity,
+    still_reachable: impl Fn(SessionId) -> bool,
 ) -> bool {
     bindings.iter().any(|(bound, binding)| {
         *bound != session
             && binding
                 .derived_identity()
                 .is_some_and(|bound_identity| bound_identity.shares_a_directory_with(&composed))
+            && still_reachable(*bound)
     })
 }
 
