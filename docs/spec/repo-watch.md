@@ -286,6 +286,8 @@ The module commits lifecycle effects before advancing its application cursor;
 the daemon acknowledges the corresponding seam event afterward. Lifecycle events
 through the committed frontier captured at the start of each pass are drained
 before replaying pending commands; later events remain for the next pass.
+Lifecycle catch-up does not hold the runtime mutex used by session reads and
+configuration reload.
 
 Pull-request dispatch atomically creates the session with a provisioning hold
 that public start and ownership releases cannot clear. Input accepted during
