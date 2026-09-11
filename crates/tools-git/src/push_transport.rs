@@ -20,12 +20,7 @@ pub struct ConfiguredGitRemote {
 impl ConfiguredGitRemote {
     /// Constructs one fixed remote name and exact destination URL.
     ///
-    /// The destination is judged by [`GitRemoteUrl`], the same type the durable
-    /// mint stores, rather than by a second bounded-text rule here. Restating
-    /// the grammar locally is what let the two sides drift: the durable side
-    /// was https-only while this constructor admitted any bounded URL, so the
-    /// claim that both refuse the same set held in neither. Delegating makes it
-    /// true by construction — scheme, userinfo, query, and port bounds included.
+    /// The destination uses the same [`GitRemoteUrl`] type as the durable mint.
     pub fn try_new(
         name: impl Into<String>,
         url: impl Into<String>,

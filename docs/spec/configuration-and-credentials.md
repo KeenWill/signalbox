@@ -154,12 +154,13 @@ at least one second or `"none"` and bounds the timeout requested from
 `"none"`, or `"host"`), `sandbox_read_only_binds` (default `[]`), and
 `sandbox_path_prepend` (default `[]`) select networking, absolute host paths
 bound read-only at the same paths, and absolute directories prepended to `PATH`.
-Host networking shares the daemon's network namespace and DNS configuration
-without destination filtering, independently of web-egress and tool-mapping
-policies. Optional `sandbox_rustup_home` and `sandbox_rustup_toolchain` set
-`RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; automatic toolchain installation is
-disabled, `CARGO_HOME` stays private and writable, and `npm_config_cache` is
-`/workspace/.npm`.
+Programmatic read-only mounts at explicit destinations overlay the workspace,
+worktree, and working-directory binds. Host networking shares the daemon's
+network namespace and DNS configuration without destination filtering,
+independently of web-egress and tool-mapping policies. Optional
+`sandbox_rustup_home` and `sandbox_rustup_toolchain` set `RUSTUP_HOME` and
+`RUSTUP_TOOLCHAIN`; automatic toolchain installation is disabled, `CARGO_HOME`
+stays private and writable, and `npm_config_cache` is `/workspace/.npm`.
 
 The optional `[tool_proposals]` table sets `max_requests` and
 `max_argument_bytes` to nonnegative integers or `"none"`, with defaults of 32
@@ -655,9 +656,11 @@ against the configured `ModelTargetCatalog` and fails closed as
 `CallTargetMismatch` corruption when they differ.
 
 The configured root is opened once during tool construction and its pinned
-authority is cloned into the workspace, Git, and execution suites. A
-nonexistent, non-directory, final-symlink, non-repository, linked, or externally
-administered configured root fails startup for the complete mapped composition.
+authority is cloned into the workspace and execution suites. Repository roots,
+including empty repositories and linked worktrees, also compose the Git suite; a
+plain directory has no Git executor but registers Git declarations for
+repository-backed derived sessions. A nonexistent, non-directory, final-symlink,
+or malformed repository root fails startup.
 
 Repository-watch pull-request dispatch provisions its derived directory; other
 derived directories are provisioned by deployment. Only a reported absence at
@@ -667,11 +670,16 @@ misprovisioned and fails closed. Which root a session bound is recorded on its
 first workspace-root-bound tool invocation and does not change for the process's
 lifetime; the first record written wins, so two concurrent first requests
 converge on one root. Isolation is checked against directory identities rather
-than pathnames: a composed root sharing either its worktree or its `.git`
-directory with the configured root or with another bound session is refused.
-Failure to compose or bind a derived root closes that tool request as a known
-failure whose sanitized detail names the closed reason, and it never falls back
-to another root.
+than pathnames: a composed root sharing its worktree, worktree administration,
+or common administration directory with the configured root or with another
+bound session is refused. Linked worktrees sharing common references and objects
+cannot bind separate session serialization domains. Administration directories
+nested under another bound workspace or its Git administration are refused by
+comparing captured ancestry with all three bound directory identities. Ancestry
+capture needs only search permission on ancestor directories and refuses device
+boundaries or Linux mount-ID boundaries. Failure to compose or bind a derived
+root closes that tool request as a known failure whose sanitized detail names
+the closed reason, and it never falls back to another root.
 
 The secret reaches the provider through the profile's delivery, never through a
 process environment variable of the daemon. Two families of one adapter may
@@ -803,15 +811,24 @@ credential needs read access for polling and checkout provisioning. Classic
 `repo` is broader than read-only access, so a fine-grained read credential
 limits that role to the watched repositories. An optional absolute
 `push_credential_file` on `[[repository_watch.repositories]]` supplies a
-deployment-owned token with push authority. An App-backed repository uses its
-installation token for pushes when no separate push file is configured. Git
-receives an `https://x-access-token:<token>@github.com/` URL rewrite only
-through the child environment; command arguments retain the public destination.
+deployment-owned HTTPS token or SSH private key. Optional `push_remote_url`
+selects an exact HTTPS, `ssh://`, or `git@host:` destination; its default is the
+watched repository's GitHub HTTPS URL. HTTPS uses the push token, or the
+installation token for an App-backed repository targeting GitHub when no
+separate push file is configured. SSH uses the configured key when present, or,
+on Linux, the host SSH agent exposed through `SSH_AUTH_SOCK` in the sandbox.
+Agent-backed push authority is derived only when that socket accepts a
+connection. Each configured credential file is reread through
+`FileCredentialAccess` on every push; HTTPS passes an authenticated URL rewrite
+in the child environment, and SSH retains a private temporary key file through
+push and remote confirmation. GitHub HTTPS destination matching uses the parsed,
+normalized hostname.
+
 Push credential files participate in the repository-watch credential isolation
 checks, including symlink and hard-link aliases of polling, push, and webhook
 credentials. The push family is registered from the configuration installed by
-durable reload recovery at startup; a repository-watch reload that adds or
-removes `push_credential_file` takes effect for registration at the next boot.
+durable reload recovery at startup; a repository-watch reload that changes push
+registration takes effect at the next boot.
 
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
