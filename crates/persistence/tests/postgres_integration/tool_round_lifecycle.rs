@@ -5781,6 +5781,227 @@ async fn zero_tool_result_admission_requires_compaction() -> Result<(), Box<dyn 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn zero_tool_result_admission_compacts_after_target_change() -> Result<(), Box<dyn Error>> {
+    const FIXTURE_SEED: u128 = 0x269_3000;
+    const RESULT: &str = "the focused test passed";
+    let (container, pool, _) = migrated_postgres().await?;
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+        FIXTURE_SEED + 6,
+    )));
+    let fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(FIXTURE_SEED + 0x30),
+    ));
+    let limits = ToolContinuationUsageLimit::new(target, FastMode::Enabled, 8_192, 258_400);
+    let session = SessionId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 2));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 3));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 4));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_SEED + 5));
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+        FIXTURE_SEED + 6,
+    )));
+
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared_with_fast_target(
+            FIXTURE_SEED + 7,
+            FIXTURE_SEED + 1,
+            selection,
+            fast_target,
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                FIXTURE_SEED + 8,
+                FIXTURE_SEED + 1,
+                "fast tool-round request",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 9)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(FIXTURE_SEED + 10),
+            starting_frontier: Uuid::from_u128(FIXTURE_SEED + 11),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one fast tool-round target forms a catalog");
+    let families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(target, fast_target)]))
+    .expect("the fast tool-round targets share one credential family");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_session_credentials(families)
+            .with_continuation_usage_limits([limits.clone()]);
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                session,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 12)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 13)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 14)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 15)),
+                        TurnId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 16)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+    let fixture = RestartModelCallFixture {
+        session,
+        turn,
+        attempt,
+        call,
+    };
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(fixture.session, fixture.call)
+        .await?
+    else {
+        panic!("fixture call authorizes");
+    };
+    let (fixture, repository, _, _) = commit_authorized_tool_batch(
+        FIXTURE_SEED,
+        (fixture, repository, *authorized),
+        &[("current_time", "{}")],
+        InitialToolApproval::PolicyAuto,
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(240_000))
+            .with_output_tokens(Some(117)),
+        None,
+    )
+    .await?;
+    let tools = repository.tool_loop_repository();
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    tools
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tools
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    tools
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(RESULT.to_owned())
+                            .expect("fixture result is valid"),
+                    ),
+                }),
+        )
+        .await?;
+    let stored = sqlx::query(
+        "SELECT context_result_byte_limit, result_text, context_result_text
+           FROM tool_attempt WHERE attempt_id = $1",
+    )
+    .bind(attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored.try_get::<i64, _>("context_result_byte_limit")?, 0);
+    assert_eq!(stored.try_get::<String, _>("result_text")?, RESULT);
+    assert_eq!(
+        stored.try_get::<String, _>("context_result_text")?,
+        format!(
+            "\n[tool result truncated: retained 0 bytes; dropped {} bytes]",
+            RESULT.len()
+        )
+    );
+    let replacement_target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::now_v7()));
+    let replacement_targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+            DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_SEED + 5)),
+            target,
+        )])
+        .expect("fixture target is unique");
+    let replacement_families = ModelCredentialFamilyCatalog::try_new([
+        (target, Arc::<str>::from("test-model-family"), None),
+        (
+            replacement_target,
+            Arc::<str>::from("test-model-family"),
+            None,
+        ),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(target, replacement_target)]))
+    .expect("replacement fast target shares the fixture credential family");
+    let replacement_repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        replacement_targets,
+        model_credential_reference(),
+    )
+    .with_session_credentials(replacement_families)
+    .with_continuation_usage_limits([limits]);
+    let tools = replacement_repository.tool_loop_repository();
+    let continuation = ModelCallId::from_uuid(Uuid::now_v7());
+    let frontier = ContextFrontierId::from_uuid(Uuid::now_v7());
+    let outcome = tools
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                frontier,
+                continuation,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("fixture has no steering"),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(_)
+    ));
+    let checkpoint = sqlx::query(
+        "SELECT state_kind, compaction_frontier_id,
+                EXISTS (SELECT 1 FROM model_call WHERE model_call_id = $2) AS call_prepared
+           FROM turn_lifecycle WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(continuation.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(checkpoint.try_get::<String, _>("state_kind")?, "active");
+    assert_eq!(
+        checkpoint.try_get::<Uuid, _>("compaction_frontier_id")?,
+        frontier.into_uuid()
+    );
+    assert!(!checkpoint.try_get::<bool, _>("call_prepared")?);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_bounded_result_compacts_when_the_following_batch_has_no_admission()
 -> Result<(), Box<dyn Error>> {
     // Only supplies distinct identities for the two model responses.
