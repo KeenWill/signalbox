@@ -128,6 +128,12 @@ impl RepoWatchStore {
         codec: &mut Codec,
         now: OffsetDateTime,
     ) -> Result<bool, EvaluationError<Factory::Error>> {
+        if self
+            .activate_next(repository, rule, ids, factory, codec, now)
+            .await?
+        {
+            return Ok(true);
+        }
         let Some(next) = self
             .next_rule_event(repository, rule)
             .await
@@ -269,7 +275,7 @@ impl RepoWatchStore {
                  WHERE fact.repository = dispatched.repository
                    AND fact.pull_request_number = dispatched.pull_request_number
                    AND fact.repository_event_ordinal > dispatched.repository_event_ordinal
-                   AND (origin.retry_of IS NULL OR fact.recorded_at >= origin.issued_at)
+                   AND ((origin.retry_of IS NULL AND origin.activation_event IS NULL) OR fact.recorded_at >= origin.issued_at)
                    AND fact.event_kind IN ('pull_request_closed', 'pull_request_merged')
                  ORDER BY fact.repository_event_ordinal LIMIT 1
              ) AS terminal ON true
@@ -309,9 +315,9 @@ impl RepoWatchStore {
                 "INSERT INTO dispatch_ledger (
                     dispatch_ref, action_ordinal, command_id, repository, rule_id, rule_revision,
                     event_id, command_kind, command_payload, status, issued_at,
-                    retirement_event_id, retirement_reason, retry_of, retry_event)
+                    retirement_event_id, retirement_reason, retry_of, retry_event, activation_event)
                  SELECT dispatch_ref, action_ordinal, $2, repository, rule_id, rule_revision,
-                    event_id, 'lifecycle', $3, 'pending', $4, $5, $6, retry_of, retry_event
+                    event_id, 'lifecycle', $3, 'pending', $4, $5, $6, retry_of, retry_event, activation_event
                  FROM dispatch_ledger WHERE command_id = $1
                  ON CONFLICT (dispatch_ref, action_ordinal) WHERE retirement_event_id IS NOT NULL DO NOTHING")
                 .bind(retirement.command_id).bind(command.command_id().into_uuid()).bind(payload)

@@ -10,10 +10,17 @@ use signalbox_session_ownership::{
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum MatchSource {
+    ProviderEvent,
+    Activation,
+}
+
 pub(crate) struct RetryAdmission {
     pub parent: Uuid,
     pub event: Vec<u8>,
-    rule: RepoWatchRule,
+    pub(crate) rule: RepoWatchRule,
+    pub(crate) source: MatchSource,
 }
 
 #[derive(sqlx::FromRow)]
@@ -22,6 +29,7 @@ struct Candidate {
     event_id: Uuid,
     event: Vec<u8>,
     sessions: Vec<Uuid>,
+    activation: bool,
 }
 
 impl RepoWatchStore {
@@ -53,7 +61,7 @@ impl RepoWatchStore {
                  AND d.command_kind = 'create_session' AND d.singleton_key IS NOT NULL AND e.pull_request_number IS NOT NULL
                ORDER BY e.pull_request_number, d.issued_at DESC, d.dispatch_ref DESC, d.action_ordinal
              )
-             SELECT d.dispatch_ref, d.event_id, COALESCE(d.retry_event,e.normalized_payload) AS event,
+             SELECT d.dispatch_ref, d.event_id, COALESCE(d.activation_event,d.retry_event,e.normalized_payload) AS event, d.activation_event IS NOT NULL AS activation,
                ARRAY(SELECT a.created_session_id FROM dispatch_ledger a WHERE a.dispatch_ref=d.dispatch_ref AND a.command_kind='create_session' AND a.created_session_id IS NOT NULL) AS sessions
              FROM latest d JOIN gh_readable_event e USING(event_id)
              WHERE e.pull_request_number IS NOT NULL AND d.status='applied'
@@ -85,8 +93,16 @@ impl RepoWatchStore {
             let Some(observation) = baseline.observation.as_ref() else {
                 continue;
             };
-            let Some(event) = retry_event(rule, &previous, observation.state().pull_requests())
-            else {
+            let Some(event) = reevaluation_event(
+                rule,
+                &previous,
+                observation.state().pull_requests(),
+                if candidate.activation {
+                    MatchSource::Activation
+                } else {
+                    MatchSource::ProviderEvent
+                },
+            ) else {
                 continue;
             };
             let key =
@@ -97,13 +113,14 @@ impl RepoWatchStore {
                 event: serde_json::to_vec(&crate::normalized_event_payload(&event))
                     .map_err(|_| EvaluationError::Store(StoreError::InvalidRetainedEvent))?,
                 rule: rule.clone(),
+                source: if candidate.activation {
+                    MatchSource::Activation
+                } else {
+                    MatchSource::ProviderEvent
+                },
             };
-            let batches =
-                crate::plan_repository_event(std::slice::from_ref(rule), &event, ids, factory)
-                    .map_err(EvaluationError::Plan)?;
-            let Some(batch) = batches.first() else {
-                continue;
-            };
+            let batch = crate::plan_rule_commands(rule, &event, ids, factory)
+                .map_err(EvaluationError::Plan)?;
             let mut tx = self
                 .pool
                 .begin()
@@ -125,11 +142,11 @@ impl RepoWatchStore {
             let outcome = self
                 .record_commands_transaction(
                     &mut tx,
-                    batch,
+                    &batch,
                     now,
                     codec,
                     Some((&key, rule.cooldown())),
-                    Some(&admission),
+                    Some(crate::Reevaluation::Retry(&admission)),
                 )
                 .await
                 .map_err(EvaluationError::Store)?;
@@ -180,24 +197,38 @@ impl RepoWatchStore {
             .ok_or(StoreError::InvalidRetainedEvent)?;
         let candidate = crate::event_decode::event(first.event_id(), &retry.event)
             .ok_or(StoreError::InvalidRetainedEvent)?;
-        Ok(
-            retry_event(&retry.rule, &candidate, observation.state().pull_requests()).as_ref()
-                == Some(&candidate)
-                && crate::dispatch::singleton_key(
-                    retry.rule.singleton_per(),
-                    &candidate,
-                    Some(&observation),
-                )
-                .as_deref()
-                    == Some(key),
+        Ok(reevaluation_event(
+            &retry.rule,
+            &candidate,
+            observation.state().pull_requests(),
+            retry.source,
         )
+        .as_ref()
+            == Some(&candidate)
+            && crate::dispatch::singleton_key(
+                retry.rule.singleton_per(),
+                &candidate,
+                Some(&observation),
+            )
+            .as_deref()
+                == Some(key))
     }
 }
 
+#[cfg(test)]
 fn retry_event(
     rule: &RepoWatchRule,
     previous: &RepoWatchEvent,
     current: &[RepoWatchPullRequestState],
+) -> Option<RepoWatchEvent> {
+    reevaluation_event(rule, previous, current, MatchSource::ProviderEvent)
+}
+
+pub(crate) fn reevaluation_event(
+    rule: &RepoWatchRule,
+    previous: &RepoWatchEvent,
+    current: &[RepoWatchPullRequestState],
+    source: MatchSource,
 ) -> Option<RepoWatchEvent> {
     let RepoWatchEventTarget::PullRequest(origin) = previous.target() else {
         return None;
@@ -245,10 +276,16 @@ fn retry_event(
                 current: current.mergeable_state(),
             }
         }
-        RepoWatchEventKindV1::Labeled { label } if !current.context().labels().contains(label) => {
+        RepoWatchEventKindV1::Labeled { label }
+            if source == MatchSource::ProviderEvent
+                && !current.context().labels().contains(label) =>
+        {
             return None;
         }
-        RepoWatchEventKindV1::Unlabeled { label } if current.context().labels().contains(label) => {
+        RepoWatchEventKindV1::Unlabeled { label }
+            if source == MatchSource::ProviderEvent
+                && current.context().labels().contains(label) =>
+        {
             return None;
         }
         RepoWatchEventKindV1::ChecksCompleted { .. } => RepoWatchEventKindV1::ChecksCompleted {
@@ -267,7 +304,26 @@ fn retry_event(
         kind,
     )
     .ok()?;
-    rule.matcher().matches(&event).then_some(event)
+    let matches = if source == MatchSource::Activation {
+        rule.matcher().matches_activation(
+            previous.repository(),
+            current.context(),
+            current.mergeable_state(),
+            current
+                .completed_check_suites()
+                .iter()
+                .map(|check| check.outcome().into())
+                .chain(
+                    current
+                        .completed_check_runs()
+                        .iter()
+                        .map(|check| check.conclusion()),
+                ),
+        )
+    } else {
+        rule.matcher().matches(&event)
+    };
+    matches.then_some(event)
 }
 
 fn failing_conclusion(conclusion: CheckConclusion) -> bool {

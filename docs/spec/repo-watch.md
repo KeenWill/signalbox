@@ -42,7 +42,7 @@ mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
 
-The module schema contains seventeen tables:
+The module schema contains eighteen tables:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A
   repository row fences complete frontier commits with a generation and the
@@ -82,6 +82,9 @@ The module schema contains seventeen tables:
   and accepted conditional REST snapshots.
 - `poll_cursor` retains unfinished repository reconciliation.
 - `core_event_cursor` records module application progress.
+- `rule_activation_candidate` retains unfinished pull requests selected when a
+  revision activates until admission, loss of eligibility, or revision
+  retirement.
 - `rule_evaluation_cursor` records each rule revision's last evaluated
   repository event, including nonmatches and suppressed dispatches.
 
@@ -252,21 +255,27 @@ credential from configuration using the retained repository identity. An
 unconfigured repository terminalizes the dispatch as `repository_unconfigured`
 and closes its held session through a parent-only nonsticky lifecycle stop.
 
-Rule evaluation starts after the active revision's activation tail and resumes
-from its durable cursor. Matching facts acquire the configured singleton before
-commands and evaluation progress commit together. Pull-request scope keys the
-provider number; stack scope keys the root of the open base/head-branch
-component; repository scope keys the repository; rule scope spans repositories.
-Each key belongs to one rule revision. A live dispatch suppresses later matching
-facts. Nonsticky session termination releases its action; cooldown begins when
-the last action releases. A sticky stop keeps redispatch suppressed for that
-key. After the latest dispatch ends nonsticky without a durably completed
-configured push, repository watch retries that rule and pull request after its
-cooldown while the latest observed matching condition remains: a conflicting
-merge, unresolved review threads, or failing checks. Retries use the current
-pull-request context, retain their preceding dispatch and evaluated event
-context, and pass through the existing singleton and dispatch admission limits;
-they do not create GitHub change events.
+Each new rule revision also admits existing open pull requests with a
+conflicting merge, unresolved threads, or failing checks that satisfy its
+current field predicates. Activation retains the candidate set atomically with
+the revision; admission rechecks current state and uses the existing singleton,
+cooldown and dispatch limits. These dispatches and their retries retain their
+observed context and original event provenance without creating GitHub change
+events. Provider event evaluation starts after the active revision's activation
+tail and resumes from its durable cursor. Matching facts acquire the configured
+singleton before commands and evaluation progress commit together. Pull-request
+scope keys the provider number; stack scope keys the root of the open
+base/head-branch component; repository scope keys the repository; rule scope
+spans repositories. Each key belongs to one rule revision. A live dispatch
+suppresses later matching facts. Nonsticky session termination releases its
+action; cooldown begins when the last action releases. A sticky stop keeps
+redispatch suppressed for that key. After the latest dispatch ends nonsticky
+without a durably completed configured push, repository watch retries that rule
+and pull request after its cooldown while the latest observed matching condition
+remains: a conflicting merge, unresolved review threads, or failing checks.
+Retries use the current pull-request context, retain their preceding dispatch
+and evaluated event context, and pass through the existing singleton and
+dispatch admission limits; they do not create GitHub change events.
 
 Goal commissioning or resumption releases the dispatched session's held start
 gate. A user-stopped goal issues a parent-only sticky stop. An achieved session
@@ -275,15 +284,16 @@ event commissions a fresh session and goal under the rule's cooldown. A close or
 merge fact with a repository event ordinal after the dispatch event issues a
 parent-only sticky stop for its live dispatched session, with
 `pull_request_closed` or `pull_request_merged` retained as the ledger reason; an
-already terminal session is left alone. For retries, the close or merge fact
-must also be recorded no earlier than dispatch issuance. Reactions check durable
-core terminal facts before recording retirement or submitting its stop,
-including facts still pending at the module cursor. Retirement scans retain
-discovered terminal times on the dispatch ledger. A queued retirement whose
-session has ended is rejected locally as `session_already_terminal`. Reactions
-retain their original rule and action even after configuration removes the rule.
-The module commits lifecycle effects before advancing its application cursor;
-the daemon acknowledges the corresponding seam event afterward.
+already terminal session is left alone. For retries and activation dispatches,
+the close or merge fact must also be recorded no earlier than dispatch issuance.
+Reactions check durable core terminal facts before recording retirement or
+submitting its stop, including facts still pending at the module cursor.
+Retirement scans retain discovered terminal times on the dispatch ledger. A
+queued retirement whose session has ended is rejected locally as
+`session_already_terminal`. Reactions retain their original rule and action even
+after configuration removes the rule. The module commits lifecycle effects
+before advancing its application cursor; the daemon acknowledges the
+corresponding seam event afterward.
 
 Pull-request dispatch atomically creates the session with a provisioning hold
 that public start and ownership releases cannot clear. Input accepted during
