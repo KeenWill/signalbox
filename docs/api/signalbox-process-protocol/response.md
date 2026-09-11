@@ -410,6 +410,7 @@ pub enum ServerMessage {
         entry_count: CanonicalU64,
     },
     TranscriptSnapshotStart {
+        after_frontier: option::Option<CanonicalUuid>,
         workspace_root_kind: option::Option<SessionWorkspaceRootKind>,
         repository_watch: option::Option<RepositoryWatchProvenance>,
         session_id: CanonicalUuid,
@@ -464,6 +465,7 @@ pub enum ServerMessage {
         cursor: CanonicalU64,
         turn_count: CanonicalU64,
         entry_count: CanonicalU64,
+        frontier: option::Option<CanonicalUuid>,
     },
     SessionEvent {
         cursor: CanonicalU64,

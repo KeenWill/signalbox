@@ -401,9 +401,26 @@ pub(super) async fn persist_cancelled(
         persist_ended_attempt(connection, cancelled.session(), cancelled.turn(), attempt).await?;
     }
     if !cancelled.tool_result_entries().is_empty() {
-        crate::tool_loop::persist_result_entry_slice(connection, cancelled.tool_result_entries())
+        if let Some(checkpoint) =
+            crate::tool_loop::checkpoint::load(connection, cancelled.session(), cancelled.turn())
+                .await
+                .map_err(map_tool_evidence_error)?
+        {
+            if !checkpoint.is_semantic_prefix_of(cancelled.terminal_snapshot())
+                || cancelled.terminal_snapshot().entry_count() != checkpoint.entry_count() + 1
+            {
+                return Err(
+                    ModelCallCorruption::Inconsistent("cancelled tool checkpoint prefix").into(),
+                );
+            }
+        } else {
+            crate::tool_loop::persist_result_entry_slice(
+                connection,
+                cancelled.tool_result_entries(),
+            )
             .await
             .map_err(map_tool_evidence_error)?;
+        }
     }
     let entry = cancelled.cancellation_entry();
     if !matches!(

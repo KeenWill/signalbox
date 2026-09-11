@@ -208,10 +208,11 @@ member with an unreleased chain exclusion.
 
 A successful reload that changes a member's Codex-home path releases its
 authentication exclusions for already parked turns and grants their waits
-eligibility in the receipt transaction. Replay releases nothing again. Unchanged
-profiles, time passage, and restart do not release authentication exclusions.
-The predecessor failure and the turn's input, frontier, target, and policy
-remain retained; a terminal turn is never revived.
+eligibility in the receipt transaction. The prior home directory need not remain
+available for delivery. Replay releases nothing again. Unchanged profiles, time
+passage, and restart do not release authentication exclusions. The predecessor
+failure and the turn's input, frontier, target, and policy remain retained; a
+terminal turn is never revived.
 
 A release that selects neither a member nor another wait consumes the wait,
 opens a fresh call-free attempt, ends it KnownFailure, reclassifies pending
@@ -296,4 +297,5 @@ pre-call exhaustion state and live event.
 
 ## Planned
 
-None.
+Network-unavailable pool waits and existing observation wakes are designed in
+[network pool recovery](../design/network-pool-recovery.md).

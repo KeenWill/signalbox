@@ -417,15 +417,20 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             Self::Read(ProcessReadError::Corruption(_)) | Self::Integrity => {
                 signalbox_application::OperatorFailureClass::FailClosedCorruption
             }
-            Self::Configuration | Self::State | Self::AlreadyAttempted | Self::NoProgress => {
-                signalbox_application::OperatorFailureClass::CallerOrHubBug
-            }
+            Self::Read(ProcessReadError::ResyncRequired)
+            | Self::Configuration
+            | Self::State
+            | Self::AlreadyAttempted
+            | Self::NoProgress => signalbox_application::OperatorFailureClass::CallerOrHubBug,
         }
     }
 
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
             Self::Credential(error) => error.operator_failure_cause_code(),
+            Self::Read(ProcessReadError::ResyncRequired) => {
+                "context_compaction_read_resync_required"
+            }
             Self::Read(ProcessReadError::Database(_)) => "context_compaction_read_database",
             Self::Read(ProcessReadError::Corruption(_)) => "context_compaction_read_corruption",
             Self::Repository(ContextCompactionRepositoryError::Database(_)) => {
@@ -1760,6 +1765,10 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let response = match error {
+        ProcessReadError::ResyncRequired => internal_protocol_error(
+            Some(session.into_uuid()),
+            InternalDiagnostic::ContextCompactionReadCorruption,
+        ),
         ProcessReadError::Database(_) => ProtocolError::mutation_unavailable(false),
         ProcessReadError::Corruption(_) => internal_protocol_error(
             Some(session.into_uuid()),
