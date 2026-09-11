@@ -99,7 +99,7 @@ pub enum TerminalEvidence {
 }
 
 /// Correlated exchange facts observed at the provider boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct ExchangeFacts {
     /// The provider's request identifier (for the smoke-critical provider,
     /// the `request-id` response header), when observed.
@@ -130,7 +130,7 @@ pub fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
 
 /// A provider-issued request identifier, retained verbatim for support and
 /// audit correlation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProviderRequestId(String);
 
 impl ProviderRequestId {
@@ -163,7 +163,7 @@ impl ProviderMessageId {
 /// An unrecognized provider token is retained verbatim inside
 /// [`Unrecognized`](Self::Unrecognized) so the caller never string-matches a
 /// rendered message to learn it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum FinishReason {
     /// The model finished its turn.
     EndTurn,

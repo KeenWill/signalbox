@@ -4,6 +4,17 @@ use crate::{
     CanonicalU64, CanonicalUuid, FrameValidationError, ServerMessage, deserialize_required_nullable,
 };
 
+/// Maximum UTF-8 byte length admitted for a configured credential profile or
+/// pool name.
+pub const MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES: usize = 256;
+
+/// Prefix identifying a configured credential member in operator status.
+pub const CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX: &str = "credential:";
+
+/// Maximum UTF-8 byte length of an operator-status component name.
+pub const MAX_UNAVAILABLE_COMPONENT_UTF8_BYTES: usize =
+    CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX.len() + MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES;
+
 /// One non-terminal session state a deadline violation can be reported under.
 ///
 /// `terminal` is absent by construction: a terminal session owes no deadline,
@@ -96,6 +107,7 @@ pub struct OperatorStatusSessionSupervisionMessage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperatorStatusEndMessage {
+    pub unavailable_component_count: CanonicalU64,
     pub repository_ingestion_count: CanonicalU64,
     pub lifecycle_week_count: CanonicalU64,
     /// The `nonterminal_past_deadline` alarm value, target zero.
@@ -105,12 +117,22 @@ pub struct OperatorStatusEndMessage {
     pub outbox_quarantine_count: CanonicalU64,
 }
 
+/// One process-local component that startup retained as unavailable.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorStatusUnavailableComponentMessage {
+    pub component: String,
+    pub cause: String,
+}
+
 /// One member of a coherent operator-status snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperatorStatusMessage {
     /// Begins the snapshot.
     Start {},
+    /// A configured component omitted from service with a stable cause.
+    UnavailableComponent(Box<OperatorStatusUnavailableComponentMessage>),
     /// One calendar week of session-lifecycle metrics.
     LifecycleWeek(Box<OperatorStatusLifecycleWeekMessage>),
     /// One owned non-terminal session past its armed-deadline obligation.
@@ -153,6 +175,17 @@ pub(crate) fn validate_operator_status_message(
             // record has no expiry to be past, and a session whose expiry is
             // past has a record.
             item.deadline_missing == item.expired_for_seconds.is_none()
+        }
+        OperatorStatusMessage::UnavailableComponent(item) => {
+            !item.component.is_empty()
+                && item.component.len() <= MAX_UNAVAILABLE_COMPONENT_UTF8_BYTES
+                && !item.component.contains('\0')
+                && !item.cause.is_empty()
+                && item.cause.len() <= 128
+                && item
+                    .cause
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         }
         OperatorStatusMessage::Start {}
         | OperatorStatusMessage::End(_)
