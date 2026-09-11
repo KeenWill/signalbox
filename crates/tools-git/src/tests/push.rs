@@ -1291,7 +1291,7 @@ async fn push_refuses_unsupported_merge_shape_before_an_oversized_parent_snapsho
 }
 
 #[tokio::test]
-async fn push_accepts_criss_cross_history_with_a_proven_branch_parent() {
+async fn push_refuses_criss_cross_history_with_multiple_merge_bases() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
     let ancestor = merge_test_commit(&repository, "shared\n", &[]);
@@ -1303,12 +1303,14 @@ async fn push_accepts_criss_cross_history_with_a_proven_branch_parent() {
     let transport = RecordingPushTransport::default();
     let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
 
-    executor
+    let result = executor
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
-        .await
-        .expect("ancestry does not require a unique content merge base");
+        .await;
 
-    assert_eq!(transport.request().commit(), merge.to_string());
+    let mut bases = vec![first, second];
+    bases.sort_unstable();
+    assert_eq!(result, Err(GitPushFailure::AmbiguousMergeBases { bases }));
+    assert!(!transport.has_request());
 }
 
 #[tokio::test]
@@ -1380,5 +1382,23 @@ async fn push_refuses_merge_parents_that_do_not_contain_the_fence() {
         .await;
 
     assert_eq!(result, Err(GitPushFailure::UnprovenMergeParents));
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn push_refuses_merge_parents_with_unrelated_histories() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let branch = merge_test_commit(&repository, "branch\n", &[]);
+    let base = merge_test_commit(&repository, "unrelated\n", &[]);
+    let merge = merge_test_commit(&repository, "combined\n", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert_eq!(result, Err(GitPushFailure::Repository));
     assert!(!transport.has_request());
 }
