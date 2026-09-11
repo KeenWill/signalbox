@@ -899,6 +899,30 @@ impl OutboxConsumerReader {
         .await?)
     }
 
+    /// Reads the latest terminal turn of each idle ordinary dispatch without advancing delivery.
+    pub async fn completed_ordinary_dispatches(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<DispatchedOutboxEvent>, OutboxDispatchError> {
+        let mut transaction = self.pool.begin().await?;
+        let sequences = crate::session_lifecycle_command::ordinary::completed_turn_sequences(
+            &mut transaction,
+            sessions,
+        )
+        .await?;
+        let mut events = Vec::with_capacity(sequences.len());
+        for sequence in sequences {
+            let sequence = decode_nonnegative_sequence(sequence)?;
+            let (_, beyond_allocated, event) = load_event(&mut transaction, sequence).await?;
+            if beyond_allocated {
+                return Err(OutboxCursorCorruption::EventBeyondAllocatedSequence.into());
+            }
+            events.push(event.ok_or(OutboxRowCorruption::MissingCommittedEventHeader)?);
+        }
+        transaction.rollback().await?;
+        Ok(events)
+    }
+
     /// Reports a durably completed configured push in a session's tool history.
     pub async fn session_pushed(&self, session: SessionId) -> Result<bool, OutboxDispatchError> {
         Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tool_attempt a JOIN tool_request r USING (request_id) WHERE a.session_id = $1 AND r.tool_name = 'git_push_configured' AND a.terminal_disposition_kind = 'completed')")
