@@ -826,5 +826,5 @@ async fn commit_claim(
     transaction
         .commit()
         .await
-        .map_err(ReviewWorkflowStoreError::CommitAmbiguous)
+        .map_err(super::review_workflow::classify_mutating_commit_error)
 }

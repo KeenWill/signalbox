@@ -2,6 +2,66 @@
 
 use super::*;
 
+/// a deferred constraint failure at commit proves the claim and effect rolled back.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn definite_commit_failure_rolls_back_claim_and_effect() -> Result<(), Box<dyn Error>> {
+    const PARENT_IDENTITY: u128 = 0x74d;
+    const TARGET_IDENTITY: u128 = 0x74e;
+    const COMMAND_IDENTITY: u128 = 0x74f;
+
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
+    let store = ReviewWorkflowStore::new(pool);
+    let parent = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(PARENT_IDENTITY)),
+        key("provider"),
+        key("repository"),
+        ReviewTargetSubject::Commit,
+        key("parent-head"),
+        None,
+        None,
+    )
+    .expect("parent fixture is admitted");
+    let target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(TARGET_IDENTITY)),
+        key("provider"),
+        key("repository"),
+        ReviewTargetSubject::Commit,
+        key("child-head"),
+        Some(key("parent-head")),
+        Some(&parent),
+    )
+    .expect("child fixture is admitted");
+    let command_id = DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY));
+    let command = ReviewWorkflowCommand::new(
+        command_id,
+        [4; 32],
+        ReviewWorkflowOperation::CreateTarget(target.clone()),
+    );
+    let mut service = ReviewWorkflowCommandService::new(store.clone());
+
+    let error = service
+        .execute(command)
+        .await
+        .expect_err("missing deferred stack parent rejects commit");
+    let ReviewWorkflowStoreError::Database(error) = error else {
+        panic!("deferred foreign-key failure must be an ordinary database error");
+    };
+    assert_sqlstate(&error, "23503");
+    assert_eq!(store.load_target(target.id()).await?, None);
+    assert_eq!(
+        store
+            .load_command_outcome(
+                command_id,
+                [4; 32],
+                ReviewWorkflowOperationKind::CreateTarget,
+            )
+            .await?,
+        None,
+    );
+    Ok(())
+}
+
 /// a review command applies its effect and receipt through one pool connection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
