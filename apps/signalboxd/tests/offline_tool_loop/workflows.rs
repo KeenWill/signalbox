@@ -51,7 +51,8 @@ dangerous_tool_auto_approval = false
         None,
     )
     .map_err(|error| format!("reload: {error:?}"))?;
-    let policy = WorkflowToolPolicy::new(fixture.pool.clone(), reload);
+    reload.recover().await?;
+    let policy = WorkflowToolPolicy::new(fixture.pool.clone());
     Ok((fixture, policy))
 }
 
@@ -270,6 +271,10 @@ async fn workflow_replay_copies_complete_input_and_list_marks_the_callers_run()
     );
     assert_eq!(read["journal_length"], "0");
     assert!(signalbox_domain::ToolResultText::try_new(read.to_string()).is_ok());
+    assert_eq!(
+        read["run"]["registration_id"],
+        registration.into_uuid().to_string()
+    );
     Ok(())
 }
 
@@ -488,5 +493,122 @@ async fn workflow_register_refuses_a_source_symlink_outside_the_workspace()
         .fetch_one(&fixture.pool)
         .await?;
     assert_eq!(registrations, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn workflow_grants_and_postures_survive_reload_removal_and_restart()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::reload_configuration::{
+        ReloadConfiguration, ReloadLookup, ReloadResult,
+    };
+    use signalbox_tools_workflows::Operation;
+
+    let (fixture, policy) = workflow_fixture(
+        "[templates.workflow_tools.start]\nnames = [\"build\"]\nposture = \"human\"",
+    )
+    .await?;
+    let original = policy.for_session(fixture.session).await?;
+    let files = tempdir()?;
+    let credential = tempfile::NamedTempFile::new_in(files.path())?;
+    let model_path = files.path().join("models.toml");
+    let template_path = files.path().join("templates.toml");
+    let mut model_source = PROCESS_MODEL_CONFIGURATION.parse::<toml_edit::DocumentMut>()?;
+    model_source["credential_profiles"][0]["file"] =
+        toml_edit::value(credential.path().to_str().expect("fixture credential path"));
+    let example = include_str!("../../../../config/signalboxd.example.toml")
+        .parse::<toml_edit::DocumentMut>()?;
+    model_source.insert("numeric_bounds", example["numeric_bounds"].clone());
+    fs::write(&model_path, model_source.to_string())?;
+    let models = HubModelConfiguration::parse(&model_source.to_string())?;
+    fs::write(
+        &template_path,
+        r#"
+version = 1
+[[templates]]
+name = "workflow-test"
+version = 1
+model = "00000000-0000-0000-0000-000000000001"
+system_prompt = "Manage workflows."
+dangerous_tool_auto_approval = false
+[templates.workflow_tools.start]
+names = "*"
+posture = "auto"
+"#,
+    )?;
+    let reload = ConfigurationReload::new(
+        fixture.pool.clone(),
+        models.clone(),
+        SessionTemplateConfiguration::default(),
+        model_path.clone(),
+        template_path.clone(),
+        None,
+    )
+    .map_err(|error| format!("reload: {error:?}"))?;
+    reload.recover().await?;
+    let request = || ReloadConfiguration {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+    };
+    assert_eq!(
+        reload.reload(request()).await?,
+        ReloadLookup::Recorded(ReloadResult::Reloaded)
+    );
+    assert_eq!(policy.for_session(fixture.session).await?, original);
+    assert!(original.permits(Operation::Start, Some("build")));
+    assert!(!original.permits(Operation::Start, Some("deploy")));
+    assert_eq!(
+        original.posture(Operation::Start),
+        ToolApprovalPosture::Human
+    );
+
+    let catalogs = reload.catalogs();
+    let name = signalbox_domain::SessionTemplateName::try_new("workflow-test".into())?;
+    let template = catalogs
+        .templates
+        .resolve(&name)
+        .expect("replacement template");
+    let mut create = CreateSessionService::new(
+        UuidV7SessionIdGenerator,
+        CreateSessionRepository::new(fixture.pool.clone(), test_session_credential_pin()),
+    );
+    let CreateSessionOutcome::Applied(created) = create
+        .execute(CreateSessionRequest::try_new_from_template(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            template.provenance().clone(),
+            template.defaults().clone(),
+        )?)
+        .await?
+    else {
+        panic!("new template session is created")
+    };
+    let replacement = policy.for_session(created.session()).await?;
+    assert!(replacement.permits(Operation::Start, Some("deploy")));
+    assert_eq!(
+        replacement.posture(Operation::Start),
+        ToolApprovalPosture::Auto
+    );
+
+    fs::write(&template_path, "version = 1\n")?;
+    assert_eq!(
+        reload.reload(request()).await?,
+        ReloadLookup::Recorded(ReloadResult::Reloaded)
+    );
+    assert_eq!(policy.for_session(fixture.session).await?, original);
+    assert_eq!(policy.for_session(created.session()).await?, replacement);
+    drop(reload);
+    let restarted = ConfigurationReload::new(
+        fixture.pool.clone(),
+        models,
+        SessionTemplateConfiguration::default(),
+        model_path,
+        template_path,
+        None,
+    )
+    .map_err(|error| format!("restart: {error:?}"))?;
+    restarted.recover().await?;
+    let retained = WorkflowToolPolicy::new(fixture.pool.clone());
+    assert_eq!(retained.for_session(fixture.session).await?, original);
+    assert_eq!(retained.for_session(created.session()).await?, replacement);
     Ok(())
 }

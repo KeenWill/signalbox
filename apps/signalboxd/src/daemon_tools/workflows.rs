@@ -2,7 +2,6 @@
 
 use super::WorkspaceInstructionRootResolver;
 use crate::{
-    configuration_reload::ConfigurationReload,
     process_runtime::{ProtocolError, program},
     workflows::WorkflowService,
 };
@@ -22,36 +21,28 @@ use sqlx::{PgPool, Row};
 use std::{io::Read, path::Path};
 use uuid::Uuid;
 
-/// Shared reloadable policy lookup for model composition and workflow execution.
+/// Retained template policy lookup for model composition and workflow execution.
 #[derive(Clone, Debug)]
 pub struct WorkflowToolPolicy {
     pool: PgPool,
-    catalogs: ConfigurationReload,
 }
 
 impl WorkflowToolPolicy {
-    pub fn new(pool: PgPool, catalogs: ConfigurationReload) -> Self {
-        Self { pool, catalogs }
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
     pub async fn for_session(
         &self,
         session: SessionId,
     ) -> Result<WorkflowPolicy, WorkflowToolError> {
-        let template: Option<String> =
-            sqlx::query_scalar("SELECT template_name FROM session WHERE session_id = $1")
-                .bind(session.into_uuid())
-                .fetch_one(&self.pool)
-                .await?;
-        let catalogs = self.catalogs.catalogs();
-        Ok(template
-            .and_then(|name| signalbox_domain::SessionTemplateName::try_new(name).ok())
-            .and_then(|name| {
-                catalogs
-                    .templates
-                    .resolve(&name)
-                    .map(|template| template.workflow_tools().clone())
-            })
-            .unwrap_or_default())
+        let row = sqlx::query("SELECT session.template_name, snapshot.workflow_tools FROM session LEFT JOIN session_workflow_template_snapshot AS snapshot USING (template_name, template_content_digest) WHERE session_id = $1")
+            .bind(session.into_uuid()).fetch_one(&self.pool).await?;
+        if row.try_get::<Option<String>, _>("template_name")?.is_none() {
+            return Ok(WorkflowPolicy::default());
+        }
+        row.try_get::<Option<sqlx::types::Json<WorkflowPolicy>>, _>("workflow_tools")?
+            .map(|policy| policy.0)
+            .ok_or(WorkflowToolError::Contract)
     }
 }
 
@@ -114,9 +105,9 @@ impl DaemonWorkflowPort {
                     CanonicalUuid::from_uuid(run),
                 )
                 .await?;
-                let metadata = sqlx::query("SELECT registration.name, registration.revision, sequence.last_position::text AS journal_length FROM program_run_registration AS run JOIN program_registration AS registration USING (registration_id) JOIN program_run_journal_sequence_state AS sequence USING (run_id) WHERE run.run_id = $1")
+                let metadata = sqlx::query("SELECT last_position::text AS journal_length FROM program_run_journal_sequence_state WHERE run_id = $1")
                     .bind(run).fetch_one(pool).await?;
-                let mut result = json!({"run_id":run.to_string(), "name":metadata.try_get::<String,_>("name")?, "revision":metadata.try_get::<String,_>("revision")?, "journal_length":metadata.try_get::<String,_>("journal_length")?, "run":view});
+                let mut result = json!({"run_id":run.to_string(), "journal_length":metadata.try_get::<String,_>("journal_length")?, "run":view});
                 bound_run_bytes(&mut result)?;
                 Ok(result)
             }

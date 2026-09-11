@@ -174,9 +174,9 @@ runs.
 order with registration identity, name, revision, state, started and terminal
 times, and `own_run` for runs the caller started or replayed. Responses fit the
 tool-result bound and return an exclusive `next_after` cursor, null at the end.
-`workflow_read { run_id }` returns registration name and revision, journal
-length, and the socket run view with input-first byte prefixes and extents
-bounded by the serialized tool-result ceiling.
+`workflow_read { run_id }` returns registration identity, journal length, and
+the socket run view with input-first byte prefixes and extents bounded by the
+serialized tool-result ceiling.
 
 `workflow_start { name, revision, input }` resolves a registration and starts a
 new run with exact input bytes. `workflow_replay { run_id }` starts a new run
@@ -305,8 +305,6 @@ actor. The application submit boundary accepts that attribution without granting
 authority.
 
 ## Planned
-
-- Session workflow tools: [design](../design/session-workflow-tools.md).
 
 - Payload offload to SHA-256 blobs under the `program_journal` storage class;
   every payload is inline today ([design](../design/workflows.md)).

@@ -718,6 +718,20 @@ fn parse_template(
     if !workflow_tools.valid() {
         return Err(SessionTemplateConfigurationError::InvalidField);
     }
+    let digest = if workflow_tools == Default::default() {
+        digest
+    } else {
+        let mut content = Sha256::new();
+        update_digest_frame(
+            &mut content,
+            b"signalbox/session-template/workflow-tools/v1",
+        );
+        update_digest_frame(&mut content, digest.as_bytes());
+        let policy = serde_json::to_vec(&workflow_tools)
+            .map_err(|_| SessionTemplateConfigurationError::InvalidField)?;
+        update_digest_frame(&mut content, &policy);
+        SessionTemplateContentDigest::from_bytes(content.finalize().into())
+    };
     Ok(ResolvedSessionTemplate {
         workflow_tools,
         version,
@@ -1254,6 +1268,32 @@ names = "*"
             .content_digest();
 
         assert_ne!(provider_default_digest, configured_digest);
+    }
+
+    #[test]
+    fn template_digest_binds_workflow_grants_and_postures() {
+        let resolve = |policy: &str| {
+            let catalog = SessionTemplateConfiguration::parse_at(
+                &inline_catalog(policy),
+                Path::new("deployment/session-templates.toml"),
+                None,
+                &models(),
+            )
+            .expect("workflow template loads");
+            let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned()).unwrap();
+            catalog
+                .resolve(&name)
+                .unwrap()
+                .provenance()
+                .content_digest()
+        };
+        let initial = "[templates.workflow_tools.start]\nnames = [\"build\"]\nposture = \"human\"";
+        assert_ne!(
+            resolve(initial),
+            resolve(&initial.replace("build", "deploy"))
+        );
+        assert_ne!(resolve(initial), resolve(&initial.replace("human", "auto")));
+        assert_ne!(resolve(initial), resolve(""));
     }
 
     #[test]

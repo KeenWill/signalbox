@@ -632,15 +632,15 @@ delegated approval. Each template's `workflow_tools` operation entry selects
 `enabled = true`; start, replay and register require `names`, an exact
 registration-name list or `"*"`. Absent grants refuse with
 `workflow_grant_denied`, retained as an ordinary typed tool failure
-independently of approval. Policy resolves through the session's retained
-template name in the reloadable catalog; each proposed call freezes its posture.
+independently of approval. Grants and postures resolve from the retained
+template snapshot keyed by the session's template name and content digest, which
+includes the workflow policy. Reloading the catalog cannot change a live
+session's grants or postures; each proposed call freezes its selected posture.
 The judge receives the configured operation grant alongside the ordinary request
 context. [Workflows](workflows.md) owns run views, registration and mutation
 receipts.
 
 ## Planned
-
-- Session workflow tools: [design](../design/session-workflow-tools.md).
 
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
 

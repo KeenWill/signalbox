@@ -2629,8 +2629,7 @@ async fn run_hub_incarnation(
             Err(failure) => startup_failure_after_close(failure, closed),
         };
     }
-    let workflow_tool_policy =
-        signalboxd::WorkflowToolPolicy::new(pool.clone(), configuration_reload.clone());
+    let workflow_tool_policy = signalboxd::WorkflowToolPolicy::new(pool.clone());
     if let Ok((service, _)) = &workflows {
         let workflow_catalog = signalbox_tools_workflows::catalog().map_err(|_| {
             erase_startup_cause(
