@@ -399,7 +399,14 @@ fn parse_review_library(
         &source,
         templates,
     )?;
-    let concern_specs = REVIEW_CONCERNS
+    let enabled_concerns = REVIEW_CONCERNS
+        .iter()
+        .filter(|(key, _)| concerns.contains_key(key))
+        .collect::<Vec<_>>();
+    if enabled_concerns.is_empty() {
+        return Err(SessionTemplateConfigurationError::InvalidConcernInventory);
+    }
+    let concern_specs = enabled_concerns
         .iter()
         .map(|(key, template_name)| {
             let body = required_concern_body(concerns, key)?;
@@ -418,7 +425,7 @@ fn parse_review_library(
             repair: review_template_name(REVIEW_REPAIR_TEMPLATE_NAME)?,
             publication: review_template_name(REVIEW_PUBLICATION_TEMPLATE_NAME)?,
         },
-        concerns: REVIEW_CONCERNS
+        concerns: enabled_concerns
             .iter()
             .map(|(key, template)| {
                 Ok(ReviewConcernTemplateSelection {
@@ -1726,19 +1733,33 @@ dangerous_tool_auto_approval = false
     }
 
     #[test]
-    fn review_library_rejects_a_missing_concern() {
+    fn review_library_accepts_a_nonempty_concern_subset_in_closed_order() {
         let catalog =
             review_catalog("").replace("security = \"Find security boundary failures.\"\n", "");
-        let result = SessionTemplateConfiguration::parse_at(
+        let configuration = SessionTemplateConfiguration::parse_at(
             &catalog,
             Path::new("deployment/session-templates.toml"),
             None,
             &models(),
-        );
+        )
+        .expect("a nonempty concern subset is configured");
+        let selection = configuration
+            .configured_review_selection()
+            .expect("review selection exists");
 
+        assert_eq!(configuration.summaries().len(), REVIEW_CONCERNS.len() + 3);
         assert_eq!(
-            result.expect_err("incomplete concern inventory is rejected"),
-            SessionTemplateConfigurationError::InvalidConcernInventory
+            selection
+                .concerns
+                .iter()
+                .map(|concern| concern.key.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "correctness",
+                "interface-and-type-design",
+                "test-quality",
+                "documentation-code-drift",
+            ]
         );
     }
 

@@ -21,8 +21,9 @@ use std::{
     fmt, fs,
     future::Future,
     num::NonZeroUsize,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Command, ExitCode},
     sync::Arc,
     time::Duration,
 };
@@ -31,8 +32,7 @@ use signalbox_application::{
     ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
     InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
     OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
-    SchedulerPassOccupancyBound, StaleActiveTurnBound, StartupScanService,
-    TurnLivenessScanInterval, UuidV7StartupScanIdGenerator,
+    SchedulerPassOccupancyBound, StaleActiveTurnBound, TurnLivenessScanInterval,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -44,7 +44,7 @@ use signalbox_model_provider_runtime::{
 use signalbox_model_runtime::CredentialReference;
 #[cfg(test)]
 use signalbox_model_runtime_anthropic::AnthropicConstructionError;
-use signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version;
+use signalbox_model_runtime_codex_cli::probe_pinned_codex_cli_version;
 #[cfg(test)]
 use signalbox_model_runtime_openai::OpenAiConstructionError;
 use signalbox_persistence::{
@@ -74,10 +74,12 @@ use signalboxd::{
     SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
     TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
     TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
-    reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
+    ambient_otlp_environment_variables, reconcile_fenced_pool_floor,
+    run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
-        WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
+        WEB_BIND_ENVIRONMENT, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
+        WebHttpRuntimeError,
     },
 };
 use tracing_subscriber::prelude::*;
@@ -97,6 +99,57 @@ const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
 const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
+const SCRUBBED_DATABASE_ENVIRONMENT: &str = "SIGNALBOX_INTERNAL_SCRUBBED_DATABASE_ENVIRONMENT";
+const SCRUBBED_OTLP_ENVIRONMENT: &str = "SIGNALBOX_INTERNAL_SCRUBBED_OTLP_ENVIRONMENT";
+
+fn ambient_database_environment(
+    variable_is_present: impl Fn(&'static str) -> bool,
+) -> Vec<&'static str> {
+    signalbox_persistence::production_connection_environment_variables()
+        .filter(|name| variable_is_present(name))
+        .collect()
+}
+
+fn ambient_otlp_environment(
+    variable_is_present: impl Fn(&'static str) -> bool,
+) -> Vec<&'static str> {
+    ambient_otlp_environment_variables()
+        .filter(|name| variable_is_present(name))
+        .collect()
+}
+
+/// Replaces this process before Tokio starts any threads so SQLx and its TLS
+/// backend cannot observe ambient PostgreSQL or certificate-store variables,
+/// and the OTLP exporter cannot merge its ambient settings.
+fn reexecute_without_ambient_library_environment() -> Result<(), std::io::Error> {
+    let database = ambient_database_environment(|name| env::var_os(name).is_some());
+    let otlp = ambient_otlp_environment(|name| env::var_os(name).is_some());
+    if database.is_empty() && otlp.is_empty() {
+        return Ok(());
+    }
+
+    let executable = env::current_exe()?;
+    let mut command = Command::new(executable);
+    command.args(env::args_os().skip(1));
+    for name in signalbox_persistence::production_connection_environment_variables() {
+        command.env_remove(name);
+    }
+    for name in ambient_otlp_environment_variables() {
+        command.env_remove(name);
+    }
+    command.env(SCRUBBED_DATABASE_ENVIRONMENT, database.join(","));
+    command.env(SCRUBBED_OTLP_ENVIRONMENT, otlp.join(","));
+    Err(command.exec())
+}
+
+fn scrubbed_database_environment_warnings() -> Vec<String> {
+    env::var(SCRUBBED_DATABASE_ENVIRONMENT)
+        .unwrap_or_default()
+        .split(',')
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
 
 fn graceful_shutdown_window(
     model_exchange_timeout: Option<Duration>,
@@ -989,9 +1042,9 @@ fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailure
                 commit_ambiguous: false,
             }
         }
-        ProcessRuntimeError::Dispatch(OutboxDispatchError::Corruption(_)) => {
-            OperatorFailureClass::FailClosedCorruption
-        }
+        ProcessRuntimeError::Dispatch(
+            OutboxDispatchError::CursorCorruption(_) | OutboxDispatchError::RowCorruption(_),
+        ) => OperatorFailureClass::FailClosedCorruption,
         ProcessRuntimeError::Encode(_)
         | ProcessRuntimeError::EncodeInvariant
         | ProcessRuntimeError::InboundFrameBudgetClosed
@@ -1291,6 +1344,18 @@ async fn initialize_prometheus(
 async fn run_hub(
     telemetry_configuration: &TelemetryConfiguration,
 ) -> Result<ShutdownOutcome, HubRuntimeError> {
+    let mut ambient_database_settings = scrubbed_database_environment_warnings();
+    ambient_database_settings.extend(
+        signalbox_persistence::production_connection_ambient_warnings()
+            .into_iter()
+            .map(str::to_owned),
+    );
+    for setting in ambient_database_settings {
+        tracing::warn!(
+            setting,
+            "ambient PostgreSQL setting was ignored in favor of DATABASE_URL"
+        );
+    }
     use signalboxd::guard_recovery::GuardRecoveryPolicy;
     let configuration = HubConfiguration::from_environment().map_err(|error| {
         erase_startup_cause(
@@ -1449,6 +1514,7 @@ async fn run_hub_incarnation(
             SanitizedStartupCause::WebHttpConfiguration(&error),
         )
     })?;
+    report_non_loopback_web_bind(&web_configuration);
     let on_disk = fs::read_to_string(configuration.model_configuration_file()).map_err(|_| {
         erase_startup_cause(
             RuntimePhase::Configuration,
@@ -1772,15 +1838,54 @@ async fn run_hub_incarnation(
             SanitizedStartupCause::Credential(&error),
         )
     })?;
+    let mut codex_cli_unavailable_cause = None;
     if let Some(codex_cli) = model_configuration.codex_cli() {
-        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
+        match probe_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
             .await
-            .map_err(|_| {
-                erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
-                )
-            })?;
+        {
+            Ok(probe) => {
+                tracing::info!(
+                    installed_version = %probe.version(),
+                    installed_digest = probe.digest(),
+                    "Codex CLI startup probe completed"
+                );
+                if !probe.matches_pin() {
+                    codex_cli_unavailable_cause = Some("codex_cli_pin_mismatch");
+                }
+            }
+            Err(error) => {
+                codex_cli_unavailable_cause = Some(error.cause_code());
+            }
+        }
+        if let Some(cause_code) = codex_cli_unavailable_cause {
+            tracing::warn!(cause_code, "Codex CLI adapter is unavailable");
+        }
+    }
+    let mut unavailable_components = model_configuration
+        .empty_codex_home_profiles()
+        .into_iter()
+        .map(|profile| {
+            tracing::warn!(
+                credential_profile = profile,
+                cause_code = "codex_home_empty",
+                "Codex credential pool member is unavailable"
+            );
+            signalbox_process_protocol::OperatorStatusUnavailableComponentMessage {
+                component: format!(
+                    "{}{profile}",
+                    signalbox_process_protocol::CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX
+                ),
+                cause: "codex_home_empty".to_owned(),
+            }
+        })
+        .collect::<Vec<_>>();
+    if let Some(cause) = codex_cli_unavailable_cause {
+        unavailable_components.push(
+            signalbox_process_protocol::OperatorStatusUnavailableComponentMessage {
+                component: "adapter:codex_cli".to_owned(),
+                cause: cause.to_owned(),
+            },
+        );
     }
     let prometheus_runtime = initialize_prometheus(telemetry_configuration).await;
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
@@ -1823,6 +1928,9 @@ async fn run_hub_incarnation(
         post_kill_reap_bound,
         native_message_limit,
     );
+    if let Some(cause) = codex_cli_unavailable_cause {
+        runtime_factory = runtime_factory.with_codex_cli_unavailable(cause);
+    }
     runtime_factory
         .build(&model_configuration)
         .map_err(|error| {
@@ -2005,7 +2113,10 @@ async fn run_hub_incarnation(
     let scan_runner_service = runner_service.clone();
     let migration_oauth_registrations = model_configuration.oauth_registrations();
     let invocation_registrations = model_configuration.credential_invocation_registrations();
+    let (execution_supervisor, fatal_execution) = FatalExecutionSupervisor::new(());
+    let scan_supervision = execution_supervisor.recovery_reporter();
     let scan_pool = pool.clone();
+    let scan_nudge = eligibility_nudge.clone();
     let scan_approval_wait_wakeups = approval_wait_wakeups.clone();
     let startup = migrate_scan_then_schedule(
         async {
@@ -2038,17 +2149,20 @@ async fn run_hub_incarnation(
                         SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
                     )
                 })?;
-            let mut scan = StartupScanService::new(
-                UuidV7StartupScanIdGenerator,
-                PostgresStartupScanRepository::new(scan_pool),
-            );
-            let outcome = scan.execute().await.map_err(|error| {
-                let failure_class = error.operator_failure_class();
-                let cause_code = error.operator_failure_cause_code();
-                let session = error.session();
-                let turn = error.repository_error().corruption_turn();
-                erase_startup_scan_cause(failure_class, cause_code, session, turn)
-            })?;
+            let outcome = scan_supervision
+                .scan_and_park_startup_sessions(
+                    PostgresStartupScanRepository::new(scan_pool.clone()),
+                    scan_pool,
+                    scan_nudge,
+                )
+                .await
+                .map_err(|error| {
+                    let failure_class = error.operator_failure_class();
+                    let cause_code = error.operator_failure_cause_code();
+                    let session = error.session();
+                    let turn = error.repository_error().corruption_turn();
+                    erase_startup_scan_cause(failure_class, cause_code, session, turn)
+                })?;
             scan_runner_service
                 .recovery_store()
                 .resume_runner_replacements()
@@ -2079,7 +2193,7 @@ async fn run_hub_incarnation(
                 tracing::error!(
                     session = %session.as_uuid(),
                     cause = "durable_state_corruption",
-                    "startup skipped corrupt session; durable operator item recorded"
+                    "startup skipped corrupt session; operator recovery requested"
                 );
             }
             for session in outcome.awaiting_recovery_decision_sessions() {
@@ -2123,6 +2237,15 @@ async fn run_hub_incarnation(
         }
     };
     let mut blob_store_registry = blob_store_registry.map(Arc::new);
+    if let Some(registry) = &blob_store_registry {
+        unavailable_components.extend(registry.unavailable_stores().map(|(name, cause)| {
+            signalbox_process_protocol::OperatorStatusUnavailableComponentMessage {
+                component: format!("blob_store:{name}"),
+                cause: cause.to_owned(),
+            }
+        }));
+    }
+    unavailable_components.sort_unstable_by(|left, right| left.component.cmp(&right.component));
     // The family is model-facing only where blob storage exists: an absent
     // registry means no configuration and an empty catalog, so advertising
     // `blob_metadata` and `blob_read` would declare tools no request can use.
@@ -2582,7 +2705,8 @@ async fn run_hub_incarnation(
     )
     .with_configuration_reload(configuration_reload.clone())
     .with_context_compaction_model(Arc::clone(&context_compaction_model))
-    .with_snapshot_reader_budget(snapshot_reader_budget);
+    .with_snapshot_reader_budget(snapshot_reader_budget)
+    .with_unavailable_components(unavailable_components);
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
         None => process_runtime,
@@ -2604,7 +2728,6 @@ async fn run_hub_incarnation(
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let text_deltas = process_runtime.provider_text_delta_sink();
     let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
-    let (execution_supervisor, fatal_execution) = FatalExecutionSupervisor::new(());
     let session_supervision = execution_supervisor.recovery_reporter();
     let process_runtime =
         process_runtime.with_recovery_reporter(execution_supervisor.recovery_reporter());
@@ -3077,6 +3200,16 @@ async fn run_hub_incarnation(
     Ok(outcome)
 }
 
+fn report_non_loopback_web_bind(configuration: &WebHttpConfiguration) {
+    if !configuration.bind_address().ip().is_loopback() {
+        tracing::warn!(
+            setting = WEB_BIND_ENVIRONMENT,
+            bind_address = %configuration.bind_address(),
+            "explicit non-loopback web bind was admitted"
+        );
+    }
+}
+
 /// Whether an operator filter setting was admitted or rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperatorFilterDisposition {
@@ -3201,11 +3334,28 @@ fn install_tracing_subscriber(
     Ok(otlp_runtime)
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     if let Some(exit_code) = run_web_image_derivative_worker_if_requested() {
         return exit_code;
     }
+    if reexecute_without_ambient_library_environment().is_err() {
+        eprintln!("failed to isolate ambient library configuration");
+        return ExitCode::FAILURE;
+    }
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            eprintln!("failed to construct the daemon asynchronous runtime");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(run_daemon())
+}
+
+async fn run_daemon() -> ExitCode {
     let telemetry_configuration = match TelemetryConfiguration::from_environment() {
         Ok(configuration) => configuration,
         Err(error) => {
@@ -3238,6 +3388,20 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let scrubbed_otlp_setting = env::var(SCRUBBED_OTLP_ENVIRONMENT)
+        .ok()
+        .and_then(|settings| settings.split(',').next().map(str::to_owned));
+    if let Some(setting) = telemetry_configuration
+        .ambient_otlp_setting()
+        .map(str::to_owned)
+        .or(scrubbed_otlp_setting)
+    {
+        tracing::warn!(
+            target: "signalbox_telemetry_internal",
+            setting,
+            "ambient OTLP setting was ignored in favor of Signalbox telemetry configuration"
+        );
+    }
 
     let exit_code = match run_hub(&telemetry_configuration).await {
         Ok(ShutdownOutcome::Interrupted) => {
@@ -3365,22 +3529,50 @@ mod tests {
 
     use super::{
         AnthropicConstructionError, BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT,
-        FENCED_POOL_MAX_CONNECTIONS, FencedPoolFloorReconciliationPolicy, HubConfiguration,
-        HubConfigurationError, HubConfigurationValues, HubRuntimeError,
-        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OpenAiConstructionError, OperatorFilterDisposition,
-        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
-        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
-        RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
-        ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
-        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
-        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
-        fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
-        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
-        report_database_close_failure, run_scheduler_until_shutdown,
-        runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
-        validate_fenced_pool_min_connections,
+        FENCED_POOL_MAX_CONNECTIONS, FencedPoolFloorReconciliationPolicy,
+        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError,
+        HubConfigurationValues, HubRuntimeError, MODEL_CONFIGURATION_FILE_ENVIRONMENT,
+        OpenAiConstructionError, OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT,
+        ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RequiredSettingFailure,
+        RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
+        RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
+        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, WebHttpConfiguration,
+        ambient_database_environment, ambient_otlp_environment, combine_runtime_stop_cause,
+        completed_runtime_outcome, credential_files_conflict, database_close_failure_outcome,
+        drain_runtime_tasks, erase_startup_cause, fenced_pool_floor_reconciliation_policy,
+        graceful_shutdown_window, migrate_scan_then_schedule, operator_filter,
+        process_runtime_failure_class, report_database_close_failure, report_non_loopback_web_bind,
+        run_scheduler_until_shutdown, runner_lifecycle_failure_class, should_close_pool,
+        staging_sweep_failure_outcome, validate_fenced_pool_min_connections,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
+
+    #[test]
+    fn database_environment_is_scrubbed_before_the_runtime_starts() {
+        let present = ambient_database_environment(|name| {
+            matches!(name, "PGAPPNAME" | "PGOPTIONS" | "SSL_CERT_FILE")
+        });
+
+        assert_eq!(present, ["PGAPPNAME", "PGOPTIONS", "SSL_CERT_FILE"]);
+    }
+
+    #[test]
+    fn otlp_environment_is_scrubbed_before_the_exporter_is_built() {
+        let present = ambient_otlp_environment(|name| {
+            matches!(
+                name,
+                "OTEL_EXPORTER_OTLP_HEADERS" | "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION"
+            )
+        });
+
+        assert_eq!(
+            present,
+            [
+                "OTEL_EXPORTER_OTLP_HEADERS",
+                "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION"
+            ]
+        );
+    }
 
     const BRAVE_KEY_FILE_FIXTURE: &str = "brave-key";
 
@@ -3525,10 +3717,28 @@ mod tests {
     }
 
     #[test]
+    fn explicit_non_loopback_web_bind_emits_an_operator_warning() {
+        let non_loopback = WebHttpConfiguration::new(
+            "0.0.0.0:37231"
+                .parse()
+                .expect("fixture bind address is valid"),
+            None,
+        )
+        .expect("explicit non-loopback configuration is admitted");
+
+        let warning = capture_operator_telemetry(|| {
+            report_non_loopback_web_bind(&non_loopback);
+        });
+
+        assert!(warning.contains("explicit non-loopback web bind was admitted"));
+        assert!(warning.contains("0.0.0.0:37231"));
+    }
+
+    #[test]
     fn runtime_failure_class_reports_dispatch_corruption() {
         let corruption = ProcessRuntimeError::Dispatch(
-            signalbox_persistence::outbox::OutboxDispatchError::Corruption(
-                signalbox_persistence::outbox::OutboxCorruption::MissingDeliveryState,
+            signalbox_persistence::outbox::OutboxDispatchError::CursorCorruption(
+                signalbox_persistence::outbox::OutboxCursorCorruption::MissingDeliveryState,
             ),
         );
         assert_eq!(
@@ -4396,6 +4606,111 @@ mod tests {
         assert!(
             matches!(super::recovery_incarnation_outcome(Err(corruption), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == corruption)
         );
+    }
+
+    struct StartupFailureRepository {
+        sessions: Box<[SessionId]>,
+        failure: Option<signalbox_persistence::startup::StartupScanRepositoryError>,
+        operator_write_fails: bool,
+        recovered: Arc<Mutex<Vec<SessionId>>>,
+    }
+
+    impl signalbox_application::StartupScanRepository for StartupFailureRepository {
+        type Error = signalbox_persistence::startup::StartupScanRepositoryError;
+
+        async fn sessions(&mut self) -> Result<Box<[SessionId]>, Self::Error> {
+            Ok(self.sessions.clone())
+        }
+
+        async fn record_corrupt_session(
+            &mut self,
+            _session: SessionId,
+            _error: &Self::Error,
+        ) -> Result<(), Self::Error> {
+            if self.operator_write_fails {
+                Err(
+                    signalbox_persistence::startup::StartupScanCorruption::Inconsistent(
+                        "startup operator item",
+                    )
+                    .into(),
+                )
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn recover<Generator>(
+            &mut self,
+            session: SessionId,
+            _identities: signalbox_domain::AcceptedInputTurnFailureIdentities,
+            _ids: &mut Generator,
+        ) -> Result<signalbox_application::StartupScanSessionOutcome, Self::Error>
+        where
+            Generator: signalbox_application::StartupScanIdGenerator + Send,
+        {
+            self.recovered.lock().unwrap().push(session);
+            match self.failure.take() {
+                Some(error) => Err(error),
+                None => Ok(signalbox_application::StartupScanSessionOutcome::NoActiveTurn),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_scan_retains_scoped_failures_without_requesting_process_recovery() {
+        use signalbox_persistence::startup::{StartupScanCorruption, StartupScanRepositoryError};
+        for (label, failure, operator_write_fails, suspended) in [
+            (
+                "corrupt session parked durably",
+                StartupScanCorruption::Missing("session projection").into(),
+                false,
+                false,
+            ),
+            (
+                "corrupt session operator write fails",
+                StartupScanCorruption::Missing("session projection").into(),
+                true,
+                true,
+            ),
+            (
+                "session recovery database unavailable",
+                StartupScanRepositoryError::Database {
+                    source: sqlx::Error::PoolClosed,
+                    commit_ambiguous: false,
+                },
+                false,
+                true,
+            ),
+            (
+                "session recovery commit ambiguous",
+                StartupScanRepositoryError::Database {
+                    source: sqlx::Error::PoolClosed,
+                    commit_ambiguous: true,
+                },
+                false,
+                true,
+            ),
+        ] {
+            let failed = SessionId::from_uuid(Uuid::now_v7());
+            let healthy = SessionId::from_uuid(Uuid::now_v7());
+            let recovered = Arc::new(Mutex::new(Vec::new()));
+            let (supervisor, signal) = signalboxd::FatalExecutionSupervisor::new(());
+            let reporter = supervisor.recovery_reporter();
+            let repository = StartupFailureRepository {
+                sessions: Box::new([failed, healthy]),
+                failure: Some(failure),
+                operator_write_fails,
+                recovered: Arc::clone(&recovered),
+            };
+            reporter.scan_startup_sessions(repository).await.unwrap();
+            tokio::select! {
+                biased;
+                () = signal.wait_for_process_recovery() => panic!("{label}: scoped failure requested process recovery"),
+                () = ready(()) => {}
+            }
+            assert_eq!(*recovered.lock().unwrap(), [failed, healthy], "{label}");
+            assert_eq!(signal.is_triggered(), suspended, "{label}");
+        }
     }
 
     #[tokio::test]

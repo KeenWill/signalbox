@@ -77,8 +77,12 @@ changes only later runs.
 
 A pass is recorded only after its orchestration input has been durably accepted
 and its origin turn exists, and activation binds to that exact turn; an optional
-session identifier is not a substitute for execution evidence. Executable
-orchestration is caller-driven, never inferred or scheduled automatically.
+session identifier is not a substitute for execution evidence. An active turn or
+its terminal lifecycle record authenticates activation, so activation remains
+valid when the matching turn reaches terminal state before the request is
+processed. A queued run and pass remain recoverable through result-free
+cancelled pass completion without turn evidence. Executable orchestration is
+caller-driven, never inferred or scheduled automatically.
 
 Pass terminal state is the workflow-operation outcome; turn outcome
 authenticates the execution boundary and does not decide that outcome by itself,

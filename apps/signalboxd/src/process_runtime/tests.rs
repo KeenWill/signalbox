@@ -1683,6 +1683,47 @@ pub(crate) mod tests {
         assert_eq!(reconstructed_pass, running_pass);
     }
 
+    #[test]
+    fn terminal_turn_activates_a_queued_review_pass() {
+        let reference = ReviewRunRef::new(
+            ReviewTargetId::from_uuid(Uuid::from_u128(1)),
+            ReviewRunId::from_uuid(Uuid::from_u128(2)),
+        );
+        let pass_reference =
+            ReviewPassRef::new(reference, ReviewPassId::from_uuid(Uuid::from_u128(3)));
+        let session = SessionId::from_uuid(Uuid::from_u128(4));
+        let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(5));
+        let turn = TurnId::from_uuid(Uuid::from_u128(6));
+        let policy = ReviewPolicy::version_one();
+        let mut queued_run = ReviewRun::new(reference, ReviewWorkflowKind::ReadOnlyReview, policy);
+        let queued_pass = ReviewPass::try_new(
+            pass_reference,
+            ReviewPassKind::ReadOnlyReview,
+            &mut queued_run,
+            session,
+            ReviewPassAcceptedInputEvidence::new(accepted_input, session, Some(turn)),
+        )
+        .expect("the fixture pass owns its accepted input");
+
+        let (activated_run, activated_pass) = super::activate_queued_review_pass(
+            queued_run,
+            queued_pass,
+            turn,
+            signalbox_persistence::review_workflow::ReviewTurnLifecycleState::Terminal(
+                ReviewPassTurnOutcome::Completed,
+            ),
+        )
+        .expect("a terminal turn retains enough history to activate its queued pass");
+
+        assert_eq!(
+            activated_run.state(),
+            ReviewRunState::Running {
+                active_pass: pass_reference,
+            }
+        );
+        assert_eq!(activated_pass.state(), &ReviewPassState::Running { turn });
+    }
+
     #[tokio::test]
     async fn review_command_budget_admits_one_claim_at_a_time() -> Result<(), Box<dyn Error>> {
         assert_eq!(MAX_CONCURRENT_REVIEW_COMMANDS, 1);

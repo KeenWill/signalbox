@@ -146,8 +146,6 @@ pub enum FileInspectionStatus {
     Unknown,
     /// A recognized format was malformed.
     Malformed,
-    /// Incompatible strong claims made type selection unsafe.
-    Ambiguous,
     /// Caller declaration disagreed with detected bytes.
     DeclaredMismatch,
     /// A recognized encrypted or locked file is terminal in version one.
@@ -172,13 +170,6 @@ pub enum FileInspection {
         media_type: CanonicalMediaType,
         /// Registered sanitized reason.
         reason_code: ReasonCode,
-    },
-    /// Incompatible strong candidates were observed.
-    Ambiguous {
-        /// Exact inspected use.
-        source: FileUse,
-        /// Canonically sorted distinct claims.
-        media_types: Vec<CanonicalMediaType>,
     },
     /// Declared metadata disagreed with byte evidence.
     DeclaredMismatch {
@@ -205,7 +196,6 @@ impl FileInspection {
             Self::Validated(_) => FileInspectionStatus::Validated,
             Self::Unknown { .. } => FileInspectionStatus::Unknown,
             Self::Malformed { .. } => FileInspectionStatus::Malformed,
-            Self::Ambiguous { .. } => FileInspectionStatus::Ambiguous,
             Self::DeclaredMismatch { .. } => FileInspectionStatus::DeclaredMismatch,
             Self::EncryptedOrLocked { .. } => FileInspectionStatus::EncryptedOrLocked,
         }
@@ -217,7 +207,6 @@ impl FileInspection {
             Self::Validated(validated) => validated.source(),
             Self::Unknown { source }
             | Self::Malformed { source, .. }
-            | Self::Ambiguous { source, .. }
             | Self::DeclaredMismatch { source, .. }
             | Self::EncryptedOrLocked { source, .. } => source,
         }
@@ -512,8 +501,6 @@ pub enum FileMediaFailure {
     BlobUnavailable,
     /// No registered reader safely recognized the bytes.
     UnknownType,
-    /// Incompatible strong candidates made selection unsafe.
-    AmbiguousType,
     /// Caller declaration disagreed with byte evidence.
     DeclaredTypeMismatch {
         /// Canonical caller declaration.
@@ -568,7 +555,6 @@ impl fmt::Display for FileMediaFailure {
             Self::BlobCorrupt => "blob is corrupt",
             Self::BlobUnavailable => "blob is unavailable",
             Self::UnknownType => "file type is unknown",
-            Self::AmbiguousType => "file type is ambiguous",
             Self::DeclaredTypeMismatch { .. } => "declared and detected file types disagree",
             Self::Malformed { .. } => "recognized file is malformed",
             Self::EncryptedOrLocked { .. } => "file is encrypted or locked",

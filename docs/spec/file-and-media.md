@@ -190,8 +190,8 @@ bytes and available derived views as bounded structured data.
 
 Generated output is limited to the view's declared type set and eight MiB. The
 registry computes its identity and independently detects and fully validates its
-bytes through the ordinary sandboxed worker before publication. It rejects an
-ambiguous result, wrong type, wrong output reader or exceeded bound. Valid
+bytes through the ordinary sandboxed worker before publication. It rejects
+unknown bytes, a wrong type, a wrong output reader or an exceeded bound. Valid
 output publishes and verifies, registers as a generated artifact, then commits
 its durable tool result. A failure before commit leaves no rich result; an
 unreferenced blob may remain after publication. Direct reads publish and

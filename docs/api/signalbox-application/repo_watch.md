@@ -206,10 +206,19 @@ pub enum RepoWatchThreadState {
 pub struct RepoWatchThreadObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RepoWatchThreadObservation {
-    pub const fn new(thread: signalbox_domain::ReviewThreadId, state: RepoWatchThreadState)
-        -> Self;
+    pub const fn open(
+        thread: signalbox_domain::ReviewThreadId,
+        author: option::Option<signalbox_domain::RepoWatchAuthorLogin>,
+    ) -> Self;
+    pub const fn resolved(
+        thread: signalbox_domain::ReviewThreadId,
+        author: option::Option<signalbox_domain::RepoWatchAuthorLogin>,
+        resolver: option::Option<signalbox_domain::RepoWatchAuthorLogin>,
+    ) -> Self;
     pub const fn thread(&self) -> &signalbox_domain::ReviewThreadId;
     pub const fn state(&self) -> RepoWatchThreadState;
+    pub const fn author(&self) -> option::Option<&signalbox_domain::RepoWatchAuthorLogin>;
+    pub const fn resolver(&self) -> option::Option<&signalbox_domain::RepoWatchAuthorLogin>;
 }
 ```
 
