@@ -13,7 +13,8 @@ labels remain distinct representations.
 The descriptor reads supervision independently of lifecycle reconstitution and
 transcript detail decoding. A corrupt transcript remains unavailable while its
 valid supervision evidence remains readable. Unknown failure classes fail
-closed. The browser receives no diagnostic payload or credential material.
+closed. The browser receives no unsanitized diagnostic payload or credential
+material.
 
 Pending supervision displays recovery required in the session header and message
 composer status. The retained failure class and cause remain visible after
