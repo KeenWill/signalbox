@@ -27,7 +27,11 @@ orchestration; final `validate` stays on builds because it also executes two
 Cargo contract checks. The web job uses builds with declared browser runtimes
 and fonts. Report-tier jobs and Docker live smokes limit Cargo compilation to
 two jobs; the API digest also limits Bazel to two jobs. Docker sidecar CPU
-allowances are separate from runner compilation budgets.
+allowances are separate from runner compilation budgets. PostgreSQL partitions
+limit Bazel to four concurrent actions and four local CPU units, matching the
+integration runner CPU limit. The daemon partition has a 30-minute job deadline
+to accommodate cold compilation; other PostgreSQL partitions retain 15 minutes.
+The Bazel resource estimates do not enforce an operating-system memory ceiling.
 
 ## The routing rule
 
