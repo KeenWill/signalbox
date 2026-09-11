@@ -4,9 +4,9 @@ use std::{
 };
 
 use signalbox_domain::{
-    BranchName, CommitSha, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
-    PullRequestNumber, PullRequestTitle, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1,
-    RepositorySlug,
+    BranchName, CommitSha, LabelName, PullRequestBody, PullRequestEventContext,
+    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchEvent,
+    RepoWatchEventId, RepoWatchEventKindV1, RepositorySlug,
 };
 use signalbox_module_repo_watch_v2::matching_rules;
 use uuid::Uuid;
@@ -89,7 +89,7 @@ credential_file = "/run/credentials/repository-watch-token"
 
 /// An unlabeled, non-draft opening against a stacked base. Event identity,
 /// pull-request number, head content and title are arbitrary fixture values.
-fn unlabeled_stacked_opening(head_branch: &str) -> RepoWatchEvent {
+fn stacked_opening(head_branch: &str, labels: Vec<LabelName>) -> RepoWatchEvent {
     const ANY_EVENT_ID: u128 = 1;
     const ANY_HEAD: &str = "1111111111111111111111111111111111111111";
     const ANY_TITLE: &str = "Rule example fixture";
@@ -105,7 +105,7 @@ fn unlabeled_stacked_opening(head_branch: &str) -> RepoWatchEvent {
             head_branch: BranchName::try_new(head_branch.to_owned()).expect("head branch"),
             title: PullRequestTitle::try_new(ANY_TITLE.to_owned()).expect("title"),
             body: PullRequestBody::try_new(String::new()).expect("body"),
-            labels: Vec::new(),
+            labels,
             draft: false,
             author: None,
         }),
@@ -115,14 +115,14 @@ fn unlabeled_stacked_opening(head_branch: &str) -> RepoWatchEvent {
 }
 
 #[test]
-fn example_watch_rules_dispatch_unlabeled_agent_and_renovate_openings() {
+fn example_watch_rules_dispatch_unlabeled_agent_openings() {
     let configuration = example_watch_configuration();
     let rules = configuration
         .repository_watch()
         .expect("repository watch")
         .rules();
-    for branch in ["agent/stack-child", "renovate/dependency"] {
-        let event = unlabeled_stacked_opening(branch);
+    for branch in ["agent/stack-child"] {
+        let event = stacked_opening(branch, Vec::new());
         let matched = matching_rules(rules, &event);
         assert_eq!(
             matched
@@ -142,10 +142,49 @@ fn example_watch_rules_ignore_openings_outside_the_branch_prefixes() {
         .repository_watch()
         .expect("repository watch")
         .rules();
-    for branch in ["feature/change", "agentish/change", "renovated/change"] {
-        let event = unlabeled_stacked_opening(branch);
+    for branch in [
+        "feature/change",
+        "agentish/change",
+        "renovated/change",
+        "renovate/dependency",
+    ] {
+        let event = stacked_opening(branch, Vec::new());
         assert!(matching_rules(rules, &event).is_empty(), "opening {branch}");
     }
+}
+
+#[test]
+fn example_watch_rules_exclude_no_auto_openings() {
+    let configuration = example_watch_configuration();
+    let rules = configuration
+        .repository_watch()
+        .expect("repository watch")
+        .rules();
+    let event = stacked_opening(
+        "agent/stack-child",
+        vec![LabelName::try_new("no-auto".to_owned()).expect("exclusion label")],
+    );
+
+    assert!(matching_rules(rules, &event).is_empty());
+}
+
+#[test]
+fn example_merge_template_uses_the_metadata_boolean_for_conflicts() {
+    let catalog: toml::Value = toml::from_str(include_str!(
+        "../../../../config/session-templates.example.toml"
+    ))
+    .expect("template example");
+    let template = catalog["templates"]
+        .as_array()
+        .expect("templates")
+        .iter()
+        .find(|template| template["name"].as_str() == Some("merge-forward"))
+        .expect("merge-forward template");
+    let prompt = template["system_prompt"].as_str().expect("prompt");
+
+    assert!(prompt.contains("github_pull_request_metadata"));
+    assert!(prompt.contains("Continue only when mergeable is false (conflicting)"));
+    assert!(prompt.contains("otherwise reply once with the current head and mergeability and finish without edits or publication"));
 }
 
 /// Whether one line is commented-out configuration rather than active TOML.
