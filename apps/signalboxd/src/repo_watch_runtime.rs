@@ -882,26 +882,10 @@ impl RuntimeState {
             return Ok(());
         };
         let mut codec = RepositoryWatchCommandCodec;
-        if let Some(event) = self
-            .lifecycle
-            .next()
+        self.store
+            .drain_lifecycle(&mut self.factory, &mut codec, &self.lifecycle)
             .await
-            .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?
-        {
-            self.store
-                .react_to_lifecycle(&event, &mut self.factory, &mut codec, &self.lifecycle)
-                .await
-                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
-            self.lifecycle
-                .acknowledge(&event)
-                .await
-                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
-        } else {
-            self.store
-                .react_to_pull_request_lifecycle(&mut self.factory, &mut codec, &self.lifecycle)
-                .await
-                .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
-        }
+            .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
         for repository in configuration.repositories() {
             for rule in configuration.rules() {
                 self.store
