@@ -124,6 +124,11 @@ impl reload_configuration::ReloadConfigurationRepository {
         request: reload_configuration::ReloadConfiguration,
         result: &reload_configuration::ReloadResult,
     ) -> result::Result<(), reload_configuration::ReloadRepositoryError>;
+    pub async fn finish_profile_reload(
+        &self,
+        request: reload_configuration::ReloadConfiguration,
+        changed_profiles: &[string::String],
+    ) -> result::Result<(), reload_configuration::ReloadRepositoryError>;
     pub async fn pending(
         &self,
     ) -> result::Result<

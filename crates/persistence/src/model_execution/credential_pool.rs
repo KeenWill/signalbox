@@ -315,9 +315,11 @@ pub(super) async fn load_durable_pool_exclusions(
     let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
     let mut excluded = sqlx::query_scalar::<_, String>(
         "SELECT credential_reference
-           FROM credential_pool_chain_exclusion
+           FROM credential_pool_chain_exclusion AS chain
           WHERE session_id = $1
-            AND turn_id = $2",
+            AND turn_id = $2
+            AND NOT EXISTS (SELECT 1 FROM credential_authentication_release released
+                            WHERE released.predecessor_model_call_id = chain.predecessor_model_call_id)",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))

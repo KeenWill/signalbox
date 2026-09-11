@@ -219,7 +219,79 @@ impl ReloadConfigurationRepository {
         request: ReloadConfiguration,
         result: &ReloadResult,
     ) -> Result<(), ReloadRepositoryError> {
+        self.finish_with_profiles(request, result, &[]).await
+    }
+
+    /// Records successful installation and wakes authentication waits for changed profiles.
+    pub async fn finish_profile_reload(
+        &self,
+        request: ReloadConfiguration,
+        changed_profiles: &[String],
+    ) -> Result<(), ReloadRepositoryError> {
+        self.finish_with_profiles(request, &ReloadResult::Reloaded, changed_profiles)
+            .await
+    }
+
+    async fn finish_with_profiles(
+        &self,
+        request: ReloadConfiguration,
+        result: &ReloadResult,
+        changed_profiles: &[String],
+    ) -> Result<(), ReloadRepositoryError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT command_id FROM reload_configuration_command WHERE command_id = $1 FOR UPDATE",
+        )
+        .bind(request.command_id.into_uuid())
+        .fetch_one(&mut *tx)
+        .await?;
+        if let ReloadLookup::Recorded(recorded) = lookup(&mut tx, request).await? {
+            return if recorded == *result {
+                Ok(())
+            } else {
+                Err(ReloadRepositoryError::Corruption(
+                    "conflicting terminal reload result",
+                ))
+            };
+        }
+        if !changed_profiles.is_empty() {
+            crate::model_execution::acquire_model_call_outbox_order_guard(&mut tx)
+                .await
+                .map_err(|error| match error {
+                    crate::model_execution::ModelCallRepositoryError::Database {
+                        source, ..
+                    } => ReloadRepositoryError::Database(source),
+                    _ => ReloadRepositoryError::Corruption("profile release order guard"),
+                })?;
+            let mut profiles = changed_profiles.to_vec();
+            profiles.sort();
+            profiles.dedup();
+            for profile in &profiles {
+                sqlx::query(crate::lock_inventory::HASHED_TRANSACTION_ADVISORY_LOCK)
+                    .bind(format!("credential_pool_action_head:{profile}"))
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            sqlx::query(
+                "INSERT INTO credential_authentication_release (predecessor_model_call_id, command_id)
+                 SELECT chain.predecessor_model_call_id, $1
+                 FROM credential_pool_chain_exclusion chain
+                 JOIN credential_availability_wait waiting USING (session_id, turn_id)
+                 WHERE chain.credential_reference = ANY($2) AND chain.cause_kind = 'credential_rejected'
+                   AND waiting.consumed_by_attempt_id IS NULL
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(request.command_id.into_uuid()).bind(&profiles).execute(&mut *tx).await?;
+            sqlx::query(
+                "UPDATE credential_availability_wait waiting SET eligible = true
+                 WHERE consumed_by_attempt_id IS NULL AND NOT eligible AND EXISTS (
+                     SELECT 1 FROM credential_pool_chain_exclusion chain
+                     JOIN credential_authentication_release released USING (predecessor_model_call_id)
+                     WHERE chain.session_id = waiting.session_id AND chain.turn_id = waiting.turn_id
+                       AND released.command_id = $1)",
+            )
+            .bind(request.command_id.into_uuid()).execute(&mut *tx).await?;
+        }
         record_result(&mut tx, request, result).await?;
         if lookup(&mut tx, request).await? != ReloadLookup::Recorded(result.clone()) {
             return Err(ReloadRepositoryError::Corruption(

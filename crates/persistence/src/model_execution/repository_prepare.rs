@@ -830,7 +830,7 @@ impl PostgresModelCallRepository {
                             (session_id, turn_id, credential_reference,
                              predecessor_model_call_id, cause_kind)
                          VALUES ($1, $2, $3, $4, $5)
-                         ON CONFLICT (session_id, turn_id, credential_reference) DO NOTHING",
+                         ON CONFLICT (predecessor_model_call_id) DO NOTHING",
                             )
                             .bind(session_id_to_uuid(session))
                             .bind(turn_id_to_uuid(observation.correlation().turn()))

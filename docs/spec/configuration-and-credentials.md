@@ -629,7 +629,8 @@ its text. An unknown or invalid field is rejected without its name, so
 opaque to code: no build-provided constant is compared against it. Catalogs are
 read at startup. `reload_configuration` validates the complete replacement and
 atomically replaces the model and alias catalog, session-template catalog, and
-repository-watch configuration; every other section is startup-only. A
+repository-watch configuration, and existing Codex-home profile paths. Other
+profile fields, pool policies, and other sections are startup-only. A
 replacement whose startup-only sections differ leaves the running configuration
 in place. Reload never rewrites evidence already recorded. File watching and
 polling are external callers of the verb.
