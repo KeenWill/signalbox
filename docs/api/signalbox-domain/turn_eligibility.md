@@ -106,6 +106,13 @@ impl ActivatedTurn {
         recovery_attempt: nonzero::NonZeroU32,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> result::Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_tool_batch(
+        self,
+        batch: ToolBatch,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> result::Result<CancelledModelCallTurn, ModelCallClosureError>;
     pub fn apply_interrupt_to_runner_recovery(
         self,
         starting_snapshot: ResolvedContextFrontierSnapshot,

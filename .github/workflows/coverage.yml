@@ -42,19 +42,13 @@ on:
       - ".github/actions/setup-bazel/**"
   workflow_dispatch:
 
-# Superseded runs release their slots against the public concurrency cap:
-# pull-request runs group per PR, and other non-main runs group per
-# event+ref (today only workflow_dispatch reaches that arm — every push
-# trigger in this repo is filtered to main). Main runs each take a group
-# of their own and are never canceled: sharing one group would let a third
-# run cancel a second still pending behind the first, which
-# `cancel-in-progress: false` does not prevent.
+# Keep the latest run per PR, main branch, or other event/ref.
 concurrency:
   group: >-
     coverage-${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref)
-    || github.ref == 'refs/heads/main' && github.run_id
+    || github.ref == 'refs/heads/main' && 'main'
     || format('{0}-{1}', github.event_name, github.ref) }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

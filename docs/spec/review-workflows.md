@@ -41,7 +41,9 @@ through a client-fed adapter whose closed operations each supply one stage
 result. A closed review library of prompt templates, resolved at startup under
 the catalog rules
 [configuration and credentials](configuration-and-credentials.md) states,
-supplies the session templates each stage uses. The
+supplies the session templates each stage uses. The example library uses
+`review-judge-strict-v1`: six acceptance categories, explicit decline classes,
+independent 1–5 verdict confidence, and a valid all-declined result. The
 [process protocol](process-protocol.md) and the terminal client expose the
 primitive and orchestration operations.
 

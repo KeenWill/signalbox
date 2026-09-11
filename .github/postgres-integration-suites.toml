@@ -62,8 +62,16 @@ features = ["test-support"]
 # pays the fixed shard costs once and stays well short of the long pole.
 shards = 1
 # Subprocess entry points invoked only by their owning process tests.
-# The file-media composition proof runs with the delegated sandbox in host_integration_tests.
-skip = ["bridge_build_direct_invocation_fixture", "bridge_wait_", "file_tools_enter_the_daemon_catalog_with_a_composed_frontier_resolver"]
+# Host sandbox tests run in host_integration_tests.
+skip = [
+    "bridge_build_direct_invocation_fixture",
+    "bridge_wait_",
+    "file_tools_enter_the_daemon_catalog_with_a_composed_frontier_resolver",
+    "daemon_tools::composed_identity::mount_tests::administration_ancestry_rejects_a_same_device_bind_mount",
+    "daemon_tools::git_push::ssh_tests::ssh_push_uses_agent_and_account_trust_files_inside_sandbox_for_both_destination_forms",
+    "daemon_tools::git_push::ssh_tests::ssh_push_keeps_account_trust_visible_under_workspace",
+    "daemon_tools::git_push::ssh_tests::ssh_push_streams_a_generated_gigabyte_blob",
+]
 
 [[suite]]
 name = "terminal-client"
