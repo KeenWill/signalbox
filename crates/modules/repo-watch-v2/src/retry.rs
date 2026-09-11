@@ -255,47 +255,52 @@ pub(crate) fn reevaluation_event(
     if !(conflicting || unresolved || failing) {
         return None;
     }
-    let kind = match previous.kind() {
-        RepoWatchEventKindV1::HeadChanged {
-            previous: before,
-            current: dispatched,
-        } => RepoWatchEventKindV1::HeadChanged {
-            previous: if current.context().head_sha() == dispatched {
-                before
-            } else {
-                dispatched
-            }
-            .clone(),
-            current: current.context().head_sha().clone(),
-        },
-        RepoWatchEventKindV1::BaseAdvanced { .. } => RepoWatchEventKindV1::BaseAdvanced {
-            branch: current.context().base_branch().clone(),
-        },
-        RepoWatchEventKindV1::MergeableStateChanged { .. } => {
-            RepoWatchEventKindV1::MergeableStateChanged {
-                current: current.mergeable_state(),
-            }
+    // Activation carries current mergeability; its original fact remains in gh_event.
+    let kind = if source == MatchSource::Activation {
+        RepoWatchEventKindV1::MergeableStateChanged {
+            current: current.mergeable_state(),
         }
-        RepoWatchEventKindV1::Labeled { label }
-            if source == MatchSource::ProviderEvent
-                && !current.context().labels().contains(label) =>
-        {
-            return None;
-        }
-        RepoWatchEventKindV1::Unlabeled { label }
-            if source == MatchSource::ProviderEvent
-                && current.context().labels().contains(label) =>
-        {
-            return None;
-        }
-        RepoWatchEventKindV1::ChecksCompleted { .. } => RepoWatchEventKindV1::ChecksCompleted {
-            outcome: if failing {
-                ChecksOutcome::Failure
-            } else {
-                ChecksOutcome::Success
+    } else {
+        match previous.kind() {
+            RepoWatchEventKindV1::HeadChanged {
+                previous: before,
+                current: dispatched,
+            } => RepoWatchEventKindV1::HeadChanged {
+                previous: if current.context().head_sha() == dispatched {
+                    before
+                } else {
+                    dispatched
+                }
+                .clone(),
+                current: current.context().head_sha().clone(),
             },
-        },
-        _ => previous.kind().clone(),
+            RepoWatchEventKindV1::BaseAdvanced { .. } => RepoWatchEventKindV1::BaseAdvanced {
+                branch: current.context().base_branch().clone(),
+            },
+            RepoWatchEventKindV1::MergeableStateChanged { .. } => {
+                RepoWatchEventKindV1::MergeableStateChanged {
+                    current: current.mergeable_state(),
+                }
+            }
+            RepoWatchEventKindV1::Labeled { label }
+                if !current.context().labels().contains(label) =>
+            {
+                return None;
+            }
+            RepoWatchEventKindV1::Unlabeled { label }
+                if current.context().labels().contains(label) =>
+            {
+                return None;
+            }
+            RepoWatchEventKindV1::ChecksCompleted { .. } => RepoWatchEventKindV1::ChecksCompleted {
+                outcome: if failing {
+                    ChecksOutcome::Failure
+                } else {
+                    ChecksOutcome::Success
+                },
+            },
+            _ => previous.kind().clone(),
+        }
     };
     let event = RepoWatchEvent::try_pull_request(
         previous.id(),
@@ -611,6 +616,52 @@ mod tests {
                 &[RepoWatchPullRequestState::try_new(current).expect("pull")]
             )
             .is_some()
+        );
+    }
+
+    #[test]
+    fn activation_admits_unfinished_work_after_the_source_label_was_removed() {
+        let (rule, event) = origin(RepoWatchEventKindV1::Labeled {
+            label: LabelName::try_new("repo-watch".to_owned()).expect("label"),
+        });
+        let mut current = input();
+        current.mergeable_state = MergeableState::Conflicting;
+        let observed = RepoWatchPullRequestState::try_new(current).expect("pull");
+        let activation = reevaluation_event(
+            &rule,
+            &event,
+            std::slice::from_ref(&observed),
+            MatchSource::Activation,
+        )
+        .expect("activation does not require the source label to remain");
+        assert_eq!(activation.id(), event.id());
+        assert_eq!(
+            activation.target(),
+            &RepoWatchEventTarget::PullRequest(observed.context().clone())
+        );
+    }
+
+    #[test]
+    fn activation_admits_unfinished_work_after_the_source_label_was_restored() {
+        let label = LabelName::try_new("repo-watch".to_owned()).expect("label");
+        let (rule, event) = origin(RepoWatchEventKindV1::Unlabeled {
+            label: label.clone(),
+        });
+        let mut current = input();
+        current.context = context(vec![label]);
+        current.mergeable_state = MergeableState::Conflicting;
+        let observed = RepoWatchPullRequestState::try_new(current).expect("pull");
+        let activation = reevaluation_event(
+            &rule,
+            &event,
+            std::slice::from_ref(&observed),
+            MatchSource::Activation,
+        )
+        .expect("activation does not require the source label to stay absent");
+        assert_eq!(activation.id(), event.id());
+        assert_eq!(
+            activation.target(),
+            &RepoWatchEventTarget::PullRequest(observed.context().clone())
         );
     }
 
