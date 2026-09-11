@@ -20,6 +20,8 @@ pub enum CredentialAvailabilityWaitCause {
     Contended,
     /// Every pool member is excluded and at least one can become available again.
     Exhausted,
+    /// Every pool member exhausted provider-internal retries and awaits network recovery.
+    NetworkUnavailable,
 }
 
 /// Durable nonterminal model-call state carried by a transcript snapshot.
