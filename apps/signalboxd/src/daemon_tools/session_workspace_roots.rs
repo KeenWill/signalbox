@@ -398,12 +398,16 @@ pub(super) fn another_session_bound(
     bindings: &BTreeMap<SessionId, RecordedSessionBinding>,
     session: SessionId,
     composed: ComposedWorkspaceIdentity,
+    still_reachable: impl Fn(SessionId) -> bool,
 ) -> bool {
     bindings.iter().any(|(bound, binding)| {
         let Some(bound_identity) = binding.derived_identity() else {
             return false;
         };
-        if *bound == session || !bound_identity.shares_a_directory_with(&composed) {
+        if *bound == session
+            || !bound_identity.shares_a_directory_with(&composed)
+            || !still_reachable(*bound)
+        {
             return false;
         }
         tracing::warn!(
