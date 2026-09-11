@@ -150,6 +150,28 @@ pub(crate) async fn load_delegated_runner_recovery_for_interrupt(
     )
 }
 
+pub(crate) async fn load_delegated_active_turn_for_interrupt(
+    connection: &mut PgConnection,
+    requested_session: SessionId,
+) -> Result<Option<signalbox_domain::ActivatedTurn>, ModelCallRepositoryError> {
+    let session = match load_session_from_connection(connection, requested_session).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return Ok(None),
+        Err(SessionRepositoryError::Database(error)) => return Err(error.into()),
+        Err(SessionRepositoryError::Corruption(error)) => {
+            return Err(ModelCallCorruption::CurrentSession(error).into());
+        }
+    };
+    let scheduling = Box::pin(load_scheduling_projection(connection, session))
+        .await
+        .map_err(map_scheduling_error)?;
+    Ok(
+        load_delegated_live_turn(connection, requested_session, &scheduling)
+            .await?
+            .map(|loaded| loaded.active),
+    )
+}
+
 pub(crate) async fn load_delegated_model_call_recovery(
     connection: &mut PgConnection,
     session: SessionId,
@@ -358,6 +380,9 @@ async fn load_delegated_live_turn(
             attempt.interrupt_command_id,
             attempt.interrupt_predecessor_turn_id AS attempt_interrupt_predecessor_turn_id,
             lifecycle.active_phase_kind,
+            lifecycle.session_id,
+            lifecycle.active_tool_round_call_id,
+            lifecycle.child_wait_request_id,
             lifecycle.recovery_model_call_id,
             lifecycle.pinned_provider_model_identity_id,
             lifecycle.runner_recovery_runner_id,
@@ -395,7 +420,7 @@ async fn load_delegated_live_turn(
                     AND attempt.turn_attempt_id = lifecycle.current_attempt_id
                 )
                 OR (
-                    lifecycle.active_phase_kind = 'awaiting_runner_recovery'
+                    lifecycle.active_phase_kind IN ('awaiting_runner_recovery', 'awaiting_child')
                     AND attempt.state_kind = 'ended'
                     AND attempt.end_variant = 'without_stop'
                     AND attempt.end_disposition = 'yielded_to_durable_wait'
@@ -425,7 +450,7 @@ async fn load_delegated_live_turn(
           AND NOT lifecycle.delegation_runtime_terminal
           AND lifecycle.active_phase_kind IN (
                 'running', 'awaiting_runner_recovery',
-                'awaiting_model_call_recovery'
+                'awaiting_child', 'awaiting_model_call_recovery'
           )
           AND goal_turn_is_runtime_relevant(
                 lifecycle.session_id, lifecycle.turn_id
@@ -600,6 +625,29 @@ async fn decode_delegated_active_phase(
             }
             .into()),
         },
+        "awaiting_child" => {
+            let session = SessionId::from_uuid(required(row, "session_id")?);
+            let call = ModelCallId::from_uuid(required(row, "active_tool_round_call_id")?);
+            let awaiting_request =
+                signalbox_domain::ToolRequestId::from_uuid(required(row, "child_wait_request_id")?);
+            let batch =
+                crate::tool_loop::load_active_batch_from_connection(connection, session, turn)
+                    .await
+                    .map_err(super::prepared::map_tool_evidence_error)?
+                    .ok_or(ModelCallCorruption::Missing("delegated child wait batch"))?;
+            if batch.producing_call() != call
+                || !matches!(batch.phase(),
+                    signalbox_domain::ToolBatchPhase::AwaitingChild { request, .. } if request == awaiting_request
+                )
+            {
+                return Err(
+                    ModelCallCorruption::Inconsistent("delegated child wait evidence").into(),
+                );
+            }
+            ActiveTurnSchedulingReconstitutionInput::awaiting_child(turn, &batch).ok_or_else(|| {
+                ModelCallCorruption::Inconsistent("delegated child wait phase").into()
+            })
+        }
         "awaiting_runner_recovery" => {
             let runner =
                 signalbox_domain::RunnerId::from_uuid(required(row, "runner_recovery_runner_id")?);
@@ -713,6 +761,9 @@ async fn load_delegated_live_wake_turn(
             attempt.interrupt_command_id,
             attempt.interrupt_predecessor_turn_id AS attempt_interrupt_predecessor_turn_id,
             lifecycle.active_phase_kind,
+            lifecycle.session_id,
+            lifecycle.active_tool_round_call_id,
+            lifecycle.child_wait_request_id,
             lifecycle.recovery_model_call_id,
             lifecycle.pinned_provider_model_identity_id,
             lifecycle.runner_recovery_runner_id,
@@ -743,7 +794,7 @@ async fn load_delegated_live_wake_turn(
           AND NOT lifecycle.delegation_runtime_terminal
           AND lifecycle.active_phase_kind IN (
                 'running', 'awaiting_runner_recovery',
-                'awaiting_model_call_recovery'
+                'awaiting_child', 'awaiting_model_call_recovery'
           )
          JOIN turn_lifecycle AS predecessor
            ON predecessor.turn_id = lifecycle.immediate_predecessor_turn_id
@@ -767,7 +818,7 @@ async fn load_delegated_live_wake_turn(
                     AND attempt.turn_attempt_id = lifecycle.current_attempt_id
                 )
                 OR (
-                    lifecycle.active_phase_kind = 'awaiting_runner_recovery'
+                    lifecycle.active_phase_kind IN ('awaiting_runner_recovery', 'awaiting_child')
                     AND attempt.state_kind = 'ended'
                     AND attempt.end_variant = 'without_stop'
                     AND attempt.end_disposition = 'yielded_to_durable_wait'
