@@ -366,7 +366,7 @@ fn parse_file_env_key(
     }
 }
 
-fn normalize_absolute_path(value: &str) -> Result<PathBuf, HubModelConfigurationError> {
+pub(crate) fn normalize_absolute_path(value: &str) -> Result<PathBuf, HubModelConfigurationError> {
     if value.is_empty()
         || value.len() > MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES
         || value.contains('\0')
