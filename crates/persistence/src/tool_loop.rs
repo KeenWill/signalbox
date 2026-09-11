@@ -2433,7 +2433,7 @@ pub(crate) async fn load_cancelled_foreground_wait(
             AND issuing.end_variant = 'without_stop'
             AND issuing.end_disposition = 'yielded_to_durable_wait'
           WHERE member.member_position > $3 AND member.member_position <= $3 + $4
-            AND entry.payload_kind = 'tool_closed_by_turn_end'
+            AND entry.payload_kind IN ('tool_closed_by_turn_end', 'delegation_result')
             AND attempt.state_kind = 'terminal'
             AND attempt.terminal_disposition_kind = 'awaiting_child'",
     )
