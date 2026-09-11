@@ -1431,6 +1431,7 @@ fn range_closes_tool_exchanges(members: &[ProjectedFrontierMember]) -> bool {
         match member.payload_kind.as_str() {
             "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
             "tool_execution_result"
+            | "delegation_result"
             | "tool_denied"
             | "tool_inadmissible"
             | "tool_closed_by_turn_end" => {
@@ -1454,6 +1455,7 @@ fn preview_members(
         match member.payload_kind.as_str() {
             "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
             "tool_execution_result"
+            | "delegation_result"
             | "tool_denied"
             | "tool_inadmissible"
             | "tool_closed_by_turn_end" => {
@@ -1479,6 +1481,7 @@ fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
         match member.payload_kind.as_str() {
             "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
             "tool_execution_result"
+            | "delegation_result"
             | "tool_denied"
             | "tool_inadmissible"
             | "tool_closed_by_turn_end" => {
@@ -1734,6 +1737,43 @@ mod tests {
         assert_eq!(latest_safe_boundary(&visible), Some(2));
         let preview =
             preview_members(&visible).expect("the inadmissible result closes its request");
+        assert_eq!(
+            preview
+                .iter()
+                .map(|member| member.is_safe_boundary())
+                .collect::<Vec<_>>(),
+            [false, true, true, false]
+        );
+    }
+
+    #[test]
+    fn delegation_result_closes_compaction_exchange_before_the_next_request() {
+        let visible = vec![
+            ProjectedFrontierMember {
+                position: 1,
+                reference: entry(0x7041),
+                payload_kind: "assistant_tool_use".to_owned(),
+                summary_range: None,
+            },
+            ProjectedFrontierMember {
+                position: 2,
+                reference: entry(0x7042),
+                payload_kind: "delegation_result".to_owned(),
+                summary_range: None,
+            },
+            ordinary(3, entry(0x7043)),
+            ProjectedFrontierMember {
+                position: 4,
+                reference: entry(0x7044),
+                payload_kind: "assistant_tool_use".to_owned(),
+                summary_range: None,
+            },
+        ];
+        assert!(range_closes_tool_exchanges(&visible[..3]));
+        assert!(!range_closes_tool_exchanges(&visible));
+        assert_eq!(latest_safe_boundary(&visible), Some(2));
+        let preview =
+            preview_members(&visible).expect("the delivered child result closes its request");
         assert_eq!(
             preview
                 .iter()
