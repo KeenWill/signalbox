@@ -18,6 +18,11 @@ pub enum SessionLiveActiveState {
         /// Current provider call, when one is prepared or in flight.
         model_call: Option<ModelCallId>,
     },
+    /// Credential admission retains the turn until its existing wake sources admit a member.
+    AwaitingCredentialAvailability {
+        attempt: signalbox_domain::TurnAttemptId,
+        cause: signalbox_domain::CredentialAvailabilityWaitCause,
+    },
     /// One ambiguous provider call needs an explicit recovery decision.
     AwaitingModelCallRecovery { call: ModelCallId },
     /// One tool request needs an explicit approval decision.

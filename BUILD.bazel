@@ -714,6 +714,22 @@ rust_selection_test(
     name = "git_push_agent_sandbox",
     args = [
         "daemon_tools::git_push::ssh_tests::ssh_push_uses_agent_and_account_trust_files_inside_sandbox_for_both_destination_forms",
+        "daemon_tools::git_push::ssh_tests::ssh_push_streams_a_generated_gigabyte_blob",
+        "--exact",
+        "--ignored",
+    ],
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+    test = "//apps/signalboxd:unit_tests",
+)
+
+rust_selection_test(
+    name = "git_administration_sandbox",
+    args = [
+        "daemon_tools::composed_identity::mount_tests::administration_ancestry_rejects_a_same_device_bind_mount",
         "--exact",
         "--ignored",
     ],
@@ -746,6 +762,7 @@ test_suite(
     tests = [
         ":file_media_daemon_sandbox",
         ":file_media_text_sandbox",
+        ":git_administration_sandbox",
         ":git_push_agent_sandbox",
         ":git_push_workspace_trust_sandbox",
         "//crates/file-media-adapters-audio:adapters",

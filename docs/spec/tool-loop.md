@@ -222,7 +222,9 @@ resumes from durable wait and result rows and cannot duplicate an external
 effect. A batch can retain multiple foreground waits; continuation and
 interruption associate delivered child results with their await requests in
 proposal order. The next model call closes that batch across the intervening
-child-wait attempts, including when an ordinary tool follows the final wait.
+child-wait attempts, including when an ordinary tool follows the final wait. A
+delegated turn waiting on its own child remains interruptible and closable
+without a live model call.
 
 The error kind set stays closed; a family whose failures do not fit maps into it
 and may fix the detail to its own closed token vocabulary.
@@ -379,8 +381,11 @@ use the same bound workspace.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
-correlated with that exact attempt. A tool that executes and exits nonzero
-returns bounded structured `ExecutionFailed` evidence and is `KnownFailed`. A
+correlated with that exact attempt. Delegated turns retain the same recovery
+evidence for automatic reconciliation and explicit stop without erasing the
+physical ambiguity. Automatic reconciliation publishes an unavailable child
+result and wakes the parent. A tool that executes and exits nonzero returns
+bounded structured `ExecutionFailed` evidence and is `KnownFailed`. A
 supervisor-reported sandbox timeout or cancellation retains its bounded output
 without requiring a launcher completion record. Output admission applies the
 size, U+0000, credential-redaction, and correlation checks before durable

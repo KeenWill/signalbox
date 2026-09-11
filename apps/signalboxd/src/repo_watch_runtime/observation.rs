@@ -63,7 +63,7 @@ impl RepositoryWatchRuntime {
         &self,
         input: &ObserveInput,
     ) -> Result<Option<signalbox_domain::InlineFramePayload>, RepoWatchEffectFailure> {
-        observe::adopt_checked(&self.measurements_store, input).await
+        observe::adopt_checked(&self.store, input).await
     }
 
     pub(crate) async fn execute_observation(
@@ -81,7 +81,7 @@ impl RepositoryWatchRuntime {
                     .map_err(observe::failure)?,
             ));
         };
-        observe::execute_checked(&self.measurements_store, input, &mut *observer.lock().await).await
+        observe::execute_checked(&self.store, input, &mut *observer.lock().await).await
     }
 }
 

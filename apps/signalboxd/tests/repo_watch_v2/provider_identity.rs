@@ -8,9 +8,6 @@ async fn provider_facts_returning_on_the_same_head_after_presentation_edits_are_
 -> Result<(), Box<dyn Error>> {
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("provider-identity/project"))?;

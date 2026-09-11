@@ -5,11 +5,12 @@ use std::future::Future;
 use std::sync::Arc;
 
 use signalbox_domain::{
-    ReviewExternalLink, ReviewFinding, ReviewFindingEvent, ReviewFindingEventKind,
-    ReviewFindingEventResultKind, ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingRef,
-    ReviewFindingStatus, ReviewKey, ReviewPassEvidence, ReviewPassKind, ReviewPassRef,
-    ReviewPassResult, ReviewPassState, ReviewPolicy, ReviewRunEvidence, ReviewRunState,
-    ReviewTargetId, ReviewText, ReviewWorkflowKind,
+    ReviewBarVerdict, ReviewExternalLink, ReviewFinding, ReviewFindingEvent,
+    ReviewFindingEventKind, ReviewFindingEventResultKind, ReviewFindingExternalLinkRef,
+    ReviewFindingId, ReviewFindingRef, ReviewFindingStatus, ReviewJudgment, ReviewKey,
+    ReviewPassEvidence, ReviewPassKind, ReviewPassRef, ReviewPassResult, ReviewPassState,
+    ReviewPolicy, ReviewRunEvidence, ReviewRunState, ReviewTargetId, ReviewText,
+    ReviewWorkflowKind,
 };
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -890,14 +891,20 @@ pub enum ReviewPlannedDisposition {
 pub struct ReviewJudgmentPlanMember {
     finding: ReviewFindingRef,
     disposition: ReviewPlannedDisposition,
+    judgment: ReviewJudgment,
 }
 
 impl ReviewJudgmentPlanMember {
     /// Binds one input finding to exactly one planned disposition.
-    pub const fn new(finding: ReviewFindingRef, disposition: ReviewPlannedDisposition) -> Self {
+    pub const fn new(
+        finding: ReviewFindingRef,
+        disposition: ReviewPlannedDisposition,
+        judgment: ReviewJudgment,
+    ) -> Self {
         Self {
             finding,
             disposition,
+            judgment,
         }
     }
 
@@ -909,6 +916,11 @@ impl ReviewJudgmentPlanMember {
     /// Borrows the planned disposition.
     pub const fn disposition(&self) -> &ReviewPlannedDisposition {
         &self.disposition
+    }
+
+    /// Borrows the categorical judge result.
+    pub const fn judgment(&self) -> &ReviewJudgment {
+        &self.judgment
     }
 }
 
@@ -967,6 +979,9 @@ impl ReviewJudgmentPlan {
 /// Why a judgment plan does not cover exactly the complete fan-out.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReviewJudgmentPlanFailure {
+    #[error("review judgment category contradicts the planned disposition")]
+    /// The category accepts a declined disposition or declines an accepted one.
+    ContradictoryVerdict,
     #[error("review judgment analysis target differs from the attempt")]
     /// The analysis pass belongs to another target.
     ForeignAnalysisTarget,
@@ -1036,9 +1051,14 @@ fn validate_plan(
         return Err(ReviewJudgmentPlanFailure::InexactFindingInventory);
     }
     let expected_set: BTreeSet<_> = expected.iter().copied().collect();
-    for (finding, member) in fanout.findings.iter().zip(&plan.members) {
+    for member in &plan.members {
         if matches!(member.disposition, ReviewPlannedDisposition::Accepted)
-            && finding.proposal().content().is_real_confidence()
+            != matches!(member.judgment.verdict(), ReviewBarVerdict::Accept(_))
+        {
+            return Err(ReviewJudgmentPlanFailure::ContradictoryVerdict);
+        }
+        if matches!(member.disposition, ReviewPlannedDisposition::Accepted)
+            && member.judgment.confidence().policy_confidence()
                 < fanout.attempt.policy.minimum_judge_confidence()
         {
             return Err(ReviewJudgmentPlanFailure::AcceptedBelowThreshold {
@@ -1270,6 +1290,11 @@ fn validate_judgment_effect(
     if !event_matches_planned_disposition(event.kind(), &member.disposition) {
         return Err(ReviewJudgmentEffectEvidenceFailure::IncompatibleEvent);
     }
+    if let ReviewFindingEventKind::Accepted { confidence } = event.kind()
+        && *confidence != member.judgment.confidence()
+    {
+        return Err(ReviewJudgmentEffectEvidenceFailure::IncompatibleEvent);
+    }
     let (expected_pass, expected_workflow) = match member.disposition {
         ReviewPlannedDisposition::Accepted
         | ReviewPlannedDisposition::Rejected { .. }
@@ -1303,7 +1328,7 @@ fn referenced_event_policy(event: &ReviewFindingEventKind) -> Option<ReviewPolic
     match event {
         ReviewFindingEventKind::Duplicate { canonical } => Some(canonical.producer_policy()),
         ReviewFindingEventKind::Superseded { successor } => Some(successor.producer_policy()),
-        ReviewFindingEventKind::Accepted
+        ReviewFindingEventKind::Accepted { .. }
         | ReviewFindingEventKind::Rejected { .. }
         | ReviewFindingEventKind::Stale
         | ReviewFindingEventKind::Posted { .. }
@@ -1317,7 +1342,7 @@ fn event_matches_planned_disposition(
     disposition: &ReviewPlannedDisposition,
 ) -> bool {
     match (event, disposition) {
-        (ReviewFindingEventKind::Accepted, ReviewPlannedDisposition::Accepted)
+        (ReviewFindingEventKind::Accepted { .. }, ReviewPlannedDisposition::Accepted)
         | (ReviewFindingEventKind::Stale, ReviewPlannedDisposition::Stale) => true,
         (
             ReviewFindingEventKind::Rejected { reason: actual },
@@ -1336,7 +1361,7 @@ fn event_matches_planned_disposition(
             },
         ) => actual.reference() == *expected,
         (
-            ReviewFindingEventKind::Accepted
+            ReviewFindingEventKind::Accepted { .. }
             | ReviewFindingEventKind::Rejected { .. }
             | ReviewFindingEventKind::Duplicate { .. }
             | ReviewFindingEventKind::Superseded { .. }
@@ -1370,8 +1395,13 @@ fn event_kind_matches_result(
     result: &ReviewFindingEventResultKind,
 ) -> bool {
     match (event, result) {
-        (ReviewFindingEventKind::Accepted, ReviewFindingEventResultKind::Accepted)
-        | (ReviewFindingEventKind::Stale, ReviewFindingEventResultKind::Stale)
+        (
+            ReviewFindingEventKind::Accepted { confidence: actual },
+            ReviewFindingEventResultKind::Accepted {
+                confidence: expected,
+            },
+        ) => actual == expected,
+        (ReviewFindingEventKind::Stale, ReviewFindingEventResultKind::Stale)
         | (ReviewFindingEventKind::Fixed, ReviewFindingEventResultKind::Fixed) => true,
         (
             ReviewFindingEventKind::Rejected { reason: actual },
@@ -1407,7 +1437,7 @@ fn event_kind_matches_result(
                 && actual_link.as_ref().map(|link| link.link()) == *expected_link
         }
         (
-            ReviewFindingEventKind::Accepted
+            ReviewFindingEventKind::Accepted { .. }
             | ReviewFindingEventKind::Rejected { .. }
             | ReviewFindingEventKind::Duplicate { .. }
             | ReviewFindingEventKind::Superseded { .. }
@@ -1415,7 +1445,7 @@ fn event_kind_matches_result(
             | ReviewFindingEventKind::Posted { .. }
             | ReviewFindingEventKind::Fixed
             | ReviewFindingEventKind::BlockedWithReason { .. },
-            ReviewFindingEventResultKind::Accepted
+            ReviewFindingEventResultKind::Accepted { .. }
             | ReviewFindingEventResultKind::Rejected { .. }
             | ReviewFindingEventResultKind::Duplicate { .. }
             | ReviewFindingEventResultKind::Superseded { .. }
@@ -2343,6 +2373,31 @@ mod tests {
 
     use super::*;
 
+    fn plan_member(
+        finding: ReviewFindingRef,
+        disposition: ReviewPlannedDisposition,
+    ) -> ReviewJudgmentPlanMember {
+        use signalbox_domain::{ReviewBarCategory, ReviewDeclineClass, ReviewJudgeConfidence};
+        let verdict = if matches!(disposition, ReviewPlannedDisposition::Accepted) {
+            ReviewBarVerdict::Accept(ReviewBarCategory::OwnBehaviorDefect)
+        } else {
+            ReviewBarVerdict::None(ReviewDeclineClass::Other)
+        };
+        let reason = match &disposition {
+            ReviewPlannedDisposition::Rejected { reason } => reason.clone(),
+            _ => ReviewText::try_new("Judgment fixture.".to_owned()).expect("reason"),
+        };
+        ReviewJudgmentPlanMember::new(
+            finding,
+            disposition,
+            ReviewJudgment::new(
+                verdict,
+                ReviewJudgeConfidence::try_new(5).expect("confidence"),
+                reason,
+            ),
+        )
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum RunnerMode {
         Partial,
@@ -2796,11 +2851,11 @@ mod tests {
         let first = finding_ref(100);
         let second = finding_ref(200);
         let members = vec![
-            ReviewJudgmentPlanMember::new(
+            plan_member(
                 first,
                 ReviewPlannedDisposition::Duplicate { canonical: second },
             ),
-            ReviewJudgmentPlanMember::new(
+            plan_member(
                 second,
                 ReviewPlannedDisposition::Superseded { successor: first },
             ),
@@ -2821,15 +2876,15 @@ mod tests {
         let second = finding_ref(200);
         let third = finding_ref(300);
         let members = vec![
-            ReviewJudgmentPlanMember::new(
+            plan_member(
                 first,
                 ReviewPlannedDisposition::Duplicate { canonical: second },
             ),
-            ReviewJudgmentPlanMember::new(
+            plan_member(
                 second,
                 ReviewPlannedDisposition::Superseded { successor: third },
             ),
-            ReviewJudgmentPlanMember::new(
+            plan_member(
                 third,
                 ReviewPlannedDisposition::Duplicate { canonical: first },
             ),
@@ -2849,8 +2904,8 @@ mod tests {
         let first = finding_ref(100);
         let second = finding_ref(200);
         let members = vec![
-            ReviewJudgmentPlanMember::new(first, ReviewPlannedDisposition::Stale),
-            ReviewJudgmentPlanMember::new(
+            plan_member(first, ReviewPlannedDisposition::Stale),
+            plan_member(
                 second,
                 ReviewPlannedDisposition::Duplicate { canonical: first },
             ),
@@ -2869,7 +2924,7 @@ mod tests {
     fn canonical_judgment_effect_authenticates_before_receipt() {
         let immutable_attempt = attempt();
         let finding = finding_ref(100);
-        let member = ReviewJudgmentPlanMember::new(finding, ReviewPlannedDisposition::Accepted);
+        let member = plan_member(finding, ReviewPlannedDisposition::Accepted);
         let success = accepted_judgment_success(
             &immutable_attempt,
             finding,
@@ -2883,14 +2938,58 @@ mod tests {
     }
 
     #[test]
+    fn judgment_effect_cannot_replace_the_sealed_judge_confidence() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let mut member = plan_member(finding, ReviewPlannedDisposition::Accepted);
+        member.judgment = ReviewJudgment::new(
+            member.judgment.verdict(),
+            signalbox_domain::ReviewJudgeConfidence::try_new(4).expect("admitted confidence"),
+            member.judgment.reason().clone(),
+        );
+        let success = accepted_judgment_success(
+            &immutable_attempt,
+            finding,
+            500,
+            immutable_attempt.stage_templates().judgment(),
+        );
+
+        assert_eq!(
+            validate_judgment_effect(&immutable_attempt, &member, &success),
+            Err(ReviewJudgmentEffectEvidenceFailure::IncompatibleEvent),
+        );
+    }
+
+    #[test]
+    fn all_declined_judgments_complete_without_repairs_or_publications() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let mut plan = accepted_plan(&immutable_attempt, finding);
+        plan.members = vec![plan_member(
+            finding,
+            ReviewPlannedDisposition::Rejected {
+                reason: ReviewText::try_new(String::from(
+                    "The candidate asks for hypothetical hardening.",
+                ))
+                .expect("reason"),
+            },
+        )];
+
+        let repairs = complete_repairs(&immutable_attempt, &plan, Vec::new())
+            .expect("no accepted findings require repair");
+
+        let CompletedRepairStage::Complete(barrier) = repairs else {
+            panic!("all declined findings complete the repair stage");
+        };
+        assert_eq!(validate_publication(&barrier, &[]), Ok(()));
+    }
+
+    #[test]
     fn duplicate_judgment_effect_authenticates_referenced_policy() {
         let immutable_attempt = attempt();
         let finding = finding_ref(100);
         let (success, canonical) = duplicate_judgment_success(&immutable_attempt, finding, 500);
-        let member = ReviewJudgmentPlanMember::new(
-            finding,
-            ReviewPlannedDisposition::Duplicate { canonical },
-        );
+        let member = plan_member(finding, ReviewPlannedDisposition::Duplicate { canonical });
 
         let result = validate_judgment_effect(&immutable_attempt, &member, &success);
 
@@ -2905,7 +3004,7 @@ mod tests {
     fn judgment_effect_rejects_a_cross_wired_run() {
         let immutable_attempt = attempt();
         let finding = finding_ref(100);
-        let member = ReviewJudgmentPlanMember::new(finding, ReviewPlannedDisposition::Accepted);
+        let member = plan_member(finding, ReviewPlannedDisposition::Accepted);
         let success = accepted_judgment_success(
             &immutable_attempt,
             finding,
@@ -2926,7 +3025,10 @@ mod tests {
             success.event().pass(),
             success.event().pass_evidence().clone(),
             foreign_run,
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                    .expect("judge confidence"),
+            },
         );
         let cross_wired =
             ReviewJudgmentEffectSuccess::new(event, immutable_attempt.stage_templates().judgment());
@@ -2941,7 +3043,7 @@ mod tests {
     fn judgment_effect_rejects_a_different_planned_disposition() {
         let immutable_attempt = attempt();
         let finding = finding_ref(100);
-        let member = ReviewJudgmentPlanMember::new(finding, ReviewPlannedDisposition::Stale);
+        let member = plan_member(finding, ReviewPlannedDisposition::Stale);
         let success = accepted_judgment_success(
             &immutable_attempt,
             finding,
@@ -2962,7 +3064,7 @@ mod tests {
     fn judgment_effect_rejects_a_pass_without_the_exact_event_result() {
         let immutable_attempt = attempt();
         let finding = finding_ref(100);
-        let member = ReviewJudgmentPlanMember::new(finding, ReviewPlannedDisposition::Accepted);
+        let member = plan_member(finding, ReviewPlannedDisposition::Accepted);
         let ordinal = ReviewEventOrdinal::try_new(1).expect("event ordinal is positive");
         let (pass, run) = succeeded_evidence(
             immutable_attempt.target(),
@@ -2978,7 +3080,10 @@ mod tests {
             pass.reference(),
             pass,
             run,
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                    .expect("judge confidence"),
+            },
         );
         let success =
             ReviewJudgmentEffectSuccess::new(event, immutable_attempt.stage_templates().judgment());
@@ -3272,10 +3377,7 @@ mod tests {
             analysis_pass,
             analysis_run,
             immutable_attempt.stage_templates().judgment(),
-            vec![ReviewJudgmentPlanMember::new(
-                finding,
-                ReviewPlannedDisposition::Accepted,
-            )],
+            vec![plan_member(finding, ReviewPlannedDisposition::Accepted)],
         );
         let repairs = vec![ReviewRepairMemberOutcome::Blocked(finding)];
 
@@ -3604,10 +3706,8 @@ mod tests {
     #[test]
     fn applied_judgment_effects_reject_non_prefix_receipt() {
         let immutable_attempt = attempt();
-        let first =
-            ReviewJudgmentPlanMember::new(finding_ref(1_340), ReviewPlannedDisposition::Accepted);
-        let second =
-            ReviewJudgmentPlanMember::new(finding_ref(1_350), ReviewPlannedDisposition::Accepted);
+        let first = plan_member(finding_ref(1_340), ReviewPlannedDisposition::Accepted);
+        let second = plan_member(finding_ref(1_350), ReviewPlannedDisposition::Accepted);
         let second_receipt = ReviewJudgmentEffectId::new(immutable_attempt.id(), second.finding());
 
         let prefix = applied_judgment_effect_prefix_len(
@@ -3622,10 +3722,8 @@ mod tests {
     #[test]
     fn applied_judgment_effects_accept_exact_prefix() {
         let immutable_attempt = attempt();
-        let first =
-            ReviewJudgmentPlanMember::new(finding_ref(1_360), ReviewPlannedDisposition::Accepted);
-        let second =
-            ReviewJudgmentPlanMember::new(finding_ref(1_370), ReviewPlannedDisposition::Accepted);
+        let first = plan_member(finding_ref(1_360), ReviewPlannedDisposition::Accepted);
+        let second = plan_member(finding_ref(1_370), ReviewPlannedDisposition::Accepted);
         let first_receipt = ReviewJudgmentEffectId::new(immutable_attempt.id(), first.finding());
         let members = [first, second];
         let applied = [first_receipt];
@@ -3932,8 +4030,14 @@ mod tests {
         template_digest: ReviewTemplateDigest,
     ) -> ReviewJudgmentEffectSuccess {
         let ordinal = ReviewEventOrdinal::try_new(1).expect("event ordinal is positive");
-        let result =
-            ReviewFindingEventResult::new(finding, ordinal, ReviewFindingEventResultKind::Accepted);
+        let result = ReviewFindingEventResult::new(
+            finding,
+            ordinal,
+            ReviewFindingEventResultKind::Accepted {
+                confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                    .expect("judge confidence"),
+            },
+        );
         let (pass, run) = succeeded_evidence(
             immutable_attempt.target(),
             immutable_attempt.policy(),
@@ -3948,7 +4052,10 @@ mod tests {
             pass.reference(),
             pass,
             run,
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                    .expect("judge confidence"),
+            },
         );
         ReviewJudgmentEffectSuccess::new(event, template_digest)
     }
@@ -4063,10 +4170,7 @@ mod tests {
             pass,
             run,
             immutable_attempt.stage_templates().judgment(),
-            vec![ReviewJudgmentPlanMember::new(
-                finding,
-                ReviewPlannedDisposition::Accepted,
-            )],
+            vec![plan_member(finding, ReviewPlannedDisposition::Accepted)],
         )
     }
 

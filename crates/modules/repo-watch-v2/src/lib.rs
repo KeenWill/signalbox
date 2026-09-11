@@ -23,7 +23,7 @@ use signalbox_session_ownership::{
     RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule,
     RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, ReviewState,
     SessionCommand, SessionCommandKind, SessionCreationCause, SessionId, SessionLifecycleCommand,
-    SessionLifecycleOperation, SessionOwnership, StartGate, StopStickiness,
+    SessionLifecycleOperation, SessionOwnership, StartGate,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -455,11 +455,11 @@ pub trait DispatchReferenceGenerator {
 /// Why a lifecycle reaction did not fit repo-watch's closed command policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleReactionError {
-    /// Only session terminal and goal change events drive these reactions.
+    /// Only session terminal, turn terminal, and goal change events drive these reactions.
     UnsupportedTrigger,
     /// The reaction command must target the session named by its trigger.
     MismatchedSession,
-    /// Only start release and sticky stop are repo-watch lifecycle reactions.
+    /// Only start release and admitted stop commands are repo-watch lifecycle reactions.
     UnsupportedCommand,
 }
 
@@ -2773,7 +2773,7 @@ fn plan_rule_commands<Ids: DispatchReferenceGenerator, Factory: CreateSessionCom
     Ok(commands)
 }
 
-/// Admits a start release or sticky stop driven by a lifecycle event.
+/// Admits a start release or stop driven by a lifecycle event.
 pub fn plan_lifecycle_reaction(
     trigger: &LifecycleEvent,
     dispatch: RepoWatchDispatchId,
@@ -2784,7 +2784,9 @@ pub fn plan_lifecycle_reaction(
 ) -> Result<PlannedCommand, LifecycleReactionError> {
     if !matches!(
         trigger.kind(),
-        LifecycleEventKind::SessionTerminal(_) | LifecycleEventKind::GoalChanged(_)
+        LifecycleEventKind::SessionTerminal(_)
+            | LifecycleEventKind::GoalChanged(_)
+            | LifecycleEventKind::TurnTerminal { .. }
     ) {
         return Err(LifecycleReactionError::UnsupportedTrigger);
     }
@@ -2812,13 +2814,7 @@ fn plan_lifecycle_reaction_at_sequence(
         return Err(LifecycleReactionError::MismatchedSession);
     }
     let admitted = matches!(command.operation(), SessionLifecycleOperation::ReleaseStart)
-        || matches!(
-            command.operation(),
-            SessionLifecycleOperation::Stop {
-                sticky: StopStickiness::Sticky,
-                ..
-            }
-        );
+        || matches!(command.operation(), SessionLifecycleOperation::Stop { .. });
     if !admitted {
         return Err(LifecycleReactionError::UnsupportedCommand);
     }
@@ -2842,7 +2838,9 @@ pub fn plan_retained_lifecycle_reaction(
 ) -> Result<PlannedCommand, LifecycleReactionError> {
     if !matches!(
         trigger.kind(),
-        LifecycleEventKind::SessionTerminal(_) | LifecycleEventKind::GoalChanged(_)
+        LifecycleEventKind::SessionTerminal(_)
+            | LifecycleEventKind::GoalChanged(_)
+            | LifecycleEventKind::TurnTerminal { .. }
     ) {
         return Err(LifecycleReactionError::UnsupportedTrigger);
     }
@@ -2864,13 +2862,7 @@ fn plan_retained_lifecycle_reaction_at_sequence(
         return Err(LifecycleReactionError::MismatchedSession);
     }
     let admitted = matches!(command.operation(), SessionLifecycleOperation::ReleaseStart)
-        || matches!(
-            command.operation(),
-            SessionLifecycleOperation::Stop {
-                sticky: StopStickiness::Sticky,
-                ..
-            }
-        );
+        || matches!(command.operation(), SessionLifecycleOperation::Stop { .. });
     if !admitted {
         return Err(LifecycleReactionError::UnsupportedCommand);
     }

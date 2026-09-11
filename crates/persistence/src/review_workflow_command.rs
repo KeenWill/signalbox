@@ -482,7 +482,7 @@ async fn lock_finding_graph(
             link: Some(pending),
             ..
         } => Some(pending.link()),
-        ReviewFindingEventKind::Accepted
+        ReviewFindingEventKind::Accepted { .. }
         | ReviewFindingEventKind::Rejected { .. }
         | ReviewFindingEventKind::Duplicate { .. }
         | ReviewFindingEventKind::Superseded { .. }

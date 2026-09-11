@@ -3,8 +3,8 @@ import Foundation
 import XCTest
 
 final class CredentialWaitTests: XCTestCase {
-  func testCredentialWaitDecodesBothClosedCausesAndRejectsAnUnknownCause() throws {
-    for cause in ["contended", "exhausted"] {
+  func testCredentialWaitDecodesClosedCausesAndRejectsAnUnknownCause() throws {
+    for cause in ["contended", "exhausted", "network_unavailable"] {
       let data = Data(#"{"type":"active_awaiting_credential_availability","wait_attempt_id":"11111111-1111-4111-8111-111111111111","cause":"\#(cause)"}"#.utf8)
       let state = try SignalboxJSONCoding.decoder().decode(SignalboxTranscriptTurnState.self, from: data)
       guard case .activeAwaitingCredentialAvailability(_, let actual) = state else {

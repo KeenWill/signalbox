@@ -145,6 +145,7 @@ fn encode_link_association(association: ReviewExternalLinkAssociation) -> Encode
 
 struct EncodedFindingEvent<'a> {
     kind: &'static str,
+    judge_confidence: Option<i16>,
     reason: Option<&'a str>,
     referenced: Option<ReviewReferencedFindingEvidence>,
     referenced_status: Option<ReviewFindingStatus>,
@@ -154,15 +155,20 @@ struct EncodedFindingEvent<'a> {
 fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'_> {
     let empty = |kind| EncodedFindingEvent {
         kind,
+        judge_confidence: None,
         reason: None,
         referenced: None,
         referenced_status: None,
         external_link: None,
     };
     match event {
-        ReviewFindingEventKind::Accepted => empty("accepted"),
+        ReviewFindingEventKind::Accepted { confidence } => EncodedFindingEvent {
+            judge_confidence: Some(i16::from(confidence.get())),
+            ..empty("accepted")
+        },
         ReviewFindingEventKind::Rejected { reason } => EncodedFindingEvent {
             kind: "rejected",
+            judge_confidence: None,
             reason: Some(reason.as_str()),
             referenced: None,
             referenced_status: None,
@@ -170,6 +176,7 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
         },
         ReviewFindingEventKind::Duplicate { canonical } => EncodedFindingEvent {
             kind: "duplicate",
+            judge_confidence: None,
             reason: None,
             referenced: Some(*canonical),
             referenced_status: Some(canonical.status()),
@@ -177,6 +184,7 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
         },
         ReviewFindingEventKind::Superseded { successor } => EncodedFindingEvent {
             kind: "superseded",
+            judge_confidence: None,
             reason: None,
             referenced: Some(*successor),
             referenced_status: Some(successor.status()),
@@ -185,6 +193,7 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
         ReviewFindingEventKind::Stale => empty("stale"),
         ReviewFindingEventKind::Posted { link } => EncodedFindingEvent {
             kind: "posted",
+            judge_confidence: None,
             reason: None,
             referenced: None,
             referenced_status: None,
@@ -193,6 +202,7 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
         ReviewFindingEventKind::Fixed => empty("fixed"),
         ReviewFindingEventKind::BlockedWithReason { reason, link } => EncodedFindingEvent {
             kind: "blocked_with_reason",
+            judge_confidence: None,
             reason: Some(reason.as_str()),
             referenced: None,
             referenced_status: None,

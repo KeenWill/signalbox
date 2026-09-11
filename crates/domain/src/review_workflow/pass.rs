@@ -772,7 +772,7 @@ pub(super) fn finding_event_result_matches_pass(
     matches!(
         (event, pass, outcome),
         (
-            ReviewFindingEventResultKind::Accepted
+            ReviewFindingEventResultKind::Accepted { .. }
                 | ReviewFindingEventResultKind::Rejected { .. }
                 | ReviewFindingEventResultKind::Stale,
             ReviewPassKind::Judge,

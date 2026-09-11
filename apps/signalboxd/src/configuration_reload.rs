@@ -208,7 +208,7 @@ impl ConfigurationReload {
         signalbox_module_repo_watch_v2::StoreError,
     > {
         match &self.watch {
-            Some(watch) => watch.session_origin(session).await,
+            Some(watch) => watch.session_origin(session, &self.pool).await,
             None => Ok(None),
         }
     }
@@ -1071,15 +1071,9 @@ mod tests {
             std::os::unix::fs::PermissionsExt::from_mode(0o644),
         )
         .expect("weaken permissions");
-        assert_eq!(
-            reload
-                .read_replacement()
-                .expect_err("public fallback rejected"),
-            failure(
-                ReloadPhase::Validate,
-                "credential reference `github-primary` could not be resolved: InsecurePermissions"
-            )
-        );
+        reload
+            .read_replacement()
+            .expect("reload warns and reads the permissive fallback credential");
         credential.close().expect("remove fallback");
         assert_eq!(
             reload

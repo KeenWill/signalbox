@@ -459,7 +459,10 @@ impl ReviewFindingPendingExternalLinkRef {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewFindingEventKind {
     /// A judge accepted the finding.
-    Accepted,
+    Accepted {
+        /// Independent confidence in the judge's accepted verdict.
+        confidence: super::ReviewJudgeConfidence,
+    },
     /// A judge rejected the finding.
     Rejected {
         /// Exact reason.
@@ -497,7 +500,7 @@ impl ReviewFindingEventKind {
     /// Returns the closed discriminator committed by the producing pass.
     pub const fn event_type(&self) -> ReviewFindingEventType {
         match self {
-            Self::Accepted => ReviewFindingEventType::Accepted,
+            Self::Accepted { .. } => ReviewFindingEventType::Accepted,
             Self::Rejected { .. } => ReviewFindingEventType::Rejected,
             Self::Duplicate { .. } => ReviewFindingEventType::Duplicate,
             Self::Superseded { .. } => ReviewFindingEventType::Superseded,
@@ -510,7 +513,9 @@ impl ReviewFindingEventKind {
 
     pub(super) fn result_kind(&self) -> ReviewFindingEventResultKind {
         match self {
-            Self::Accepted => ReviewFindingEventResultKind::Accepted,
+            Self::Accepted { confidence } => ReviewFindingEventResultKind::Accepted {
+                confidence: *confidence,
+            },
             Self::Rejected { reason } => ReviewFindingEventResultKind::Rejected {
                 reason: reason.clone(),
             },
@@ -738,9 +743,8 @@ impl ReviewFinding {
                 ReviewFindingTransitionFailure::IncompatibleEventPassEvidence,
             ));
         }
-        if matches!(&event.kind, ReviewFindingEventKind::Accepted)
-            && self.proposal.content.is_real_confidence()
-                < event.run.policy().minimum_judge_confidence()
+        if let ReviewFindingEventKind::Accepted { confidence } = &event.kind
+            && confidence.policy_confidence() < event.run.policy().minimum_judge_confidence()
         {
             return Err(self.event_error(
                 event,
@@ -748,8 +752,9 @@ impl ReviewFinding {
             ));
         }
         if matches!(&event.kind, ReviewFindingEventKind::Posted { .. })
-            && self.proposal.content.is_real_confidence()
-                < event.run.policy().minimum_publication_confidence()
+            && self.judge_confidence().is_none_or(|confidence| {
+                confidence.policy_confidence() < event.run.policy().minimum_publication_confidence()
+            })
         {
             return Err(self.event_error(
                 event,
@@ -793,6 +798,20 @@ impl ReviewFinding {
         &self.proposal
     }
 
+    /// Returns the independent confidence retained by the accepted judgment.
+    pub fn judge_confidence(&self) -> Option<super::ReviewJudgeConfidence> {
+        self.events.iter().find_map(|event| match event.kind() {
+            ReviewFindingEventKind::Accepted { confidence } => Some(*confidence),
+            ReviewFindingEventKind::Rejected { .. }
+            | ReviewFindingEventKind::Duplicate { .. }
+            | ReviewFindingEventKind::Superseded { .. }
+            | ReviewFindingEventKind::Stale
+            | ReviewFindingEventKind::Posted { .. }
+            | ReviewFindingEventKind::Fixed
+            | ReviewFindingEventKind::BlockedWithReason { .. } => None,
+        })
+    }
+
     /// Borrows the complete ordered event history.
     pub fn events(&self) -> &[ReviewFindingEvent] {
         &self.events
@@ -829,7 +848,7 @@ pub fn validate_complete_review_finding_reference_graph(
         let referenced = finding.events.iter().find_map(|event| match &event.kind {
             ReviewFindingEventKind::Duplicate { canonical } => Some(*canonical),
             ReviewFindingEventKind::Superseded { successor } => Some(*successor),
-            ReviewFindingEventKind::Accepted
+            ReviewFindingEventKind::Accepted { .. }
             | ReviewFindingEventKind::Rejected { .. }
             | ReviewFindingEventKind::Stale
             | ReviewFindingEventKind::Posted { .. }
@@ -1041,7 +1060,7 @@ pub(super) fn finding_transition(
     use ReviewFindingStatus as Status;
 
     match (current, event) {
-        (Status::Open, Event::Accepted) => Some(Status::Accepted),
+        (Status::Open, Event::Accepted { .. }) => Some(Status::Accepted),
         (Status::Open, Event::Rejected { .. }) => Some(Status::Rejected),
         (Status::Open | Status::Accepted, Event::Duplicate { .. }) => Some(Status::Duplicate),
         (
@@ -1083,7 +1102,7 @@ fn finding_event_matches_pass_evidence(
     let kind_matches = matches!(
         (&event.kind, pass.kind()),
         (
-            ReviewFindingEventKind::Accepted
+            ReviewFindingEventKind::Accepted { .. }
                 | ReviewFindingEventKind::Rejected { .. }
                 | ReviewFindingEventKind::Stale,
             ReviewPassKind::Judge

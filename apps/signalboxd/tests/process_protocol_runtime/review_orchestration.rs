@@ -774,16 +774,34 @@ pub(crate) fn complete_judgment_members(
         ReviewJudgmentPlanMember {
             finding_id: findings.accepted_and_fixed,
             disposition: ReviewJudgmentDisposition::Accepted {},
+            judgment: signalbox_process_protocol::ReviewJudgmentResult {
+                bar_category: String::from("own-behavior-defect"),
+                decline_class: None,
+                confidence: CanonicalU64::new(5),
+                reason: String::from("The fixture supplies concrete evidence."),
+            },
         },
         ReviewJudgmentPlanMember {
             finding_id: findings.duplicate,
             disposition: ReviewJudgmentDisposition::Duplicate {
                 canonical_finding_id: findings.accepted_and_fixed,
             },
+            judgment: signalbox_process_protocol::ReviewJudgmentResult {
+                bar_category: String::from("none"),
+                decline_class: Some(String::from("duplicate")),
+                confidence: CanonicalU64::new(5),
+                reason: String::from("The fixture supplies concrete evidence."),
+            },
         },
         ReviewJudgmentPlanMember {
             finding_id: findings.accepted_and_published,
             disposition: ReviewJudgmentDisposition::Accepted {},
+            judgment: signalbox_process_protocol::ReviewJudgmentResult {
+                bar_category: String::from("own-behavior-defect"),
+                decline_class: None,
+                confidence: CanonicalU64::new(5),
+                reason: String::from("The fixture supplies concrete evidence."),
+            },
         },
     ]
 }
@@ -797,16 +815,34 @@ pub(crate) fn direct_cycle_members(
             disposition: ReviewJudgmentDisposition::Duplicate {
                 canonical_finding_id: findings.duplicate,
             },
+            judgment: signalbox_process_protocol::ReviewJudgmentResult {
+                bar_category: String::from("none"),
+                decline_class: Some(String::from("duplicate")),
+                confidence: CanonicalU64::new(5),
+                reason: String::from("The fixture supplies concrete evidence."),
+            },
         },
         ReviewJudgmentPlanMember {
             finding_id: findings.duplicate,
             disposition: ReviewJudgmentDisposition::Duplicate {
                 canonical_finding_id: findings.accepted_and_fixed,
             },
+            judgment: signalbox_process_protocol::ReviewJudgmentResult {
+                bar_category: String::from("none"),
+                decline_class: Some(String::from("duplicate")),
+                confidence: CanonicalU64::new(5),
+                reason: String::from("The fixture supplies concrete evidence."),
+            },
         },
         ReviewJudgmentPlanMember {
             finding_id: findings.accepted_and_published,
             disposition: ReviewJudgmentDisposition::Accepted {},
+            judgment: signalbox_process_protocol::ReviewJudgmentResult {
+                bar_category: String::from("own-behavior-defect"),
+                decline_class: None,
+                confidence: CanonicalU64::new(5),
+                reason: String::from("The fixture supplies concrete evidence."),
+            },
         },
     ]
 }
@@ -820,17 +856,35 @@ pub(crate) fn transitive_cycle_members(
             disposition: ReviewJudgmentDisposition::Duplicate {
                 canonical_finding_id: findings.duplicate,
             },
+            judgment: signalbox_process_protocol::ReviewJudgmentResult {
+                bar_category: String::from("none"),
+                decline_class: Some(String::from("duplicate")),
+                confidence: CanonicalU64::new(5),
+                reason: String::from("The fixture supplies concrete evidence."),
+            },
         },
         ReviewJudgmentPlanMember {
             finding_id: findings.duplicate,
             disposition: ReviewJudgmentDisposition::Duplicate {
                 canonical_finding_id: findings.accepted_and_published,
             },
+            judgment: signalbox_process_protocol::ReviewJudgmentResult {
+                bar_category: String::from("none"),
+                decline_class: Some(String::from("duplicate")),
+                confidence: CanonicalU64::new(5),
+                reason: String::from("The fixture supplies concrete evidence."),
+            },
         },
         ReviewJudgmentPlanMember {
             finding_id: findings.accepted_and_published,
             disposition: ReviewJudgmentDisposition::Duplicate {
                 canonical_finding_id: findings.accepted_and_fixed,
+            },
+            judgment: signalbox_process_protocol::ReviewJudgmentResult {
+                bar_category: String::from("none"),
+                decline_class: Some(String::from("duplicate")),
+                confidence: CanonicalU64::new(5),
+                reason: String::from("The fixture supplies concrete evidence."),
             },
         },
     ]
@@ -1181,7 +1235,9 @@ pub(crate) async fn drive_review_orchestration_process_loop() -> Result<(), Box<
             accepted_fixed,
             findings.accepted_and_fixed,
             1,
-            ReviewFindingEvent::Accepted {},
+            ReviewFindingEvent::Accepted {
+                confidence: CanonicalU64::new(5),
+            },
             ReviewFindingStatus::Accepted,
         )
         .await?;
@@ -1231,7 +1287,9 @@ pub(crate) async fn drive_review_orchestration_process_loop() -> Result<(), Box<
             accepted_published,
             findings.accepted_and_published,
             1,
-            ReviewFindingEvent::Accepted {},
+            ReviewFindingEvent::Accepted {
+                confidence: CanonicalU64::new(5),
+            },
             ReviewFindingStatus::Accepted,
         )
         .await?;

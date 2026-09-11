@@ -39,6 +39,8 @@
 //!   `runner_connection_authority_head`, both by enrollment `FOR SHARE`.
 //! - `context_compaction::complete`: source `context_frontier` `FOR SHARE` after the lifecycle
 //!   session lock.
+//! - `reload_configuration::finish_with_profiles`: `reload_configuration_command FOR UPDATE`
+//!   before credential and outbox locks.
 //!
 //! Advisory-lock protocols:
 //! - `oauth_credential`: the `oauth-registration-catalog` transaction advisory lock is
@@ -644,7 +646,16 @@ pub(crate) const DELEGATION_LOAD_RELATION: &str =
     "SELECT relation.parent_session_id, relation.parent_turn_id,
             relation.child_session_id, relation.policy_kind,
             relation.on_parent_stopped, relation.on_parent_cancelled,
-            task.turn_id AS child_turn_id, task.task_content
+            task.turn_id AS child_turn_id, task.task_content,
+            EXISTS (
+                SELECT 1
+                  FROM turn_lifecycle AS lifecycle
+                 WHERE lifecycle.session_id = task.child_session_id
+                   AND lifecycle.turn_id = task.turn_id
+                   AND lifecycle.state_kind = 'terminal'
+                   AND lifecycle.terminal_disposition_kind =
+                        'reconciliation_required'
+            ) AS reconciliation_required_child
        FROM session_delegation AS relation
        JOIN session_delegation_initial_task AS task
          ON task.spawning_tool_request_id = relation.spawning_tool_request_id
@@ -943,8 +954,8 @@ pub(crate) const REVIEW_RUN_TRANSITION: &str = "SELECT
                 AS evidence_pass_result_event_ordinal,
             canonical_pass.result_event_kind
                 AS evidence_pass_result_event_kind,
-            canonical_pass.result_reason
-                AS evidence_pass_result_reason,
+            canonical_pass.result_reason AS evidence_pass_result_reason,
+            canonical_pass.result_judge_confidence AS evidence_pass_result_judge_confidence,
             canonical_pass.result_referenced_finding_id
                 AS evidence_pass_result_referenced_finding_id,
             canonical_pass.result_referenced_finding_run_id
@@ -981,6 +992,7 @@ pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
             workflow_pass.result_event_ordinal,
             workflow_pass.result_event_kind,
             workflow_pass.result_reason,
+            workflow_pass.result_judge_confidence,
             workflow_pass.result_referenced_finding_id,
             workflow_pass.result_referenced_finding_run_id,
             workflow_pass.result_referenced_finding_pass_id,
