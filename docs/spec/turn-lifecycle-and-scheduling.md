@@ -384,6 +384,9 @@ prefix. Imported ancestry resolves only through the checked session-creation
 producer, and its one-to-one seed must name the exact stored frontier whose
 membership matches the selected prefix.
 
+Active-turn compaction retains the active turn while its dedicated call is
+prepared or in flight.
+
 Stored active phases are conclusions derived from complete owner facts, never
 trusted discriminators. A recovery-decision wait reconstitutes from an ambiguous
 terminal model call or tool attempt correlated with its ended turn attempt; an
