@@ -4809,6 +4809,8 @@ dependencies = [
  "signalbox-tool-contract",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

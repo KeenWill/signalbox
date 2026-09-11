@@ -366,3 +366,211 @@ mod capacity;
 
 #[path = "credential_wait_projection.rs"]
 mod projection;
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_pool_quota_rotation_parks_until_capacity_returns() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_domain::{ProviderRateLimitSnapshot, ProviderRateLimitWindow};
+    use signalbox_persistence::model_execution::CredentialPoolRuntimeTieBreak;
+    use std::time::SystemTime;
+    const SEED: u128 = 0x6005_1000;
+    const POOL: &str = "quota-wait-pool";
+    const FIRST: &str = "quota-first";
+    const SECOND: &str = "quota-second";
+    let (container, pool, _) = migrated_postgres().await?;
+    let (session, turn, repository) = active_credential_pool_fixture(
+        &pool,
+        SEED,
+        POOL,
+        &[FIRST, SECOND],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(SEED + 4)));
+    let mut repository = repository.with_credential_pools(HashMap::from([(
+        target,
+        park_policy(POOL, &[FIRST, SECOND]).with_capacity_policy(
+            CredentialPoolRuntimeTieBreak::LeastUsed,
+            Some(0),
+            CredentialPoolRuntimeAction::SwitchNextTurn,
+        ),
+    )]));
+    let now = SystemTime::now();
+    let reset = now + Duration::from_secs(3600);
+    let exhausted = ProviderRateLimitSnapshot::new(
+        now,
+        vec![ProviderRateLimitWindow::new(0, None, Some(reset))],
+    );
+    let (first, reference) =
+        prepare_and_authorize_pool_call(&repository, session, SEED + 100).await?;
+    assert_eq!(reference, FIRST);
+    let rotated = repository
+        .commit_observation(
+            session,
+            first
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::QuotaExhausted,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    true,
+                )
+                .with_rate_limits(Some(exhausted.clone())),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 120)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 121)),
+                ),
+                successor_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(SEED + 122)),
+            },
+            |_| panic!("no steering in this fixture"),
+        )
+        .await?;
+    assert!(matches!(
+        rotated,
+        Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(_))
+    ));
+    let (second, reference) =
+        prepare_and_authorize_pool_call(&repository, session, SEED + 200).await?;
+    assert_eq!(reference, SECOND);
+    let parked = repository
+        .commit_observation(
+            session,
+            second
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::QuotaExhausted,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    true,
+                )
+                .with_rate_limits(Some(exhausted)),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 220)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 221)),
+                ),
+                successor_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(SEED + 222)),
+            },
+            |_| panic!("no steering in this fixture"),
+        )
+        .await?;
+    let Some(ModelCallObservationCommitOutcome::CredentialWait(wait)) = parked else {
+        panic!("both exhausted members must park the active turn")
+    };
+    assert_eq!(wait.cause(), CredentialAvailabilityWaitCause::Exhausted);
+    let transcript = signalbox_persistence::process_read::ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("parked session remains readable");
+    assert!(
+        matches!(transcript.turns()[0].state(), signalbox_persistence::process_read::ProcessTurnState::ActiveAwaitingCredentialAvailability { wait: projected } if *projected == wait)
+    );
+    let failed: i64 = sqlx::query_scalar("SELECT count(*) FROM semantic_transcript_entry WHERE source_session_id = $1 AND payload_kind = 'turn_failed'")
+        .bind(session.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(failed, 0);
+    // Fresh provider capacity evidence grants the existing capacity wake.
+    sqlx::query("UPDATE credential_rate_limit_snapshot SET observed_at_nanos = observed_at_nanos + 1, windows = $2 WHERE credential_reference = $1")
+        .bind(SECOND).bind(serde_json::json!([{"remaining_percent": 100, "window_duration": null, "resets_at": null}]))
+        .execute(&pool).await?;
+    let PrepareInitialModelCallOutcome::Checkpointed(call) =
+        prepare_wait_admission(&repository, session, SEED + 300).await?
+    else {
+        panic!("fresh capacity must release the parked quota successor")
+    };
+    let reference: String =
+        sqlx::query_scalar("SELECT credential_reference FROM model_call WHERE model_call_id = $1")
+            .bind(call.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(reference, SECOND);
+    let calls: i64 = sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+        .bind(turn.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(calls, 3);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_pool_quota_rotation_prefers_another_member_after_capacity_returns()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ProviderRateLimitSnapshot, ProviderRateLimitWindow};
+    use signalbox_persistence::model_execution::CredentialPoolRuntimeTieBreak;
+    use std::time::SystemTime;
+    const SEED: u128 = 0x6005_2000;
+    const POOL: &str = "quota-rotation-pool";
+    const FIRST: &str = "quota-first";
+    const SECOND: &str = "quota-second";
+    let (container, pool, _) = migrated_postgres().await?;
+    let (session, _turn, repository) = active_credential_pool_fixture(
+        &pool,
+        SEED,
+        POOL,
+        &[FIRST, SECOND],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(SEED + 4)));
+    let mut repository = repository.with_credential_pools(HashMap::from([(
+        target,
+        park_policy(POOL, &[FIRST, SECOND]).with_capacity_policy(
+            CredentialPoolRuntimeTieBreak::LeastUsed,
+            Some(0),
+            CredentialPoolRuntimeAction::SwitchNextTurn,
+        ),
+    )]));
+    let now = SystemTime::now();
+    let reset = now + Duration::from_secs(3600);
+    let exhausted = ProviderRateLimitSnapshot::new(
+        now,
+        vec![ProviderRateLimitWindow::new(0, None, Some(reset))],
+    );
+    let (first, reference) =
+        prepare_and_authorize_pool_call(&repository, session, SEED + 100).await?;
+    assert_eq!(reference, FIRST);
+    let rotated = repository
+        .commit_observation(
+            session,
+            first
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::QuotaExhausted,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    true,
+                )
+                .with_rate_limits(Some(exhausted.clone())),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(SEED + 120)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(SEED + 121)),
+                ),
+                successor_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(SEED + 122)),
+            },
+            |_| panic!("no steering in this fixture"),
+        )
+        .await?;
+    assert!(matches!(
+        rotated,
+        Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(_))
+    ));
+
+    sqlx::query("UPDATE credential_rate_limit_snapshot SET observed_at_nanos = observed_at_nanos + 1, windows = $2 WHERE credential_reference = $1")
+        .bind(FIRST).bind(serde_json::json!([{"remaining_percent": 100, "window_duration": null, "resets_at": null}]))
+        .execute(&pool).await?;
+    let (_second, reference) =
+        prepare_and_authorize_pool_call(&repository, session, SEED + 200).await?;
+    assert_eq!(reference, SECOND);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

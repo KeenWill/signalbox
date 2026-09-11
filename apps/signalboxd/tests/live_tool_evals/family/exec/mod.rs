@@ -1018,6 +1018,7 @@ pub(crate) fn direct_exec_result(evidence: DirectExecEvidence<'_>) -> serde_json
     let mut result = serde_json::to_value(ExecResult {
         confinement: evidence.confinement,
         outcome: evidence.outcome,
+        diagnostic: None,
         stdout: OutputCapture {
             text: evidence.stdout.to_owned(),
             completeness: evidence.completeness,
