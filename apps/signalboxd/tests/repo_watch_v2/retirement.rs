@@ -120,9 +120,6 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
     let source = signalbox_session_ownership::LifecycleEventSource::new(core_pool.clone());
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     // Distinct command/session identities are arbitrary fixture data.
@@ -363,9 +360,6 @@ async fn quarantined_dispatch_origin_still_releases_and_retires_its_session()
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
     let source = signalbox_session_ownership::LifecycleEventSource::new(core_pool.clone());
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("quarantine/project"))?;
@@ -507,9 +501,6 @@ async fn quarantined_dispatch_origin_still_releases_and_retires_its_session()
 async fn terminal_triggered_dispatches_do_not_retire_themselves() -> Result<(), Box<dyn Error>> {
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-        .execute(&core_pool)
-        .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let source = signalbox_session_ownership::LifecycleEventSource::new(core_pool.clone());

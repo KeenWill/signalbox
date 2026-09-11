@@ -9,6 +9,7 @@ pub const RESERVED_KEY_TOOL_ARGUMENTS: &str = r#"{"nested":{"$serde_json::privat
 pub const OTHER_SESSION_ID: &str = "session-synthetic-2";
 pub const MESSAGE_ID: &str = "message-synthetic-1";
 pub const OTHER_MESSAGE_ID: &str = "message-synthetic-2";
+pub const RETRIED_MESSAGE_ID: &str = "message-synthetic-retry";
 pub const MODEL: &str = "claude-synthetic-model";
 pub const RESOLVED_MODEL: &str = "claude-synthetic-model-resolved";
 pub const OTHER_RESOLVED_MODEL: &str = "claude-synthetic-model-other";

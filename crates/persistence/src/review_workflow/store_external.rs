@@ -25,12 +25,28 @@ use signalbox_domain::{
     ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunReconstitutionInput,
 };
 use sqlx::types::Uuid;
-use sqlx::{PgConnection, Row};
+use sqlx::{PgConnection, Postgres, Row, Transaction};
 
 impl ReviewWorkflowStore {
     /// Idempotently inserts one canonical pre-effect external-link reservation.
     pub async fn reserve_external_link(
         &self,
+        requested: ReviewExternalLink,
+    ) -> Result<ReserveExternalLinkOutcome, ReviewWorkflowStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let outcome = self
+            .reserve_external_link_in_transaction(&mut transaction, requested)
+            .await?;
+        match &outcome {
+            ReserveExternalLinkOutcome::Inserted(_) => commit_mutation(transaction).await?,
+            ReserveExternalLinkOutcome::Existing(_) => transaction.commit().await?,
+        }
+        Ok(outcome)
+    }
+
+    pub(crate) async fn reserve_external_link_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
         requested: ReviewExternalLink,
     ) -> Result<ReserveExternalLinkOutcome, ReviewWorkflowStoreError> {
         if requested.attachment().is_some()
@@ -42,7 +58,6 @@ impl ReviewWorkflowStore {
             ));
         }
         let association = encode_link_association(requested.association());
-        let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
             "INSERT INTO review_external_link
                 (external_link_id, target_id, association_kind, run_id,
@@ -59,15 +74,16 @@ impl ReviewWorkflowStore {
         .bind(association.finding_pass.map(ReviewPassId::into_uuid))
         .bind(requested.provider().as_str())
         .bind(encode_external_object_kind(requested.object_kind()))
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if result.rows_affected() == 1 {
-            commit_mutation(transaction).await?;
             return Ok(ReserveExternalLinkOutcome::Inserted(requested));
         }
-        transaction.commit().await?;
-        let existing = self
-            .load_external_link(requested.id())
+        sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
+            .bind(requested.id().into_uuid())
+            .fetch_one(&mut **transaction)
+            .await?;
+        let existing = Self::load_external_link_on_connection(transaction, requested.id())
             .await?
             .ok_or_else(|| {
                 corruption(
@@ -93,28 +109,45 @@ impl ReviewWorkflowStore {
         link: ReviewExternalLinkId,
         attachment: ReviewExternalLinkAttachment,
     ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
-        let Some(current) = self.load_external_link(link).await? else {
+        let mut transaction = self.pool.begin().await?;
+        let next = self
+            .attach_external_link_in_transaction(&mut transaction, link, attachment)
+            .await?;
+        if next.is_some() {
+            commit_mutation(transaction).await?;
+        } else {
+            transaction.rollback().await?;
+        }
+        Ok(next)
+    }
+
+    pub(crate) async fn attach_external_link_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        link: ReviewExternalLinkId,
+        attachment: ReviewExternalLinkAttachment,
+    ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
+        let locked = sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
+            .bind(link.into_uuid())
+            .fetch_optional(&mut **transaction)
+            .await?;
+        if locked.is_none() {
             return Ok(None);
-        };
+        }
+        let current = Self::load_external_link_on_connection(transaction, link)
+            .await?
+            .ok_or_else(|| {
+                corruption(
+                    "review_external_link",
+                    String::from("locked reservation disappeared"),
+                )
+            })?;
         current
             .clone()
             .attach(attachment.clone())
             .map_err(|error| {
                 ReviewWorkflowStoreError::InvalidTransition(
                     ReviewWorkflowTransitionError::ExternalLink(error),
-                )
-            })?;
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
-            .bind(link.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-        let current = Self::load_external_link_on_connection(&mut transaction, link)
-            .await?
-            .ok_or_else(|| {
-                corruption(
-                    "review_external_link",
-                    String::from("locked reservation disappeared"),
                 )
             })?;
         let next = current.attach(attachment.clone()).map_err(|error| {
@@ -158,14 +191,14 @@ impl ReviewWorkflowStore {
         if let Some(finding) = transition_finding {
             sqlx::query(crate::lock_inventory::REVIEW_FINDINGS_TRANSITION)
                 .bind(vec![finding.into_uuid()])
-                .fetch_all(&mut *transaction)
+                .fetch_all(&mut **transaction)
                 .await?;
         }
         if posted_event.is_none()
             && let ReviewExternalLinkAssociation::Finding(reference) = next.association()
         {
             let current_finding = self
-                .load_finding_projection_on_connection(&mut transaction, reference.finding())
+                .load_finding_projection_on_connection(transaction, reference.finding())
                 .await?
                 .ok_or_else(|| {
                     corruption(
@@ -185,7 +218,7 @@ impl ReviewWorkflowStore {
         }
         if let Some(event) = posted_event.as_ref() {
             let current_finding = self
-                .load_finding_projection_on_connection(&mut transaction, event.finding().finding())
+                .load_finding_projection_on_connection(transaction, event.finding().finding())
                 .await?
                 .ok_or_else(|| {
                     corruption(
@@ -209,12 +242,12 @@ impl ReviewWorkflowStore {
                  )",
             )
             .bind(link.into_uuid())
-            .fetch_one(&mut *transaction)
+            .fetch_one(&mut **transaction)
             .await?
         {
             return Err(ReviewWorkflowStoreError::IncompletePublicationReconciliation);
         }
-        bind_pass_result(&mut transaction, attachment.pass_evidence()).await?;
+        bind_pass_result(transaction, attachment.pass_evidence()).await?;
         sqlx::query(
             "INSERT INTO review_external_link_attachment
                 (external_link_id, target_id, pass_run_id, pass_id,
@@ -228,12 +261,11 @@ impl ReviewWorkflowStore {
         .bind(next.provider().as_str())
         .bind(encode_external_object_kind(next.object_kind()))
         .bind(attachment.external_object().as_str())
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if let Some(event) = posted_event.as_ref() {
-            insert_finding_event(&mut transaction, event).await?;
+            insert_finding_event(transaction, event).await?;
         }
-        commit_mutation(transaction).await?;
         Ok(Some(next))
     }
 
@@ -579,6 +611,7 @@ impl ReviewWorkflowStore {
                         AS pass_result_event_ordinal,
                     pass.result_event_kind AS pass_result_event_kind,
                     pass.result_reason AS pass_result_reason,
+                    pass.result_judge_confidence AS pass_result_judge_confidence,
                     pass.result_referenced_finding_id
                         AS pass_result_referenced_finding_id,
                     pass.result_referenced_finding_run_id
@@ -712,6 +745,7 @@ impl ReviewWorkflowStore {
                     pass.result_finding_pass_id,
                     pass.result_event_ordinal, pass.result_event_kind,
                     pass.result_reason,
+                    pass.result_judge_confidence,
                     pass.result_referenced_finding_id,
                     pass.result_referenced_finding_run_id,
                     pass.result_referenced_finding_target_id,

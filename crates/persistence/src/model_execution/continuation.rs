@@ -575,6 +575,9 @@ async fn load_tool_continuation_headroom_evidence(
     let producing_effective_target = ResolvedProviderTarget::naming(
         ProviderModelIdentity::from_uuid(row.try_get("effective_provider_model_identity_id")?),
     );
+    if compacted_input_bytes.is_none() && row.try_get::<bool, _>("result_admission_exhausted")? {
+        return Ok(true);
+    }
     if compacted_input_bytes.is_none() && producing_effective_target != current_effective_target {
         return Ok(false);
     }
@@ -615,9 +618,6 @@ async fn load_tool_continuation_headroom_evidence(
             .saturating_add(steering_bytes)
             .saturating_add(limit.max_output_tokens())
             > limit.context_window_tokens());
-    }
-    if row.try_get::<bool, _>("result_admission_exhausted")? {
-        return Ok(true);
     }
     let Some(input_tokens) = usage.input_tokens() else {
         return Ok(false);

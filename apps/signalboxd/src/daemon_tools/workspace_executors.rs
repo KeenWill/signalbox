@@ -9,7 +9,6 @@ use super::{
         RecordedSessionBinding, SessionRootDecision, SessionWorkspaceRoot, SessionWorkspaceRoots,
         WorkspaceInstructionRootAuthority, WorkspaceInstructionRootFuture,
         WorkspaceInstructionRootResolutionError, a_derived_binding_exists,
-        a_derived_binding_shares_the_configured_root, another_session_bound,
         composition_aliases_its_own_parent, decide_session_root,
         parent_aliases_the_configured_root, probe_is_stale,
         shares_a_directory_with_the_configured_root,
@@ -293,8 +292,8 @@ where
                 // protect only the requests that take that branch.
                 if a_derived_binding_exists(&state.bindings, session) {
                     let standing_configured = self.standing_configured_identity()?;
-                    if a_derived_binding_shares_the_configured_root(
-                        &state.bindings,
+                    if state.refuses_configured_workspace_sharing(
+                        &self.roots,
                         session,
                         self.configured.workspace_identity.clone(),
                         standing_configured.clone(),
@@ -472,12 +471,7 @@ where
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
         let mut state = self.state.lock().await;
-        // Every other derived binding revalidates its own pair before its next
-        // request dispatches, so a derived workspace whose directories changed
-        // fails that session closed rather than being reachable beside this
-        // one; the pairs recorded here are the ones those sessions can still
-        // use.
-        if another_session_bound(&state.bindings, session, composed.clone()) {
+        if state.refuses_shared_workspace(&self.roots, session, composed.clone()) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
         match state

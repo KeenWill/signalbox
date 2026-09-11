@@ -1,6 +1,10 @@
 use super::{
+    composed_identity::ComposedWorkspaceIdentity,
     families::WorkspaceBoundExecutors,
-    session_workspace_roots::{MAX_RETAINED_SESSION_WORKSPACES, RecordedSessionBinding},
+    session_workspace_roots::{
+        MAX_RETAINED_SESSION_WORKSPACES, RecordedSessionBinding, SessionWorkspaceRoot,
+        SessionWorkspaceRoots, another_session_bound,
+    },
 };
 use signalbox_domain::SessionId;
 use signalbox_tools_exec::ProcessRunner;
@@ -63,6 +67,29 @@ pub(super) struct SessionWorkspaceState<Executors> {
 }
 
 impl<Executors: Clone + RetainedInFlight> SessionWorkspaceState<Executors> {
+    pub(super) fn refuses_shared_workspace(
+        &self,
+        roots: &SessionWorkspaceRoots,
+        session: SessionId,
+        composed: ComposedWorkspaceIdentity,
+    ) -> bool {
+        another_session_bound(&self.bindings, session, composed, |bound| {
+            self.retained.retained.contains_key(&bound)
+                || !matches!(roots.resolve(bound), SessionWorkspaceRoot::ConfiguredRoot)
+        })
+    }
+
+    pub(super) fn refuses_configured_workspace_sharing(
+        &self,
+        roots: &SessionWorkspaceRoots,
+        session: SessionId,
+        pinned: ComposedWorkspaceIdentity,
+        standing: ComposedWorkspaceIdentity,
+    ) -> bool {
+        self.refuses_shared_workspace(roots, session, pinned)
+            || self.refuses_shared_workspace(roots, session, standing)
+    }
+
     pub(super) const fn new() -> Self {
         Self {
             bindings: BTreeMap::new(),

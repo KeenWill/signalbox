@@ -81,6 +81,7 @@ impl ConversationIntrospectionError {
     fn from_process(error: ProcessReadError) -> Self {
         Self {
             class: match error {
+                ProcessReadError::ResyncRequired => OperatorFailureClass::CallerOrHubBug,
                 ProcessReadError::Database(_) => OperatorFailureClass::Infrastructure {
                     commit_ambiguous: false,
                 },

@@ -36,13 +36,24 @@ impl ReviewWorkflowStore {
         &self,
         target: &ReviewTarget,
     ) -> Result<(), ReviewWorkflowStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        self.insert_target_on_connection(&mut transaction, target)
+            .await?;
+        commit_mutation(transaction).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn insert_target_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        target: &ReviewTarget,
+    ) -> Result<(), ReviewWorkflowStoreError> {
         let (subject_kind, change_request_number) = match target.subject() {
             ReviewTargetSubject::ChangeRequest(number) => {
                 ("change_request", Some(Decimal::from(number.get())))
             }
             ReviewTargetSubject::Commit => ("commit", None),
         };
-        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO review_target
                 (target_id, provider_key, repository_key, subject_kind,
@@ -62,9 +73,8 @@ impl ReviewWorkflowStore {
                 .stack_parent()
                 .map(|parent| parent.target().into_uuid()),
         )
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
-        commit_mutation(transaction).await?;
         Ok(())
     }
 
@@ -74,9 +84,19 @@ impl ReviewWorkflowStore {
         target: ReviewTargetId,
     ) -> Result<Option<ReviewTarget>, ReviewWorkflowStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
-        let target = load_target_on_connection(&mut transaction, target).await?;
+        let target = self
+            .load_target_in_transaction(&mut transaction, target)
+            .await?;
         transaction.commit().await?;
         Ok(target)
+    }
+
+    pub(crate) async fn load_target_in_transaction(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        target: ReviewTargetId,
+    ) -> Result<Option<ReviewTarget>, ReviewWorkflowStoreError> {
+        load_target_on_connection(transaction, target).await
     }
 
     /// Inserts one queued run with its complete frozen policy.
@@ -120,6 +140,17 @@ impl ReviewWorkflowStore {
         run: ReviewRunId,
     ) -> Result<Option<ReviewRun>, ReviewWorkflowStoreError> {
         Ok(self.load_run_with_pass(run).await?.map(|(run, _pass)| run))
+    }
+
+    pub(crate) async fn load_run_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        run: ReviewRunId,
+    ) -> Result<Option<ReviewRun>, ReviewWorkflowStoreError> {
+        Ok(self
+            .load_run_with_pass_on_connection(connection, run)
+            .await?
+            .map(|(run, _pass)| run))
     }
 
     /// Loads and validates one run and its recorded pass from one snapshot.
@@ -167,8 +198,8 @@ impl ReviewWorkflowStore {
                         AS evidence_pass_result_event_ordinal,
                     canonical_pass.result_event_kind
                         AS evidence_pass_result_event_kind,
-                    canonical_pass.result_reason
-                        AS evidence_pass_result_reason,
+                    canonical_pass.result_reason AS evidence_pass_result_reason,
+                    canonical_pass.result_judge_confidence AS evidence_pass_result_judge_confidence,
                     canonical_pass.result_referenced_finding_id
                         AS evidence_pass_result_referenced_finding_id,
                     canonical_pass.result_referenced_finding_run_id
@@ -273,6 +304,18 @@ impl ReviewWorkflowStore {
 
     /// Inserts one pass after its exact session input has been accepted.
     pub async fn insert_pass(&self, pass: &ReviewPass) -> Result<(), ReviewWorkflowStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        self.insert_pass_on_connection(&mut transaction, pass)
+            .await?;
+        commit_mutation(transaction).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn insert_pass_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        pass: &ReviewPass,
+    ) -> Result<(), ReviewWorkflowStoreError> {
         if pass.state() != &ReviewPassState::Queued {
             return Err(ReviewWorkflowStoreError::InvalidInsertion(
                 ReviewWorkflowInsertionError::PassNotQueued {
@@ -281,7 +324,6 @@ impl ReviewWorkflowStore {
             ));
         }
         let state = encode_pass_state(pass.state());
-        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO review_pass
                 (pass_id, run_id, target_id, pass_kind, session_id,
@@ -301,15 +343,27 @@ impl ReviewWorkflowStore {
         .bind(state.kind)
         .bind(state.turn.map(TurnId::into_uuid))
         .bind(state.frontier.map(ContextFrontierId::into_uuid))
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
-        commit_mutation(transaction).await?;
         Ok(())
     }
 
     /// Inserts one queued run and its first queued pass atomically.
     pub async fn insert_run_and_pass(
         &self,
+        run: &ReviewRun,
+        pass: &ReviewPass,
+    ) -> Result<(), ReviewWorkflowStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        self.insert_run_and_pass_on_connection(&mut transaction, run, pass)
+            .await?;
+        commit_mutation(transaction).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn insert_run_and_pass_on_connection(
+        &self,
+        connection: &mut PgConnection,
         run: &ReviewRun,
         pass: &ReviewPass,
     ) -> Result<(), ReviewWorkflowStoreError> {
@@ -338,7 +392,6 @@ impl ReviewWorkflowStore {
         let (run_state_kind, run_state_pass_id) = encode_run_state(run.state());
         let policy = run.policy();
         let pass_state = encode_pass_state(pass.state());
-        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO review_run
                 (run_id, target_id, workflow_kind, policy_version,
@@ -356,7 +409,7 @@ impl ReviewWorkflowStore {
         ))
         .bind(run_state_kind)
         .bind(run_state_pass_id.map(ReviewPassId::into_uuid))
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
         sqlx::query(
             "INSERT INTO review_pass
@@ -377,9 +430,8 @@ impl ReviewWorkflowStore {
         .bind(pass_state.kind)
         .bind(pass_state.turn.map(TurnId::into_uuid))
         .bind(pass_state.frontier.map(ContextFrontierId::into_uuid))
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
-        commit_mutation(transaction).await?;
         Ok(())
     }
 
@@ -389,11 +441,19 @@ impl ReviewWorkflowStore {
         pass: ReviewPassId,
     ) -> Result<Option<ReviewPass>, ReviewWorkflowStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
-        let pass = load_pass_on_connection(&mut transaction, pass)
-            .await?
-            .map(|loaded| loaded.pass);
+        let pass = self.load_pass_on_connection(&mut transaction, pass).await?;
         transaction.commit().await?;
         Ok(pass)
+    }
+
+    pub(crate) async fn load_pass_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        pass: ReviewPassId,
+    ) -> Result<Option<ReviewPass>, ReviewWorkflowStoreError> {
+        Ok(load_pass_on_connection(connection, pass)
+            .await?
+            .map(|loaded| loaded.pass))
     }
 
     /// Loads the session and originating turn recorded for one accepted input.
@@ -468,29 +528,46 @@ impl ReviewWorkflowStore {
         next_run: ReviewRunState,
         next_pass: ReviewPassState,
     ) -> Result<Option<(ReviewRun, ReviewPass)>, ReviewWorkflowStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let transitioned = self
+            .transition_run_and_pass_on_connection(&mut transaction, run, pass, next_run, next_pass)
+            .await?;
+        if transitioned.is_some() {
+            commit_mutation(transaction).await?;
+        } else {
+            transaction.rollback().await?;
+        }
+        Ok(transitioned)
+    }
+
+    pub(crate) async fn transition_run_and_pass_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        run: ReviewRunId,
+        pass: ReviewPassId,
+        next_run: ReviewRunState,
+        next_pass: ReviewPassState,
+    ) -> Result<Option<(ReviewRun, ReviewPass)>, ReviewWorkflowStoreError> {
         if pass_state_result(&next_pass).is_some() {
             return Err(ReviewWorkflowStoreError::NonAtomicPassResult);
         }
-        let mut transaction = self.pool.begin().await?;
         let run_row = sqlx::query(crate::lock_inventory::REVIEW_RUN_TRANSITION)
             .bind(run.into_uuid())
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut *connection)
             .await?;
         let Some(run_row) = run_row else {
-            transaction.rollback().await?;
             return Ok(None);
         };
         let pass_row = sqlx::query(crate::lock_inventory::REVIEW_PASS_TRANSITION)
             .bind(pass.into_uuid())
             .bind(encode_pass_state(&next_pass).turn.map(TurnId::into_uuid))
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut *connection)
             .await?;
         let Some(pass_row) = pass_row else {
-            transaction.rollback().await?;
             return Ok(None);
         };
         let turn_evidence = decode_pass_turn_evidence(&pass_row)?;
-        let loaded_pass = load_pass_on_connection(&mut transaction, pass)
+        let loaded_pass = load_pass_on_connection(connection, pass)
             .await?
             .ok_or_else(|| {
                 corruption(
@@ -533,7 +610,7 @@ impl ReviewWorkflowStore {
         .bind(encoded_pass.kind)
         .bind(encoded_pass.turn.map(TurnId::into_uuid))
         .bind(encoded_pass.frontier.map(ContextFrontierId::into_uuid))
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
         let (run_state_kind, run_state_pass) = encode_run_state(transitioned_run.state());
         sqlx::query(
@@ -545,9 +622,8 @@ impl ReviewWorkflowStore {
         .bind(run.into_uuid())
         .bind(run_state_kind)
         .bind(run_state_pass.map(ReviewPassId::into_uuid))
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
-        commit_mutation(transaction).await?;
         Ok(Some((transitioned_run, transitioned_pass)))
     }
 }

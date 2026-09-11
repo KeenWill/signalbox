@@ -605,10 +605,35 @@ pub struct WebSessionWorkFacts {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebSessionSupervisionClass
+
+```rust
+pub enum WebSessionSupervisionClass {
+    Infrastructure,
+    CommitAmbiguous,
+    Corruption,
+    IdentityCollision,
+    Bug,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebSessionSupervision
+
+```rust
+pub struct WebSessionSupervision {
+    pub class: WebSessionSupervisionClass,
+    pub cause_code: string::String,
+    pub pending: bool,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebSessionTimelineDescriptor
 
 ```rust
 pub struct WebSessionTimelineDescriptor {
+    pub supervision: option::Option<WebSessionSupervision>,
     pub workspace_root_kind: option::Option<WebSessionWorkspaceRootKind>,
     pub repository_watch: option::Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
@@ -1575,12 +1600,27 @@ pub struct WebSessionTimelineDetailPage {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebCredentialAvailabilityWaitCause
+
+```rust
+pub enum WebCredentialAvailabilityWaitCause {
+    Contended,
+    Exhausted,
+    NetworkUnavailable,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebSessionLiveActiveState
 
 ```rust
 pub enum WebSessionLiveActiveState {
     Running {
         model_call_id: option::Option<WebLiveResourceId>,
+    },
+    AwaitingCredentialAvailability {
+        wait_attempt_id: WebLiveResourceId,
+        cause: WebCredentialAvailabilityWaitCause,
     },
     AwaitingModelCallRecovery {
         model_call_id: WebLiveResourceId,
@@ -1943,36 +1983,4 @@ pub enum WebUsageCostUnavailableReason {
     ConfigurationUnavailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebDollarAmount
-
-```rust
-pub struct WebDollarAmount(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl WebDollarAmount {
-    #[must_use]
-    pub fn from_derived(value: string::String) -> Self;
-}
-impl<'de> de::Deserialize<'de> for WebDollarAmount {
-    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
-    where
-        D: de::Deserializer<'de>;
-}
-```
-
-## WebUsageRateVersion
-
-```rust
-pub struct WebUsageRateVersion(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl WebUsageRateVersion {
-    #[must_use]
-    pub fn from_configured(value: string::String) -> Self;
-}
-impl<'de> de::Deserialize<'de> for WebUsageRateVersion {
-    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
-    where
-        D: de::Deserializer<'de>;
-}
 ```

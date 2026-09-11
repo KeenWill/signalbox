@@ -607,7 +607,9 @@ pub(super) fn accepted_finding_result() -> ReviewPassResult {
     ReviewPassResult::FindingEvent(ReviewFindingEventResult::new(
         finding_ref(10),
         ReviewEventOrdinal::one(),
-        ReviewFindingEventResultKind::Accepted,
+        ReviewFindingEventResultKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     ))
 }
 
@@ -928,7 +930,9 @@ pub(super) fn finding_transition_rows() -> Vec<FindingTransitionRow> {
     let events = [
         (
             "Accepted",
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+            },
             ReviewFindingStatus::Accepted,
         ),
         (

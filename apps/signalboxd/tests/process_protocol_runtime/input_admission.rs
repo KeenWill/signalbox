@@ -616,13 +616,14 @@ async fn reported_usage_preflight_counts_queued_input_framing() -> Result<(), Bo
     let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
     let configuration = reported_usage_preflight_configuration()?;
     let runtime_models = configuration.runtime_model_catalog();
-    let summary_text = String::from("queued input preflight summary");
+    // Keep the summary within the fixture's 16-byte compaction output budget.
+    let summary_text = String::from("queued summary");
     let summary_runtime = ScriptedModel::single(completed_script(
         "fixture-model",
         &summary_text,
         TokenUsage {
             input_tokens: Some(4000),
-            output_tokens: Some(20),
+            output_tokens: Some(4),
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         },

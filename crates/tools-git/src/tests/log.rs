@@ -96,6 +96,32 @@ fn one_entry_log_does_not_order_an_unreturned_long_merge_parent() {
 }
 
 #[test]
+fn log_orders_a_small_page_across_long_merge_ancestry() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let long_parent = plant_linear_history(&repository, fixture.initial, 4097);
+    let merge = commit_with_parents(
+        &repository,
+        &[fixture.initial, long_parent],
+        "merge with an ancestor as its first parent",
+    );
+    let executor = fixture.executor();
+
+    let log = execute(
+        &executor,
+        LocalOperation::Log(GitLogArguments {
+            revision: merge.to_string(),
+            max_entries: 2,
+        }),
+    );
+
+    assert_eq!(log["commits"][0]["commit"], merge.to_string());
+    assert_eq!(log["commits"][1]["commit"], long_parent.to_string());
+    assert_eq!(log["commits"].as_array().expect("commit page").len(), 2);
+    assert_eq!(log["truncated"], true);
+}
+
+#[test]
 fn construction_rejects_a_shallow_file_over_the_entry_budget() {
     let fixture = Fixture::new();
     plant_shallow_entries(fixture.root(), fixture.initial, MAX_SHALLOW_ENTRIES + 1);

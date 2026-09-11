@@ -168,6 +168,7 @@ fn configured_composition_contains(name: &ToolName, composition: DaemonToolCompo
         || name == SESSION_STATUS_UPDATE_NAME
         || name == GOAL_DECLARE_NAME
         || CODE_HOST_TOOL_NAMES.contains(&name)
+        || signalbox_tools_workflows::WORKFLOW_TOOL_NAMES.contains(&name)
         || PLAN_TOOL_NAMES.contains(&name)
         || SESSION_DELEGATION_TOOL_NAMES.contains(&name)
         || BLOB_TOOL_NAMES.contains(&name)

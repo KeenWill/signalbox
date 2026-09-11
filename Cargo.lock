@@ -4570,6 +4570,7 @@ name = "signalbox-model-runtime-claude-cli"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "chrono",
  "rustix 1.1.4",
  "semver",
  "serde",
@@ -4579,6 +4580,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4942,6 +4944,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-tools-workflows"
+version = "0.0.0"
+dependencies = [
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "signalbox-application",
+ "signalbox-derive",
+ "signalbox-domain",
+ "signalbox-tool-contract",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-tools-workspace"
 version = "0.0.0"
 dependencies = [
@@ -5061,6 +5077,7 @@ dependencies = [
  "signalbox-tools-plan",
  "signalbox-tools-sessions",
  "signalbox-tools-web",
+ "signalbox-tools-workflows",
  "signalbox-tools-workspace",
  "signalbox-web-contract",
  "signalbox-workflow-runtime",

@@ -68,6 +68,8 @@ pub struct DaemonToolExecutor<
     pub(super) delegation: SessionDelegationExecutor<DaemonSessionDelegationPort>,
     pub(super) goal: Option<GoalDeclarationExecutor>,
     pub(super) blob: Option<BlobToolExecutor>,
+    pub(super) workflows:
+        Option<signalbox_tools_workflows::WorkflowExecutor<super::workflows::DaemonWorkflowPort>>,
     pub(super) file_media: Option<super::DaemonFileMediaExecutor>,
 }
 
@@ -101,6 +103,12 @@ where
     FileSystem: WorkspaceMutationFileSystem,
     ExecRunner: ProcessRunner,
 {
+    /// Installs the workflow executor matching the compiled declarations.
+    pub fn with_workflows(mut self, port: super::workflows::DaemonWorkflowPort) -> Self {
+        self.workflows = Some(signalbox_tools_workflows::WorkflowExecutor(port));
+        self
+    }
+
     /// Supplies current repository configuration and persisted dispatch authority for pushes.
     pub fn with_repository_watch(
         mut self,
@@ -220,6 +228,13 @@ where
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
         let name = invocation.request().name().as_str();
         match name {
+            name if signalbox_tools_workflows::WORKFLOW_TOOL_NAMES.contains(&name) => self
+                .workflows
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             CURRENT_TIME_NAME => self
                 .current_time
                 .execute(invocation)

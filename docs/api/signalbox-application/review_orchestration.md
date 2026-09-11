@@ -316,9 +316,11 @@ impl ReviewJudgmentPlanMember {
     pub const fn new(
         finding: signalbox_domain::ReviewFindingRef,
         disposition: ReviewPlannedDisposition,
+        judgment: signalbox_domain::ReviewJudgment,
     ) -> Self;
     pub const fn finding(&self) -> signalbox_domain::ReviewFindingRef;
     pub const fn disposition(&self) -> &ReviewPlannedDisposition;
+    pub const fn judgment(&self) -> &signalbox_domain::ReviewJudgment;
 }
 ```
 
@@ -346,6 +348,7 @@ impl ReviewJudgmentPlan {
 
 ```rust
 pub enum ReviewJudgmentPlanFailure {
+    ContradictoryVerdict,
     ForeignAnalysisTarget,
     ForeignAnalysisPolicy,
     ForeignAnalysisTemplate,

@@ -106,6 +106,31 @@ impl ActivatedTurn {
         recovery_attempt: nonzero::NonZeroU32,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> result::Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
+    pub fn apply_automatic_tool_reconciliation(
+        self,
+        wait: AwaitingToolRecovery,
+        tool_attempt: EndedToolAttempt,
+        attempt: EndedTurnAttempt,
+        result_projection: PreparedToolResultProjection,
+        recovery_attempt: nonzero::NonZeroU32,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> result::Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_tool_recovery(
+        self,
+        wait: AwaitingToolRecovery,
+        tool_attempt: EndedToolAttempt,
+        attempt: EndedTurnAttempt,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> result::Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_tool_batch(
+        self,
+        batch: ToolBatch,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> result::Result<CancelledModelCallTurn, ModelCallClosureError>;
     pub fn apply_interrupt_to_runner_recovery(
         self,
         starting_snapshot: ResolvedContextFrontierSnapshot,
@@ -526,6 +551,16 @@ impl PreparedDelegatedTurnActivation {
         vec::Vec<SemanticTranscriptEntry>,
         ResolvedContextFrontierSnapshot,
     )>;
+    pub fn with_reconstituted_tool_recovery(
+        self,
+        phase: ActiveTurnSchedulingReconstitutionInput,
+        pending: vec::Vec<PendingSteeringInput>,
+        consumed: vec::Vec<ConsumedSteeringReconstitutionInput>,
+    ) -> option::Option<(
+        ActivatedTurn,
+        EndedTurnAttempt,
+        ResolvedContextFrontierSnapshot,
+    )>;
     pub fn with_reconstituted_model_call_recovery(
         self,
         input: DelegatedModelCallRecoveryReconstitutionInput,
@@ -820,6 +855,11 @@ impl CancelledTurnExecutionReconstitutionInput {
         ended_attempt: TurnAttemptId,
         attempt_end: TerminalAttemptEndReconstitutionInput,
         ended_call: option::Option<ModelCallId>,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
+    pub const fn foreground_child_wait(
+        owning_turn: TurnId,
+        wait: EndedToolAttempt,
         interrupt: AppliedInterruptCommandResult,
     ) -> Self;
     pub fn with_terminal_tool_attempts(
