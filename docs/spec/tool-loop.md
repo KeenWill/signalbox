@@ -222,7 +222,9 @@ resumes from durable wait and result rows and cannot duplicate an external
 effect. A batch can retain multiple foreground waits; continuation and
 interruption associate delivered child results with their await requests in
 proposal order. The next model call closes that batch across the intervening
-child-wait attempts, including when an ordinary tool follows the final wait.
+child-wait attempts, including when an ordinary tool follows the final wait. A
+delegated turn waiting on its own child remains interruptible and closable
+without a live model call.
 
 The error kind set stays closed; a family whose failures do not fit maps into it
 and may fix the detail to its own closed token vocabulary.

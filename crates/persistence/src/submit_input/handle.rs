@@ -20,9 +20,9 @@ use crate::model_execution::{
     attach_interrupt_reclassification_candidates_for_active,
     attach_recovery_interrupt_reclassification_candidates,
     attach_recovery_interrupt_reclassification_candidates_for_activated,
-    load_delegated_runner_recovery_for_interrupt, lock_delegated_child_endpoint_sessions,
-    persist_stop_requested, persist_terminal_outcome, persist_tool_reconciliation_required,
-    require_live_execution_for_restart,
+    load_delegated_active_turn_for_interrupt, load_delegated_runner_recovery_for_interrupt,
+    lock_delegated_child_endpoint_sessions, persist_stop_requested, persist_terminal_outcome,
+    persist_tool_reconciliation_required, require_live_execution_for_restart,
 };
 use crate::tool_loop::{
     load_active_batch_from_connection, load_optional_foreground_delegation_outcome,
@@ -449,16 +449,18 @@ where
                         })?,
                 ))
             } else {
-                let execution =
-                    require_live_execution_for_restart(connection, interrupt.session()).await?;
-                let identities = attach_interrupt_reclassification_candidates(
+                let active =
+                    load_delegated_active_turn_for_interrupt(connection, interrupt.session())
+                        .await?
+                        .ok_or(SubmitInputCorruption::Missing("delegated active tool turn"))?;
+                let identities = attach_interrupt_reclassification_candidates_for_activated(
                     cancellation_identities,
-                    &execution,
+                    &active,
                     &mut next_reclassified_turn,
                 )?;
                 Some(ModelCallInterruptOutcome::Cancelled(
-                    execution
-                        .apply_interrupt_to_tool_batch(interrupt, projection, identities)
+                    active
+                        .apply_interrupt_to_tool_batch(batch, projection, interrupt, identities)
                         .map_err(|_| {
                             SubmitInputCorruption::Inconsistent(
                                 "applied interrupt cannot close executing tool batch",
