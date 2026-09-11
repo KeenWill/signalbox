@@ -1334,11 +1334,19 @@ mod tests {
         )
         .expect("workspace source");
         let arguments = cargo_arguments(CargoDiagnosticsCommand::Check, DEFAULT_TIMEOUT_SECONDS);
+        let launch_root = std::env::current_dir().expect("test launch directory");
+        let cargo = std::env::var_os("SIGNALBOX_TEST_CARGO")
+            .map(|path| launch_root.join(path))
+            .unwrap_or_else(|| std::path::PathBuf::from(&arguments.program));
+        let rustc = std::env::var_os("SIGNALBOX_TEST_RUSTC")
+            .map(|path| launch_root.join(path))
+            .unwrap_or_else(|| std::path::PathBuf::from("rustc"));
 
-        let result = Command::new(&arguments.program)
+        let result = Command::new(cargo)
             .args(&arguments.arguments)
             .current_dir(&workspace)
             .env("CARGO_HOME", &cargo_home)
+            .env("RUSTC", rustc)
             .env("CARGO_TARGET_DIR", workspace.join("target"))
             .env_remove("RUSTC_WRAPPER")
             .output()
