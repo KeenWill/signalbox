@@ -2858,53 +2858,7 @@ async fn lifecycle_stop_ignores_completed_foreground_waits_from_earlier_calls()
     let seed = 0x13ff_8000;
     let (first, first_spawn, first_wait) =
         checkpoint_foreground_child_wait_without_result(&pool, seed).await?;
-    // Checkpoint the first child's delivered result; continuation and stop use all constraints.
-    let mut transaction = pool.begin().await?;
-    sqlx::raw_sql(
-        "ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
-         ALTER TABLE session_child_result DISABLE TRIGGER ALL;
-         ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL;",
-    )
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO session_delegation_event
-            (spawning_tool_request_id, event_ordinal, event_kind, outcome_kind,
-             reason_kind, provenance_kind, provenance_session_id, provenance_turn_id)
-         SELECT spawning_tool_request_id, 2, 'outcome_recorded', 'result_returned',
-                'child_completed', 'child_turn', child_session_id, $2
-           FROM session_delegation WHERE spawning_tool_request_id = $1",
-    )
-    .bind(first_spawn.into_uuid())
-    .bind(next_test_submit_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO session_child_result
-            (spawning_tool_request_id, event_ordinal, event_kind, outcome_kind, content_text)
-         VALUES ($1, 2, 'outcome_recorded', 'result_returned', 'first child completed')",
-    )
-    .bind(first_spawn.into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO session_child_result_delivery
-            (awaiting_tool_request_id, spawning_tool_request_id, parent_session_id)
-         VALUES ($1, $2, $3)",
-    )
-    .bind(first_wait.into_uuid())
-    .bind(first_spawn.into_uuid())
-    .bind(first.session.into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::raw_sql(
-        "ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;
-         ALTER TABLE session_child_result ENABLE TRIGGER ALL;
-         ALTER TABLE session_child_result_delivery ENABLE TRIGGER ALL;",
-    )
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
+    checkpoint_available_child_result(&pool, first.session, first_spawn, first_wait).await?;
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6))),
@@ -3008,6 +2962,8 @@ async fn lifecycle_stop_ignores_completed_foreground_waits_from_earlier_calls()
         vec![spawning_request, awaiting_request],
     )
     .await?;
+    checkpoint_available_child_result(&pool, fixture.session, spawning_request, awaiting_request)
+        .await?;
     let committed = recorded(
         &pool,
         SessionLifecycleCommand::new(
@@ -3015,7 +2971,7 @@ async fn lifecycle_stop_ignores_completed_foreground_waits_from_earlier_calls()
             fixture.session,
             SessionLifecycleOperation::Stop {
                 sticky: StopStickiness::Redispatchable,
-                descendant_scope: DescendantTerminationScope::ParentAlone,
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
             },
         ),
     )
@@ -3039,8 +2995,13 @@ async fn lifecycle_stop_ignores_completed_foreground_waits_from_earlier_calls()
                 UserContent::try_text("settle the stopped child wait".into())
                     .expect("fixture content"),
                 fixture.turn,
-                DescendantTerminationScope::ParentAlone,
-                input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                DescendantTerminationScope::ParentAndDescendants,
+                input_choices(
+                    1,
+                    ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(
+                        DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+                    )),
+                ),
             ),
             CommandPrincipal::Core,
             ParentTerminationKind::Stopped,
@@ -3086,7 +3047,7 @@ async fn lifecycle_stop_ignores_completed_foreground_waits_from_earlier_calls()
             (first_wait.into_uuid(), String::from("delegation_result")),
             (
                 awaiting_request.into_uuid(),
-                String::from("tool_closed_by_turn_end")
+                String::from("delegation_result")
             ),
         ]
     );
@@ -3104,5 +3065,61 @@ async fn lifecycle_stop_ignores_completed_foreground_waits_from_earlier_calls()
     );
     pool.close().await;
     drop(container);
+    Ok(())
+}
+
+/// Checkpoints one available child result without resuming its foreground wait.
+async fn checkpoint_available_child_result(
+    pool: &PgPool,
+    session: SessionId,
+    spawning: ToolRequestId,
+    awaiting: ToolRequestId,
+) -> Result<(), Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind, outcome_kind,
+             reason_kind, provenance_kind, provenance_session_id, provenance_turn_id)
+         SELECT spawning_tool_request_id, 2, 'outcome_recorded', 'result_returned',
+                'child_completed', 'child_turn', child_session_id, $2
+           FROM session_delegation WHERE spawning_tool_request_id = $1",
+    )
+    .bind(spawning.into_uuid())
+    .bind(next_test_submit_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind, outcome_kind, content_text)
+         VALUES ($1, 2, 'outcome_recorded', 'result_returned', 'child completed')",
+    )
+    .bind(spawning.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result_delivery
+            (awaiting_tool_request_id, spawning_tool_request_id, parent_session_id)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(awaiting.into_uuid())
+    .bind(spawning.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery ENABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
     Ok(())
 }
