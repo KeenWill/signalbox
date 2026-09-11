@@ -1644,8 +1644,8 @@ async fn seal_judgment_plan_impl(
             "INSERT INTO review_orchestration_judgment_member
                 (attempt_id, member_ordinal, finding_id, finding_run_id, finding_pass_id,
                  disposition_kind, reason, referenced_finding_id,
-                 referenced_run_id, referenced_pass_id)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                 referenced_run_id, referenced_pass_id, judgment)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
         )
         .bind(attempt.as_uuid())
         .bind(ordinal_i32(ordinal)?)
@@ -1657,6 +1657,9 @@ async fn seal_judgment_plan_impl(
         .bind(referenced.map(|value| value.finding().into_uuid()))
         .bind(referenced.map(|value| value.run().run().into_uuid()))
         .bind(referenced.map(|value| value.pass().pass().into_uuid()))
+        .bind(sqlx::types::Json(
+            crate::review_judgment::StoredReviewJudgment::encode(member.judgment()),
+        ))
         .execute(&mut *transaction)
         .await?;
     }
@@ -1705,7 +1708,7 @@ async fn load_judgment_plan_on_connection(
         "SELECT member.finding_id, member.finding_run_id, member.finding_pass_id,
                 attempt.target_id,
                 reason, referenced_finding_id, referenced_run_id, referenced_pass_id
-                , disposition_kind
+                , disposition_kind, judgment
            FROM review_orchestration_judgment_member AS member
            JOIN review_orchestration_attempt AS attempt USING (attempt_id)
           WHERE member.attempt_id = $1 ORDER BY member_ordinal",
@@ -1737,7 +1740,18 @@ async fn load_judgment_plan_on_connection(
             "stale" => ReviewPlannedDisposition::Stale,
             _ => return Err(corruption("judgment disposition is not closed")),
         };
-        members.push(ReviewJudgmentPlanMember::new(finding, disposition));
+        let judgment = row
+            .try_get::<sqlx::types::Json<crate::review_judgment::StoredReviewJudgment>, _>(
+                "judgment",
+            )?
+            .0
+            .decode()
+            .ok_or_else(|| corruption("invalid categorical judgment"))?;
+        members.push(ReviewJudgmentPlanMember::new(
+            finding,
+            disposition,
+            judgment,
+        ));
     }
     Ok(Some(ReviewJudgmentPlan::new(
         pass,

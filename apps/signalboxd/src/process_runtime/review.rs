@@ -973,11 +973,19 @@ where
         return write_review_invalid(writer, version, request_id).await;
     };
     let (result_kind, event_kind, blocked) = match event {
-        WireReviewFindingEvent::Accepted {} => (
-            ReviewFindingEventResultKind::Accepted,
-            ReviewFindingEventKind::Accepted,
-            false,
-        ),
+        WireReviewFindingEvent::Accepted { confidence } => {
+            let Some(confidence) = u8::try_from(confidence.value())
+                .ok()
+                .and_then(signalbox_domain::ReviewJudgeConfidence::try_new)
+            else {
+                return write_review_invalid(writer, version, request_id).await;
+            };
+            (
+                ReviewFindingEventResultKind::Accepted { confidence },
+                ReviewFindingEventKind::Accepted { confidence },
+                false,
+            )
+        }
         WireReviewFindingEvent::Rejected { reason } => {
             let Ok(reason) = ReviewText::try_new(reason) else {
                 return write_review_invalid(writer, version, request_id).await;

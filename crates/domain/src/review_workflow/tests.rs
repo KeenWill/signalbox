@@ -1731,7 +1731,9 @@ fn finding_machine_rejects_terminal_reopening() {
             finding_ref(10),
             ReviewEventOrdinal::one(),
             succeeded_pass(19, ReviewPassKind::Judge),
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+            },
         ))
         .expect("open finding may be accepted")
         .apply(posted_finding_event(
@@ -1755,7 +1757,9 @@ fn finding_machine_rejects_terminal_reopening() {
             finding_ref(10),
             ReviewEventOrdinal::try_new(4).expect("positive ordinal"),
             succeeded_pass(23, ReviewPassKind::Judge),
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+            },
         ))
         .expect_err("fixed finding is terminal");
     assert_eq!(
@@ -1774,7 +1778,9 @@ fn finding_history_rejects_noncontiguous_first_ordinal() {
             finding_ref(10),
             ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
             succeeded_pass(20, ReviewPassKind::Judge),
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+            },
         ))
         .expect_err("history must begin at ordinal one");
     assert_eq!(
@@ -1792,7 +1798,9 @@ fn finding_history_rejects_foreign_event_owner() {
         finding_ref(11),
         ReviewEventOrdinal::one(),
         succeeded_pass(20, ReviewPassKind::Judge),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let error = ReviewFinding::new(proposal())
         .apply(event.clone())
@@ -1814,7 +1822,9 @@ fn finding_history_rejects_substituted_event_pass_identity() {
         finding,
         ordinal,
         succeeded_pass(20, ReviewPassKind::Judge),
-        &ReviewFindingEventKind::Accepted,
+        &ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let event = ReviewFindingEvent::new(
         finding,
@@ -1822,7 +1832,9 @@ fn finding_history_rejects_substituted_event_pass_identity() {
         pass_ref(21),
         pass.clone(),
         pass_run_evidence(&pass),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let error = ReviewFinding::new(proposal())
         .apply(event)
@@ -1868,7 +1880,9 @@ fn finding_history_rejects_incompatible_event_pass_kind() {
         finding_ref(10),
         ReviewEventOrdinal::one(),
         succeeded_pass(20, ReviewPassKind::Publish),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let error = ReviewFinding::new(proposal())
         .apply(event.clone())
@@ -1898,7 +1912,9 @@ fn finding_history_rejects_event_policy_mismatch() {
                 result: None,
             },
         ),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let error = ReviewFinding::new(proposal())
         .apply(event)
@@ -1920,7 +1936,9 @@ fn finding_history_rejects_cross_wired_event_run() {
         finding,
         ordinal,
         succeeded_pass(20, ReviewPassKind::Judge),
-        &ReviewFindingEventKind::Accepted,
+        &ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let run = ReviewRunEvidence::new(
         pass.reference().run(),
@@ -1934,7 +1952,9 @@ fn finding_history_rejects_cross_wired_event_run() {
         pass.reference(),
         pass,
         run,
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let error = ReviewFinding::new(proposal())
         .apply(event)
@@ -1956,7 +1976,9 @@ fn finding_history_rejects_event_run_lifecycle_mismatch() {
         finding,
         ordinal,
         succeeded_pass(20, ReviewPassKind::Judge),
-        &ReviewFindingEventKind::Accepted,
+        &ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let run = ReviewRunEvidence::new(
         pass.reference().run(),
@@ -1972,7 +1994,9 @@ fn finding_history_rejects_event_run_lifecycle_mismatch() {
         pass.reference(),
         pass,
         run,
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let error = ReviewFinding::new(proposal())
         .apply(event)
@@ -1993,7 +2017,9 @@ fn finding_history_rejects_mismatched_pass_result() {
         finding,
         ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
         succeeded_pass(20, ReviewPassKind::Judge),
-        &ReviewFindingEventKind::Accepted,
+        &ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let event = ReviewFindingEvent::new(
         finding,
@@ -2001,7 +2027,9 @@ fn finding_history_rejects_mismatched_pass_result() {
         pass.reference(),
         pass.clone(),
         pass_run_evidence(&pass),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let error = ReviewFinding::new(proposal())
         .apply(event)
@@ -2077,7 +2105,9 @@ fn finding_history_rejects_conflicting_reused_pass_evidence() {
             finding_ref(10),
             ReviewEventOrdinal::one(),
             succeeded_pass(20, ReviewPassKind::Judge),
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+            },
         ))
         .expect("successful judgment may accept a finding");
     let event = finding_event(
@@ -2114,7 +2144,9 @@ fn finding_history_rejects_reparented_pass_identity() {
         finding_ref(CANONICAL_FINDING_SEED),
         ReviewEventOrdinal::one(),
         succeeded_pass(ARBITRARY_JUDGMENT_PASS_SEED, ReviewPassKind::Judge),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let pass = ReviewPassEvidence::new(
         ReviewPassRef::new(pass_ref(REASSIGNED_PASS_SEED).run(), accepted.pass().pass()),
@@ -2157,7 +2189,9 @@ fn finding_history_rejects_changed_run_claim() {
         finding_ref(CANONICAL_FINDING_SEED),
         ReviewEventOrdinal::one(),
         succeeded_pass(ARBITRARY_JUDGMENT_PASS_SEED, ReviewPassKind::Judge),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let pass = ReviewPassEvidence::new(
         ReviewPassRef::new(accepted.pass().run(), pass_id(REASSIGNED_PASS_SEED)),
@@ -2201,7 +2235,9 @@ fn finding_history_indexes_replay_claims() {
             finding_ref(10),
             ReviewEventOrdinal::one(),
             succeeded_pass(19, ReviewPassKind::Judge),
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+            },
         ))
         .expect("finding may be accepted")
         .apply(finding_event(
@@ -2243,7 +2279,9 @@ fn finding_history_rejects_incompatible_event_pass_outcome() {
             ReviewPolicy::version_one(),
             ReviewPassState::Failed { turn: turn_id(120) },
         ),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let error = ReviewFinding::new(proposal())
         .apply(event)
@@ -2288,7 +2326,9 @@ fn posted_event_rejects_another_publication_pass() {
             finding_ref(10),
             ReviewEventOrdinal::one(),
             succeeded_pass(19, ReviewPassKind::Judge),
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+            },
         ))
         .expect("finding may be accepted")
         .apply(event)
@@ -2308,7 +2348,9 @@ fn publication_blocked_finding_can_reconcile_to_posted() {
             finding_ref(10),
             ReviewEventOrdinal::one(),
             succeeded_pass(19, ReviewPassKind::Judge),
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+            },
         ))
         .expect("finding may be accepted")
         .apply(finding_event(
@@ -2343,7 +2385,9 @@ fn publication_reconciliation_rejects_another_reservation() {
             finding_ref(10),
             ReviewEventOrdinal::one(),
             succeeded_pass(19, ReviewPassKind::Judge),
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+            },
         ))
         .expect("finding may be accepted")
         .apply(finding_event(
@@ -2385,7 +2429,9 @@ fn reposting_rejects_consumed_publication_link() {
             finding_ref(10),
             ReviewEventOrdinal::one(),
             succeeded_pass(19, ReviewPassKind::Judge),
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+            },
         ))
         .expect("finding may be accepted")
         .apply(posted_finding_event(
@@ -2578,7 +2624,10 @@ fn attachment_rejects_nested_non_posted_event() {
                     Some(ReviewFindingEventResult::new(
                         finding,
                         ReviewEventOrdinal::one(),
-                        ReviewFindingEventResultKind::Accepted,
+                        ReviewFindingEventResultKind::Accepted {
+                            confidence: crate::ReviewJudgeConfidence::try_new(5)
+                                .expect("judge confidence"),
+                        },
                     )),
                 ),
             )),
@@ -3634,7 +3683,9 @@ fn rejected_finding_transition_retains_current_aggregate() {
         finding_ref(FOREIGN_FINDING_SEED),
         ReviewEventOrdinal::one(),
         succeeded_pass(ARBITRARY_JUDGMENT_PASS_SEED, ReviewPassKind::Judge),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     );
     let error = current
         .clone()
@@ -3949,16 +4000,18 @@ fn finding_history_rejects_mismatched_result_reference_status() {
 #[test]
 fn finding_rejects_acceptance_below_policy_threshold() {
     let error = ReviewFinding::new(proposal_with_confidence_axes(FindingConfidenceAxes {
-        is_real: 6_999,
+        is_real: 9_999,
         severity_label: 10_000,
     }))
     .apply(finding_event(
         finding_ref(10),
         ReviewEventOrdinal::one(),
         succeeded_pass(20, ReviewPassKind::Judge),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(3).expect("judge confidence"),
+        },
     ))
-    .expect_err("is-real confidence below 70 percent cannot be accepted");
+    .expect_err("judge confidence below the threshold cannot be accepted");
 
     assert_eq!(
         error.failure(),
@@ -3966,33 +4019,31 @@ fn finding_rejects_acceptance_below_policy_threshold() {
     );
 }
 
-/// publication cannot post a finding below the frozen threshold.
+/// publication uses the judge confidence independently of the producer.
 #[test]
-fn finding_rejects_posting_below_policy_threshold() {
+fn publication_uses_independent_judge_confidence() {
     let finding = ReviewFinding::new(proposal_with_confidence_axes(FindingConfidenceAxes {
-        is_real: 7_999,
-        severity_label: 10_000,
+        is_real: 1_000,
+        severity_label: 9_000,
     }))
     .apply(finding_event(
         finding_ref(10),
         ReviewEventOrdinal::one(),
         succeeded_pass(19, ReviewPassKind::Judge),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(4).expect("judge confidence"),
+        },
     ))
-    .expect("is-real confidence meets the judgment threshold");
-    let error = finding
+    .expect("independent judge confidence permits acceptance");
+    let published = finding
         .apply(posted_finding_event(
             finding_ref(10),
-            ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+            ReviewEventOrdinal::try_new(2).expect("ordinal"),
             succeeded_pass(20, ReviewPassKind::Publish),
             link_id(30),
         ))
-        .expect_err("is-real confidence below 80 percent cannot be posted");
-
-    assert_eq!(
-        error.failure(),
-        ReviewFindingTransitionFailure::BelowPublicationThreshold
-    );
+        .expect("producer confidence does not suppress judged publication");
+    assert_eq!(published.status(), ReviewFindingStatus::Posted);
 }
 
 /// severity-label uncertainty never suppresses a real finding.
@@ -4006,9 +4057,11 @@ fn finding_thresholds_ignore_severity_label_confidence() {
         finding_ref(10),
         ReviewEventOrdinal::one(),
         succeeded_pass(19, ReviewPassKind::Judge),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: crate::ReviewJudgeConfidence::try_new(5).expect("judge confidence"),
+        },
     ))
-    .expect("high is-real confidence permits judgment");
+    .expect("high judge confidence permits judgment");
 
     let posted = accepted
         .apply(posted_finding_event(

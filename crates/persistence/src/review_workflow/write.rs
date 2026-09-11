@@ -80,10 +80,10 @@ pub(super) async fn insert_finding_event(
              referenced_finding_id, referenced_finding_run_id,
              referenced_finding_target_id, referenced_finding_pass_id,
              referenced_finding_status,
-             external_link_id, external_link_association_kind)
+             external_link_id, external_link_association_kind, judge_confidence)
          VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-             $13, $14, $15
+             $13, $14, $15, $16
          )",
     )
     .bind(finding.finding().into_uuid())
@@ -117,6 +117,7 @@ pub(super) async fn insert_finding_event(
     .bind(encoded.referenced_status.map(encode_finding_status))
     .bind(encoded.external_link.map(ReviewExternalLinkId::into_uuid))
     .bind(encoded.external_link.map(|_| "finding"))
+    .bind(encoded.judge_confidence)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -151,7 +152,8 @@ pub(super) async fn bind_pass_result(
                 result_referenced_finding_status = $17,
                 result_external_link_id = $18,
                 result_external_object_key = $19,
-                result_observation_state = $20
+                result_observation_state = $20,
+                result_judge_confidence = $22
           WHERE pass_id = $1
             AND run_id = $2
             AND target_id = $3
@@ -175,10 +177,11 @@ pub(super) async fn bind_pass_result(
                     result_referenced_finding_status,
                     result_external_link_id,
                     result_external_object_key,
-                    result_observation_state
+                    result_observation_state,
+                    result_judge_confidence
                 ) IS NOT DISTINCT FROM (
                     $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                    $16, $17, $18, $19, $20
+                    $16, $17, $18, $19, $20, $22
                 )
             )
         RETURNING pass_id",
@@ -216,6 +219,7 @@ pub(super) async fn bind_pass_result(
     .bind(result.external_object)
     .bind(result.observation_state.map(encode_external_object_state))
     .bind(state.frontier.map(ContextFrontierId::into_uuid))
+    .bind(result.judge_confidence)
     .fetch_optional(&mut **transaction)
     .await?;
     if bound.is_none() {

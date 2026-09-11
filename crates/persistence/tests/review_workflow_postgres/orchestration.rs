@@ -135,6 +135,64 @@ async fn prepare_orchestration_fixture(
     prepare_orchestration_fixture_with_findings(pool, 1).await
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn schema_requires_scored_categorical_judgments() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+    let original: serde_json::Value = sqlx::query_scalar(
+        "SELECT judgment FROM review_orchestration_judgment_member WHERE attempt_id = $1",
+    )
+    .bind(fixture.attempt_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut missing_confidence = original.clone();
+    missing_confidence
+        .as_object_mut()
+        .expect("judgment object")
+        .remove("confidence");
+    let mut out_of_range = original.clone();
+    out_of_range["confidence"] = serde_json::json!(6);
+    let mut missing_category = original.clone();
+    missing_category["bar_category"] = serde_json::Value::Null;
+    let mut contradictory = original.clone();
+    contradictory["bar_category"] = serde_json::json!("none");
+    contradictory["decline_class"] = serde_json::json!("duplicate");
+    sqlx::query("ALTER TABLE review_orchestration_judgment_member DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    for invalid in [
+        serde_json::Value::Null,
+        missing_confidence,
+        out_of_range,
+        missing_category,
+        contradictory,
+    ] {
+        let error = sqlx::query(
+            "UPDATE review_orchestration_judgment_member SET judgment = $2 WHERE attempt_id = $1",
+        )
+        .bind(fixture.attempt_id.as_uuid())
+        .bind(sqlx::types::Json(invalid))
+        .execute(&pool)
+        .await
+        .expect_err("the required categorical shape cannot be bypassed through SQL");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some("review_orchestration_judgment_shape")
+        );
+    }
+    sqlx::query("ALTER TABLE review_orchestration_judgment_member ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        fixture.store.load_judgment_plan(fixture.attempt_id).await?,
+        Some(fixture.plan)
+    );
+    Ok(())
+}
+
 /// Prepares one sealed attempt carrying `findings` findings on a single target.
 ///
 /// Every finding shares the fixture's target, which is what makes the count a
@@ -248,7 +306,18 @@ async fn prepare_orchestration_fixture_with_findings(
         finding_refs
             .iter()
             .map(|reference| {
-                ReviewJudgmentPlanMember::new(*reference, ReviewPlannedDisposition::Accepted)
+                ReviewJudgmentPlanMember::new(
+                    *reference,
+                    ReviewPlannedDisposition::Accepted,
+                    signalbox_domain::ReviewJudgment::new(
+                        signalbox_domain::ReviewBarVerdict::Accept(
+                            signalbox_domain::ReviewBarCategory::OwnBehaviorDefect,
+                        ),
+                        signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                            .expect("judge confidence"),
+                        text("The fixture supplies concrete evidence."),
+                    ),
+                )
             })
             .collect(),
     );
@@ -539,7 +608,10 @@ async fn review_orchestration_store_reconstructs_complete_attempt() -> Result<()
                 fixture.finding_ref,
                 ReviewEventOrdinal::one(),
                 fixture.evidence[3].clone(),
-                ReviewFindingEventKind::Accepted,
+                ReviewFindingEventKind::Accepted {
+                    confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                        .expect("judge confidence"),
+                },
             ),
         )
         .await?

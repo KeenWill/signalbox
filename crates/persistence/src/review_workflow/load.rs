@@ -111,6 +111,7 @@ pub(crate) async fn load_pass_on_connection(
                 workflow_pass.result_event_ordinal,
                 workflow_pass.result_event_kind,
                 workflow_pass.result_reason,
+                workflow_pass.result_judge_confidence,
                 workflow_pass.result_referenced_finding_id,
                 workflow_pass.result_referenced_finding_run_id,
                 workflow_pass.result_referenced_finding_target_id,

@@ -426,8 +426,8 @@ impl ReviewWorkflowStore {
                         AS producing_pass_result_event_ordinal,
                     producing_pass.result_event_kind
                         AS producing_pass_result_event_kind,
-                    producing_pass.result_reason
-                        AS producing_pass_result_reason,
+                    producing_pass.result_reason AS producing_pass_result_reason,
+                    producing_pass.result_judge_confidence AS producing_pass_result_judge_confidence,
                     producing_pass.result_referenced_finding_id
                         AS producing_pass_result_referenced_finding_id,
                     producing_pass.result_referenced_finding_run_id
@@ -533,8 +533,8 @@ impl ReviewWorkflowStore {
                         AS event_pass_result_event_ordinal,
                     event_pass.result_event_kind
                         AS event_pass_result_event_kind,
-                    event_pass.result_reason
-                        AS event_pass_result_reason,
+                    event_pass.result_reason AS event_pass_result_reason,
+                    event_pass.result_judge_confidence AS event_pass_result_judge_confidence,
                     event_pass.result_referenced_finding_id
                         AS event_pass_result_referenced_finding_id,
                     event_pass.result_referenced_finding_run_id
@@ -560,7 +560,7 @@ impl ReviewWorkflowStore {
                         AS event_minimum_publication_confidence,
                     event_run.state_kind AS event_run_state_kind,
                     event_run.state_pass_id AS event_run_state_pass_id,
-                    event.event_kind, event.reason,
+                    event.event_kind, event.reason, event.judge_confidence,
                     event.referenced_finding_id,
                     event.referenced_finding_run_id,
                     event.referenced_finding_target_id,
