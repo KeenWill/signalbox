@@ -35,10 +35,10 @@ fn input_failure_reports_the_tool_invariant_without_changing_its_class() {
         OperatorFailureClass::FailClosedCorruption,
     );
     let failure = crate::submit_input::SubmitInputRepositoryError::from(execution);
-    assert_eq!(
-        failure.to_string(),
-        "SubmitInput model execution failed: inconsistent model-call execution tool result payload",
-    );
+    expect_test::expect![[
+        "SubmitInput model execution failed: inconsistent model-call execution tool result payload"
+    ]]
+    .assert_eq(&failure.to_string());
 }
 
 #[test]
