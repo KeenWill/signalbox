@@ -1080,9 +1080,6 @@ pub(crate) const TEST_DATABASE_TEMPLATE: &str = "SELECT pg_advisory_lock($1)";
 pub(crate) const HASHED_TRANSACTION_ADVISORY_LOCK: &str =
     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))";
 
-pub(crate) const RELOAD_CONFIGURATION_COMMAND: &str =
-    "SELECT command_id FROM reload_configuration_command WHERE command_id = $1 FOR UPDATE";
-
 pub(crate) const SEARCH_ARTIFACT_IDENTITY: &str = "SELECT pg_advisory_xact_lock(
                  hashtextextended(
                      concat_ws(chr(31), $1::text, $2::text),
