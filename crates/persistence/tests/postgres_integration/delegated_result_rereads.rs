@@ -1261,6 +1261,52 @@ async fn delegated_reconciliation_withholds_result_and_is_already_terminal_to_ca
     assert_eq!(terminal_before.0, "terminal");
     assert_eq!(terminal_before.1, "reconciliation_required");
 
+    let nested_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x220));
+    let nested_child = SessionId::from_uuid(Uuid::from_u128(seed + 0x221));
+    sqlx::query("ALTER TABLE session_delegation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind, on_parent_stopped, on_parent_cancelled)
+         VALUES ($1, $2, $3, $4, 'bound', 'cancel', 'stop')",
+    )
+    .bind(nested_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(nested_child.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let nested_frontier: (String, String) = sqlx::query_as(
+        "SELECT effective_parent_kind, expected_action
+           FROM delegation_cascade_expected_frontier($1, 'stopped')
+          WHERE spawning_tool_request_id = $2",
+    )
+    .bind(parent.into_uuid())
+    .bind(nested_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(nested_frontier, ("stopped".into(), "cancel".into()));
+
+    sqlx::query("ALTER TABLE session_delegation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM session_delegation
+          WHERE spawning_tool_request_id = $1",
+    )
+    .bind(nested_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
     use signalbox_domain::{
         CommandPrincipal, SessionLifecycleCommand, SessionLifecycleOperation, StopStickiness,
     };
