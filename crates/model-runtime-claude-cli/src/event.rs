@@ -17,8 +17,8 @@ use crate::bridge::{SERVER_NAME, TOOL_ACKNOWLEDGEMENT, TOOL_PREFIX};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
-    AssistantContent, AssistantEvent, AssistantRawEvent, CompactBoundary, RawToolUse, ResultEvent, ResultSubtype,
-    SystemInit, UserEvent,
+    AssistantContent, AssistantEvent, AssistantRawEvent, CompactBoundary, RawToolUse, ResultEvent,
+    ResultSubtype, SystemInit, UserEvent,
 };
 
 fn reject_duplicate_json_members(line: &str) -> Result<(), DecodeFailure> {
@@ -210,6 +210,7 @@ impl<C: Clone> EventDecoder<C> {
                     | "hook_response"
                     | "api_retry"
                     | "thinking_tokens"
+                    | "model_refusal_no_fallback"
             )
         ) {
             if let (Some(session), Some(native)) = (

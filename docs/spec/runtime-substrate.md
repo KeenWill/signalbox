@@ -417,6 +417,9 @@ Claude CLI native compaction boundaries must name the initialized session. The
 adapter logs the reported trigger and pre-compaction token count; the boundary
 does not replace the daemon's canonical transcript.
 
+A Claude native refusal notification stays bound to the initialized session and
+is nonterminal; the result event supplies the refusal evidence.
+
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
 zero, a total-only report records nothing because no adapter distributes a
