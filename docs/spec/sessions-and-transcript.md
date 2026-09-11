@@ -277,11 +277,16 @@ state it does not recognize returns an error rather than a guess.
 
 The only way to derive a new transcript snapshot is to append to the old one, so
 every earlier entry stays in order. Two frontiers are equal only if they are the
-same frontier; comparing content is a separate explicit operation. Compaction
-changes which entries are visible to the model, never what is stored. A summary
-cannot hide an unsummarized prefix, and its end boundary must close every tool
-exchange it covers. `ToolInadmissible` closes its request for both explicit and
-automatic compaction boundaries.
+same frontier; comparing content is a separate explicit operation. A transcript
+suffix acknowledgement names one durable semantic frontier, not an outbox event
+cursor or a content-equality token. Persistence admits it only when that
+frontier belongs to the selected session and is a prefix of the current
+frontier, then reads entries after its immutable member count. The process
+protocol requires a full resynchronization for an unknown, foreign-session, or
+non-prefix acknowledgement. Compaction changes which entries are visible to the
+model, never what is stored. A summary cannot hide an unsummarized prefix, and
+its end boundary must close every tool exchange it covers. `ToolInadmissible`
+closes its request for both explicit and automatic compaction boundaries.
 
 An accepted-input turn binds its configuration when its input is accepted, and a
 delegated-task or delegation-wake turn binds the configuration stored with its

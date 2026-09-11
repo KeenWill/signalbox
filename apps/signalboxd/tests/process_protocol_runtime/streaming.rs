@@ -120,7 +120,10 @@ pub(crate) async fn read_completed_assistant(
         .request_version(
             ProtocolVersion::One,
             request_id,
-            ClientRequest::ReadTranscript { session_id },
+            ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
         )
         .await?;
     let mut assistant_index = None;
@@ -224,6 +227,7 @@ pub(crate) fn transcript_snapshot_end_facts(message: &ServerMessage) -> Transcri
             cursor,
             turn_count,
             entry_count,
+            ..
         } => TranscriptSnapshotEndFacts {
             session_id: *session_id,
             cursor: cursor.value(),
@@ -307,7 +311,13 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
         submit_first_input(&mut connection, session_id, content.clone()).await?;
 
     connection
-        .request(3, ClientRequest::ReadTranscript { session_id })
+        .request(
+            3,
+            ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
+        )
         .await?;
 
     let start = response_within(&mut connection).await?;
@@ -339,6 +349,332 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
             entry_count: 0,
         }
     );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn transcript_suffix_reads_new_entries_then_an_empty_suffix() -> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, first_turn) = submit_first_input(
+        &mut connection,
+        session_id,
+        String::from("establish the acknowledged prefix"),
+    )
+    .await?;
+    let (first_script, _) = streamed_script(1, String::from("first reply"));
+    let (second_script, _) = streamed_script(1, String::from("second reply"));
+    let scripted = ScriptedModel::following([first_script, second_script]);
+    let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let provider =
+        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog(), None)
+            .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    runtime.pool.clone(),
+                    model_configuration.target_catalog(),
+                    ModelCallCredentialReference::new("streaming-fixture"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
+        ));
+    let pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(runtime.pool.clone()),
+        ),
+        execution,
+    );
+    let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
+    let first_observation_pool = runtime.pool.clone();
+    let first_session = SessionId::from_uuid(session_id.into_uuid());
+    let first_domain_turn = TurnId::from_uuid(first_turn.into_uuid());
+    let first_fatal_shutdown = fatal_execution.clone();
+    let first_shutdown = async move {
+        tokio::select! {
+            () = wait_for_turn_settle(
+                &first_observation_pool,
+                first_session,
+                first_domain_turn,
+                TurnSettle::Terminal,
+            ) => {}
+            () = first_fatal_shutdown.wait() => {}
+        }
+    };
+    assert_eq!(
+        timeout(
+            RUNTIME_SETTLE_ALLOWANCE,
+            scheduler.run_until(first_shutdown),
+        )
+        .await?,
+        SchedulerLoopExit::Shutdown
+    );
+    assert!(!fatal_execution.is_triggered());
+
+    connection
+        .request(
+            3,
+            ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
+        )
+        .await?;
+    let mut prefix_wire = Vec::new();
+    let mut prefix_model_usage_count = 0_u64;
+    let (prefix_frontier, prefix_entry_count) = loop {
+        let frame = response_within(&mut connection).await?;
+        prefix_wire.extend_from_slice(&signalbox_process_protocol::encode_server_line(&frame)?);
+        match frame.message() {
+            ServerMessage::TranscriptModelCallUsage { .. } => {
+                prefix_model_usage_count += 1;
+            }
+            ServerMessage::TranscriptSnapshotEnd {
+                session_id: snapshot_session,
+                entry_count,
+                frontier: Some(frontier),
+                ..
+            } if *snapshot_session == session_id => {
+                break (*frontier, entry_count.value());
+            }
+            _ => {}
+        }
+    };
+    assert!(!prefix_wire.is_empty());
+    assert!(prefix_model_usage_count > 0);
+    assert!(prefix_entry_count > 0);
+
+    connection
+        .request(
+            4,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::text(String::from("append a completed turn")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let second_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let second_observation_pool = runtime.pool.clone();
+    let second_session = SessionId::from_uuid(session_id.into_uuid());
+    let second_domain_turn = TurnId::from_uuid(second_turn.into_uuid());
+    let second_fatal_shutdown = fatal_execution.clone();
+    let second_shutdown = async move {
+        tokio::select! {
+            () = wait_for_turn_settle(
+                &second_observation_pool,
+                second_session,
+                second_domain_turn,
+                TurnSettle::Terminal,
+            ) => {}
+            () = second_fatal_shutdown.wait() => {}
+        }
+    };
+    assert_eq!(
+        timeout(
+            RUNTIME_SETTLE_ALLOWANCE,
+            scheduler.run_until(second_shutdown),
+        )
+        .await?,
+        SchedulerLoopExit::Shutdown
+    );
+    assert!(!fatal_execution.is_triggered());
+
+    connection
+        .request(
+            5,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::text(String::from("current queued work")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_receipt = response_within(&mut connection).await?;
+    let (queued_input, queued_turn) = match queued_receipt.message() {
+        ServerMessage::InputSubmitted {
+            session_id: submitted_session,
+            accepted_input_id,
+            acceptance_position,
+            turn_id,
+            ..
+        } if *submitted_session == session_id && acceptance_position.value() == 3 => {
+            (*accepted_input_id, *turn_id)
+        }
+        message => {
+            return Err(
+                io::Error::other(format!("unexpected queued-input receipt: {message:?}")).into(),
+            );
+        }
+    };
+
+    connection
+        .request(
+            6,
+            ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: Some(prefix_frontier),
+            },
+        )
+        .await?;
+    let mut suffix_wire = Vec::new();
+    let mut suffix_turn_count = 0_u64;
+    let mut suffix_model_usage_count = 0_u64;
+    let mut suffix_model_calls_end_count = 0_u64;
+    let mut suffix_entry_indices = Vec::new();
+    let latest_frontier = loop {
+        let frame = response_within(&mut connection).await?;
+        suffix_wire.extend_from_slice(&signalbox_process_protocol::encode_server_line(&frame)?);
+        match frame.message() {
+            ServerMessage::TranscriptSnapshotStart {
+                session_id: snapshot_session,
+                after_frontier,
+                ..
+            } => {
+                assert_eq!(*snapshot_session, session_id);
+                assert_eq!(*after_frontier, Some(prefix_frontier));
+            }
+            ServerMessage::TranscriptTurn {
+                turn_id,
+                acceptance_position,
+                state,
+                ..
+            } => {
+                suffix_turn_count += 1;
+                assert_eq!(*turn_id, queued_turn);
+                assert_eq!(acceptance_position.value(), 3);
+                assert_eq!(
+                    state,
+                    &TurnState::Queued {
+                        accepted_input_id: queued_input,
+                        content: UserInputContent::text(String::from("current queued work")),
+                    }
+                );
+            }
+            ServerMessage::TranscriptModelCallUsage { .. } => {
+                suffix_model_usage_count += 1;
+            }
+            ServerMessage::TranscriptModelCallsEnd { .. } => {
+                suffix_model_calls_end_count += 1;
+            }
+            ServerMessage::TranscriptEntry { entry_index, .. }
+            | ServerMessage::TranscriptUserEntry { entry_index, .. }
+            | ServerMessage::TranscriptTextEntry { entry_index, .. } => {
+                suffix_entry_indices.push(entry_index.value());
+            }
+            ServerMessage::TranscriptSnapshotEnd {
+                session_id: snapshot_session,
+                turn_count,
+                entry_count,
+                frontier: Some(frontier),
+                ..
+            } => {
+                assert_eq!(*snapshot_session, session_id);
+                assert_eq!(turn_count.value(), suffix_turn_count);
+                assert_eq!(
+                    entry_count.value(),
+                    u64::try_from(suffix_entry_indices.len())?
+                );
+                break *frontier;
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(suffix_turn_count, 1);
+    assert_eq!(suffix_model_usage_count, 0);
+    assert_eq!(suffix_model_calls_end_count, 0);
+    assert_eq!(
+        suffix_entry_indices.first().copied(),
+        Some(prefix_entry_count)
+    );
+    assert!(!suffix_entry_indices.is_empty());
+    let suffix_text = String::from_utf8(suffix_wire)?;
+    assert!(suffix_text.contains("\"type\":\"transcript_snapshot_start\""));
+    assert!(suffix_text.contains("\"type\":\"transcript_snapshot_end\""));
+    assert!(!suffix_text.contains("\"type\":\"transcript_model_call_usage\""));
+    assert!(!suffix_text.contains("\"type\":\"transcript_model_calls_end\""));
+
+    connection
+        .request(
+            7,
+            ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: Some(latest_frontier),
+            },
+        )
+        .await?;
+    let mut empty_suffix_wire = Vec::new();
+    let mut empty_suffix_turn_count = 0_u64;
+    let mut empty_suffix_entry_count = 0_u64;
+    loop {
+        let frame = response_within(&mut connection).await?;
+        empty_suffix_wire
+            .extend_from_slice(&signalbox_process_protocol::encode_server_line(&frame)?);
+        match frame.message() {
+            ServerMessage::TranscriptSnapshotStart {
+                session_id: snapshot_session,
+                after_frontier,
+                ..
+            } => {
+                assert_eq!(*snapshot_session, session_id);
+                assert_eq!(*after_frontier, Some(latest_frontier));
+            }
+            ServerMessage::TranscriptTurn { turn_id, state, .. } => {
+                empty_suffix_turn_count += 1;
+                assert_eq!(*turn_id, queued_turn);
+                assert!(matches!(state, TurnState::Queued { .. }));
+            }
+            ServerMessage::TranscriptModelCallUsage { .. }
+            | ServerMessage::TranscriptModelCallsEnd { .. } => {
+                return Err(io::Error::other(
+                    "empty suffix replayed historical model-call metadata",
+                )
+                .into());
+            }
+            ServerMessage::TranscriptEntry { .. }
+            | ServerMessage::TranscriptUserEntry { .. }
+            | ServerMessage::TranscriptTextEntry { .. } => {
+                empty_suffix_entry_count += 1;
+            }
+            ServerMessage::TranscriptSnapshotEnd {
+                session_id: snapshot_session,
+                turn_count,
+                entry_count,
+                frontier,
+                ..
+            } => {
+                assert_eq!(*snapshot_session, session_id);
+                assert_eq!(turn_count.value(), empty_suffix_turn_count);
+                assert_eq!(entry_count.value(), empty_suffix_entry_count);
+                assert_eq!(*frontier, Some(latest_frontier));
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(empty_suffix_turn_count, 1);
+    assert_eq!(empty_suffix_entry_count, 0);
+    let empty_suffix_text = String::from_utf8(empty_suffix_wire)?;
+    assert!(empty_suffix_text.contains("\"type\":\"transcript_snapshot_start\""));
+    assert!(empty_suffix_text.contains("\"type\":\"transcript_snapshot_end\""));
+    assert!(!empty_suffix_text.contains("\"type\":\"transcript_entry\""));
+    assert!(!empty_suffix_text.contains("\"type\":\"transcript_user_entry\""));
+    assert!(!empty_suffix_text.contains("\"type\":\"transcript_text_entry\""));
 
     drop(connection);
     runtime.stop().await

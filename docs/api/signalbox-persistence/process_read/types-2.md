@@ -230,5 +230,6 @@ impl process_read::ProcessTranscriptSummary {
     pub const fn turn_count(&self) -> u64;
     pub const fn model_call_count(&self) -> u64;
     pub const fn entry_count(&self) -> u64;
+    pub const fn frontier(&self) -> option::Option<signalbox_domain::ContextFrontierId>;
 }
 ```

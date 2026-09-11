@@ -318,12 +318,34 @@ projection or spool failure before transmission returns `unavailable` and
 exposes no partial snapshot. Every bounded sequence read is a start message, its
 items, and an end message carrying the count. A session metadata page orders its
 summaries by strictly increasing session identity, continuing after the
-requested cursor. The terminal client spools each complete snapshot or page into
-an owner-private anonymous temporary file. A client treats a snapshot or page as
-authoritative only after the end message arrives and its counts, indices,
-fragment sequence, session, and cursor validate. Snapshot deduplication uses the
-complete semantic identity of source session and entry; a second occurrence of
-that key fails the snapshot.
+requested cursor.
+
+`read_transcript` carries required nullable `after_frontier`. Null requests a
+full snapshot, while a frontier requests the semantic transcript suffix after
+that acknowledged prefix. The snapshot start echoes `after_frontier`, and the
+snapshot end names the resulting current frontier. An unknown frontier, a
+frontier owned by another session, or a same-session frontier that is not a
+prefix of the current transcript returns `resync_required` before any snapshot
+frame.
+
+A full transcript snapshot emits every turn, terminal model-call usage in its
+required order, the model-call section end, and every semantic entry. A suffix
+snapshot emits only entries after the acknowledged frontier, preserving their
+global zero-based entry indices. It also emits the current active turn and the
+earliest queued turn when present, and omits historical terminal turns,
+model-call usage, and the model-call section end. Snapshot-end turn and entry
+counts name only records emitted in that snapshot.
+
+The terminal client spools each complete snapshot or page into an owner-private
+anonymous temporary file. A client treats a snapshot or page as authoritative
+only after the end message arrives and its counts, indices, fragment sequence,
+session, cursor, frontier, and acknowledgement echo validate. A valid suffix
+appends its contiguous entries directly to the retained transcript spool and
+replaces the bounded active and queued turn projection. A failed or truncated
+suffix leaves the retained acknowledgement unchanged. `resync_required` causes a
+full read whose completed snapshot replaces the retained transcript and bounded
+turn state. Snapshot deduplication uses the complete semantic identity of source
+session and entry; a second occurrence of that key fails the snapshot.
 
 The imported-conversation read is `imported_conversation_start` naming the
 inspected conversation, one `imported_conversation_entry` per normalized entry,
