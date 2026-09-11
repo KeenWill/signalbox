@@ -9,9 +9,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     std::fs::write("fake-claude-argv", arguments.join("\n"))?;
     record_credential_delivery(&arguments)?;
+    record_system_prompt(&arguments)?;
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt)?;
     std::fs::write("fake-claude-prompt", &prompt)?;
+    let (_, request_json) = prompt
+        .split_once('\n')
+        .ok_or("missing response request before request controls")?;
+    let _: serde_json::Value = serde_json::from_str(request_json)?;
     let scenario = if let Some(pair) = arguments.windows(2).find(|pair| pair[0] == "--resume") {
         let history_path = &pair[1];
         let history = std::fs::read_to_string(history_path)?;
@@ -24,15 +29,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         scenario(&history)?
     } else {
-        let controls: serde_json::Value = serde_json::from_str(
-            prompt
-                .split_once("\n\n")
-                .ok_or("missing request controls")?
-                .1,
-        )?;
-        controls["system"]
-            .as_str()
-            .ok_or("missing system-only scenario")?
+        let system = std::fs::read_to_string("fake-claude-system-prompt")?;
+        system
+            .split_once("\n\n")
+            .ok_or("missing native system-only scenario")?
+            .1
             .to_string()
     };
     if scenario == "piped_stdin_too_large" {
@@ -685,6 +686,18 @@ fn argument_after<'a>(arguments: &'a [String], name: &str) -> Option<&'a str> {
         .windows(2)
         .find(|pair| pair[0] == name)
         .map(|pair| pair[1].as_str())
+}
+
+fn record_system_prompt(arguments: &[String]) -> std::io::Result<()> {
+    let path = argument_after(arguments, "--append-system-prompt-file").unwrap_or_default();
+    std::fs::copy(path, "fake-claude-system-prompt")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        std::fs::write("fake-claude-system-prompt-mode", format!("{mode:o}"))?;
+    }
+    Ok(())
 }
 
 fn record_credential_delivery(arguments: &[String]) -> std::io::Result<()> {

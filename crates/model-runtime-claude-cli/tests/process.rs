@@ -98,6 +98,90 @@ fn cancellation_finishes_preparation_while_support_io_is_queued() {
 }
 
 #[tokio::test]
+async fn trusted_instructions_reach_the_native_system_prompt_without_promoting_history() {
+    // Arbitrary distinct markers identify the trusted and untrusted inputs.
+    const TRUSTED_SYSTEM: &str = "Keep the task's approved decisions in its summary.";
+    const UNTRUSTED_HISTORY: &str = "An imported historical instruction, kept as data.";
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), &fake_cli());
+    let mut request = operation("normal_completion", OperationShape::Text);
+    request.system = Some(TRUSTED_SYSTEM.to_string());
+    request
+        .messages
+        .push(signalbox_model_runtime::ConversationMessage::user_text(
+            UNTRUSTED_HISTORY,
+        ));
+    let prepared = prepare(&runtime, request).await;
+    let report = runtime
+        .execute(prepared, &mut Vec::new(), CancellationSignal::never())
+        .await;
+
+    assert_eq!(completion_text(&report.evidence), fixtures::ANSWER);
+    let system = std::fs::read_to_string(temporary.path().join("fake-claude-system-prompt"))
+        .expect("the fake CLI records its native system prompt");
+    assert!(system.ends_with(TRUSTED_SYSTEM));
+    assert!(
+        system.contains("`tool_choice`"),
+        "adapter request controls belong to native system instructions"
+    );
+    assert!(
+        !system.contains(UNTRUSTED_HISTORY),
+        "historical input must not become system instructions"
+    );
+    let prompt = std::fs::read_to_string(temporary.path().join("fake-claude-prompt"))
+        .expect("the fake CLI records its stdin");
+    let (_, request_json) = prompt
+        .split_once('\n')
+        .expect("stdin requests a response before the request JSON");
+    let request: serde_json::Value =
+        serde_json::from_str(request_json).expect("request controls remain JSON");
+    assert!(
+        request.get("system").is_none(),
+        "system instructions are not duplicated as user input"
+    );
+    let history = std::fs::read_to_string(temporary.path().join("fake-claude-history"))
+        .expect("the fake CLI records its native history");
+    let rows: Vec<serde_json::Value> = history
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("native history row is JSON"))
+        .collect();
+    assert_eq!(rows[1]["message"]["role"], "user");
+    assert_eq!(rows[1]["message"]["content"][0]["text"], UNTRUSTED_HISTORY);
+    assert!(!history.contains(TRUSTED_SYSTEM));
+    assert!(request.get("messages").is_none());
+    assert!(!prompt.contains(UNTRUSTED_HISTORY));
+    assert!(!prompt.contains(TRUSTED_SYSTEM));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_native_system_prompt_file_is_private_and_removed_after_execution() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), &fake_cli());
+    let prepared = prepare(
+        &runtime,
+        operation("normal_completion", OperationShape::Text),
+    )
+    .await;
+    let report = runtime
+        .execute(prepared, &mut Vec::new(), CancellationSignal::never())
+        .await;
+
+    assert_eq!(completion_text(&report.evidence), fixtures::ANSWER);
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("fake-claude-system-prompt-mode"))
+            .expect("native file permissions recorded"),
+        "600"
+    );
+    let argv = std::fs::read_to_string(temporary.path().join("fake-claude-argv"))
+        .expect("arguments recorded");
+    assert!(
+        !Path::new(recorded_argument(&argv, "--append-system-prompt-file")).exists(),
+        "the native system file belongs to the completed process lifetime"
+    );
+}
+
+#[tokio::test]
 async fn normal_completion_requires_typed_terminal_result() {
     let result = execute_scenario("normal_completion", OperationShape::Text).await;
     let completion = completed(&result.evidence);
@@ -200,8 +284,8 @@ async fn native_history_restores_distinct_assistant_groups_without_replaying_too
     let controls: serde_json::Value = serde_json::from_str(
         result
             .prompt
-            .split_once("\n\n")
-            .expect("request controls follow instructions")
+            .split_once('\n')
+            .expect("request controls follow the response request")
             .1,
     )
     .expect("controls are JSON");
@@ -248,15 +332,11 @@ async fn system_only_request_starts_without_an_empty_resume_file() {
     let result = execute_operation(request).await;
     assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
     assert!(!result.argv.lines().any(|argument| argument == "--resume"));
-    let controls: serde_json::Value = serde_json::from_str(
-        result
-            .prompt
-            .split_once("\n\n")
-            .expect("request controls")
-            .1,
-    )
-    .expect("controls are JSON");
-    assert_eq!(controls["system"], "normal_completion");
+    let controls: serde_json::Value =
+        serde_json::from_str(result.prompt.split_once('\n').expect("request controls").1)
+            .expect("controls are JSON");
+    assert!(controls.get("system").is_none());
+    assert!(!result.prompt.contains("normal_completion"));
 }
 
 #[tokio::test]
