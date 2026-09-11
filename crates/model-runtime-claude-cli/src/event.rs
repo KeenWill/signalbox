@@ -194,6 +194,7 @@ impl<C: Clone> EventDecoder<C> {
                     | "hook_response"
                     | "api_retry"
                     | "thinking_tokens"
+                    | "model_refusal_no_fallback"
             )
         ) {
             if let (Some(session), Some(native)) = (

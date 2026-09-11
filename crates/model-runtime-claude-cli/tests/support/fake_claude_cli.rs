@@ -73,6 +73,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     system_init(&arguments)?;
     match scenario.as_str() {
+        "refusal_notice" | "refusal_notice_without_result" | "refusal_notice_wrong_session" => {
+            let session = if scenario == "refusal_notice_wrong_session" {
+                fixtures::OTHER_SESSION_ID
+            } else {
+                fixtures::SESSION_ID
+            };
+            emit_json(&serde_json::json!({
+                "type": "system", "subtype": "model_refusal_no_fallback",
+                "session_id": session, "original_model": fixtures::MODEL,
+                "request_id": null, "content": "",
+                "api_refusal_category": "synthetic_refusal"
+            }))?;
+            if scenario != "refusal_notice_without_result" {
+                assistant_text(fixtures::REFUSAL)?;
+                success("refusal", Some(fixtures::REFUSAL))?;
+            }
+        }
         "native_prompt_too_large" => {
             emit_json(&serde_json::json!({
                 "type": "result", "subtype": "success", "is_error": true,

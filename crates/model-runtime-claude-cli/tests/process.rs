@@ -462,6 +462,37 @@ async fn named_tool_choice_rejects_an_extra_declared_proposal() {
 }
 
 #[tokio::test]
+async fn a_native_refusal_notice_allows_the_terminal_refusal() {
+    let result = execute_scenario("refusal_notice", OperationShape::Text).await;
+    let refusal = refused(&result.evidence);
+
+    assert_eq!(
+        refusal.content,
+        vec![AssistantPart::Text(fixtures::REFUSAL.to_string())]
+    );
+    assert_eq!(refusal.usage, expected_usage());
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn a_native_refusal_notice_without_a_result_is_incomplete() {
+    let result = execute_scenario("refusal_notice_without_result", OperationShape::Text).await;
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_native_refusal_notice_must_match_the_initialized_session() {
+    let result = execute_scenario("refusal_notice_wrong_session", OperationShape::Text).await;
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
 async fn refusal_requires_the_typed_refusal_stop_reason() {
     let result = execute_scenario("refusal", OperationShape::Text).await;
     let refusal = refused(&result.evidence);
