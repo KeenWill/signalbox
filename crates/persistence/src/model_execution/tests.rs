@@ -25,6 +25,23 @@ use super::{
 };
 
 #[test]
+fn input_failure_reports_the_tool_invariant_without_changing_its_class() {
+    let cause = crate::tool_loop::ToolLoopRepositoryError::Corruption(
+        crate::tool_loop::ToolLoopCorruption::Inconsistent("tool result payload"),
+    );
+    let execution = super::prepared::map_tool_evidence_error(cause);
+    assert_eq!(
+        execution.operator_failure_class(),
+        OperatorFailureClass::FailClosedCorruption,
+    );
+    let failure = crate::submit_input::SubmitInputRepositoryError::from(execution);
+    assert_eq!(
+        failure.to_string(),
+        "SubmitInput model execution failed: inconsistent model-call execution tool result payload",
+    );
+}
+
+#[test]
 fn remapped_call_rejects_missing_preparation_limit_evidence() {
     let target =
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(1)));
