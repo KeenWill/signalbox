@@ -203,10 +203,11 @@ exits. Linux Bazel PostgreSQL selections share process-owned servers with
 exclusive storage slots per live database; Cargo enables this path with
 `SIGNALBOX_TEST_SHARED_POSTGRES=1`. Bazel's runtime wrapper removes its servers
 before returning; Cargo's pidfd guardian follows its owning test process.
-Fixtures using testcontainers rely on `ContainerAsync` drop to remove their
-containers; a test process that dies without unwinding can leave those
-containers holding host memory. Test harnesses attach the disposable label
-selected by the sweep, using
+Untrappable wrapper or runner termination can leave shared containers holding
+host memory for the sweep below. Fixtures using testcontainers rely on
+`ContainerAsync` drop to remove their containers; a test process that dies
+without unwinding can leave those containers holding host memory. Test harnesses
+attach the disposable label selected by the sweep, using
 `signalbox_persistence::disposable_test_container_labels` for testcontainers.
 `TESTCONTAINERS_COMMAND=keep` preserves containers and database clones for
 inspection. Remove leftover containers with

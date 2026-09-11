@@ -137,12 +137,17 @@ fixture reserves its own bounded tablespace. A full server starts another server
 instead of blocking tests that need multiple fixtures. Slots become reusable
 only after a successful database drop; failed setup or cleanup retains the
 reservation until the process exits. `TESTCONTAINERS_COMMAND=keep` retains
-databases and servers. A pidfd guardian removes each server when its owning test
-process exits, including process death. Nextest retains its existing run-owned
-server path. These selections run outside the Bazel sandbox so its teardown
-cannot kill the guardian before it removes Docker containers. Cargo can opt in
-with the same variable. Ordinary tests retain their existing fixture behavior.
-No suite filters or test concurrency settings change.
+databases and servers.
+
+Bazel's runtime wrapper owns server cleanup and waits for it before returning to
+Bazel, which reaps detached descendants. A failed or killed test binary still
+triggers wrapper cleanup. Killing the entire wrapper or runner with `SIGKILL`
+can leave labeled containers holding host memory until the
+[existing sweeper](../../tooling/sweep-test-containers.sh) reclaims them. Cargo
+can opt in with the same variable and uses a pidfd guardian tied to the test
+process. Nextest retains its existing run-owned server path. Ordinary Bazel
+selections retain their existing fixture behavior. No suite filters or test
+concurrency settings change.
 
 ## PostgreSQL result reuse
 
