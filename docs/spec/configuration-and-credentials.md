@@ -113,21 +113,21 @@ retain the Git family's 1 MiB structural metadata bound.
 bound. A finite `max_blob_replica_count` must admit the durable catalog's full
 store bound. Disabling reconciliation requires an unbounded nudge buffer.
 Conversation import admits no source-size setting; a `conversation_import` table
-is rejected by the closed top-level schema.
-`repository_watch_webhook_retention` must be positive and finite and governs
-authenticated webhook `expires_at` and merged-pull-request baseline retention as
-described in [repository watch](repo-watch.md). `codex_cli_version_probe_bound`
-bounds a credential-free startup probe of the configured Codex executable. A
-missing or zero bound fails configuration before the socket opens. An
-unsuccessful or malformed probe, or an installed version outside the configured
-pin, leaves the Codex adapter unavailable while the daemon continues startup.
-The same bound limits each read-only Codex capacity probe for
-[parked credential waits](credential-availability.md).
-One valid document yields correlated immutable in-memory catalogs: the domain
-`ModelTargetCatalog` for execution-time target resolution and the
-`RuntimeModelCatalog` for the provider bridge. The optional
-`repository_watch_poll_request_budget` defaults to 100 and accepts integers from
-2 through 1,000, including the quota preflight request in each attempt.
+is rejected by the closed top-level schema. `repository_watch_webhook_retention`
+must be positive and finite and governs authenticated webhook `expires_at` and
+merged-pull-request baseline retention as described in
+[repository watch](repo-watch.md). `codex_cli_version_probe_bound` bounds a
+credential-free startup probe of the configured Codex executable. A missing or
+zero bound fails configuration before the socket opens. An unsuccessful or
+malformed probe, or an installed version outside the configured pin, leaves the
+Codex adapter unavailable while the daemon continues startup. The same bound
+limits each read-only Codex capacity probe for
+[parked credential waits](credential-availability.md). One valid document yields
+correlated immutable in-memory catalogs: the domain `ModelTargetCatalog` for
+execution-time target resolution and the `RuntimeModelCatalog` for the provider
+bridge. The optional `repository_watch_poll_request_budget` defaults to 100 and
+accepts integers from 2 through 1,000, including the quota preflight request in
+each attempt.
 
 `guard_recovery_initial_delay` and `guard_recovery_maximum_delay` are positive
 durations, with the maximum no smaller than the initial delay.
@@ -629,7 +629,8 @@ its text. An unknown or invalid field is rejected without its name, so
 opaque to code: no build-provided constant is compared against it. Catalogs are
 read at startup. `reload_configuration` validates the complete replacement and
 atomically replaces the model and alias catalog, session-template catalog, and
-repository-watch configuration; every other section is startup-only. A
+repository-watch configuration, and existing Codex-home profile paths. Other
+profile fields, pool policies, and other sections are startup-only. A
 replacement whose startup-only sections differ leaves the running configuration
 in place. Reload never rewrites evidence already recorded. File watching and
 polling are external callers of the verb.
