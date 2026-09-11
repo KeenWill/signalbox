@@ -84,7 +84,17 @@ pub(crate) async fn require_live_execution_for_restart(
 struct LoadedDelegatedLiveTurn {
     active: signalbox_domain::ActivatedTurn,
     starting_snapshot: ResolvedContextFrontierSnapshot,
-    recovery: Option<DelegatedModelCallRecovery>,
+    recovery: Option<DelegatedRecovery>,
+}
+
+enum DelegatedRecovery {
+    ModelCall(Box<DelegatedModelCallRecovery>),
+    ToolAttempt(Box<DelegatedToolRecovery>),
+}
+
+pub(crate) struct DelegatedToolRecovery {
+    pub(crate) active: signalbox_domain::ActivatedTurn,
+    pub(crate) attempt: signalbox_domain::EndedTurnAttempt,
 }
 
 pub(crate) struct DelegatedModelCallRecovery {
@@ -179,7 +189,23 @@ pub(crate) async fn load_delegated_model_call_recovery(
 ) -> Result<Option<DelegatedModelCallRecovery>, ModelCallRepositoryError> {
     Ok(load_delegated_live_turn(connection, session, scheduling)
         .await?
-        .and_then(|loaded| loaded.recovery))
+        .and_then(|loaded| match loaded.recovery {
+            Some(DelegatedRecovery::ModelCall(recovery)) => Some(*recovery),
+            _ => None,
+        }))
+}
+
+pub(crate) async fn load_delegated_tool_recovery(
+    connection: &mut PgConnection,
+    session: SessionId,
+    scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,
+) -> Result<Option<DelegatedToolRecovery>, ModelCallRepositoryError> {
+    Ok(load_delegated_live_turn(connection, session, scheduling)
+        .await?
+        .and_then(|loaded| match loaded.recovery {
+            Some(DelegatedRecovery::ToolAttempt(recovery)) => Some(*recovery),
+            _ => None,
+        }))
 }
 
 pub(super) async fn require_live_execution_with_targets(
@@ -384,6 +410,7 @@ async fn load_delegated_live_turn(
             lifecycle.active_tool_round_call_id,
             lifecycle.child_wait_request_id,
             lifecycle.recovery_model_call_id,
+            lifecycle.recovery_tool_attempt_id,
             lifecycle.pinned_provider_model_identity_id,
             lifecycle.runner_recovery_runner_id,
             lifecycle.runner_recovery_placement_revision,
@@ -434,7 +461,7 @@ async fn load_delegated_live_turn(
                     )
                 )
                 OR (
-                    lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                    lifecycle.active_phase_kind IN ('awaiting_model_call_recovery', 'awaiting_tool_recovery')
                     AND attempt.turn_attempt_id = lifecycle.current_attempt_id
                     AND attempt.state_kind = 'ended'
                     AND attempt.end_variant IN ('without_stop', 'after_cancellation')
@@ -450,7 +477,7 @@ async fn load_delegated_live_turn(
           AND NOT lifecycle.delegation_runtime_terminal
           AND lifecycle.active_phase_kind IN (
                 'running', 'awaiting_runner_recovery',
-                'awaiting_child', 'awaiting_model_call_recovery'
+                'awaiting_child', 'awaiting_model_call_recovery', 'awaiting_tool_recovery'
           )
           AND goal_turn_is_runtime_relevant(
                 lifecycle.session_id, lifecycle.turn_id
@@ -496,10 +523,15 @@ async fn load_delegated_live_turn(
     .ok_or(ModelCallCorruption::Inconsistent(
         "delegated live-turn projection",
     ))?;
-    let recovery_call = (required::<String>(&row, "active_phase_kind")?
-        == "awaiting_model_call_recovery")
-        .then(|| required::<Uuid>(&row, "recovery_model_call_id").map(ModelCallId::from_uuid))
-        .transpose()?;
+    let recovery_operation = match required::<String>(&row, "active_phase_kind")?.as_str() {
+        "awaiting_model_call_recovery" => Some(signalbox_domain::IssuedOperationRef::ModelCall(
+            ModelCallId::from_uuid(required(&row, "recovery_model_call_id")?),
+        )),
+        "awaiting_tool_recovery" => Some(signalbox_domain::IssuedOperationRef::ToolAttempt(
+            signalbox_domain::ToolAttemptId::from_uuid(required(&row, "recovery_tool_attempt_id")?),
+        )),
+        _ => None,
+    };
     let phase = decode_delegated_active_phase(connection, &row, turn, initial_attempt).await?;
     finish_loaded_delegated_turn(
         connection,
@@ -508,7 +540,7 @@ async fn load_delegated_live_turn(
         starting_frontier,
         prepared,
         phase,
-        recovery_call,
+        recovery_operation,
     )
     .await
     .map(Some)
@@ -521,7 +553,7 @@ async fn finish_loaded_delegated_turn(
     starting_frontier: signalbox_domain::ContextFrontierId,
     prepared: PreparedDelegatedTurnActivation,
     phase: ActiveTurnSchedulingReconstitutionInput,
-    recovery_call: Option<ModelCallId>,
+    recovery_operation: Option<signalbox_domain::IssuedOperationRef>,
 ) -> Result<LoadedDelegatedLiveTurn, ModelCallRepositoryError> {
     let pending = load_delegated_pending_steering(connection, session, turn).await?;
     let consumed = load_delegated_consumed_steering(connection, session, turn).await?;
@@ -532,7 +564,9 @@ async fn finish_loaded_delegated_turn(
             "delegated starting snapshot",
         ))?;
 
-    if let Some(recovery_call_id) = recovery_call {
+    if let Some(signalbox_domain::IssuedOperationRef::ModelCall(recovery_call_id)) =
+        recovery_operation
+    {
         let (pinned, calls) = load_live_turn_calls(connection, session, turn).await?;
         let pinned = pinned.ok_or(ModelCallCorruption::Missing(
             "delegated recovery pinned target",
@@ -569,12 +603,32 @@ async fn finish_loaded_delegated_turn(
         return Ok(LoadedDelegatedLiveTurn {
             active: active.clone(),
             starting_snapshot: stored_snapshot,
-            recovery: Some(DelegatedModelCallRecovery {
-                active,
-                call,
-                attempt,
-                source_snapshot,
-            }),
+            recovery: Some(DelegatedRecovery::ModelCall(Box::new(
+                DelegatedModelCallRecovery {
+                    active,
+                    call,
+                    attempt,
+                    source_snapshot,
+                },
+            ))),
+        });
+    }
+
+    if let Some(signalbox_domain::IssuedOperationRef::ToolAttempt(_)) = recovery_operation {
+        let (active, attempt, prepared_snapshot) = prepared
+            .with_reconstituted_tool_recovery(phase, pending, consumed)
+            .ok_or(ModelCallCorruption::Inconsistent(
+                "delegated tool recovery evidence",
+            ))?;
+        if stored_snapshot != prepared_snapshot {
+            return Err(ModelCallCorruption::Inconsistent("delegated starting snapshot").into());
+        }
+        return Ok(LoadedDelegatedLiveTurn {
+            active: active.clone(),
+            starting_snapshot: stored_snapshot,
+            recovery: Some(DelegatedRecovery::ToolAttempt(Box::new(
+                DelegatedToolRecovery { active, attempt },
+            ))),
         });
     }
 
@@ -668,6 +722,87 @@ async fn decode_delegated_active_phase(
                     None,
                 ),
             )
+        }
+        "awaiting_tool_recovery" => {
+            let session = SessionId::from_uuid(required(row, "session_id")?);
+            let call = ModelCallId::from_uuid(required(row, "active_tool_round_call_id")?);
+            let recovery_attempt = signalbox_domain::ToolAttemptId::from_uuid(required(
+                row,
+                "recovery_tool_attempt_id",
+            )?);
+            let batch =
+                crate::tool_loop::load_active_batch_from_connection(connection, session, turn)
+                    .await
+                    .map_err(super::prepared::map_tool_evidence_error)?
+                    .ok_or(ModelCallCorruption::Missing(
+                        "delegated tool recovery batch",
+                    ))?;
+            let wait = batch
+                .awaiting_recovery()
+                .filter(|wait| {
+                    wait.attempt() == recovery_attempt
+                        && wait.producing_call() == call
+                        && wait.issuing_attempt() == projection_attempt
+                })
+                .ok_or(ModelCallCorruption::Inconsistent(
+                    "delegated tool recovery wait",
+                ))?;
+            if required::<String>(row, "attempt_state_kind")? != "ended" {
+                return Err(
+                    ModelCallCorruption::Inconsistent("delegated recovery attempt state").into(),
+                );
+            }
+            match (
+                required::<String>(row, "end_variant")?.as_str(),
+                required::<String>(row, "end_disposition")?.as_str(),
+            ) {
+                ("without_stop", "ambiguous") => Ok(
+                    ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery(
+                        turn,
+                        projection_attempt,
+                        wait,
+                    ),
+                ),
+                ("without_stop", "lost") => Ok(
+                    ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery_after_restart(
+                        turn,
+                        projection_attempt,
+                        wait,
+                    ),
+                ),
+                ("after_cancellation", disposition @ ("ambiguous" | "lost")) => {
+                    let command =
+                        durable_command_id_from_uuid(required(row, "interrupt_command_id")?)
+                            .map_err(|_| {
+                                ModelCallCorruption::Inconsistent(
+                                    "delegated recovery interrupt identity",
+                                )
+                            })?;
+                    let recorded = require_recorded_batch(connection, &[command])
+                        .await
+                        .map_err(map_scheduling_error)?;
+                    let interrupt = require_applied_interrupt_from_attempt(row, turn, &recorded)
+                        .map_err(map_scheduling_error)?;
+                    if disposition == "ambiguous" {
+                        Ok(ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery_after_cancellation(
+                            turn,
+                            projection_attempt,
+                            wait,
+                            interrupt,
+                        ))
+                    } else {
+                        Ok(ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery_after_cancellation_restart(
+                            turn,
+                            projection_attempt,
+                            wait,
+                            interrupt,
+                        ))
+                    }
+                }
+                _ => {
+                    Err(ModelCallCorruption::Inconsistent("delegated recovery attempt end").into())
+                }
+            }
         }
         "awaiting_model_call_recovery" => {
             let call = ModelCallId::from_uuid(required(row, "recovery_model_call_id")?);
@@ -765,6 +900,7 @@ async fn load_delegated_live_wake_turn(
             lifecycle.active_tool_round_call_id,
             lifecycle.child_wait_request_id,
             lifecycle.recovery_model_call_id,
+            lifecycle.recovery_tool_attempt_id,
             lifecycle.pinned_provider_model_identity_id,
             lifecycle.runner_recovery_runner_id,
             lifecycle.runner_recovery_placement_revision,
@@ -794,7 +930,7 @@ async fn load_delegated_live_wake_turn(
           AND NOT lifecycle.delegation_runtime_terminal
           AND lifecycle.active_phase_kind IN (
                 'running', 'awaiting_runner_recovery',
-                'awaiting_child', 'awaiting_model_call_recovery'
+                'awaiting_child', 'awaiting_model_call_recovery', 'awaiting_tool_recovery'
           )
          JOIN turn_lifecycle AS predecessor
            ON predecessor.turn_id = lifecycle.immediate_predecessor_turn_id
@@ -832,7 +968,7 @@ async fn load_delegated_live_wake_turn(
                     )
                 )
                 OR (
-                    lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                    lifecycle.active_phase_kind IN ('awaiting_model_call_recovery', 'awaiting_tool_recovery')
                     AND attempt.turn_attempt_id = lifecycle.current_attempt_id
                     AND attempt.state_kind = 'ended'
                     AND attempt.end_variant IN ('without_stop', 'after_cancellation')
@@ -922,10 +1058,15 @@ async fn load_delegated_live_wake_turn(
         .ok_or(ModelCallCorruption::Inconsistent(
             "delegated wake live-turn projection",
         ))?;
-    let recovery_call = (required::<String>(&row, "active_phase_kind")?
-        == "awaiting_model_call_recovery")
-        .then(|| required::<Uuid>(&row, "recovery_model_call_id").map(ModelCallId::from_uuid))
-        .transpose()?;
+    let recovery_operation = match required::<String>(&row, "active_phase_kind")?.as_str() {
+        "awaiting_model_call_recovery" => Some(signalbox_domain::IssuedOperationRef::ModelCall(
+            ModelCallId::from_uuid(required(&row, "recovery_model_call_id")?),
+        )),
+        "awaiting_tool_recovery" => Some(signalbox_domain::IssuedOperationRef::ToolAttempt(
+            signalbox_domain::ToolAttemptId::from_uuid(required(&row, "recovery_tool_attempt_id")?),
+        )),
+        _ => None,
+    };
     let phase = decode_delegated_active_phase(connection, &row, turn, initial_attempt).await?;
     finish_loaded_delegated_turn(
         connection,
@@ -934,7 +1075,7 @@ async fn load_delegated_live_wake_turn(
         starting_frontier,
         prepared,
         phase,
-        recovery_call,
+        recovery_operation,
     )
     .await
     .map(Some)

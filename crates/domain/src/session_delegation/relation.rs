@@ -48,6 +48,7 @@ impl SessionDelegation {
             spawning_request,
             child,
             child_turn,
+            reconciliation_required_child: _,
             events,
         } = input;
         let DelegatedSpawnRequest {

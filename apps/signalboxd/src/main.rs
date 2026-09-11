@@ -2020,19 +2020,6 @@ async fn run_hub_incarnation(
             eligibility_nudge.clone(),
         );
 
-    let capacity_refresh = signalboxd::credential_invocations::CodexCapacityRefresh::new(
-        pool.clone(),
-        &model_configuration,
-        reconciliation_sweep_interval,
-        codex_cli_version_probe_bound,
-    )
-    .map_err(|_| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("codex_capacity_refresh_construction_failed"),
-        )
-    })?;
-
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
         .map(|configuration| configuration.exec_supervisor_executable().to_path_buf());
@@ -2629,6 +2616,12 @@ async fn run_hub_incarnation(
             Err(failure) => startup_failure_after_close(failure, closed),
         };
     }
+    let capacity_refresh = signalboxd::credential_invocations::CodexCapacityRefresh::new(
+        pool.clone(),
+        configuration_reload.clone(),
+        reconciliation_sweep_interval,
+        codex_cli_version_probe_bound,
+    );
     let workflow_tool_policy = signalboxd::WorkflowToolPolicy::new(pool.clone());
     if let Ok((service, _)) = &workflows {
         let workflow_catalog = signalbox_tools_workflows::catalog().map_err(|_| {
@@ -2973,9 +2966,7 @@ async fn run_hub_incarnation(
                 runtime_tasks.spawn(async move {
                     let capacity_shutdown = invocation_shutdown.clone();
                     tokio::join!(invocation_processes.run(invocation_shutdown), async {
-                        if let Some(refresh) = capacity_refresh {
-                            refresh.run(capacity_shutdown).await;
-                        }
+                        capacity_refresh.run(capacity_shutdown).await;
                     },);
                     RuntimeTaskExit::CredentialInvocations
                 });

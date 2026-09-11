@@ -517,15 +517,17 @@ reading the session state and its observed cursor from one repeatable-read
 snapshot, then emits that snapshot as its first item. The live snapshot carries
 the active turn's state, the queued turn count with a bounded preview of the
 earliest queued identities, any pending reconciliation operation, and the runner
-placement and connection health. Provider-text deltas queued when the snapshot
-completes are discarded, and a durable update for the followed session queued
-with a cursor above the snapshot's is emitted after the snapshot. An update for
-another session advances the observed cursor and is not emitted. Lag confined to
-records the snapshot cursor covers is absorbed silently. Falling behind past
-covered records, or saturating the monitor while retained fragment text is
-draining, emits one positive-cursor resync item and ends the response; the
-client then replaces all transient presentation with a fresh live snapshot and
-resumes durable history above its cursor without reloading the historical
+placement and connection health. A credential-availability wait carries its
+wait-attempt identity and typed contended, exhausted, or network-unavailable
+cause; the session page displays that stored reason. Provider-text deltas queued
+when the snapshot completes are discarded, and a durable update for the followed
+session queued with a cursor above the snapshot's is emitted after the snapshot.
+An update for another session advances the observed cursor and is not emitted.
+Lag confined to records the snapshot cursor covers is absorbed silently. Falling
+behind past covered records, or saturating the monitor while retained fragment
+text is draining, emits one positive-cursor resync item and ends the response;
+the client then replaces all transient presentation with a fresh live snapshot
+and resumes durable history above its cursor without reloading the historical
 transcript. The browser permits one immediate resynchronization, then waits one
 second before each subsequent resynchronization; leaving the session cancels the
 wait. The session synchronization service owns the selected stream and publishes
@@ -700,9 +702,11 @@ scope, and parent-alone does not evaluate descendants. Each evaluated edge
 applies its stored relationship policy: a background relationship keeps the
 child running, and a bound relationship takes its `on_parent_stopped` or
 `on_parent_cancelled` action according to the command. If a child already has
-its unique terminal result, the edge records already-terminal with the new
-parent command provenance and an exact check of that prior result, creating no
-second result; traversal still visits that child's outgoing relationships.
+its unique terminal result, or the exact delegated initial turn has
+reconciliation-required terminal lifecycle evidence, the edge records
+already-terminal with the new parent command provenance and an exact check of
+that prior evidence, creating no child result; traversal still visits that
+child's outgoing relationships.
 
 Delegation-message entries refer to message records and do not reclassify
 model-authored content as input from the user. Undelivered messages and
@@ -717,10 +721,12 @@ rejects the operation with typed recipient-sequence exhaustion.
 
 Returned content derives only from the proof-bearing completed call;
 independently supplied text cannot authorize a result. Reconciliation-required
-work is not terminal delegation evidence and produces no outcome while its
-ambiguity stands; automatic reconciliation seals the child as a failed result
-carrying child-result-unavailable and the exact reconciled child turn, in the
-transaction that commits the terminal transition.
+work produces no child result or relationship outcome when its ambiguity first
+terminalizes the turn. Its authenticated terminal lifecycle evidence can later
+satisfy a descendant cascade's already-terminal classification; automatic
+reconciliation seals the child as a failed result carrying
+child-result-unavailable and the exact reconciled child turn, in the transaction
+that commits the terminal transition.
 
 A parent-policy stop or cancellation carries opaque authority from the exact
 applied parent termination result, exposing the parent session, durable user

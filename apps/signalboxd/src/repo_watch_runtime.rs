@@ -146,7 +146,7 @@ pub async fn connect_repository_watch_pool(
 /// A reload handle and one serialized command worker for the compiled-in module.
 #[derive(Clone)]
 pub struct RepositoryWatchRuntime {
-    measurements_store: RepoWatchStore,
+    store: RepoWatchStore,
     state: Arc<Mutex<RuntimeState>>,
     observers: observation::Observers,
     workflow_service: Arc<std::sync::OnceLock<crate::workflows::WorkflowService>>,
@@ -256,19 +256,16 @@ impl RepositoryWatchRuntime {
         &self,
         repository: &RepositorySlug,
     ) -> signalbox_module_repo_watch_v2::measurements::IngestionMeasurements {
-        self.measurements_store.ingestion_measurements(repository)
+        self.store.ingestion_measurements(repository)
     }
     pub(crate) async fn session_origin(
         &self,
         session: signalbox_domain::SessionId,
+        core: &PgPool,
     ) -> Result<
         Option<signalbox_module_repo_watch_v2::RetainedDispatchAction>,
         signalbox_module_repo_watch_v2::StoreError,
     > {
-        let (store, core) = {
-            let state = self.state.lock().await;
-            (state.store.clone(), state.core_pool.clone())
-        };
         let origin: Option<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
             "SELECT session.dispatch_ref, creation.command_id
                FROM session
@@ -279,12 +276,12 @@ impl RepositoryWatchRuntime {
                 AND session.dispatching_module = 'repo_watch'",
         )
         .bind(session.into_uuid())
-        .fetch_optional(&core)
+        .fetch_optional(core)
         .await?;
         let Some((dispatch, command)) = origin else {
             return Ok(None);
         };
-        store
+        self.store
             .origin_for_create_command(
                 signalbox_session_ownership::RepoWatchDispatchId::from_uuid(dispatch),
                 signalbox_session_ownership::DurableCommandId::from_uuid(command),
@@ -368,7 +365,7 @@ impl RepositoryWatchRuntime {
         let observers = observation::Observers::default();
         let workflow_service = Arc::new(std::sync::OnceLock::new());
         Self {
-            measurements_store: store.clone(),
+            store: store.clone(),
             observers: observers.clone(),
             workflow_service: workflow_service.clone(),
             state: Arc::new(Mutex::new(RuntimeState {
@@ -686,6 +683,14 @@ impl RepositoryWatchRuntime {
         if let Some((store, source, mut factory)) = prepared {
             store
                 .drain_lifecycle(&mut factory, &mut RepositoryWatchCommandCodec, &source)
+                .await
+                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
+            store
+                .react_to_ordinary_dispatch_completion(
+                    &mut factory,
+                    &mut RepositoryWatchCommandCodec,
+                    &source,
+                )
                 .await
                 .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
         }
@@ -1080,6 +1085,54 @@ mod tests {
             available.is_ok(),
             "session reads and reload control remain available during lifecycle IO"
         );
+    }
+
+    #[tokio::test]
+    async fn session_origin_read_does_not_wait_for_dispatch_processing() {
+        use signalbox_domain::SessionId;
+        use signalbox_module_repo_watch_v2::StoreError;
+        use std::time::Duration;
+
+        // A closed pool gives a definitive read result without a database fixture.
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .expect("lazy pool");
+        pool.close().await;
+        let (eligibility_nudge, _work) = signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let models = crate::configuration::checked_in_example_configuration().expect("models");
+        let runtime = RepositoryWatchRuntime::unstarted(
+            pool.clone(),
+            RepositoryWatchServices {
+                goal_resumption: crate::PostgresGoalPassDisposition::new(
+                    pool.clone(),
+                    models.clone(),
+                    eligibility_nudge.clone(),
+                    crate::GoalModeNumericBounds::new(None, None, None, None, None),
+                ),
+                checkout_runner: None,
+                core_pool: pool.clone(),
+                models: Arc::new(models),
+                templates: Arc::new(SessionTemplateConfiguration::default()),
+                eligibility_nudge,
+                tool_dispatch_gate: InProcessToolDispatchGate::default(),
+            },
+        );
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(0x58_400));
+        let _dispatch_processing = runtime.state.lock().await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.session_origin(session, &pool),
+        )
+        .await
+        .expect(
+            "the descriptor read must reach its database without waiting for dispatch processing",
+        );
+        assert!(matches!(
+            result,
+            Err(StoreError::Database(sqlx::Error::PoolClosed))
+        ));
     }
 
     #[tokio::test]

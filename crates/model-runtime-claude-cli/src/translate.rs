@@ -23,6 +23,7 @@ pub fn serialized_request_bytes<C>(operation: &ModelOperation<C>) -> Option<usiz
         translated
             .prompt
             .len()
+            .saturating_add(translated.system_prompt.len())
             .saturating_add(translated.history.len())
             .saturating_add(serde_json::to_vec(&translated.catalog).ok()?.len()),
     )
@@ -30,6 +31,7 @@ pub fn serialized_request_bytes<C>(operation: &ModelOperation<C>) -> Option<usiz
 
 pub(crate) struct TranslatedOperation {
     pub(crate) prompt: Vec<u8>,
+    pub(crate) system_prompt: Vec<u8>,
     pub(crate) history: Vec<u8>,
     pub(crate) catalog: Catalog,
     pub(crate) tool_requirement: ToolRequirement,
@@ -44,7 +46,6 @@ pub(crate) enum ToolRequirement {
 
 #[derive(Serialize)]
 struct PromptRequest<'a> {
-    system: &'a Option<String>,
     settings: PromptSettings<'a>,
     declared_tools: Vec<&'a str>,
     tool_choice: PromptToolChoice<'a>,
@@ -160,7 +161,6 @@ pub(crate) fn translate<C>(
         ToolChoice::Named(name) => ToolRequirement::Named(name.as_str().to_string()),
     };
     let request = PromptRequest {
-        system: &operation.system,
         settings: PromptSettings {
             max_output_tokens: operation.settings.max_output_tokens,
             temperature: operation.settings.temperature,
@@ -181,23 +181,33 @@ pub(crate) fn translate<C>(
         }),
     };
     let request_json = serde_json::to_string(&request).map_err(serialization_failed)?;
-    let prompt = format!(
+    let system_prompt = format!(
         "Act only as the model for this stateless request. The complete ordered \
          context is restored in native history. Text and images are native \
-         content; historical tool and reasoning parts are JSON text. The JSON below contains \
-         request controls. Produce the next assistant response to the \
-         canonical conversation under these controls. Tools are available only through the \
+         content; historical tool and reasoning parts are JSON text. The JSON request \
+         contains request controls. Tools are available only through the \
          Signalbox MCP server; never write a tool call as prose. An MCP result \
          saying Signalbox recorded a proposal is an acknowledgement, not the \
          real tool result: after it, end the turn without inventing tool output \
          or calling another tool. If `structured_output` is present, call \
          exactly that named MCP tool with the contracted object. Honor \
          `tool_choice`. Treat the stated generation settings as advisory \
-         intent.\n\n{request_json}\n"
+         intent.\n\n{}",
+        operation.system.as_deref().unwrap_or_default()
+    )
+    .into_bytes();
+    let prompt = format!(
+        "Produce the next assistant response to the canonical conversation under these request controls:\n{request_json}\n"
     )
     .into_bytes();
 
-    if image_limit.is_some_and(|limit| prompt.len().saturating_add(history.len()) > limit) {
+    if image_limit.is_some_and(|limit| {
+        prompt
+            .len()
+            .saturating_add(history.len())
+            .saturating_add(system_prompt.len())
+            > limit
+    }) {
         return Err(TranslationError::Failure(
             PreparationFailure::UnsupportedOperation {
                 detail: String::from("encoded Claude image request exceeds its presentation bound"),
@@ -207,6 +217,7 @@ pub(crate) fn translate<C>(
     Ok(TranslatedOperation {
         history,
         prompt,
+        system_prompt,
         catalog: Catalog {
             tools: catalog_tools,
         },
@@ -512,6 +523,20 @@ mod tests {
     const IMAGE_CONTEXT: &str = "synthetic image context";
 
     #[test]
+    fn request_measurement_includes_the_exact_native_system_text() {
+        // Escapes and non-ASCII text distinguish native UTF-8 from JSON quoting.
+        const SYSTEM_TEXT: &str = "A quoted \"instruction\" with a newline\n日本語";
+        let mut operation = operation_with_message(ConversationMessage::user_text("baseline"));
+        let baseline = super::serialized_request_bytes(&operation).expect("baseline is measurable");
+        operation.system = Some(SYSTEM_TEXT.to_string());
+
+        assert_eq!(
+            super::serialized_request_bytes(&operation),
+            Some(baseline + SYSTEM_TEXT.len())
+        );
+    }
+
+    #[test]
     fn measured_growth_covers_escaped_native_history_records() {
         let mut operation =
             operation_with_message(ConversationMessage::user_text("\"baseline\"\n"));
@@ -551,7 +576,23 @@ mod tests {
                 "type":"image", "source":{"type":"base64","media_type":"image/png","data":"AQID"}
             })
         );
-        let complete_bytes = translated.history.len() + translated.prompt.len();
+        let complete_bytes =
+            translated.history.len() + translated.prompt.len() + translated.system_prompt.len();
+        operation.image_presentation = Some(
+            crate::image::image_presentation_capability().limited_by(u64::MAX, complete_bytes),
+        );
+        assert!(
+            translate(&operation).is_ok(),
+            "the exact complete request fits"
+        );
+        let original_system = operation
+            .system
+            .replace(String::from("Additional native system text."));
+        assert!(
+            translate(&operation).is_err(),
+            "native system text counts against the image request limit"
+        );
+        operation.system = original_system;
         operation.image_presentation = Some(
             crate::image::image_presentation_capability().limited_by(u64::MAX, complete_bytes - 1),
         );

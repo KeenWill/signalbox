@@ -25,9 +25,9 @@ use crate::{
         turn_id_to_uuid,
     },
     model_execution::{
-        ModelCallRepositoryError, load_delegated_model_call_recovery,
+        ModelCallRepositoryError, load_delegated_model_call_recovery, load_delegated_tool_recovery,
         lock_delegated_child_endpoint_sessions, persist_automatic_reconciliation,
-        persist_tool_reconciliation_required,
+        persist_automatic_tool_reconciliation,
     },
     session::{SessionRepositoryError, load_session_from_connection},
     submit_input::{SubmitInputRepositoryError, load_scheduling_projection},
@@ -597,23 +597,31 @@ impl PostgresAutomaticReconciliationRepository {
                     .map_err(AutomaticReconciliationRepositoryError::Model)?;
             }
             AutomaticReconciliationOperation::ToolAttempt(claimed_attempt) => {
-                let pending = scheduling
-                    .active_turn_execution()
+                let delegated = if origin == "delegation" {
+                    load_delegated_tool_recovery(&mut transaction, claimed.session(), &scheduling)
+                        .await
+                        .map_err(AutomaticReconciliationRepositoryError::Model)?
+                } else {
+                    None
+                };
+                let active = delegated
+                    .as_ref()
+                    .map(|recovery| recovery.active.clone())
+                    .or_else(|| scheduling.active_turn_execution().map(Into::into))
                     .filter(|turn| turn.turn() == claimed.turn())
-                    .map(|turn| {
-                        turn.pending_steering()
-                            .iter()
-                            .map(|steering| {
-                                PendingSteeringReclassificationIdentity::new(
-                                    steering.accepted_input(),
-                                    TurnId::from_uuid(uuid::Uuid::now_v7()),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
                     .ok_or(AutomaticReconciliationRepositoryError::Corruption(
                         "active tool turn for exact wait",
                     ))?;
+                let pending = active
+                    .pending_steering()
+                    .iter()
+                    .map(|steering| {
+                        PendingSteeringReclassificationIdentity::new(
+                            steering.accepted_input(),
+                            TurnId::from_uuid(uuid::Uuid::now_v7()),
+                        )
+                    })
+                    .collect();
                 let identities = AmbiguousModelCallTurnIdentities::new(terminal_frontier)
                     .with_pending_steering_reclassifications(pending);
                 let batch = load_recovery_batch_by_attempt(
@@ -657,16 +665,25 @@ impl PostgresAutomaticReconciliationRepository {
                             "tool recovery result projection",
                         )
                     })?;
-                let reconciliation = scheduling
-                    .apply_automatic_tool_reconciliation(
+                let reconciliation = match delegated {
+                    Some(recovery) => recovery.active.apply_automatic_tool_reconciliation(
+                        wait,
+                        ended,
+                        recovery.attempt,
+                        projection,
+                        attempt,
+                        identities,
+                    ),
+                    None => scheduling.apply_automatic_tool_reconciliation(
                         wait, ended, projection, attempt, identities,
+                    ),
+                }
+                .map_err(|_| {
+                    AutomaticReconciliationRepositoryError::Corruption(
+                        "tool aggregate transition for exact wait",
                     )
-                    .map_err(|_| {
-                        AutomaticReconciliationRepositoryError::Corruption(
-                            "tool aggregate transition for exact wait",
-                        )
-                    })?;
-                persist_tool_reconciliation_required(&mut transaction, &reconciliation)
+                })?;
+                persist_automatic_tool_reconciliation(&mut transaction, &reconciliation)
                     .await
                     .map_err(AutomaticReconciliationRepositoryError::Model)?;
             }

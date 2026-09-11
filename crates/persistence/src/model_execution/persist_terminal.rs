@@ -343,6 +343,24 @@ pub(crate) async fn persist_automatic_reconciliation(
     .await
 }
 
+pub(crate) async fn persist_automatic_tool_reconciliation(
+    connection: &mut PgConnection,
+    reconciliation: &ReconciliationRequiredToolTurn,
+) -> Result<(), ModelCallRepositoryError> {
+    lock_delegated_child_result_frontier(
+        connection,
+        reconciliation.session(),
+        reconciliation.turn(),
+    )
+    .await?;
+    persist_tool_reconciliation_required(connection, reconciliation).await?;
+    persist_delegated_child_result(
+        connection,
+        &DelegationOutcome::from_tool_reconciliation_required_child(reconciliation),
+    )
+    .await
+}
+
 async fn persist_delegated_child_result(
     connection: &mut PgConnection,
     outcome: &DelegationOutcome,

@@ -1341,12 +1341,63 @@ pub(crate) async fn prepare_delegated_tool_crash_fixture(
     pool: &PgPool,
     seed: u128,
 ) -> Result<DelegatedToolCrashFixture, Box<dyn Error>> {
+    let (fixture, _) =
+        prepare_delegated_tool_attempt_fixture(pool, seed, ToolEffectClass::EffectFree).await?;
+    Ok(fixture)
+}
+
+/// An external-effect declaration supplies an ambiguous delegated tool wait.
+/// The seed allocates arbitrary distinct fixture identities.
+pub(crate) async fn prepare_delegated_tool_recovery_fixture(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<
+    (
+        DelegatedToolCrashFixture,
+        signalbox_domain::EndedToolAttempt,
+    ),
+    Box<dyn Error>,
+> {
+    let catalog = ambiguity_fixture_catalog();
+    let effect_class = catalog
+        .definition(
+            &ToolName::try_new(String::from(AMBIGUITY_FIXTURE_TOOL)).expect("fixture tool name"),
+        )
+        .expect("fixture declaration")
+        .effect_class();
+    let (fixture, authorized) =
+        prepare_delegated_tool_attempt_fixture(pool, seed, effect_class).await?;
+    let ended = PostgresToolLoopRepository::new(pool.clone())
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Ambiguous),
+        )
+        .await?;
+    Ok((fixture, ended))
+}
+
+async fn prepare_delegated_tool_attempt_fixture(
+    pool: &PgPool,
+    seed: u128,
+    effect_class: ToolEffectClass,
+) -> Result<
+    (
+        DelegatedToolCrashFixture,
+        signalbox_domain::ToolDispatchAuthority,
+    ),
+    Box<dyn Error>,
+> {
     let fixture = authorize_delegated_model_call_fixture(pool, seed).await?;
+    let tool_name = match effect_class {
+        ToolEffectClass::EffectFree => "current_time",
+        ToolEffectClass::ExternalEffect => AMBIGUITY_FIXTURE_TOOL,
+    };
     let request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x40));
     let response =
         ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
             ToolCallProposal::new(
-                ToolName::try_new(String::from("current_time")).expect("valid fixture tool name"),
+                ToolName::try_new(String::from(tool_name)).expect("valid fixture tool name"),
                 NormalizedToolArguments::try_from_provider_text(String::from("{}"))
                     .expect("bounded fixture arguments"),
             ),
@@ -1397,18 +1448,21 @@ pub(crate) async fn prepare_delegated_tool_crash_fixture(
             fixture.child,
             fixture.authorized.turn(),
             attempt,
-            ToolEffectClass::EffectFree,
+            effect_class,
         )
         .await?;
-    repository
+    let authorized = repository
         .authorize_attempt(fixture.child, fixture.authorized.turn(), attempt)
         .await?;
-    Ok(DelegatedToolCrashFixture {
-        parent: fixture.parent,
-        child: fixture.child,
-        turn: fixture.authorized.turn(),
-        spawning_request: fixture.spawning_request,
-    })
+    Ok((
+        DelegatedToolCrashFixture {
+            parent: fixture.parent,
+            child: fixture.child,
+            turn: fixture.authorized.turn(),
+            spawning_request: fixture.spawning_request,
+        },
+        authorized,
+    ))
 }
 
 pub(crate) struct DelegatedCapabilityFailureFixture {
