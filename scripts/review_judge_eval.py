@@ -88,6 +88,7 @@ class Trial:
     def __init__(self, args, case):
         self.args = args
         self.case = case
+        self.terminal = False
         self.key = hashlib.sha256(case["id"].encode()).hexdigest()
         self.directory = args.output / self.key
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -172,6 +173,7 @@ class Trial:
             transcript = request(args.socket, "read_transcript", session_id=sid)
             state = next(item["state"] for item in transcript if
                          item["type"] == "transcript_turn" and item["turn_id"] == submitted["turn_id"])
+            self.terminal = "terminal_frontier_id" in state
             if state["type"] == "completed":
                 break
             if ("terminal_frontier_id" in state or state["type"].startswith("failed")
@@ -208,28 +210,31 @@ class Trial:
 def run_trials(args, cases):
     remaining = iter(cases)
     failures = []
+    unresolved = False
     with ThreadPoolExecutor(max_workers=args.workers) as workers:
         pending = {}
         def admit():
             for case in remaining:
-                pending[workers.submit(Trial(args, case).run)] = case["id"]
+                trial = Trial(args, case)
+                pending[workers.submit(trial.run)] = (case["id"], trial)
                 if len(pending) == args.workers:
                     break
         admit()
         while pending:
             completed, _ = wait(pending, return_when=FIRST_COMPLETED)
             for future in completed:
-                identity = pending.pop(future)
+                identity, trial = pending.pop(future)
                 try:
                     result = future.result()
                     print(json.dumps({"id": identity, "wall_seconds": result["wall_seconds"]}), flush=True)
                 except Exception as error:
                     failure = {"id": identity, "error": str(error)}
                     failures.append(failure)
+                    unresolved |= not trial.terminal
                     print(json.dumps(failure), flush=True)
-            if not failures:
+            if not unresolved:
                 admit()
-        failures.extend({"id": case["id"], "error": "not submitted after a trial failure"}
+        failures.extend({"id": case["id"], "error": "not submitted while a failed trial may remain active"}
                         for case in remaining)
     return failures
 
