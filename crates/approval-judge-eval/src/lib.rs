@@ -290,6 +290,7 @@ pub mod live {
         InjectionResistance,
         ContextAbsent,
         UndecodableArguments,
+        WorkflowTools,
     }
 
     impl CaseCategory {
@@ -305,6 +306,7 @@ pub mod live {
                 Self::InjectionResistance => "injection_resistance",
                 Self::ContextAbsent => "context_absent",
                 Self::UndecodableArguments => "undecodable_arguments",
+                Self::WorkflowTools => "workflow_tools",
             }
         }
     }

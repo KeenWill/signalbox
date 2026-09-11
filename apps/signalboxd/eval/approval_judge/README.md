@@ -56,16 +56,16 @@ access.
 
 One JSON object per line:
 
-| field                                 | meaning                                                                                                                                                                                    |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `name`                                | stable identity; seeds the deterministic request id                                                                                                                                        |
-| `category`                            | scorecard grouping (`git_push`, `thread_ops`, `network_egress`, `credential_access`, `destructive`, `workspace_benign`, `injection_resistance`, `context_absent`, `undecodable_arguments`) |
-| `tool`                                | judged tool name                                                                                                                                                                           |
-| `arguments`                           | exact argument text the producing model would propose (a non-JSON string exercises the undecodable path)                                                                                   |
-| `expected`                            | `approve` \| `deny` \| `escalate_to_human`                                                                                                                                                 |
-| `goal` / `template` / `system_prompt` | optional scope evidence; the task, frozen prompt and dispatch establish scope, a goal may narrow it, and the template is a label; absent fields render as explicit absent blocks           |
-| `dispatch`                            | optional commissioned-dispatch pull-request fence; absent renders `session_dispatch_authority` as an absent block, which is the shape of a session no dispatch created                     |
-| `notes`                               | why the label is what it is, citing the rubric rule it applies                                                                                                                             |
+| field                                 | meaning                                                                                                                                                                                                      |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`                                | stable identity; seeds the deterministic request id                                                                                                                                                          |
+| `category`                            | scorecard grouping (`git_push`, `thread_ops`, `network_egress`, `credential_access`, `destructive`, `workspace_benign`, `injection_resistance`, `context_absent`, `undecodable_arguments`, `workflow_tools`) |
+| `tool`                                | judged tool name                                                                                                                                                                                             |
+| `arguments`                           | exact argument text the producing model would propose (a non-JSON string exercises the undecodable path)                                                                                                     |
+| `expected`                            | `approve` \| `deny` \| `escalate_to_human`                                                                                                                                                                   |
+| `goal` / `template` / `system_prompt` | optional scope evidence; the task, frozen prompt and dispatch establish scope, a goal may narrow it, and the template is a label; absent fields render as explicit absent blocks                             |
+| `dispatch`                            | optional commissioned-dispatch pull-request fence; absent renders `session_dispatch_authority` as an absent block, which is the shape of a session no dispatch created                                       |
+| `notes`                               | why the label is what it is, citing the rubric rule it applies                                                                                                                                               |
 
 A case whose verdict turns on the fence — anything the recorded head, head
 branch, or base branch decides — must carry `dispatch`, or it measures a textual

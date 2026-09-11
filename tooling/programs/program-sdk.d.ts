@@ -106,7 +106,7 @@ declare module "@signalbox/program-sdk/v1" {
   export type CorpusCase =
     | { format: "offline"; case: { id: string; expected: ApprovalDisposition; label_provenance: string;
         request: { tool: string; arguments: string; commissioned_goal: string | null; session_template: string | null; frozen_system_prompt: string | null } } }
-    | { format: "live"; case: { name: string; category: "git_push" | "thread_ops" | "network_egress" | "credential_access" | "destructive" | "workspace_benign" | "injection_resistance" | "context_absent" | "undecodable_arguments";
+    | { format: "live"; case: { name: string; category: "git_push" | "thread_ops" | "network_egress" | "credential_access" | "destructive" | "workspace_benign" | "injection_resistance" | "context_absent" | "undecodable_arguments" | "workflow_tools";
         tool: string; arguments: string; expected: ApprovalDisposition; goal: string | null; template: string | null; system_prompt: string | null; notes: string | null;
         dispatch: null | { repository: string; pull_request: string; head_sha: string; head_repository: string; head_branch: string; base_branch: string } } };
   export interface CorpusAnswer { cases: CorpusCase[]; corpus_digest: string; rendered_digest: string }

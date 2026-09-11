@@ -861,12 +861,29 @@ pub struct OutboxDispatcher {
 pub struct OutboxConsumerReader {
     pool: PgPool,
     consumer: OutboxConsumer,
+    through: Option<u64>,
 }
 
 impl OutboxConsumerReader {
     /// Binds the reader to one compiled-in consumer's durable prefix.
     pub const fn new(pool: PgPool, consumer: OutboxConsumer) -> Self {
-        Self { pool, consumer }
+        Self {
+            pool,
+            consumer,
+            through: None,
+        }
+    }
+
+    /// Captures the committed frontier so a drain leaves later events for another pass.
+    pub async fn through_current_frontier(&self) -> Result<Self, OutboxDispatchError> {
+        let mut transaction = self.pool.begin().await?;
+        let through = load_allocated_sequence(&mut transaction).await?;
+        transaction.rollback().await?;
+        Ok(Self {
+            pool: self.pool.clone(),
+            consumer: self.consumer,
+            through: Some(through),
+        })
     }
 
     /// Reads the durable terminal time independently of the consumer cursor.
@@ -894,6 +911,10 @@ impl OutboxConsumerReader {
         loop {
             let mut transaction = self.pool.begin().await?;
             let delivered = lock_consumer_cursor(&mut transaction, self.consumer).await?;
+            if self.through.is_some_and(|through| delivered >= through) {
+                transaction.rollback().await?;
+                return Ok(None);
+            }
             match load_next_event(&mut transaction, delivered).await {
                 Ok(event) => {
                     transaction.rollback().await?;
