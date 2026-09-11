@@ -780,18 +780,28 @@ mod tests {
 
     #[test]
     fn codex_home_replacement_survives_retained_reload_without_reloading_other_profile_fields() {
-        let source = include_str!("../../../config/signalboxd.example.toml").replace(
-            "\ndelivery = \"ambient\"\n",
-            "\ndelivery = \"codex_home\"\ncodex_home = \"/tmp/codex-home-before\"\n",
-        );
-        let replacement = source.replace("/tmp/codex-home-before", "/tmp/codex-home-after");
+        let homes = tempfile::tempdir().expect("synthetic profile homes");
+        let before_home = homes.path().join("before");
+        let after_home = homes.path().join("after");
+        std::fs::create_dir(&before_home).expect("initial home directory");
+        std::fs::create_dir(&after_home).expect("replacement home directory");
+        let before_path = before_home.to_str().expect("UTF-8 fixture path");
+        let after_path = after_home.to_str().expect("UTF-8 fixture path");
+        let source = crate::configuration::checked_in_example_configuration()
+            .expect("checked example")
+            .source()
+            .replace(
+                "\ndelivery = \"ambient\"\n",
+                &format!("\ndelivery = \"codex_home\"\ncodex_home = {before_path:?}\n"),
+            );
+        let replacement = source.replace(before_path, after_path);
         let before = HubModelConfiguration::parse(&source).expect("initial home catalog");
         let after = HubModelConfiguration::parse(&replacement).expect("replacement home catalog");
         assert_eq!(startup_sections(&before), startup_sections(&after));
         assert_eq!(changed_codex_homes(&before, &after), ["codex-ambient"]);
         assert!(changed_codex_homes(&after, &after).is_empty());
-        let equivalent =
-            source.replace("/tmp/codex-home-before", "/tmp/unused/../codex-home-before");
+        let equivalent_path = homes.path().join("unused/../before");
+        let equivalent = source.replace(before_path, equivalent_path.to_str().unwrap());
         let equivalent =
             HubModelConfiguration::parse(&equivalent).expect("equivalent normalized home");
         assert!(changed_codex_homes(&before, &equivalent).is_empty());
