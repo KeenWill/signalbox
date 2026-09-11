@@ -2015,6 +2015,11 @@ const fn tool_batch_state(state: DispatchedToolBatchState) -> TimelineToolBatchS
                 attempt_id: attempt,
             }
         }
+        DispatchedToolBatchState::ChildWaitResumed { attempt } => {
+            TimelineToolBatchState::ChildWaitResumed {
+                attempt_id: attempt,
+            }
+        }
     }
 }
 

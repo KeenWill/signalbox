@@ -523,13 +523,13 @@ fn packed_commit_range_is_captured_before_the_preparation_deadline() {
 
 #[tokio::test]
 async fn push_range_ignores_large_history_in_the_pack_containing_its_tip() {
-    use crate::limits::MAX_OBJECT_DATABASE_BYTES;
+    const LARGE_HISTORY_BYTES: usize = 200 * 1024 * 1024;
     use crate::tests::support::{AUTHOR_EMAIL, AUTHOR_NAME};
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository");
     let signature = git2::Signature::now(AUTHOR_NAME, AUTHOR_EMAIL).expect("fixture author");
     let archive = repository
-        .blob(&vec![b'x'; MAX_OBJECT_DATABASE_BYTES + 1])
+        .blob(&vec![b'x'; LARGE_HISTORY_BYTES + 1])
         .expect("large history blob");
     let mut archive_tree = repository.treebuilder(None).expect("archive tree");
     archive_tree
@@ -574,7 +574,7 @@ async fn push_range_ignores_large_history_in_the_pack_containing_its_tip() {
         )
         .expect("tip");
     let pack = plant_uncompressed_push_pack(&repository, &[tip, archive]);
-    assert!(fs::metadata(&pack).expect("large pack").len() > MAX_OBJECT_DATABASE_BYTES as u64);
+    assert!(fs::metadata(&pack).expect("large pack").len() > LARGE_HISTORY_BYTES as u64);
     let transport = RecordingPushTransport::default();
     let mut executor = GitPushTools::try_new(
         &LocalWorkspaceFileSystem,
@@ -621,7 +621,10 @@ fn merge_push_omits_history_shared_with_the_dispatch_fence() {
     let repository = Repository::open(fixture.root()).expect("fixture repository");
     let signature = git2::Signature::now(AUTHOR_NAME, AUTHOR_EMAIL).expect("fixture author");
     let archive = repository
-        .blob(&vec![ARCHIVE_BYTE; crate::limits::MAX_OBJECT_BYTES + 1])
+        .blob(&vec![
+            ARCHIVE_BYTE;
+            crate::tests::support::TEST_OBJECT_BYTES + 1
+        ])
         .expect("historical blob exceeds the selected-object ceiling");
     let mut builder = repository.treebuilder(None).expect("archive tree builder");
     builder
@@ -898,7 +901,7 @@ fn push_snapshot_decodes_bounded_offset_and_reference_delta_chains() {
         let blob = plant_delta_chain(
             fixture.root(),
             encoding,
-            &[crate::limits::MAX_OBJECT_BYTES, 8, 1],
+            &[crate::tests::support::TEST_OBJECT_BYTES, 8, 1],
         );
         let tip = commit_with_push_blob(&fixture, blob);
         let snapshot = crate::push_objects::PushObjectSnapshot::capture(
@@ -926,7 +929,7 @@ fn push_snapshot_rejects_oversized_selected_delta_dependencies() {
         let blob = plant_delta_chain(
             fixture.root(),
             encoding,
-            &[crate::limits::MAX_OBJECT_BYTES + 1, 8, 1],
+            &[crate::tests::support::TEST_OBJECT_BYTES + 1, 8, 1],
         );
         let tip = commit_with_push_blob(&fixture, blob);
         assert!(
@@ -945,7 +948,7 @@ fn push_snapshot_excludes_unchanged_oversized_fence_blobs() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository");
     let blob = repository
-        .blob(&vec![b'x'; crate::limits::MAX_OBJECT_BYTES + 1])
+        .blob(&vec![b'x'; crate::tests::support::TEST_OBJECT_BYTES + 1])
         .expect("existing large blob");
     let fence = commit_with_push_blob(&fixture, blob);
     let parent = repository.find_commit(fence).expect("fence commit");
@@ -1254,7 +1257,7 @@ async fn push_refuses_parent_roles_when_both_parents_descend_from_the_fence() {
 
 #[tokio::test]
 async fn push_refuses_unsupported_merge_shape_before_an_oversized_parent_snapshot() {
-    use crate::limits::MAX_OBJECT_BYTES;
+    use crate::tests::support::TEST_OBJECT_BYTES as MAX_OBJECT_BYTES;
 
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");

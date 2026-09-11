@@ -5011,6 +5011,7 @@ public enum SignalboxToolBatchState: Decodable, Equatable, Sendable {
   case proposed(frontierID: SignalboxCanonicalUUID)
   case resultsProjected(frontierID: SignalboxCanonicalUUID)
   case recoveryRequired(toolAttemptID: SignalboxCanonicalUUID)
+  case childWaitResumed(toolAttemptID: SignalboxCanonicalUUID)
   case unknown(kind: String, payload: [String: SignalboxJSONValue])
 
   public init(from decoder: Decoder) throws {
@@ -5025,6 +5026,9 @@ public enum SignalboxToolBatchState: Decodable, Equatable, Sendable {
     case "recovery_required":
       try tagged.rejectUnadmittedFields(["type", "tool_attempt_id"], decoder: decoder)
       self = .recoveryRequired(toolAttemptID: try decoder.decode("tool_attempt_id"))
+    case "child_wait_resumed":
+      try tagged.rejectUnadmittedFields(["type", "tool_attempt_id"], decoder: decoder)
+      self = .childWaitResumed(toolAttemptID: try decoder.decode("tool_attempt_id"))
     default:
       self = .unknown(kind: tagged.kind, payload: tagged.payload)
     }

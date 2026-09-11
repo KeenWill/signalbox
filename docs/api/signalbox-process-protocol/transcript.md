@@ -403,6 +403,7 @@ pub enum ToolBatchState {
     Proposed { frontier_id: CanonicalUuid },
     ResultsProjected { frontier_id: CanonicalUuid },
     RecoveryRequired { tool_attempt_id: CanonicalUuid },
+    ChildWaitResumed { tool_attempt_id: CanonicalUuid },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```

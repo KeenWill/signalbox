@@ -154,6 +154,7 @@ impl<Clock>
         exec_supervisor_executable: &Path,
         cargo_registry_cache: Option<&Path>,
         sandbox: &signalbox_tools_exec::SandboxConfiguration,
+        max_git_object_bytes: Option<usize>,
         sandboxed_exec_timeout_bound: Option<std::time::Duration>,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
@@ -191,6 +192,7 @@ impl<Clock>
                 exec_runner.clone(),
                 cargo_registry_cache,
                 sandbox,
+                max_git_object_bytes,
                 sandboxed_exec_timeout_bound,
             )?,
             roots: SessionWorkspaceRoots::try_new(workspace_root)?,
@@ -198,6 +200,7 @@ impl<Clock>
             exec_runner,
             cargo_registry_cache: cargo_registry_cache.map(Path::to_path_buf),
             sandbox: sandbox.clone(),
+            max_git_object_bytes,
             sandboxed_exec_timeout_bound,
         };
         let conversations =
@@ -362,12 +365,14 @@ where
                 None,
                 &Default::default(),
                 None,
+                None,
             )?,
             roots: SessionWorkspaceRoots::try_new(workspace_root)?,
             git_identity,
             exec_runner,
             cargo_registry_cache: None,
             sandbox: Default::default(),
+            max_git_object_bytes: None,
             sandboxed_exec_timeout_bound: None,
         };
         let conversations = ConversationTools::try_new(conversation_port)

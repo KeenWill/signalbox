@@ -7,7 +7,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use git2::{Index, Repository, build::CheckoutBuilder};
+use crate::pinning::RepositoryShell;
+use git2::Index;
 use rustix::{
     fs::{AtFlags, Mode, OFlags, RenameFlags, openat, renameat_with, statat, unlinkat},
     io::dup,
@@ -22,16 +23,14 @@ use crate::descriptor::{
 };
 use crate::failure::LocalGitFailure;
 use crate::index_lock::IndexLock;
-use crate::limits::{
-    MAX_OBJECT_BYTES, MAX_TREE_BLOB_BYTES, MAX_WORKTREE_INSPECTIONS, MAX_WORKTREE_PATH_BYTES,
-};
+use crate::limits::{MAX_WORKTREE_INSPECTIONS, MAX_WORKTREE_PATH_BYTES};
 use crate::pinning::PinnedRepository;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum WorktreeRollbackEntry {
     Missing,
     Directory,
-    File { bytes: Vec<u8>, mode: u32 },
+    File { hashes: [git2::Oid; 2], mode: u32 },
 }
 
 pub(super) type WorktreeRollbackIdentities = BTreeMap<PathBuf, Option<FileIdentity>>;
@@ -45,30 +44,20 @@ pub(super) fn capture_worktree_rollback_state<FileSystem: WorkspaceFileSystem>(
     let mut state = BTreeMap::new();
     let mut inspected = 0_usize;
     let mut inspected_path_bytes = 0_usize;
-    let mut inspected_file_bytes = 0_usize;
     while let Some(path) = pending.pop() {
         if state.contains_key(&path) {
             continue;
         }
         match filesystem.entry_kind(root, &path) {
             Ok(WorkspaceEntryKind::File) => {
-                let read = filesystem
-                    .read_file_prefix(root, &path, MAX_OBJECT_BYTES)
-                    .map_err(|_| LocalGitFailure::Operation)?;
-                inspected_file_bytes = inspected_file_bytes.saturating_add(read.bytes.len());
-                if read.truncated
-                    || read.total_bytes != read.bytes.len() as u64
-                    || inspected_file_bytes > MAX_TREE_BLOB_BYTES
-                {
-                    return Err(LocalGitFailure::Operation);
-                }
-                state.insert(
-                    path,
-                    WorktreeRollbackEntry::File {
-                        bytes: read.bytes,
-                        mode: read.mode,
-                    },
-                );
+                let (mut content, mode) =
+                    crate::streamed_object::worktree_content(filesystem, root, &path, None)
+                        .map_err(|_| LocalGitFailure::Operation)?;
+                let hashes = [
+                    content.oid(git2::ObjectFormat::Sha1)?,
+                    content.oid(git2::ObjectFormat::Sha256)?,
+                ];
+                state.insert(path, WorktreeRollbackEntry::File { hashes, mode });
             }
             Ok(WorkspaceEntryKind::Directory) => {
                 let remaining_entries = MAX_WORKTREE_INSPECTIONS.saturating_sub(inspected);
@@ -113,7 +102,7 @@ pub(super) fn capture_worktree_rollback_state<FileSystem: WorkspaceFileSystem>(
 }
 
 pub(super) fn rollback_checkout_atomically<FileSystem: WorkspaceFileSystem>(
-    repository: &Repository,
+    repository: &RepositoryShell,
     current_tree: Option<&git2::Tree<'_>>,
     target_tree: &git2::Tree<'_>,
     checkout_paths: &BTreeSet<PathBuf>,
@@ -173,7 +162,7 @@ pub(super) fn rollback_checkout_atomically<FileSystem: WorkspaceFileSystem>(
 }
 
 pub(super) fn checkout_snapshot(
-    repository: &Repository,
+    repository: &RepositoryShell,
     tree: Option<&git2::Tree<'_>>,
     checkout_paths: &BTreeSet<PathBuf>,
     destination: &Path,
@@ -181,20 +170,14 @@ pub(super) fn checkout_snapshot(
     let Some(tree) = tree else {
         return Ok(());
     };
-    let mut checkout = CheckoutBuilder::new();
-    checkout
-        .force()
-        .target_dir(destination)
-        .update_index(false)
-        .refresh(false)
-        .disable_filters(true)
-        .disable_pathspec_match(true);
-    for path in checkout_paths {
-        checkout.path(path);
-    }
-    repository
-        .checkout_tree(tree.as_object(), Some(&mut checkout))
-        .map_err(|_| LocalGitFailure::Operation)
+    crate::streamed_object::checkout_paths(
+        repository,
+        tree,
+        checkout_paths,
+        destination,
+        None,
+        |_, _| Ok(()),
+    )
 }
 
 pub(super) fn checkout_rollback_roots(checkout_paths: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
@@ -454,15 +437,15 @@ pub(super) fn rollback_states_equal(
                 .is_some_and(|expected| match (observed, expected) {
                     (
                         WorktreeRollbackEntry::File {
-                            bytes: observed_bytes,
+                            hashes: observed_hashes,
                             mode: observed_mode,
                         },
                         WorktreeRollbackEntry::File {
-                            bytes: expected_bytes,
+                            hashes: expected_hashes,
                             mode: expected_mode,
                         },
                     ) => {
-                        observed_bytes == expected_bytes
+                        observed_hashes == expected_hashes
                             && observed_mode & 0o111 == expected_mode & 0o111
                     }
                     _ => observed == expected,
@@ -480,7 +463,7 @@ pub(super) fn checkout_tree_with_rollback<
     FileSystem: WorkspaceFileSystem,
     Checkout: FnOnce() -> Result<(), LocalGitFailure>,
 >(
-    repository: &Repository,
+    repository: &RepositoryShell,
     current_tree: Option<&git2::Tree<'_>>,
     target_tree: &git2::Tree<'_>,
     updated_paths: &RefCell<BTreeSet<PathBuf>>,

@@ -8,8 +8,7 @@ use git2::Index;
 
 use crate::failure::LocalGitFailure;
 use crate::limits::{
-    GITLINK_MODE, MAX_INDEX_ENTRIES, MAX_OBJECT_BYTES, MAX_TREE_BLOB_BYTES,
-    MAX_WORKTREE_INSPECTIONS, MAX_WORKTREE_PATH_BYTES,
+    GITLINK_MODE, MAX_INDEX_ENTRIES, MAX_WORKTREE_INSPECTIONS, MAX_WORKTREE_PATH_BYTES,
 };
 use crate::pinning::{PinnedRepository, RepositoryShell};
 use crate::reference_read::resolve_pinned_reference_chain_from;
@@ -106,12 +105,11 @@ fn validate_tree_discovery_options(
     let mut pending = vec![(root.id(), PathBuf::new())];
     let mut inspected = 0_usize;
     let mut inspected_path_bytes = 0_usize;
-    let mut inspected_blob_bytes = 0_usize;
     while let Some((oid, prefix)) = pending.pop() {
         let (size, kind) = repository
             .read_object_header(oid)
             .map_err(|_| LocalGitFailure::Operation)?;
-        if kind != git2::ObjectType::Tree || size > MAX_OBJECT_BYTES {
+        if kind != git2::ObjectType::Tree || size > repository.object_byte_limit(kind) {
             return Err(LocalGitFailure::Operation);
         }
         let tree = repository
@@ -140,11 +138,7 @@ fn validate_tree_discovery_options(
                     let (size, kind) = repository
                         .read_object_header(entry.id())
                         .map_err(|_| LocalGitFailure::Operation)?;
-                    inspected_blob_bytes = inspected_blob_bytes.saturating_add(size);
-                    if kind != git2::ObjectType::Blob
-                        || size > MAX_OBJECT_BYTES
-                        || inspected_blob_bytes > MAX_TREE_BLOB_BYTES
-                    {
+                    if kind != git2::ObjectType::Blob || size > repository.object_byte_limit(kind) {
                         return Err(LocalGitFailure::Operation);
                     }
                 }
@@ -169,7 +163,6 @@ pub(super) fn validate_index_objects(
     index: &Index,
 ) -> Result<(), LocalGitFailure> {
     validate_index_entry_count(index)?;
-    let mut blob_bytes = 0_usize;
     for entry in index.iter() {
         validate_repository_data_path(&PathBuf::from(std::ffi::OsString::from_vec(
             entry.path.clone(),
@@ -183,11 +176,7 @@ pub(super) fn validate_index_objects(
         let (size, kind) = repository
             .read_object_header(entry.id)
             .map_err(|_| LocalGitFailure::Operation)?;
-        blob_bytes = blob_bytes.saturating_add(size);
-        if kind != git2::ObjectType::Blob
-            || size > MAX_OBJECT_BYTES
-            || blob_bytes > MAX_TREE_BLOB_BYTES
-        {
+        if kind != git2::ObjectType::Blob || size > repository.object_byte_limit(kind) {
             return Err(LocalGitFailure::Operation);
         }
     }
@@ -217,7 +206,7 @@ pub(super) fn validate_object_header(
     let (size, kind) = repository
         .read_object_header(oid)
         .map_err(|_| LocalGitFailure::Operation)?;
-    if size > MAX_OBJECT_BYTES {
+    if size > repository.object_byte_limit(kind) {
         Err(LocalGitFailure::Operation)
     } else {
         Ok(kind)
