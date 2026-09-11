@@ -4,6 +4,7 @@
 //! scheduler lock before asking the domain aggregate for authority. Executor
 //! work remains outside database transactions.
 
+pub(crate) mod checkpoint;
 mod file_visibility;
 mod media_reference;
 mod placement_loss;
@@ -1533,80 +1534,21 @@ impl PostgresToolLoopRepository {
                 if checkpoint.is_some() && compacted.is_none() && !compaction_failed {
                     return Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(turn));
                 }
-                let mut boundaries = Vec::new();
-                let result_count = batch.yielded_snapshot().entry_count() + batch.requests().len();
-                let mut result_frontier = checkpoint.map_or(identities.result_frontier(),
-                    signalbox_domain::ContextFrontierId::from_uuid);
-                let result_entries = if checkpoint.is_some() {
-                    let mut snapshot = load_snapshot(&mut transaction, session, result_frontier).await?;
-                    while snapshot.entry_count() > result_count {
-                        boundaries.push(snapshot.clone());
-                        let prefix: Uuid = sqlx::query_scalar(
-                            "SELECT prefix_context_frontier_id FROM context_frontier WHERE context_frontier_id = $1",
-                        ).bind(result_frontier.into_uuid()).fetch_one(&mut *transaction).await?;
-                        result_frontier = signalbox_domain::ContextFrontierId::from_uuid(prefix);
-                        snapshot = load_snapshot(&mut transaction, session, result_frontier).await?;
-                    }
-                    snapshot.ordered_entries().skip(batch.yielded_snapshot().entry_count())
-                        .map(|entry| entry.entry()).collect()
+                let mut projection = if let Some(frontier) = compacted.or(checkpoint) {
+                    checkpoint::load_result_projection(
+                        &mut transaction,
+                        &batch,
+                        signalbox_domain::ContextFrontierId::from_uuid(frontier),
+                        None,
+                    ).await?
                 } else {
-                    identities.result_entries().to_vec()
+                    checkpoint::prepare_results(
+                        &mut transaction,
+                        &batch,
+                        identities.result_entries().to_vec(),
+                        identities.result_frontier(),
+                    ).await?
                 };
-                let mut child_outcomes = BTreeMap::new();
-                for request in batch.requests() {
-                    if let Some(ReconstitutedToolAttempt::Ended(attempt)) =
-                        batch.attempt(request.id())
-                        && let ToolAttemptEnd::AwaitingChild {
-                            spawning_request,
-                            child,
-                        } = attempt.end()
-                    {
-                        child_outcomes.insert(
-                            request.id(),
-                            load_foreground_delegation_outcome(
-                                &mut transaction,
-                                session,
-                                request.id(),
-                                *spawning_request,
-                                *child,
-                            )
-                            .await?,
-                        );
-                    }
-                }
-                let mut projection = batch
-                    .prepare_delegation_result_projection(
-                        result_entries.clone(),
-                        result_frontier,
-                        child_outcomes,
-                    )
-                    .map_err(|_| {
-                        ToolLoopRepositoryError::InvalidTransition(
-                            "tool batch is not ready for continuation",
-                        )
-                    })?;
-                boundaries.reverse();
-                if let Some(frontier) = compacted {
-                    boundaries.push(load_snapshot(&mut transaction, session,
-                        signalbox_domain::ContextFrontierId::from_uuid(frontier)).await?);
-                }
-                if !boundaries.is_empty() {
-                    let loaded = crate::session::load_session_from_connection(&mut transaction, session)
-                        .await.map_err(|error| match error {
-                            crate::session::SessionRepositoryError::Database(error) => ToolLoopRepositoryError::from(error),
-                            crate::session::SessionRepositoryError::Corruption(_) => ToolLoopCorruption::Inconsistent("compaction session").into(),
-                        })?.ok_or(ToolLoopCorruption::Missing("compaction session"))?;
-                    let scheduling = Box::pin(crate::submit_input::load_scheduling_projection(&mut transaction, loaded))
-                        .await.map_err(crate::model_execution::map_scheduling_error).map_err(map_model_call_error)?;
-                    for snapshot in boundaries {
-                        let reference = snapshot.ordered_entries().last()
-                            .ok_or(ToolLoopCorruption::Missing("checkpoint boundary entry"))?;
-                        let entry = scheduling.semantic_entry(reference).cloned()
-                            .ok_or(ToolLoopCorruption::Missing("checkpoint boundary entry"))?;
-                        projection = projection.with_context_boundary(entry, snapshot)
-                            .map_err(|_| ToolLoopCorruption::Inconsistent("checkpoint boundary projection"))?;
-                    }
-                }
                 let pending_inputs: Vec<Uuid> = sqlx::query_scalar(
                     "SELECT accepted_input_id FROM accepted_input
                       WHERE session_id = $1 AND expected_active_turn_id = $2

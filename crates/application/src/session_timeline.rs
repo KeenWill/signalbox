@@ -242,9 +242,22 @@ pub struct SessionWorkFacts {
     pub queued_turn_count: u64,
 }
 
+/// Retained operator supervision facts independent of transcript reconstruction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionSupervisionFacts {
+    /// Closed operator failure classification.
+    pub class: crate::OperatorFailureClass,
+    /// Retained user-content-free cause token.
+    pub cause_code: String,
+    /// Whether operator reconciliation remains required.
+    pub pending: bool,
+}
+
 /// Lightweight authoritative description of one session read projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionTimelineDescriptor {
+    /// Retained supervision evidence, including reconciled failures.
+    pub supervision: Option<SessionSupervisionFacts>,
     /// Last recorded daemon-local workspace binding, absent before binding.
     pub workspace_root_kind: Option<signalbox_domain::SessionWorkspaceRootKind>,
     /// Session described by these facts.

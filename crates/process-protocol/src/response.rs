@@ -764,6 +764,9 @@ pub enum ServerMessage {
     },
     /// Begins one transcript snapshot sequence.
     TranscriptSnapshotStart {
+        /// Exclusive acknowledged frontier for a suffix snapshot, or null for a full snapshot.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        after_frontier: Option<CanonicalUuid>,
         /// Recorded daemon-local workspace kind, absent before binding.
         #[serde(deserialize_with = "deserialize_required_nullable")]
         workspace_root_kind: Option<crate::SessionWorkspaceRootKind>,
@@ -868,8 +871,11 @@ pub enum ServerMessage {
         cursor: CanonicalU64,
         /// Number of preceding turn messages.
         turn_count: CanonicalU64,
-        /// Number of complete semantic entries.
+        /// Number of complete semantic entries emitted by this snapshot.
         entry_count: CanonicalU64,
+        /// Current semantic frontier, acknowledged only after this frame is consumed.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        frontier: Option<CanonicalUuid>,
     },
     /// One committed update after a follow snapshot.
     SessionEvent {

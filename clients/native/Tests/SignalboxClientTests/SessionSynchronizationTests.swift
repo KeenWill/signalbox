@@ -3431,6 +3431,7 @@ private enum SynchronizationFixture {
       """
       {
         "type":"transcript_snapshot_start",
+        "after_frontier":null,
         "workspace_root_kind":null,
         "repository_watch":null,
         "session_id":"\(session)",
@@ -3446,6 +3447,7 @@ private enum SynchronizationFixture {
       """
       {
         "type":"transcript_snapshot_start",
+        "after_frontier":null,
         "workspace_root_kind":null,
         "repository_watch":null,
         "session_id":"\(session)",
@@ -3489,6 +3491,7 @@ private enum SynchronizationFixture {
       """
       {
         "type":"transcript_snapshot_start",
+        "after_frontier":null,
         "workspace_root_kind":null,
         "repository_watch":null,
         "session_id":17,
@@ -4211,6 +4214,7 @@ private enum SynchronizationFixture {
       """
       {
         "type":"transcript_snapshot_end",
+        "frontier":null,
         "session_id":"\(session)",
         "cursor":"\(cursor)",
         "turn_count":"\(turnCount)",

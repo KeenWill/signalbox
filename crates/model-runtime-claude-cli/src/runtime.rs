@@ -178,6 +178,7 @@ pub struct ClaudeCliPreparedRequest<C> {
     support_directory: TempDir,
     mcp_config: PathBuf,
     system_prompt: PathBuf,
+    history: Option<PathBuf>,
     settings: PathBuf,
     correlation: C,
     resolved_target: String,
@@ -542,6 +543,7 @@ impl ClaudeCliRuntime {
             .map(|_| support.directory.path().to_path_buf());
         let prompt = std::mem::take(&mut translated.prompt);
         translated.system_prompt = Vec::new();
+        drop(std::mem::take(&mut translated.history));
         PreparationOutcome::Prepared(ClaudeCliPreparedRequest {
             executable: self.executable.clone(),
             working_directory: self.working_directory.clone(),
@@ -549,6 +551,7 @@ impl ClaudeCliRuntime {
             support_directory: support.directory,
             mcp_config: support.mcp_config,
             system_prompt: support.system_prompt,
+            history: support.history,
             settings: support.settings,
             correlation,
             resolved_target: operation.resolved_target.as_str().to_string(),
@@ -623,6 +626,7 @@ struct SupportFiles {
     directory: TempDir,
     mcp_config: PathBuf,
     system_prompt: PathBuf,
+    history: Option<PathBuf>,
     settings: PathBuf,
 }
 
@@ -644,6 +648,13 @@ fn create_support_files(
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
             .map_err(|error| format!("could not set private support directory mode: {error}"))?;
     }
+    let history = if translated.history.is_empty() {
+        None
+    } else {
+        let path = directory.path().join("history.jsonl");
+        write_private_file(&path, &translated.history)?;
+        Some(path)
+    };
     let catalog = directory.path().join("tools.json");
     let ready = directory.path().join("mcp-ready");
     let mcp_config = directory.path().join("mcp.json");
@@ -714,6 +725,7 @@ fn create_support_files(
         directory,
         mcp_config,
         system_prompt,
+        history,
         settings,
     })
 }
@@ -825,8 +837,8 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg("--model")
         .arg(&prepared.resolved_target)
         .current_dir(&prepared.working_directory);
-    if prepared.translated.input_format == crate::image::InputFormat::StreamJson {
-        command.arg("--input-format=stream-json");
+    if let Some(history) = &prepared.history {
+        command.arg("--resume").arg(history).arg("--fork-session");
     }
     if let Some(effort) = prepared.reasoning_effort {
         command.arg("--effort").arg(effort);

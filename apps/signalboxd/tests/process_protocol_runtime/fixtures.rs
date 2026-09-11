@@ -1259,7 +1259,10 @@ pub(crate) async fn read_transcript_messages(
         .request_version(
             ProtocolVersion::One,
             request_id,
-            ClientRequest::ReadTranscript { session_id },
+            ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
         )
         .await?;
     let start = response_within(connection).await?;

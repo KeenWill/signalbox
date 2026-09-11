@@ -1246,7 +1246,8 @@ fn reconstitute_inner(
         // frontier is exactly the starting frontier plus the consumed suffix.
         // With round evidence the call was prepared at a tool-round
         // continuation boundary, so everything before the consumed suffix
-        // must be exactly one completed round's result projection.
+        // must be exactly one completed round's result projection followed
+        // by any validated compaction summaries.
         let exact_frontier_matches = starting_frontier
             .and_then(|frontier| snapshots.get(&frontier))
             .zip(snapshots.get(&model_call.frontier()))
@@ -1263,6 +1264,19 @@ fn reconstitute_inner(
                         else {
                             return false;
                         };
+                        // Compaction summaries follow the round results and
+                        // precede the consumed suffix. Peel only exact,
+                        // validated compaction results from this boundary.
+                        let mut results_end = base_entry_count;
+                        for compaction in compaction_chain.iter().rev() {
+                            let result = &snapshots[&compaction.result_frontier().snapshot()];
+                            if result.entry_count() == results_end
+                                && result.is_semantic_prefix_of(call_snapshot)
+                            {
+                                results_end = snapshots[&compaction.source_frontier().snapshot()]
+                                    .entry_count();
+                            }
+                        }
                         // The round's tools were issued by the same
                         // continuation attempt that owns the consuming call.
                         round
@@ -1278,7 +1292,7 @@ fn reconstitute_inner(
                             && tool_round_continuation_producing_call(
                                 model_call.turn(),
                                 call_snapshot,
-                                base_entry_count,
+                                results_end,
                                 round.round_tool_attempts(),
                                 round.round_tool_denials(),
                                 &input.inadmissible_requests,
@@ -2261,6 +2275,7 @@ fn reconstitute_inner(
                                 &assistant_by_call,
                                 &snapshots,
                                 &semantic_entries,
+                                &compaction_chain,
                             )
                             .is_some()
                     });
@@ -2754,6 +2769,7 @@ fn reconstitute_inner(
                         &assistant_by_call,
                         &snapshots,
                         &semantic_entries,
+                        &compaction_chain,
                     )
                     .is_some_and(|producing_call| {
                         named_tool_round_producer.is_none_or(|named| named == producing_call)
