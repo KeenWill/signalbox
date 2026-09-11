@@ -145,8 +145,9 @@ class Trial:
         created = self.mutate("create", "create_session_from_template", template_name=args.template)
         sid = created["session_id"]
         defaults = request(args.socket, "read_session_defaults", session_id=sid, defaults_version=None)[0]
-        if args.alias:
-            selection = {"kind": "alias", "alias_id": args.alias}
+        if args.alias or args.selection_id:
+            selection = ({"kind": "alias", "alias_id": args.alias} if args.alias else
+                         {"kind": "direct", "selection_id": args.selection_id})
             if defaults["model_selection"] != selection:
                 self.mutate("model", "replace_session_defaults", session_id=sid,
                     expected_defaults_version=defaults["defaults_version"], model_selection=selection,
@@ -207,7 +208,9 @@ def main():
     for name in ("socket", "repository", "workspace", "cases", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--template", default="review-judgment")
-    parser.add_argument("--alias")
+    model = parser.add_mutually_exclusive_group()
+    model.add_argument("--alias")
+    model.add_argument("--selection-id")
     parser.add_argument("--effort", choices=("low", "medium", "high", "xhigh"))
     parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()

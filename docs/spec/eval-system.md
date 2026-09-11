@@ -9,7 +9,9 @@ the daemon's configured judgment session template. Its JSONL cases carry `id`,
 and `context`. It checks out each head in a detached scratch worktree under the
 configured workspace, supplies the base diff, and retains the structured
 tool-written judgment with session, turn, frontier, usage, and elapsed-time
-evidence. It performs no publication. Labels and scoring stay with the caller.
+evidence. The caller can select a catalog alias with `--alias` or a direct
+catalog entry with `--selection-id`, and override reasoning with `--effort`. It
+performs no publication. Labels and scoring stay with the caller.
 
 ## Overview
 
