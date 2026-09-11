@@ -908,16 +908,7 @@ fn authenticate_frozen_attempt_templates(
             repair: configured_template_name(REVIEW_REPAIR_TEMPLATE_NAME)?,
             publication: configured_template_name(REVIEW_PUBLICATION_TEMPLATE_NAME)?,
         },
-        concerns: REVIEW_CONCERNS
-            .iter()
-            .map(|(key, template)| {
-                Ok(ReviewConcernTemplateSelection {
-                    key: ReviewKey::try_new((*key).to_owned())
-                        .map_err(|_| internal(ReviewOrchestrationInternalCause::ServiceContract))?,
-                    template: configured_template_name(template)?,
-                })
-            })
-            .collect::<Result<_, ReviewOrchestrationRuntimeError>>()?,
+        concerns: configured_attempt_concerns(attempt)?,
     };
     let current = templates
         .resolve_review_attempt(attempt.id(), attempt.target(), &selection)
@@ -928,6 +919,24 @@ fn authenticate_frozen_attempt_templates(
         return Err(ReviewOrchestrationRuntimeError::Rejected);
     }
     Ok(())
+}
+
+fn configured_attempt_concerns(
+    attempt: &ReviewOrchestrationAttempt,
+) -> Result<Vec<ReviewConcernTemplateSelection>, ReviewOrchestrationRuntimeError> {
+    attempt
+        .concerns()
+        .iter()
+        .map(|concern| {
+            let key = concern.key().clone();
+            let template = configured_concern_template(key.as_str())
+                .ok_or(internal(ReviewOrchestrationInternalCause::ServiceContract))?;
+            Ok(ReviewConcernTemplateSelection {
+                key,
+                template: configured_template_name(template)?,
+            })
+        })
+        .collect()
 }
 
 fn configured_template_name(
@@ -1793,17 +1802,62 @@ const fn internal(cause: ReviewOrchestrationInternalCause) -> ReviewOrchestratio
 
 #[cfg(test)]
 mod tests {
-    use signalbox_application::ReviewConcernOutcome;
+    use signalbox_application::{
+        ReviewConcernOutcome, ReviewConcernSpec, ReviewOrchestrationAttempt,
+        ReviewOrchestrationAttemptId, ReviewStageTemplateDigests, ReviewTemplateDigest,
+    };
     use signalbox_domain::{
-        ReviewPassId, ReviewPassRef, ReviewRunId, ReviewRunRef, ReviewTargetId,
+        ReviewKey, ReviewPassId, ReviewPassRef, ReviewPolicy, ReviewRunId, ReviewRunRef,
+        ReviewTargetId,
     };
     use signalbox_process_protocol::ReviewOrchestrationConcernStatus;
     use uuid::Uuid;
 
     use super::{
         ReviewOrchestrationRuntimeError, ReviewOrchestrationServiceError,
-        ReviewOrchestrationStoreError, RunnerError, map_service_error, map_store_error,
+        ReviewOrchestrationStoreError, RunnerError, configured_attempt_concerns, map_service_error,
+        map_store_error,
     };
+
+    #[test]
+    fn frozen_template_authentication_uses_the_attempt_concern_subset() {
+        let digest = ReviewTemplateDigest::new([1; 32]);
+        let attempt = ReviewOrchestrationAttempt::try_new(
+            ReviewOrchestrationAttemptId::from_uuid(Uuid::from_u128(1)),
+            ReviewTargetId::from_uuid(Uuid::from_u128(2)),
+            ReviewPolicy::version_one(),
+            ReviewKey::try_new(String::from("matched-two-v1")).expect("valid version"),
+            ReviewStageTemplateDigests::new(digest, digest, digest, digest),
+            vec![
+                ReviewConcernSpec::new(
+                    ReviewKey::try_new(String::from("correctness")).expect("valid concern"),
+                    digest,
+                ),
+                ReviewConcernSpec::new(
+                    ReviewKey::try_new(String::from("documentation-code-drift"))
+                        .expect("valid concern"),
+                    digest,
+                ),
+            ],
+        )
+        .expect("valid attempt");
+
+        let concerns = configured_attempt_concerns(&attempt).expect("configured concerns");
+
+        assert_eq!(
+            concerns
+                .iter()
+                .map(|selection| (selection.key.as_str(), selection.template.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("correctness", "review-concern-correctness"),
+                (
+                    "documentation-code-drift",
+                    "review-concern-documentation-code-drift",
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn superseded_concern_keeps_its_distinct_wire_status() {

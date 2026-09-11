@@ -728,11 +728,13 @@ select before reading any exclusion state and holds those locks through the
 A historical read resolves a call's billing kind and rates from the reference
 the call pinned, so a pool edited across a restart cannot relabel a stored call.
 
-Loading a review library generates exactly nine resolved templates whose names
-are reserved even when no library is configured, so an ordinary entry cannot
-shadow one. Creation by template name first consults the durable command
-registry, and an equal replay returns its stored session even when the name is
-absent or changed in the current catalog; the claim protocol is owned by
+Loading a review library generates four stage templates and one template for
+each configured concern. The concern inventory is a nonempty subset of the five
+closed concern keys and retains their closed order. All nine possible names are
+reserved even when no library is configured, so an ordinary entry cannot shadow
+one. Creation by template name first consults the durable command registry, and
+an equal replay returns its stored session even when the name is absent or
+changed in the current catalog; the claim protocol is owned by
 [identity and commands](identity-and-commands.md). Only an unclaimed command
 identity resolves against the loaded catalog and copies the complete bundle into
 the session's immutable defaults version one. The session records the template
