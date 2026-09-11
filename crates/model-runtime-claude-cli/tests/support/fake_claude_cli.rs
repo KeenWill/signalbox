@@ -659,7 +659,10 @@ fn record_settings_mode(_settings: &str) -> std::io::Result<()> {
 }
 
 fn scenario(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let value: serde_json::Value = serde_json::from_str(prompt)?;
+    let (_, request_json) = prompt
+        .split_once('\n')
+        .ok_or("missing response request before request JSON")?;
+    let value: serde_json::Value = serde_json::from_str(request_json)?;
     Ok(value["messages"][0]["parts"][0]["text"]
         .as_str()
         .ok_or("missing scenario")?

@@ -208,7 +208,10 @@ pub(crate) fn translate<C>(
         operation.system.as_deref().unwrap_or_default()
     )
     .into_bytes();
-    let prompt = format!("{request_json}\n").into_bytes();
+    let prompt = format!(
+        "Produce the next assistant response to the canonical conversation under these request controls:\n{request_json}\n"
+    )
+    .into_bytes();
 
     let (prompt, input_format) = crate::image::encode_input(operation, prompt, system_prompt.len())
         .map_err(TranslationError::Failure)?;

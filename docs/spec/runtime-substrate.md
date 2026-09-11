@@ -133,8 +133,9 @@ identity, and this layer has no substitution variant of its own.
 
 The Claude adapter supplies its instructions and the operation's system prompt
 through a private native system-prompt file. Transcript data and request
-controls remain user input. Request measurement includes both; the file shares
-the one-shot process lifetime.
+controls remain user input, preceded by an explicit request for the next
+assistant response. Request measurement includes both; the file shares the
+one-shot process lifetime.
 
 A subprocess adapter cannot observe or govern the wrapped client's internal HTTP
 attempts; they are provider-internal, like server-side attempts behind one
