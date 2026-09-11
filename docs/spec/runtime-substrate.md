@@ -131,6 +131,11 @@ announcing that another model continued the turn is evidence the resolved target
 did not serve it; the marker crosses the boundary only through the reported
 identity, and this layer has no substitution variant of its own.
 
+The Claude adapter supplies its instructions and the operation's system prompt
+through a private native system-prompt file. Transcript data and request
+controls remain user input. Request measurement includes both; the file shares
+the one-shot process lifetime.
+
 A subprocess adapter cannot observe or govern the wrapped client's internal HTTP
 attempts; they are provider-internal, like server-side attempts behind one
 direct request.

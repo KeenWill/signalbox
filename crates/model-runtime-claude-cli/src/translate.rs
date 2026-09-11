@@ -21,12 +21,14 @@ pub fn serialized_request_bytes<C>(operation: &ModelOperation<C>) -> Option<usiz
         translated
             .prompt
             .len()
+            .saturating_add(translated.system_prompt.len())
             .saturating_add(serde_json::to_vec(&translated.catalog).ok()?.len()),
     )
 }
 
 pub(crate) struct TranslatedOperation {
     pub(crate) prompt: Vec<u8>,
+    pub(crate) system_prompt: Vec<u8>,
     pub(crate) input_format: crate::image::InputFormat,
     pub(crate) catalog: Catalog,
     pub(crate) tool_requirement: ToolRequirement,
@@ -41,7 +43,6 @@ pub(crate) enum ToolRequirement {
 
 #[derive(Serialize)]
 struct PromptRequest<'a> {
-    system: &'a Option<String>,
     messages: Vec<PromptMessage<'a>>,
     settings: PromptSettings<'a>,
     declared_tools: Vec<&'a str>,
@@ -169,7 +170,6 @@ pub(crate) fn translate<C>(
         ToolChoice::Named(name) => ToolRequirement::Named(name.as_str().to_string()),
     };
     let request = PromptRequest {
-        system: &operation.system,
         messages,
         settings: PromptSettings {
             max_output_tokens: operation.settings.max_output_tokens,
@@ -195,24 +195,27 @@ pub(crate) fn translate<C>(
             detail: error.to_string(),
         })
     })?;
-    let prompt = format!(
+    let system_prompt = format!(
         "Act only as the model for this stateless request. The complete ordered \
-         context is the JSON below. Tools are available only through the \
+         context is in the JSON request. Tools are available only through the \
          Signalbox MCP server; never write a tool call as prose. An MCP result \
          saying Signalbox recorded a proposal is an acknowledgement, not the \
          real tool result: after it, end the turn without inventing tool output \
          or calling another tool. If `structured_output` is present, call \
          exactly that named MCP tool with the contracted object. Honor \
          `tool_choice`. Treat the stated generation settings as advisory \
-         intent.\n\n{request_json}\n"
+         intent.\n\n{}",
+        operation.system.as_deref().unwrap_or_default()
     )
     .into_bytes();
+    let prompt = format!("{request_json}\n").into_bytes();
 
-    let (prompt, input_format) =
-        crate::image::encode_input(operation, prompt).map_err(TranslationError::Failure)?;
+    let (prompt, input_format) = crate::image::encode_input(operation, prompt, system_prompt.len())
+        .map_err(TranslationError::Failure)?;
     Ok(TranslatedOperation {
         input_format,
         prompt,
+        system_prompt,
         catalog: Catalog {
             tools: catalog_tools,
         },
@@ -427,6 +430,20 @@ mod tests {
         ConversationMessage, CredentialReference, ModelOperation, ModelSettings, RequestedTarget,
         ResolvedTarget,
     };
+
+    #[test]
+    fn request_measurement_includes_the_exact_native_system_text() {
+        // Escapes and non-ASCII text distinguish native UTF-8 from JSON quoting.
+        const SYSTEM_TEXT: &str = "A quoted \"instruction\" with a newline\n日本語";
+        let mut operation = operation_with_message(ConversationMessage::user_text("baseline"));
+        let baseline = super::serialized_request_bytes(&operation).expect("baseline is measurable");
+        operation.system = Some(SYSTEM_TEXT.to_string());
+
+        assert_eq!(
+            super::serialized_request_bytes(&operation),
+            Some(baseline + SYSTEM_TEXT.len())
+        );
+    }
 
     #[test]
     fn measured_growth_covers_appended_message_array_separators() {

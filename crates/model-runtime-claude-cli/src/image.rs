@@ -72,6 +72,7 @@ pub fn image_presentation_capability() -> ImagePresentationCapability {
 pub(crate) fn encode_input<C>(
     operation: &ModelOperation<C>,
     prompt: Vec<u8>,
+    system_prompt_bytes: usize,
 ) -> Result<(Vec<u8>, InputFormat), PreparationFailure> {
     let Some(limit) = signalbox_model_runtime::image_request_byte_limit(
         operation,
@@ -109,7 +110,7 @@ pub(crate) fn encode_input<C>(
     })
     .map_err(|_| unsupported())?;
     bytes.push(b'\n');
-    if bytes.len() > limit {
+    if bytes.len().saturating_add(system_prompt_bytes) > limit {
         return Err(unsupported());
     }
     Ok((bytes, InputFormat::StreamJson))
@@ -121,6 +122,7 @@ mod tests {
     use signalbox_model_runtime::*;
     #[test]
     fn image_input_uses_stream_json_and_counts_the_complete_request() {
+        const NO_SYSTEM_PROMPT_BYTES: usize = 0;
         let mut operation = ModelOperation::new(
             (),
             CredentialReference::new("fixture"),
@@ -136,7 +138,8 @@ mod tests {
             ModelSettings::new(64),
         );
         operation.image_presentation = Some(image_presentation_capability());
-        let (bytes, format) = encode_input(&operation, b"request".to_vec()).unwrap();
+        let (bytes, format) =
+            encode_input(&operation, b"request".to_vec(), NO_SYSTEM_PROMPT_BYTES).unwrap();
         assert_eq!(format, InputFormat::StreamJson);
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["type"], "user");
@@ -146,9 +149,15 @@ mod tests {
         );
         operation.image_presentation =
             Some(image_presentation_capability().limited_by(u64::MAX, bytes.len() - 1));
-        assert!(encode_input(&operation, b"request".to_vec()).is_err());
+        assert!(encode_input(&operation, b"request".to_vec(), NO_SYSTEM_PROMPT_BYTES).is_err());
+        const SYSTEM_PROMPT: &[u8] = b"An arbitrary native system instruction.";
+        operation.image_presentation = Some(
+            image_presentation_capability()
+                .limited_by(u64::MAX, bytes.len() + SYSTEM_PROMPT.len() - 1),
+        );
+        assert!(encode_input(&operation, b"request".to_vec(), SYSTEM_PROMPT.len()).is_err());
         operation.image_presentation =
             Some(image_presentation_capability().limited_by(2, usize::MAX));
-        assert!(encode_input(&operation, b"request".to_vec()).is_err());
+        assert!(encode_input(&operation, b"request".to_vec(), NO_SYSTEM_PROMPT_BYTES).is_err());
     }
 }

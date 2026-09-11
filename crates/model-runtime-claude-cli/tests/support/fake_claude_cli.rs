@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     std::fs::write("fake-claude-argv", arguments.join("\n"))?;
     record_credential_delivery(&arguments)?;
+    record_system_prompt(&arguments)?;
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt)?;
     std::fs::write("fake-claude-prompt", &prompt)?;
@@ -580,6 +581,18 @@ fn argument_after<'a>(arguments: &'a [String], name: &str) -> Option<&'a str> {
         .map(|pair| pair[1].as_str())
 }
 
+fn record_system_prompt(arguments: &[String]) -> std::io::Result<()> {
+    let path = argument_after(arguments, "--append-system-prompt-file").unwrap_or_default();
+    std::fs::copy(path, "fake-claude-system-prompt")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        std::fs::write("fake-claude-system-prompt-mode", format!("{mode:o}"))?;
+    }
+    Ok(())
+}
+
 fn record_credential_delivery(arguments: &[String]) -> std::io::Result<()> {
     let settings = argument_after(arguments, "--settings").unwrap_or_default();
     let settings_contents = std::fs::read_to_string(settings).unwrap_or_default();
@@ -646,12 +659,7 @@ fn record_settings_mode(_settings: &str) -> std::io::Result<()> {
 }
 
 fn scenario(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let value: serde_json::Value = serde_json::from_str(
-        prompt
-            .split_once("\n\n")
-            .map(|(_, json)| json.trim())
-            .ok_or("missing prompt JSON")?,
-    )?;
+    let value: serde_json::Value = serde_json::from_str(prompt)?;
     Ok(value["messages"][0]["parts"][0]["text"]
         .as_str()
         .ok_or("missing scenario")?

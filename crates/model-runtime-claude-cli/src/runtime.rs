@@ -177,6 +177,7 @@ pub struct ClaudeCliPreparedRequest<C> {
     prompt: Vec<u8>,
     support_directory: TempDir,
     mcp_config: PathBuf,
+    system_prompt: PathBuf,
     settings: PathBuf,
     correlation: C,
     resolved_target: String,
@@ -540,12 +541,14 @@ impl ClaudeCliRuntime {
             .as_ref()
             .map(|_| support.directory.path().to_path_buf());
         let prompt = std::mem::take(&mut translated.prompt);
+        translated.system_prompt = Vec::new();
         PreparationOutcome::Prepared(ClaudeCliPreparedRequest {
             executable: self.executable.clone(),
             working_directory: self.working_directory.clone(),
             prompt,
             support_directory: support.directory,
             mcp_config: support.mcp_config,
+            system_prompt: support.system_prompt,
             settings: support.settings,
             correlation,
             resolved_target: operation.resolved_target.as_str().to_string(),
@@ -619,6 +622,7 @@ pub fn validate_model_settings(settings: &ModelSettings) -> Result<(), Preparati
 struct SupportFiles {
     directory: TempDir,
     mcp_config: PathBuf,
+    system_prompt: PathBuf,
     settings: PathBuf,
 }
 
@@ -644,6 +648,8 @@ fn create_support_files(
     let ready = directory.path().join("mcp-ready");
     let mcp_config = directory.path().join("mcp.json");
     let settings = directory.path().join("settings.json");
+    let system_prompt = directory.path().join("system-prompt.txt");
+    write_private_file(&system_prompt, &translated.system_prompt)?;
     let credential_file = directory.path().join("credential");
     let credential_helper = directory.path().join("credential-helper");
     let bridge_text = bridge
@@ -707,6 +713,7 @@ fn create_support_files(
     Ok(SupportFiles {
         directory,
         mcp_config,
+        system_prompt,
         settings,
     })
 }
@@ -800,6 +807,8 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg("")
         .arg("--settings")
         .arg(&prepared.settings)
+        .arg("--append-system-prompt-file")
+        .arg(&prepared.system_prompt)
         .arg("--disable-slash-commands")
         .arg("--strict-mcp-config")
         .arg("--mcp-config")
