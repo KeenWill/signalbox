@@ -195,8 +195,8 @@ async fn native_history_restores_distinct_assistant_groups_without_replaying_too
             .expect("canonical result text"),
     )
     .expect("canonical result is JSON");
-    assert_eq!(prior_result["parts"][0]["tool_call_id"], fixtures::TOOL_ID);
-    assert_eq!(prior_result["parts"][0]["content"], fixtures::ANSWER);
+    assert_eq!(prior_result["tool_call_id"], fixtures::TOOL_ID);
+    assert_eq!(prior_result["content"], fixtures::ANSWER);
     let controls: serde_json::Value = serde_json::from_str(
         result
             .prompt
@@ -208,6 +208,35 @@ async fn native_history_restores_distinct_assistant_groups_without_replaying_too
     assert!(
         controls.get("messages").is_none(),
         "history is not duplicated in the control prompt"
+    );
+}
+
+#[tokio::test]
+async fn native_history_keeps_current_request_text_after_prior_completion() {
+    use signalbox_model_runtime::ConversationMessage;
+    // Arbitrary, distinct text separates the next request from completed work.
+    const CURRENT_REQUEST: &str = "Write the next report.";
+    let mut request = operation("normal_completion", OperationShape::Text);
+    request.messages.extend([
+        ConversationMessage::assistant_text(fixtures::ANSWER),
+        ConversationMessage::user_text(CURRENT_REQUEST),
+    ]);
+    let result = execute_operation(request).await;
+    let rows: Vec<serde_json::Value> = result
+        .history
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("native history row is JSON"))
+        .collect();
+    assert_eq!(
+        rows[1]["message"]["content"],
+        serde_json::json!([{"type": "text", "text": fixtures::ANSWER}]),
+        "prior completion retains its native assistant text"
+    );
+    assert_eq!(rows[2]["message"]["role"], "user");
+    assert_eq!(
+        rows[2]["message"]["content"],
+        serde_json::json!([{"type": "text", "text": CURRENT_REQUEST}]),
+        "the current request reaches the CLI as native text, not a quoted JSON message"
     );
 }
 

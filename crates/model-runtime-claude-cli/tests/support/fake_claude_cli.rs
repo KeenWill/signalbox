@@ -670,12 +670,7 @@ fn record_settings_mode(_settings: &str) -> std::io::Result<()> {
 fn scenario(history: &str) -> Result<String, Box<dyn std::error::Error>> {
     let row: serde_json::Value =
         serde_json::from_str(history.lines().next().ok_or("empty native history")?)?;
-    let value: serde_json::Value = serde_json::from_str(
-        row["message"]["content"][0]["text"]
-            .as_str()
-            .ok_or("missing canonical message")?,
-    )?;
-    Ok(value["parts"][0]["text"]
+    Ok(row["message"]["content"][0]["text"]
         .as_str()
         .ok_or("missing scenario")?
         .to_string())

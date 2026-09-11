@@ -4,7 +4,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 use base64::Engine as _;
 use serde::Serialize;
-use signalbox_model_runtime::{ConversationMessage, ImagePresentationCapability, MessagePart};
+use signalbox_model_runtime::{ImageInput, ImagePresentationCapability};
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -51,30 +51,12 @@ pub fn image_presentation_capability() -> ImagePresentationCapability {
     )
 }
 
-pub(crate) fn message_content(message: &ConversationMessage, text: String) -> Vec<InputPart> {
-    let mut content = vec![InputPart::Text { text }];
-    for (part_index, part) in message.parts.iter().enumerate() {
-        let image = match part {
-            MessagePart::Image(image) => image,
-            MessagePart::ImageReference(_)
-            | MessagePart::Text(_)
-            | MessagePart::ToolCall(_)
-            | MessagePart::ToolResult(_)
-            | MessagePart::Thinking { .. }
-            | MessagePart::RedactedThinking { .. }
-            | MessagePart::ProviderReasoning { .. }
-            | MessagePart::ProviderCompaction { .. } => continue,
-        };
-        content.push(InputPart::Text {
-            text: format!("Image for parts[{part_index}] in this history message:"),
-        });
-        content.push(InputPart::Image {
-            source: ImageSource {
-                r#type: "base64",
-                media_type: image.media_type.clone(),
-                data: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
-            },
-        });
+pub(crate) fn image_content(image: &ImageInput) -> InputPart {
+    InputPart::Image {
+        source: ImageSource {
+            r#type: "base64",
+            media_type: image.media_type.clone(),
+            data: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+        },
     }
-    content
 }
