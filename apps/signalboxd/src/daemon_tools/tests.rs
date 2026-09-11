@@ -6566,11 +6566,25 @@ fn a_directory_another_session_bound_is_refused() {
         },
     )]);
 
+    let output = tempfile::NamedTempFile::new().expect("capture shared binding failure");
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(output.reopen().expect("capture writer"))
+        .finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
+
     assert!(another_session_bound(
         &bindings,
         second,
         FIXTURE_BOUND_IDENTITY
     ));
+    let diagnostic = fs::read_to_string(output.path()).expect("read captured diagnostic");
+    assert!(diagnostic.contains("workspace directory shares a recorded session binding"));
+    assert!(diagnostic.contains(&format!("session_id={}", second.into_uuid())));
+    assert!(diagnostic.contains(&format!("bound_session_id={}", first.into_uuid())));
+    assert!(diagnostic.contains(&format!("proposed={FIXTURE_BOUND_IDENTITY:?}")));
+    assert!(diagnostic.contains(&format!("bound_identity={FIXTURE_BOUND_IDENTITY:?}")));
 }
 
 /// A session resuming the directory it bound itself is not a collision.

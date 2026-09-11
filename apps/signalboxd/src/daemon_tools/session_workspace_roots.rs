@@ -400,10 +400,20 @@ pub(super) fn another_session_bound(
     composed: ComposedWorkspaceIdentity,
 ) -> bool {
     bindings.iter().any(|(bound, binding)| {
-        *bound != session
-            && binding
-                .derived_identity()
-                .is_some_and(|bound_identity| bound_identity.shares_a_directory_with(&composed))
+        let Some(bound_identity) = binding.derived_identity() else {
+            return false;
+        };
+        if *bound == session || !bound_identity.shares_a_directory_with(&composed) {
+            return false;
+        }
+        tracing::warn!(
+            session_id = %session.into_uuid(),
+            bound_session_id = %bound.into_uuid(),
+            proposed = ?composed,
+            bound_identity = ?bound_identity,
+            "workspace directory shares a recorded session binding"
+        );
+        true
     })
 }
 
