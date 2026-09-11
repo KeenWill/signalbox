@@ -1433,8 +1433,8 @@ pub(super) fn wire_uuid(value: uuid::Uuid) -> CanonicalUuid {
     CanonicalUuid::from_uuid(value)
 }
 
-pub(super) struct ProtocolError {
-    pub(super) code: ErrorCode,
+pub(crate) struct ProtocolError {
+    pub(crate) code: ErrorCode,
     pub(super) message: &'static str,
     pub(super) detail: ErrorDetail,
 }

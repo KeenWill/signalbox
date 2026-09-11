@@ -106,6 +106,7 @@ signalbox-tools-exec = { path = "../../crates/tools-exec" }
 signalbox-tools-git = { path = "../../crates/tools-git" }
 signalbox-tools-github = { path = "../../crates/tools-github" }
 signalbox-tools-plan = { path = "../../crates/tools-plan" }
+signalbox-tools-workflows = { path = "../../crates/tools-workflows" }
 signalbox-tools-sessions = { path = "../../crates/tools-sessions" }
 signalbox-tools-web = { path = "../../crates/tools-web" }
 signalbox-tools-workspace = { path = "../../crates/tools-workspace" }

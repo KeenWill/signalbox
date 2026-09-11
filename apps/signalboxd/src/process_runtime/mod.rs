@@ -381,7 +381,7 @@ mod request;
 use request::handle_request;
 mod credential_exclusions;
 mod evaluation;
-mod program;
+pub(crate) mod program;
 use credential_exclusions::*;
 use program::*;
 mod delegation;
@@ -402,6 +402,7 @@ mod transcript;
 use transcript::*;
 mod protocol;
 pub use protocol::ProcessRuntimeError;
+pub(crate) use protocol::ProtocolError;
 pub(crate) use protocol::interrupt_for_committed_closure;
 use protocol::*;
 #[cfg(test)]

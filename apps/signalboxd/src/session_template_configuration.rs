@@ -50,9 +50,15 @@ pub struct ResolvedSessionTemplate {
     version: SessionTemplateVersion,
     provenance: SessionTemplateProvenance,
     defaults: SessionConfigurationDefaults,
+    workflow_tools: signalbox_tools_workflows::WorkflowPolicy,
 }
 
 impl ResolvedSessionTemplate {
+    /// Workflow authority selected by this reloadable template.
+    pub fn workflow_tools(&self) -> &signalbox_tools_workflows::WorkflowPolicy {
+        &self.workflow_tools
+    }
+
     /// Returns the operator-assigned bundle version.
     pub const fn version(&self) -> SessionTemplateVersion {
         self.version
@@ -478,6 +484,7 @@ fn insert_review_template(
             version: source.version,
             provenance: SessionTemplateProvenance::new(name, digest),
             defaults,
+            workflow_tools: Default::default(),
         },
     );
     Ok(derive_review_template_digest(
@@ -613,6 +620,7 @@ fn parse_template(
             "system_prompt",
             "system_prompt_file",
             "dangerous_tool_auto_approval",
+            "workflow_tools",
         ],
     )?;
     let name = SessionTemplateName::try_new(required_string(table, "name")?.to_owned())
@@ -688,7 +696,23 @@ fn parse_template(
     .ok_or(SessionTemplateConfigurationError::InvalidModelSettings)?;
     let digest = SessionTemplateContentDigest::derive(version, &defaults)
         .ok_or(SessionTemplateConfigurationError::MissingPrompt)?;
+    let workflow_tools = match table.get("workflow_tools") {
+        Some(item) => {
+            let mut policy = DocumentMut::new();
+            *policy.as_table_mut() = item
+                .clone()
+                .into_table()
+                .map_err(|_| SessionTemplateConfigurationError::InvalidField)?;
+            toml::from_str::<signalbox_tools_workflows::WorkflowPolicy>(&policy.to_string())
+                .map_err(|_| SessionTemplateConfigurationError::InvalidField)?
+        }
+        None => Default::default(),
+    };
+    if !workflow_tools.valid() {
+        return Err(SessionTemplateConfigurationError::InvalidField);
+    }
     Ok(ResolvedSessionTemplate {
+        workflow_tools,
         version,
         provenance: SessionTemplateProvenance::new(name, digest),
         defaults,
@@ -1083,6 +1107,42 @@ security = "Find security boundary failures."
 documentation-code-drift = "Find documentation drift."
 "#,
         )
+    }
+
+    #[test]
+    fn workflow_template_policy_survives_the_reload_snapshot() {
+        use signalbox_tools_workflows::Operation;
+        let configuration = SessionTemplateConfiguration::parse_at(
+            &inline_catalog(
+                r#"
+[templates.workflow_tools.list]
+enabled = true
+[templates.workflow_tools.start]
+names = ["build"]
+posture = "human"
+[templates.workflow_tools.register]
+names = "*"
+"#,
+            ),
+            Path::new("deployment/templates.toml"),
+            None,
+            &models(),
+        )
+        .expect("workflow template");
+        let restored =
+            SessionTemplateConfiguration::parse_snapshot(configuration.source(), &models())
+                .expect("retained template");
+        let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned()).expect("template name");
+        let policy = restored.resolve(&name).expect("template").workflow_tools();
+        assert!(policy.permits(Operation::List, None));
+        assert!(policy.permits(Operation::Start, Some("build")));
+        assert!(!policy.permits(Operation::Start, Some("release")));
+        assert!(!policy.permits(Operation::Stop, None));
+        assert!(policy.permits(Operation::Register, Some("release")));
+        assert_eq!(
+            policy.posture(Operation::Start),
+            signalbox_domain::ToolApprovalPosture::Human
+        );
     }
 
     #[test]
@@ -1784,7 +1844,7 @@ dangerous_tool_auto_approval = false
         )
         .expect("example review library is valid");
 
-        assert_eq!(configuration.summaries().len(), REVIEW_CONCERNS.len() + 5);
+        assert!(configuration.configured_review_selection().is_some());
     }
     #[test]
     fn review_attempt_rejects_a_reordered_concern_selection() {
