@@ -955,6 +955,9 @@ pub struct LifecycleEventSource {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl LifecycleEventSource {
     pub const fn new(core_pool: sqlx_postgres::PgPool) -> Self;
+    pub async fn through_current_frontier(
+        &self,
+    ) -> result::Result<Self, signalbox_persistence::outbox::OutboxDispatchError>;
     pub async fn session_terminal_at(
         &self,
         session: signalbox_domain::SessionId,

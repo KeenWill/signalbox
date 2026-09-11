@@ -278,6 +278,13 @@ impl LifecycleEventSource {
         }
     }
 
+    /// Captures a finite lifecycle pass, leaving later core events replayable.
+    pub async fn through_current_frontier(&self) -> Result<Self, OutboxDispatchError> {
+        Ok(Self {
+            reader: self.reader.through_current_frontier().await?,
+        })
+    }
+
     /// Reads a session's durable terminal time, including unread events.
     pub async fn session_terminal_at(
         &self,

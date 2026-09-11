@@ -30,6 +30,7 @@ pub(crate) use credential_pool::acquire_model_call_outbox_order_guard;
 pub(crate) use delegation_lock::lock_delegated_child_endpoint_sessions;
 pub(crate) use delegation_lock::lock_delegated_turn_terminal_frontier;
 pub(crate) use live_turn::load_call_snapshot;
+pub(crate) use live_turn::load_delegated_active_turn_for_interrupt;
 pub(crate) use live_turn::load_delegated_model_call_recovery;
 pub(crate) use live_turn::load_delegated_runner_recovery_for_interrupt;
 pub(crate) use live_turn::lock_session;
