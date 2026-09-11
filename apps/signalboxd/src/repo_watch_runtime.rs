@@ -688,6 +688,14 @@ impl RepositoryWatchRuntime {
                 .drain_lifecycle(&mut factory, &mut RepositoryWatchCommandCodec, &source)
                 .await
                 .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
+            store
+                .react_to_ordinary_dispatch_completion(
+                    &mut factory,
+                    &mut RepositoryWatchCommandCodec,
+                    &source,
+                )
+                .await
+                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
         }
         self.state.lock().await.tick().await
     }

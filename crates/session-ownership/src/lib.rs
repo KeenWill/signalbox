@@ -293,6 +293,24 @@ impl LifecycleEventSource {
         self.reader.session_terminal_at(session).await
     }
 
+    /// Reads terminal-turn facts for ordinary dispatches with no accepted work remaining.
+    pub async fn completed_ordinary_dispatches(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<LifecycleEvent>, OutboxDispatchError> {
+        self.reader
+            .completed_ordinary_dispatches(sessions)
+            .await?
+            .into_iter()
+            .map(|event| {
+                project_lifecycle_event(event).ok_or(
+                    signalbox_persistence::outbox::OutboxRowCorruption::InvalidLifecycleEvent
+                        .into(),
+                )
+            })
+            .collect()
+    }
+
     /// Reports a durably completed configured push in the dispatched session.
     pub async fn session_pushed(&self, session: SessionId) -> Result<bool, OutboxDispatchError> {
         self.reader.session_pushed(session).await
@@ -568,6 +586,10 @@ impl SessionCommand {
                 sticky: signalbox_domain::StopStickiness::Sticky,
                 ..
             }
+            | SessionLifecycleOperation::Stop {
+                sticky: signalbox_domain::StopStickiness::Redispatchable,
+                descendant_scope: signalbox_domain::DescendantTerminationScope::ParentAlone,
+            }
             | SessionLifecycleOperation::Adopt { .. }
             | SessionLifecycleOperation::Release => Ok(Self {
                 payload: SessionCommandPayload::Lifecycle(command),
@@ -575,7 +597,7 @@ impl SessionCommand {
             SessionLifecycleOperation::Supersede { .. }
             | SessionLifecycleOperation::Stop {
                 sticky: signalbox_domain::StopStickiness::Redispatchable,
-                ..
+                descendant_scope: signalbox_domain::DescendantTerminationScope::ParentAndDescendants,
             }
             | SessionLifecycleOperation::Abandon
             | SessionLifecycleOperation::CloseFailed { .. }
@@ -667,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_lifecycle_commands_admit_sticky_stop_but_not_supersede() {
+    fn closed_lifecycle_commands_admit_parent_stop_but_not_supersede() {
         let statement = FinishConditionStatement::try_new(String::from("merge when green"))
             .expect("fixture finish condition is admitted");
         assert!(
@@ -687,6 +709,13 @@ mod tests {
             SessionCommand::lifecycle(lifecycle(SessionLifecycleOperation::Stop {
                 sticky: StopStickiness::Redispatchable,
                 descendant_scope: DescendantTerminationScope::ParentAlone,
+            }))
+            .is_ok()
+        );
+        assert!(
+            SessionCommand::lifecycle(lifecycle(SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Redispatchable,
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
             }))
             .is_err()
         );
