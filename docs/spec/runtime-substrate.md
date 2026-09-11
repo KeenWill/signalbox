@@ -204,10 +204,10 @@ state stays out of memory.
 
 Claude Code calls with conversation history fork a disposable native transcript
 of the complete canonical frontier, preserving distinct assistant message groups
-for native compaction. Historical tool calls and results remain canonical JSON
-text; images retain their message and part order. Request and growth
-measurements include the native framing, and the private transcript is removed
-with the request’s support directory.
+for native compaction. Text and images are native content in canonical part
+order; historical tool and reasoning parts remain canonical JSON text. Request
+and growth measurements include the native framing, and the private transcript
+is removed with the request’s support directory.
 
 Unix supervision contains the process group the adapter creates, so construction
 rejects hosts without process-group control; containment beyond that group

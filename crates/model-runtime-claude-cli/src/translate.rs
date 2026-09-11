@@ -61,20 +61,8 @@ struct PromptSettings<'a> {
 }
 
 #[derive(Serialize)]
-struct PromptMessage<'a> {
-    role: &'static str,
-    parts: Vec<PromptPart<'a>>,
-}
-
-#[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PromptPart<'a> {
-    Image {
-        media_type: &'a str,
-    },
-    Text {
-        text: &'a str,
-    },
     ToolCall {
         id: &'a str,
         name: &'a str,
@@ -195,8 +183,8 @@ pub(crate) fn translate<C>(
     let request_json = serde_json::to_string(&request).map_err(serialization_failed)?;
     let system_prompt = format!(
         "Act only as the model for this stateless request. The complete ordered \
-         context is restored in native history. Each history message contains \
-         its canonical JSON and any attached images. The user request JSON contains \
+         context is restored in native history. Text and images are native \
+         content; historical tool and reasoning parts are JSON text. The user request JSON contains \
          request controls. Produce the next assistant response to the \
          canonical conversation under these controls. Tools are available only through the \
          Signalbox MCP server; never write a tool call as prose. An MCP result \
@@ -257,19 +245,6 @@ struct NativeMessage {
     content: Vec<crate::image::InputPart>,
 }
 
-fn native_message(message: &ConversationMessage) -> Result<NativeMessage, TranslationError> {
-    let rendered = render_message(message)?;
-    let text = serde_json::to_string(&rendered).map_err(serialization_failed)?;
-    Ok(NativeMessage {
-        role: rendered.role,
-        id: match message.role {
-            ConversationRole::User => None,
-            ConversationRole::Assistant => Some(format!("msg_{}", Uuid::now_v7().simple())),
-        },
-        content: crate::image::message_content(message, text),
-    })
-}
-
 fn serialization_failed(error: serde_json::Error) -> TranslationError {
     TranslationError::Defect(PreparationDefect::SerializationFailed {
         detail: error.to_string(),
@@ -317,7 +292,7 @@ fn validate_tool_name(name: &str) -> Result<(), TranslationError> {
     ))
 }
 
-fn render_message(message: &ConversationMessage) -> Result<PromptMessage<'_>, TranslationError> {
+fn native_message(message: &ConversationMessage) -> Result<NativeMessage, TranslationError> {
     let role = match message.role {
         ConversationRole::User => "user",
         ConversationRole::Assistant => "assistant",
@@ -347,49 +322,66 @@ fn render_message(message: &ConversationMessage) -> Result<PromptMessage<'_>, Tr
             ));
         }
     }
-    let parts = message
+    let content = message
         .parts
         .iter()
         .map(render_part)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(PromptMessage { role, parts })
+    Ok(NativeMessage {
+        role,
+        id: match message.role {
+            ConversationRole::User => None,
+            ConversationRole::Assistant => Some(format!("msg_{}", Uuid::now_v7().simple())),
+        },
+        content,
+    })
 }
 
-fn render_part(part: &MessagePart) -> Result<PromptPart<'_>, TranslationError> {
-    match part {
-        MessagePart::Image(image) => Ok(PromptPart::Image {
-            media_type: &image.media_type,
-        }),
-        MessagePart::ImageReference(_) => Err(TranslationError::Failure(
-            PreparationFailure::UnsupportedOperation {
-                detail: String::from("image reference was not authenticated"),
-            },
-        )),
-        MessagePart::Text(text) => Ok(PromptPart::Text { text }),
-        MessagePart::ToolCall(call) => Ok(PromptPart::ToolCall {
+fn render_part(part: &MessagePart) -> Result<crate::image::InputPart, TranslationError> {
+    let historical = match part {
+        MessagePart::Image(image) => return Ok(crate::image::image_content(image)),
+        MessagePart::ImageReference(_) => {
+            return Err(TranslationError::Failure(
+                PreparationFailure::UnsupportedOperation {
+                    detail: String::from("image reference was not authenticated"),
+                },
+            ));
+        }
+        MessagePart::Text(text) => {
+            return Ok(crate::image::InputPart::Text { text: text.clone() });
+        }
+        MessagePart::ToolCall(call) => PromptPart::ToolCall {
             id: call.id.as_str(),
             name: call.name.as_str(),
             arguments: parse_replayed_tool_json(call.id.as_str(), &call.arguments_json)?,
-        }),
-        MessagePart::ToolResult(result) => Ok(PromptPart::ToolResult {
+        },
+        MessagePart::ToolResult(result) => PromptPart::ToolResult {
             tool_call_id: result.tool_call_id.as_str(),
             content: &result.content,
             is_error: result.is_error,
-        }),
-        MessagePart::Thinking { text, signature } => Ok(PromptPart::Thinking { text, signature }),
-        MessagePart::RedactedThinking { data } => Ok(PromptPart::RedactedThinking { data }),
-        MessagePart::ProviderReasoning { .. } => Err(TranslationError::Failure(
-            PreparationFailure::UnsupportedOperation {
-                detail: "provider reasoning items require their provider adapter".to_string(),
-            },
-        )),
-        MessagePart::ProviderCompaction { .. } => Err(TranslationError::Failure(
-            PreparationFailure::UnsupportedOperation {
-                detail: "provider compaction blocks can only be replayed by their provider adapter"
-                    .to_string(),
-            },
-        )),
-    }
+        },
+        MessagePart::Thinking { text, signature } => PromptPart::Thinking { text, signature },
+        MessagePart::RedactedThinking { data } => PromptPart::RedactedThinking { data },
+        MessagePart::ProviderReasoning { .. } => {
+            return Err(TranslationError::Failure(
+                PreparationFailure::UnsupportedOperation {
+                    detail: "provider reasoning items require their provider adapter".to_string(),
+                },
+            ));
+        }
+        MessagePart::ProviderCompaction { .. } => {
+            return Err(TranslationError::Failure(
+                PreparationFailure::UnsupportedOperation {
+                    detail:
+                        "provider compaction blocks can only be replayed by their provider adapter"
+                            .to_string(),
+                },
+            ));
+        }
+    };
+    Ok(crate::image::InputPart::Text {
+        text: serde_json::to_string(&historical).map_err(serialization_failed)?,
+    })
 }
 
 fn parse_replayed_tool_json(id: &str, raw: &str) -> Result<Box<RawValue>, TranslationError> {
@@ -578,7 +570,7 @@ mod tests {
         let row: serde_json::Value =
             serde_json::from_slice(&translated.history).expect("one native row");
         assert_eq!(
-            row["message"]["content"][2],
+            row["message"]["content"][0],
             serde_json::json!({
                 "type":"image", "source":{"type":"base64","media_type":"image/png","data":"AQID"}
             })
@@ -628,16 +620,59 @@ mod tests {
             .map(|row| serde_json::from_slice(row).expect("native history record is JSON"))
             .collect();
         assert_eq!(rows.len(), operation.messages.len());
+        assert_eq!(rows[0]["message"]["content"][0]["text"], IMAGE_CONTEXT);
+        assert_eq!(rows[0]["message"]["content"][1]["source"]["data"], "AQID");
+        assert_eq!(rows[1]["message"]["content"][0]["source"]["data"], "BAUG");
+        assert_eq!(rows[1]["message"]["content"][1]["text"], IMAGE_CONTEXT);
+    }
+
+    #[test]
+    fn native_history_preserves_text_around_reasoning_parts() {
+        use signalbox_model_runtime::{ConversationRole, MessagePart};
+        // Distinct arbitrary payloads detect reordered or dropped parts.
+        const FIRST_TEXT: &str = "Starting the task.";
+        const REASONING: &str = "Synthetic reasoning context.";
+        const SIGNATURE: &str = "synthetic-signature";
+        const LAST_TEXT: &str = "Task completed.";
+        const REDACTED: &str = "synthetic-redacted-data";
+        let message = ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![
+                MessagePart::Text(FIRST_TEXT.into()),
+                MessagePart::Thinking {
+                    text: REASONING.into(),
+                    signature: Some(SIGNATURE.into()),
+                },
+                MessagePart::Text(LAST_TEXT.into()),
+                MessagePart::RedactedThinking {
+                    data: REDACTED.into(),
+                },
+            ],
+        };
+        let rendered = super::native_message(&message).expect("native message renders");
+        let actual = serde_json::to_value(rendered).expect("native message is JSON");
+        assert_eq!(actual["content"][0]["text"], FIRST_TEXT);
+        let reasoning: serde_json::Value = serde_json::from_str(
+            actual["content"][1]["text"]
+                .as_str()
+                .expect("reasoning text"),
+        )
+        .expect("historical reasoning is JSON text");
         assert_eq!(
-            rows[0]["message"]["content"][1]["text"],
-            "Image for parts[1] in this history message:"
+            reasoning,
+            serde_json::json!({"type": "thinking", "text": REASONING, "signature": SIGNATURE})
         );
-        assert_eq!(rows[0]["message"]["content"][2]["source"]["data"], "AQID");
+        assert_eq!(actual["content"][2]["text"], LAST_TEXT);
+        let redacted: serde_json::Value = serde_json::from_str(
+            actual["content"][3]["text"]
+                .as_str()
+                .expect("redacted text"),
+        )
+        .expect("historical redacted reasoning is JSON text");
         assert_eq!(
-            rows[1]["message"]["content"][1]["text"],
-            "Image for parts[0] in this history message:"
+            redacted,
+            serde_json::json!({"type": "redacted_thinking", "data": REDACTED})
         );
-        assert_eq!(rows[1]["message"]["content"][2]["source"]["data"], "BAUG");
     }
 
     #[test]
