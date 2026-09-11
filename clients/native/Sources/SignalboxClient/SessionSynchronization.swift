@@ -1321,7 +1321,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       switch state {
       case .proposed, .resultsProjected:
         return true
-      case .recoveryRequired, .unknown:
+      case .recoveryRequired, .childWaitResumed, .unknown:
         return false
       }
     case .automaticReconciliationExhausted, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnCredentialPoolExhausted, .turnFailed, .turnRefused, .turnCancelled,

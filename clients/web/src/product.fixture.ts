@@ -1,6 +1,6 @@
 // Keep browser tests aligned with WebContractBootstrap::current() and its Rust-authored limits.
 export const webContractBootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '2' },
+  contract: { name: 'signalbox.web-http', version: '3' },
   capabilities: {
     bounded_json: true,
     same_origin_json_mutations: true,

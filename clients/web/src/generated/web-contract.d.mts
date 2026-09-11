@@ -840,6 +840,9 @@ export type WebTimelineToolBatchState = {
 } | {
   readonly tool_attempt_id: WebSessionId;
   readonly type: "recovery_required";
+} | {
+  readonly tool_attempt_id: WebSessionId;
+  readonly type: "child_wait_resumed";
 };
 
 export type WebTimelineToolEffectPosture = "effect_free" | "external_effect";
