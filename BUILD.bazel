@@ -51,6 +51,17 @@ filegroup(
 )
 
 py_test(
+    name = "test_postgres_test_container",
+    size = "small",
+    srcs = ["tooling/test_postgres_test_container.py"],
+    data = [
+        "config/signalboxd.example.toml",
+        "tooling/postgres_test_container.py",
+    ],
+    main = "tooling/test_postgres_test_container.py",
+)
+
+py_test(
     name = "test_supervise_lifecycle",
     size = "small",
     srcs = ["tooling/test_supervise_lifecycle.py"],
@@ -82,6 +93,7 @@ py_test(
 test_suite(
     name = "python_checker_tests",
     tests = [
+        ":test_postgres_test_container",
         ":test_summarize_coverage",
         ":test_supervise_lifecycle",
         ":test_sweep_test_containers",
