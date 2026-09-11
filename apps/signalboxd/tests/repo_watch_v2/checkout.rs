@@ -474,6 +474,67 @@ async fn assert_input_during_checkout_waits(
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn lifecycle_drain_settles_creation_before_pending_replay() -> Result<(), Box<dyn Error>> {
+    struct NoLifecycleCommands;
+    impl signalbox_module_repo_watch_v2::dispatch::LifecycleCommandFactory for NoLifecycleCommands {
+        fn lifecycle(
+            &mut self,
+            _: SessionId,
+            _: SessionLifecycleOperation,
+        ) -> SessionLifecycleCommand {
+            panic!("creation and start-release facts require no lifecycle reaction")
+        }
+    }
+    let mut fixture =
+        CheckoutFixture::with_rule("checkout/project", "labeled-review-response").await?;
+    fixture.submit_without_lifecycle_settlement().await;
+    let pending = fixture
+        .store
+        .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+        .await?;
+    assert_eq!(pending.len(), 1, "creation awaits its lifecycle event");
+    let release_commands_before: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM session_lifecycle_command WHERE operation_kind = 'release_start'",
+    )
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(release_commands_before, 1);
+    let source = signalbox_session_ownership::LifecycleEventSource::new(fixture.core.clone());
+    fixture
+        .store
+        .drain_lifecycle(
+            &mut NoLifecycleCommands,
+            &mut RepositoryWatchCommandCodec,
+            &source,
+        )
+        .await?;
+    assert!(
+        source.next().await?.is_none(),
+        "one drain applies every available lifecycle fact"
+    );
+    assert!(
+        fixture
+            .store
+            .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+            .await?
+            .is_empty(),
+        "settled creation is not resubmitted"
+    );
+    fixture.submit_without_lifecycle_settlement().await;
+    let release_commands_after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM session_lifecycle_command WHERE operation_kind = 'release_start'",
+    )
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(
+        release_commands_after, release_commands_before,
+        "a submission pass after draining creates no extra release commands"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn kickoff_replays_after_provisioning_and_after_input_commit() -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{DeliveryRequest, SubmitInputResult};
     use signalbox_persistence::submit_input::SubmitInputRepository;
