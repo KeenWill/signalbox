@@ -1805,7 +1805,7 @@ dangerous_tool_auto_approval = false
         )
         .expect("example review library is valid");
 
-        assert_eq!(configuration.summaries().len(), REVIEW_CONCERNS.len() + 5);
+        assert_eq!(configuration.summaries().len(), REVIEW_CONCERNS.len() + 6);
     }
     #[test]
     fn review_attempt_rejects_a_reordered_concern_selection() {
