@@ -273,9 +273,7 @@ pub(crate) fn app_observation_client(
                 let credential = signalbox_github_transport::response_credential(&response)
                     .ok_or(GitHubClientError::InvalidCredential)?
                     .to_vec();
-                let response = scrub_app_response(response, &path, &credential).await?;
-                observe_github_quota(&response);
-                Ok(response)
+                observe_and_scrub_app_response(response, &path, &credential).await
             })
         }),
     )
@@ -298,11 +296,12 @@ fn observe_github_quota(response: &reqwest::Response) {
     );
 }
 
-async fn scrub_app_response(
+async fn observe_and_scrub_app_response(
     response: reqwest::Response,
     path: &str,
     credential: &[u8],
 ) -> Result<reqwest::Response, GitHubClientError> {
+    observe_github_quota(&response);
     let status = response.status();
     if !status.is_success() {
         return Ok(response);
@@ -513,8 +512,12 @@ mod tests {
                         .header("content-length", body.len())
                         .body(body)
                         .expect("fixture response");
-                    super::scrub_app_response(response.into(), &path, RESPONSE_TOKEN.as_bytes())
-                        .await
+                    super::observe_and_scrub_app_response(
+                        response.into(),
+                        &path,
+                        RESPONSE_TOKEN.as_bytes(),
+                    )
+                    .await
                 })
             }),
         )
@@ -613,29 +616,49 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn malformed_app_observations_fail_before_ingestion() {
-        let response = http::Response::new(format!("not JSON: {RESPONSE_TOKEN}"));
-        let failure =
-            super::scrub_app_response(response.into(), OBSERVATION_PATH, RESPONSE_TOKEN.as_bytes())
-                .await
+    #[test]
+    fn malformed_app_observations_record_consumed_quota_before_failing() {
+        const REMAINING_QUOTA: &str = "14987";
+        let response = http::Response::builder()
+            .header("x-ratelimit-remaining", REMAINING_QUOTA)
+            .body(format!("not JSON: {RESPONSE_TOKEN}"))
+            .expect("malformed body with quota headers");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let telemetry = crate::process_runtime::tests::capture_telemetry(|| {
+            let failure = runtime
+                .block_on(super::observe_and_scrub_app_response(
+                    response.into(),
+                    OBSERVATION_PATH,
+                    RESPONSE_TOKEN.as_bytes(),
+                ))
                 .expect_err("malformed observations cannot reach persistence");
-        assert!(matches!(
-            failure,
-            GitHubClientError::Request {
-                status: Some(reqwest::StatusCode::OK),
-                ..
-            }
-        ));
+            assert!(matches!(
+                failure,
+                GitHubClientError::Request {
+                    status: Some(reqwest::StatusCode::OK),
+                    ..
+                }
+            ));
+        });
+
+        assert!(telemetry.contains("repository-watch GitHub quota observed"));
+        assert!(telemetry.contains(&format!("quota_remaining=\"{REMAINING_QUOTA}\"")));
+        assert!(!telemetry.contains(RESPONSE_TOKEN));
     }
 
     #[tokio::test]
     async fn unchanged_app_pages_do_not_require_a_json_body() {
         let response = http::Response::builder().status(304).body("").unwrap();
-        let response =
-            super::scrub_app_response(response.into(), OBSERVATION_PATH, RESPONSE_TOKEN.as_bytes())
-                .await
-                .expect("unchanged responses retain their status");
+        let response = super::observe_and_scrub_app_response(
+            response.into(),
+            OBSERVATION_PATH,
+            RESPONSE_TOKEN.as_bytes(),
+        )
+        .await
+        .expect("unchanged responses retain their status");
         assert_eq!(response.status(), reqwest::StatusCode::NOT_MODIFIED);
     }
 
