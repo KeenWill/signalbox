@@ -48,14 +48,14 @@ impl RepoWatchStore {
         use crate::dispatch::EvaluationError;
         let rows: Vec<Candidate> = sqlx::query_as(
             "WITH latest AS (
-               SELECT DISTINCT ON (e.pull_request_number) d.* FROM dispatch_ledger d JOIN gh_event e USING(event_id)
+               SELECT DISTINCT ON (e.pull_request_number) d.* FROM dispatch_ledger d JOIN gh_readable_event e USING(event_id)
                WHERE d.repository = $1 AND d.rule_id = $2 AND d.rule_revision = $3
                  AND d.command_kind = 'create_session' AND d.singleton_key IS NOT NULL AND e.pull_request_number IS NOT NULL
                ORDER BY e.pull_request_number, d.issued_at DESC, d.dispatch_ref DESC, d.action_ordinal
              )
              SELECT d.dispatch_ref, d.event_id, COALESCE(d.retry_event,e.normalized_payload) AS event,
                ARRAY(SELECT a.created_session_id FROM dispatch_ledger a WHERE a.dispatch_ref=d.dispatch_ref AND a.command_kind='create_session' AND a.created_session_id IS NOT NULL) AS sessions
-             FROM latest d JOIN gh_event e USING(event_id)
+             FROM latest d JOIN gh_readable_event e USING(event_id)
              WHERE e.pull_request_number IS NOT NULL AND d.status='applied'
                AND NOT EXISTS (SELECT 1 FROM dispatch_ledger a WHERE a.dispatch_ref=d.dispatch_ref AND a.command_kind='create_session' AND (a.session_terminal_at IS NULL OR a.singleton_released_at IS NULL OR EXTRACT(EPOCH FROM ($4::timestamptz-a.singleton_released_at)) < $5))
              ORDER BY d.issued_at, d.dispatch_ref")
@@ -159,7 +159,7 @@ impl RepoWatchStore {
             "SELECT EXISTS (SELECT 1 FROM dispatch_ledger d WHERE d.dispatch_ref=$1 AND d.repository=$2 AND d.rule_id=$3 AND d.rule_revision=$4 AND d.command_kind='create_session' AND d.status='applied')
              AND NOT EXISTS (SELECT 1 FROM rule_evaluation_cursor WHERE repository=$2 AND rule_id=$3 AND rule_revision=$4 AND effect_id IS NOT NULL)
              AND NOT EXISTS (SELECT 1 FROM dispatch_ledger a WHERE a.dispatch_ref=$1 AND a.command_kind='create_session' AND (a.session_terminal_at IS NULL OR a.singleton_released_at IS NULL OR EXTRACT(EPOCH FROM ($5::timestamptz-a.singleton_released_at)) < $6))
-             AND NOT EXISTS (SELECT 1 FROM dispatch_ledger later JOIN dispatch_ledger parent ON parent.dispatch_ref=$1 AND parent.command_kind='create_session' WHERE later.repository=$2 AND later.rule_id=$3 AND later.rule_revision=$4 AND EXISTS (SELECT 1 FROM gh_event le JOIN gh_event pe ON pe.event_id=parent.event_id WHERE le.event_id=later.event_id AND le.pull_request_number=pe.pull_request_number) AND later.command_kind='create_session' AND (later.issued_at,later.dispatch_ref) > (parent.issued_at,parent.dispatch_ref))")
+             AND NOT EXISTS (SELECT 1 FROM dispatch_ledger later JOIN dispatch_ledger parent ON parent.dispatch_ref=$1 AND parent.command_kind='create_session' WHERE later.repository=$2 AND later.rule_id=$3 AND later.rule_revision=$4 AND EXISTS (SELECT 1 FROM gh_readable_event le JOIN gh_readable_event pe ON pe.event_id=parent.event_id WHERE le.event_id=later.event_id AND le.pull_request_number=pe.pull_request_number) AND later.command_kind='create_session' AND (later.issued_at,later.dispatch_ref) > (parent.issued_at,parent.dispatch_ref))")
             .bind(retry.parent).bind(first.repository().as_str()).bind(first.rule_id().as_str())
             .bind(Decimal::from(first.rule_revision().get())).bind(now).bind(Decimal::from(cooldown.as_secs()))
             .fetch_one(&mut **tx).await?;
@@ -287,10 +287,11 @@ mod tests {
     use super::*;
     use signalbox_session_ownership::{
         BranchName, CommitSha, LabelName, PullRequestBody, PullRequestEventContext,
-        PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchEventId,
-        RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPullRequestStateInput,
-        RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
-        RepoWatchThreadObservation, ReviewThreadId, SessionTemplateName,
+        PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin,
+        RepoWatchEventId, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+        RepoWatchPullRequestStateInput, RepoWatchRuleActionV1, RepoWatchRuleId,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchThreadObservation, ReviewThreadId,
+        SessionTemplateName,
     };
     use std::num::NonZeroU64;
 
@@ -355,6 +356,10 @@ mod tests {
         )
         .expect("rule");
         (rule, event)
+    }
+
+    fn thread_author() -> RepoWatchAuthorLogin {
+        RepoWatchAuthorLogin::try_new("reviewer".to_owned()).expect("author")
     }
 
     #[test]
@@ -443,9 +448,9 @@ mod tests {
         });
         let mut current = input();
         current.mergeable_state = MergeableState::Mergeable;
-        current.threads = vec![RepoWatchThreadObservation::new(
+        current.threads = vec![RepoWatchThreadObservation::open(
             ReviewThreadId::try_new("remaining-review".to_owned()).expect("thread"),
-            RepoWatchThreadState::Open,
+            Some(thread_author()),
         )];
         let retry = retry_event(
             &rule,
@@ -513,11 +518,13 @@ mod tests {
         let thread = ReviewThreadId::try_new("thread".to_owned()).expect("thread");
         let (rule, event) = origin(RepoWatchEventKindV1::ThreadOpened {
             thread: thread.clone(),
+            author: Some(thread_author()),
         });
         let mut current = input();
-        current.threads = vec![RepoWatchThreadObservation::new(
+        current.threads = vec![RepoWatchThreadObservation::resolved(
             thread,
-            RepoWatchThreadState::Resolved,
+            Some(thread_author()),
+            Some(thread_author()),
         )];
         assert!(
             retry_event(
@@ -534,11 +541,12 @@ mod tests {
         let thread = ReviewThreadId::try_new("thread".to_owned()).expect("thread");
         let (rule, event) = origin(RepoWatchEventKindV1::ThreadOpened {
             thread: thread.clone(),
+            author: Some(thread_author()),
         });
         let mut current = input();
-        current.threads = vec![RepoWatchThreadObservation::new(
+        current.threads = vec![RepoWatchThreadObservation::open(
             thread,
-            RepoWatchThreadState::Open,
+            Some(thread_author()),
         )];
         assert!(
             retry_event(

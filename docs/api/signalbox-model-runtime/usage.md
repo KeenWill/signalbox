@@ -11,7 +11,7 @@ pub struct TokenUsage {
     pub cache_creation_input_tokens: option::Option<u64>,
     pub cache_read_input_tokens: option::Option<u64>,
 }
-// derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq, default::Default
+// derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq, default::Default, ser::Serialize
 impl TokenUsage {
     pub fn unreported() -> Self;
     pub fn absorb(&mut self, later: TokenUsage);

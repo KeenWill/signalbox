@@ -20,11 +20,14 @@ implementations, and the typed Git library.
 A suite has two layers. The authority layer opens the live repository
 administration tree through pinned directory descriptors and captures
 configuration, references, lock state, and object data into private snapshots;
-the typed Git library, `git2`, works only on those snapshots. Status, diff, and
-log capture objects on demand into a private database and revalidate their
-source bindings before returning; unrelated historical object contents are not
-copied. Packed-object decoding packs are discarded after the selected object is
-copied into the private database.
+the typed Git library, `git2`, works only on those snapshots. All operations
+capture objects on demand into a private database and revalidate their source
+bindings before returning; unrelated historical object contents are not copied.
+Packed delta traversal retains layer offsets and decodes one layer at a time;
+open descriptors do not grow with delta depth. Pack and index files open on
+demand against captured identities; idle pairs retain no descriptors. Blob
+decoding, delta reconstruction, worktree reads, checkout, and object publication
+use temporary files and fixed-size I/O buffers.
 
 Pushing is a separate surface with its own authority. A push names a branch; its
 destination is a remote the deployment configured, never one the caller chose. A
@@ -83,8 +86,26 @@ records a withdrawal rather than editing or deleting the mint. The live
 destination table is derived from those facts, so a mint stands in it until its
 withdrawal is recorded.
 
-A push destination is `https` only; the durable mint and the configured remote
-judge a URL by one type, so both refuse the same set.
+Push destinations accept HTTPS, `ssh://`, and `git@host:` forms. The durable
+mint and the configured remote use the same destination type. SSH uses a
+configured private key file or, on Linux, the host SSH agent exposed to the
+sandbox. Push approval, branch and commit fences, captured object authority,
+non-forced updates, and remote confirmation apply to both transports. SSH runs
+in batch mode with user SSH configuration disabled. Credential preparation,
+account lookup, sandbox setup, push and confirmation share one 300-second
+deadline. Agent-backed pushes run through the execution sandbox with the private
+captured repository as its workspace, host networking, and read-only binds for
+the agent socket and host trust stores. User trust files are `known_hosts` and
+`known_hosts2` under the account home returned by the host account database; the
+`HOME` environment variable does not select them. These files are mounted at
+fixed paths outside the private workspace and selected explicitly for OpenSSH.
+Agent-backed push authority requires a socket that accepts a connection when
+authority is derived. Relative agent socket paths resolve to absolute paths
+before probing and retention. The socket is mounted at a fixed UTF-8 sandbox
+path, preserving arbitrary host pathname bytes. The sandbox receives a minimal
+passwd entry from the host account lookup, including the resolved UID and home.
+Its NSS configuration resolves passwd and group entries from mounted files and
+hostnames through hosts files and DNS.
 
 Workspace roots are globally unique by canonical spelling, and the key carries
 no runner or location dimension. Why: the single-runner rule means no two
@@ -100,6 +121,11 @@ nothing about the rest. A canonical URL repeated in that list makes Git invoke
 the destination twice, so the repetition is rejected: the second invocation
 could report a known failure after the first had already changed external state.
 
+Branch-occupancy serialization covers cooperating daemon Git executors that
+honor its locks. External native worktree registration, including
+`git worktree add --no-checkout` outside the daemon, is outside this isolation
+contract. Occupancy scans reject conflicts visible at their validation points.
+
 Signalbox does not isolate a repository from every process that can write it:
 another same-authority or privileged process can mutate repository data after
 the final validation or after an operation returns. Descriptor pinning does not
@@ -111,17 +137,42 @@ filesystem length and inode checks. A same-UID writer changing blob bytes in
 place after ingest is an accepted residual; explicit operator reads verify the
 complete blob's SHA-256.
 
-Bounded scans and bounded content limit Signalbox's own work and do not
-guarantee repository availability. Unsupported layouts and formats, exhausted
-bounds, allocation failure, and host I/O failure are rejected, and the tool does
-not repair a corrupt repository. Decoded object-content limits apply to the
-objects an operation reads, including packed delta bases, intermediate results,
-and delta instructions, not to unrelated objects retained in its history.
+Scans and result text remain bounded; worktree, staging, and object-database
+content have no aggregate byte ceiling. Commits, trees, and tags retain a 1 MiB
+decoded metadata bound before libgit2 parsing; blob content streams without that
+structural bound. Mode-only revision and worktree changes with identical object
+IDs do not imply omitted content. Patches preview bounded content prefixes with
+truncation markers, including missing skip-worktree files served by index
+objects. Status identifies renames by exact object identity. Worktree streams
+pin one descriptor and revalidate its identity around each page; object
+publication streams each batch into one pack and index pair. Skipping an
+already-present object requires decoding and hashing its live content; a loose
+pathname or pack-index hit alone is insufficient. Checkout retains the clean
+path identity and revalidates the opened file and path before truncating or
+removing it; removal quarantines and revalidates the full file snapshot and
+streamed content digest, and new files are created exclusively. Copied files
+retain descriptor ownership and pass pathname, identity, and target-blob hash
+checks; captured checkout content must match the target before index
+publication. Merge verification retains bounded previews and uses file-backed
+comparison scratch data with linear-space divide-and-conquer line matching;
+disjoint replacements use a linear scan. Fixed budgets bound line-index records,
+frontier visits, and matching line comparisons across each streamed file diff;
+exhaustion compares the whole-object transition instead of line effects.
+Loose-object, packed-base, and packed-delta decompression check preparation
+deadlines on each bounded compressed-input read, including blocks that produce
+no output. Private-pack writes and merge comparison check preparation deadlines
+between fixed-size pages; rename similarity streams fixed-size signatures cached
+by object ID for each comparison pass. Unsupported layouts and formats,
+exhausted bounds, allocation failure, and host I/O failure are rejected, and the
+tool does not repair a corrupt repository. The configured `max_git_object_bytes`
+limit (`"none"` for unbounded) applies to the objects an operation reads,
+including packed delta bases, intermediate results, and delta instructions, not
+to unrelated objects retained in its history.
 
-Repository semantics outside the direct main-worktree subset are unsupported,
-not partially trusted. Linked worktrees, discovery, alternate object databases,
-replacement-object configuration, and other rejected extension surfaces need a
-separate user-approved contract before support.
+Repository semantics outside the supported worktree layouts are unsupported, not
+partially trusted. Discovery, alternate object databases, replacement-object
+configuration, and other rejected extension surfaces need a separate
+user-approved contract before support.
 
 Remote authentication, transport security, server-side authorization, and remote
 repository behavior are not properties of the local authority;
@@ -136,11 +187,16 @@ residual.
 
 ## Boundary contracts
 
-The Git family operates only on a direct main worktree whose `.git` directory is
-immediately inside the root its suite was constructed with. The root is
-construction input and never a per-call argument, so a local operation cannot
-select another repository. Composing several suites does not weaken this: each
-suite is a separate construction, and no suite can reach another's root.
+The Git family resolves the configured root's `.git` directory or `gitdir:`
+file, including a linked worktree's common administration directory.
+Administration markers accept LF or CRLF endings. A linked checkout may use a
+bare common repository; the common repository's HEAD does not occupy a checkout.
+Branch switching resolves each sibling's symbolic reference chain in its own
+local namespace under one validated administration snapshot and refuses a branch
+checked out in another worktree. The root is construction input and never a
+per-call argument, so a local operation cannot select another repository.
+Composing several suites does not weaken this: each suite is a separate
+construction, and no suite can reach another's root.
 
 Every admitted Git action is a fixed typed operation with a compiled argument
 schema and a typed result or failure. Text fields such as a commit message are
@@ -175,8 +231,9 @@ workspace.
 Operator workspace registration canonicalizes the root once in the daemon
 filesystem and stores its unique spelling with the registering command.
 Workspace comparisons use the resulting identity. Git remote minting records one
-HTTPS destination per workspace and name; withdrawal retires exactly one mint
-and frees its name. Neither operation changes which roots the daemon may open.
+HTTPS or SSH destination per workspace and name; withdrawal retires exactly one
+mint and frees its name. Neither operation changes which roots the daemon may
+open.
 
 ## Planned
 

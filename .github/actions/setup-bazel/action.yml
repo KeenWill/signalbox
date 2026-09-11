@@ -8,10 +8,17 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Allocate Bazel scratch
+      id: scratch
+      shell: bash
+      run: bash "${{ github.action_path }}/prepare-scratch.sh"
     - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
       with:
         bazelisk-version: 1.29.0
+        output-base: '"${{ steps.scratch.outputs.root }}/output"'
         bazelrc: |
+          startup --output_user_root="${{ steps.scratch.outputs.root }}/user"
+          common --repository_cache="${{ steps.scratch.outputs.root }}/repository"
           ${{ runner.environment == 'self-hosted' && inputs.remote-cache != '' && format('build --remote_cache="{0}"', inputs.remote-cache) || '' }}
           ${{ runner.environment == 'self-hosted' && inputs.remote-cache != '' && format('build --experimental_remote_downloader="{0}"', inputs.remote-cache) || '' }}
           build --experimental_remote_downloader_local_fallback

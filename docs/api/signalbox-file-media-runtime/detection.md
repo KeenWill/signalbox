@@ -105,7 +105,6 @@ pub enum FileInspectionStatus {
     Validated,
     Unknown,
     Malformed,
-    Ambiguous,
     DeclaredMismatch,
     EncryptedOrLocked,
 }
@@ -124,10 +123,6 @@ pub enum FileInspection {
         source: FileUse,
         media_type: CanonicalMediaType,
         reason_code: ReasonCode,
-    },
-    Ambiguous {
-        source: FileUse,
-        media_types: vec::Vec<CanonicalMediaType>,
     },
     DeclaredMismatch {
         source: FileUse,
@@ -358,7 +353,6 @@ pub enum FileMediaFailure {
     BlobCorrupt,
     BlobUnavailable,
     UnknownType,
-    AmbiguousType,
     DeclaredTypeMismatch {
         declared: CanonicalMediaType,
         detected: CanonicalMediaType,

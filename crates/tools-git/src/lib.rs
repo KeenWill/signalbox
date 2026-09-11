@@ -1,8 +1,8 @@
 //! Typed repository-local Git tools over an injected workspace root.
 //!
-//! Repository discovery and linked worktrees are deliberately unsupported. A
-//! suite binds one direct main worktree whose .git directory is inside the
-//! injected root. The local family has no remote operation.
+//! A suite binds the injected repository root, resolving `.git` directories or
+//! `gitdir:` files and linked-worktree common directories. Repository discovery
+//! is not performed. The local family has no remote operation.
 mod arguments;
 mod bounded;
 mod branch;
@@ -31,15 +31,18 @@ mod push_arguments;
 mod push_catalog;
 mod push_executor;
 mod push_merge;
+mod push_merge_stream;
 mod push_objects;
 mod push_transport;
 mod reference_lock;
 mod reference_read;
 mod reflog;
+mod repository_directories;
 mod result;
 mod rollback;
 mod status;
 mod status_reference;
+mod streamed_object;
 #[cfg(test)]
 mod tests;
 
@@ -47,7 +50,7 @@ pub use arguments::{
     GitBranchCreateArguments, GitBranchSwitchArguments, GitCommitArguments, GitDiffArguments,
     GitLogArguments, GitStageArguments, GitStatusArguments, InvalidGitArguments,
 };
-pub use catalog::{GitObjectFormat, LocalGitTools, PinnedRepositoryDirectories};
+pub use catalog::{GitObjectFormat, LocalGitTools, PinnedRepositoryDirectories, local_git_catalog};
 pub use construction::LocalGitToolsConstructionError;
 pub use executor::{LocalGitExecutor, LocalGitExecutorError};
 pub use identity::{GitIdentity, InvalidGitIdentity};
@@ -62,4 +65,7 @@ pub use push_executor::{GitPushExecutor, GitPushExecutorError};
 pub use push_transport::{
     ConfiguredGitRemote, GitPushReceipt, GitPushRequest, GitPushTransport, GitPushTransportFailure,
     InvalidConfiguredGitRemote, InvalidGitPushReceipt,
+};
+pub use repository_directories::{
+    RepositoryAdministrationDirectories, open_repository_administration,
 };

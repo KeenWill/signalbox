@@ -1,5 +1,8 @@
 //! Shared fixtures for the local Git tool tests.
 
+/// Explicit content policy used by bounded-object fixtures.
+pub(crate) const TEST_OBJECT_BYTES: usize = 1024 * 1024;
+
 use std::{
     ffi::OsString,
     fs,
@@ -218,6 +221,19 @@ impl WorkspaceFileSystem for ReplacingRootFileSystem {
 }
 
 impl WorkspaceFileSystem for ObservingIndexLockFileSystem {
+    fn open_file_stream(
+        &self,
+        root: &WorkspaceRoot,
+        path: &Path,
+    ) -> Result<signalbox_tools_workspace::WorkspaceFileReader, WorkspaceResolveError> {
+        let reader = LocalWorkspaceFileSystem.open_file_stream(root, path)?;
+        self.lock_observed.store(
+            self.root_path.join(".git/index.lock").is_file(),
+            Ordering::SeqCst,
+        );
+        Ok(reader)
+    }
+
     fn open_root(&self, root: &Path) -> Result<WorkspaceRoot, WorkspaceRootError> {
         LocalWorkspaceFileSystem.open_root(root)
     }
@@ -359,6 +375,7 @@ impl Fixture {
     pub(super) fn executor(&self) -> LocalGitExecutor<LocalWorkspaceFileSystem> {
         LocalGitTools::try_new(LocalWorkspaceFileSystem, self.root(), identity())
             .expect("local Git suite constructs")
+            .with_max_object_bytes(Some(TEST_OBJECT_BYTES))
             .into_parts()
             .1
     }
@@ -562,20 +579,6 @@ pub(super) fn install_gitlink(repository: &Repository, path: &str, target: Oid) 
     };
     index.add(&entry).expect("gitlink stages");
     index.write().expect("gitlink index writes");
-}
-
-pub(super) fn count_loose_objects(root: &Path) -> usize {
-    fs::read_dir(root.join(".git/objects"))
-        .expect("fixture object directory reads")
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter(|entry| entry.file_name() != "info" && entry.file_name() != "pack")
-        .map(|entry| {
-            fs::read_dir(entry.path())
-                .expect("fixture loose-object directory reads")
-                .count()
-        })
-        .sum()
 }
 
 pub(super) fn packed_object_counts(root: &Path) -> Vec<u32> {

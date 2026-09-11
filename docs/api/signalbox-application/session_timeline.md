@@ -458,6 +458,9 @@ pub enum TimelineToolBatchState {
     RecoveryRequired {
         attempt_id: signalbox_domain::ToolAttemptId,
     },
+    ChildWaitResumed {
+        attempt_id: signalbox_domain::ToolAttemptId,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

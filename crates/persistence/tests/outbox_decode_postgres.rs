@@ -49,10 +49,11 @@ use signalbox_persistence::{
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
         DispatchedDelegationWaitMode, DispatchedDelegationWake, DispatchedModelCallDisposition,
         DispatchedModelCallState, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
-        DispatchedSessionCreation, DispatchedToolBatchState, OutboxCorruption,
-        OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher, decode_bound_action,
-        decode_delegation_outcome, decode_delegation_policy_kind, decode_delegation_reason,
-        decode_delegation_update_kind, decode_delegation_wake_subject, decode_wait_mode,
+        DispatchedSessionCreation, DispatchedToolBatchState, OutboxConsumer, OutboxConsumerReader,
+        OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher, OutboxRowCorruption,
+        decode_bound_action, decode_delegation_outcome, decode_delegation_policy_kind,
+        decode_delegation_reason, decode_delegation_update_kind, decode_delegation_wake_subject,
+        decode_wait_mode,
     },
 };
 use sqlx::{PgPool, types::Uuid};
@@ -494,7 +495,12 @@ fn every_tool_batch_state() -> Vec<DispatchedToolBatchState> {
                     attempt: ToolAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_ATTEMPT_SEED)),
                 })
             }
-            DispatchedToolBatchState::RecoveryRequired { .. } => None,
+            DispatchedToolBatchState::RecoveryRequired { .. } => {
+                Some(DispatchedToolBatchState::ChildWaitResumed {
+                    attempt: ToolAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_ATTEMPT_SEED)),
+                })
+            }
+            DispatchedToolBatchState::ChildWaitResumed { .. } => None,
         };
         states.push(current);
     }
@@ -598,7 +604,7 @@ async fn admitted_spellings(
 #[track_caller]
 fn assert_storage_and_decoder_agree<Value: PartialEq + fmt::Debug>(
     admitted: &BTreeSet<String>,
-    decode: fn(&str) -> Result<Value, OutboxCorruption>,
+    decode: fn(&str) -> Result<Value, OutboxRowCorruption>,
     inventory: &[Value],
     column: &str,
 ) {
@@ -668,7 +674,7 @@ fn row_decoded_families_are_enumerated() {
     assert_eq!(every_delegation_provenance().len(), 4);
     assert_eq!(every_model_call_state().len(), 4);
     assert_eq!(every_model_call_disposition().len(), 5);
-    assert_eq!(every_tool_batch_state().len(), 3);
+    assert_eq!(every_tool_batch_state().len(), 4);
     assert_eq!(every_reconciliation_operation().len(), 2);
 }
 
@@ -929,6 +935,13 @@ async fn an_undecodable_committed_row_is_quarantined_and_delivery_continues()
     .fetch_one(&pool)
     .await?;
     assert_eq!(quarantine, "outbox typed event record is missing");
+    let readable: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM outbox_readable_event WHERE event_sequence = 1)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!readable, "the readable prefix excludes quarantine");
 
     let delivered: rust_decimal::Decimal =
         sqlx::query_scalar("SELECT delivered_through FROM outbox_consumer_cursor WHERE consumer_name = 'process_protocol'")
@@ -939,6 +952,14 @@ async fn an_undecodable_committed_row_is_quarantined_and_delivery_continues()
         rust_decimal::Decimal::from(2_u64),
         "the consumer prefix includes the quarantined row and the delivered successor"
     );
+
+    let repo_watch = OutboxConsumerReader::new(pool.clone(), OutboxConsumer::RepoWatch);
+    let repo_watch_event = repo_watch
+        .read_next()
+        .await?
+        .expect("another consumer advances past the quarantined row");
+    assert_eq!(repo_watch_event.sequence(), 2);
+    repo_watch.acknowledge(repo_watch_event.sequence()).await?;
 
     let following: rust_decimal::Decimal =
         sqlx::query_scalar("SELECT event_sequence FROM outbox_event WHERE session_id = $1")

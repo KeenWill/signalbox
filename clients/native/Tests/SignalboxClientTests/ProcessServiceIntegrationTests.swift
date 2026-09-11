@@ -3134,6 +3134,37 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testChildWaitResumedClearsUnknownToolBatchMutationGate() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.apply(.event(try ProcessProjectionFixture.activatedEvent()))
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.unknownToolBatchEvent(
+          cursor: ProcessProjectionFixture.bufferedTransitionCursor
+        )
+      )
+    )
+    XCTAssertFalse(viewModel.canStopAndSend)
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.childWaitResumedTrigger(
+          cursor: ProcessProjectionFixture.newerTransitionCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
+    XCTAssertTrue(viewModel.canStopAndSend)
+  }
+
+  @MainActor
   func testEventPresentationBoundsUnknownToolBatchDiagnostic() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -12636,6 +12667,25 @@ private enum ProcessProjectionFixture {
       }
       """,
       cursor: 2
+    )
+  }
+
+  static func childWaitResumedTrigger(
+    cursor: UInt64
+  ) throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_batch_transition",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "model_call_id":"\(ProcessDriverFixture.modelCall)",
+        "state":{
+          "type":"child_wait_resumed",
+          "tool_attempt_id":"\(reconciliationAttempt)"
+        }
+      }
+      """,
+      cursor: cursor
     )
   }
 
