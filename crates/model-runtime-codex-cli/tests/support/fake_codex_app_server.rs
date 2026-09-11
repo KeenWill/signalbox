@@ -258,6 +258,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             failed("terminal rejection");
         }
+        "retry_auth_generic"
+        | "retry_network_generic"
+        | "retry_network_content"
+        | "retry_auth_completed"
+        | "retry_auth_lost" => {
+            let status = (!scenario.starts_with("retry_network_")).then_some(401);
+            if scenario == "retry_network_content" {
+                notify(
+                    "item/agentMessage/delta",
+                    json!({"itemId":"assistant","delta":"accepted output"}),
+                );
+            }
+            notify(
+                "error",
+                json!({"error":{"message":"retry diagnostic","codexErrorInfo":{
+                    "responseStreamDisconnected":{"httpStatusCode":status}
+                }},"willRetry":true}),
+            );
+            if scenario == "retry_auth_completed" {
+                envelope(&format!(
+                    r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                    fixtures::BUFFERED_ANSWER
+                ));
+                completed();
+            } else if scenario != "retry_auth_lost" {
+                failed("generic terminal failure");
+            }
+        }
         "proof_usage" => {
             notify(
                 "thread/tokenUsage/updated",

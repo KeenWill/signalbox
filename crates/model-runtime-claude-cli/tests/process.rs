@@ -527,12 +527,9 @@ async fn refusal_requires_the_typed_refusal_stop_reason() {
     assert_eq!(result.spawns, 1);
 }
 
-/// A generic structured error determines no kind, so the definitive stderr the
-/// nonzero exit carries decides instead of the evidence reporting
-/// `Unrecognized` beside a stderr that names the cause. The usage the result
-/// stated still reaches the observation stream on this path.
+/// Generic structured errors retain usage without classifying stderr prose.
 #[tokio::test]
-async fn definitive_exit_stderr_classifies_a_generic_structured_error() {
+async fn generic_terminal_error_retains_usage_without_classifying_stderr() {
     let result = execute_scenario(
         "generic_error_then_definitive_stderr_exit",
         OperationShape::Text,
@@ -540,7 +537,7 @@ async fn definitive_exit_stderr_classifies_a_generic_structured_error() {
     .await;
     let failure = provider_error(&result.evidence);
 
-    assert_eq!(failure.kind, ProviderErrorKind::CredentialRejected);
+    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
     assert_eq!(reported_usage(&result.observations), vec![failure.usage]);
     assert_eq!(result.spawns, 1);
 }
@@ -619,22 +616,22 @@ async fn success_rejects_every_contradictory_error_field_shape() {
 }
 
 #[tokio::test]
-async fn native_stdin_size_rejection_preserves_request_too_large() {
+async fn native_stdin_error_without_a_status_stays_unrecognized() {
     let result = execute_scenario("piped_stdin_too_large", OperationShape::Text).await;
     let TerminalEvidence::ProviderError(failure) = result.evidence else {
         panic!("native stdin rejection must be a typed provider failure");
     };
-    assert_eq!(failure.kind, ProviderErrorKind::RequestTooLarge);
+    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
     assert_eq!(failure.usage, TokenUsage::unreported());
     assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
-async fn native_prompt_size_rejection_preserves_request_too_large() {
+async fn generic_native_prompt_error_stays_unrecognized() {
     let result = execute_scenario("native_prompt_too_large", OperationShape::Text).await;
     let failure = provider_error(&result.evidence);
 
-    assert_eq!(failure.kind, ProviderErrorKind::RequestTooLarge);
+    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
     assert_eq!(result.spawns, 1);
 }
 
@@ -643,8 +640,49 @@ async fn nonzero_exit_is_a_typed_provider_failure() {
     let result = execute_scenario("process_nonzero", OperationShape::Text).await;
     let failure = provider_error(&result.evidence);
 
-    assert_eq!(failure.kind, ProviderErrorKind::CredentialRejected);
+    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
     assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn terminal_classification_uses_native_subtypes_and_status_without_prose() {
+    for (scenario, expected, token) in [
+        (
+            "session_window_status",
+            ProviderErrorKind::RateLimited,
+            "success",
+        ),
+        (
+            "session_window_without_status",
+            ProviderErrorKind::Unrecognized,
+            "success",
+        ),
+        (
+            "request_size_status",
+            ProviderErrorKind::RequestTooLarge,
+            "success",
+        ),
+        (
+            "native_budget_subtype",
+            ProviderErrorKind::QuotaExhausted,
+            "error_max_budget_usd",
+        ),
+        (
+            "unknown_error_subtype",
+            ProviderErrorKind::Unrecognized,
+            "synthetic_unknown_error",
+        ),
+    ] {
+        let result = execute_scenario(scenario, OperationShape::Text).await;
+        let failure = provider_error(&result.evidence);
+        assert_eq!(failure.kind, expected, "{scenario}");
+        assert_eq!(
+            failure.native.error_token.as_deref(),
+            Some(token),
+            "{scenario}"
+        );
+        assert_eq!(result.spawns, 1);
+    }
 }
 
 #[tokio::test]

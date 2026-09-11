@@ -16,7 +16,7 @@ use crate::app_server::{
     classify::{FailureClass, classify, input_too_large},
     client::{Client, Event},
     decode::parse,
-    frame::{AgentMessage, TurnError, TurnStatus, UsageBreakdown},
+    frame::{AgentMessage, CodexErrorInfo, KnownError, TurnError, TurnStatus, UsageBreakdown},
 };
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{EnvelopeOutcome, EnvelopeToolCall, ModelEnvelope};
@@ -44,6 +44,7 @@ pub(crate) struct EventDecoder<C> {
     agent_message: Option<String>,
     client: Client,
     last_error: Option<TurnError>,
+    retry_error: Option<TurnError>,
     terminal_message_limit: usize,
     next_part_index: u32,
     usage: TokenUsage,
@@ -70,6 +71,7 @@ impl<C: Clone> EventDecoder<C> {
             agent_message: None,
             client,
             last_error: None,
+            retry_error: None,
             terminal_message_limit,
             next_part_index: 0,
             usage: TokenUsage::unreported(),
@@ -116,7 +118,12 @@ impl<C: Clone> EventDecoder<C> {
             Event::Usage(event) => self.usage.absorb(usage(event.token_usage.total)?),
             Event::Error(event) => {
                 self.agent_message = None;
-                self.last_error = (!event.will_retry).then_some(event.error);
+                if event.will_retry {
+                    self.retry_error = Some(event.error);
+                    self.last_error = None;
+                } else {
+                    self.last_error = Some(event.error);
+                }
             }
             Event::Terminal(turn) => {
                 if turn.status == TurnStatus::Completed
@@ -131,7 +138,17 @@ impl<C: Clone> EventDecoder<C> {
                         .map_err(|error| DecodeFailure::new(error.0))?;
                     self.retain_message(message)?;
                 }
-                self.last_error = turn.error;
+                self.last_error = if turn.status == TurnStatus::Failed
+                    && matches!(
+                        turn.error
+                            .as_ref()
+                            .and_then(|error| error.codex_error_info.as_ref()),
+                        Some(CodexErrorInfo::Known(KnownError::Other))
+                    ) {
+                    self.retry_error.take().or(turn.error)
+                } else {
+                    turn.error
+                };
                 self.terminal = Some(turn.status);
             }
             Event::Rejected { method, error } => self.rejection = Some((method, error)),
@@ -200,6 +217,24 @@ impl<C: Clone> EventDecoder<C> {
             .last_error
             .as_ref()
             .and_then(|error| error.codex_error_info.as_ref());
+        if let Some(CodexErrorInfo::Known(
+            KnownError::HttpConnectionFailed {
+                http_status_code: None,
+            }
+            | KnownError::ResponseStreamConnectionFailed {
+                http_status_code: None,
+            }
+            | KnownError::ResponseStreamDisconnected {
+                http_status_code: None,
+            },
+        )) = info
+        {
+            return self.boundary_loss(LossCause::TransportFailed(
+                signalbox_model_runtime::TransportFacts::new(
+                    "Codex app-server reported transport loss without an HTTP response",
+                ),
+            ));
+        }
         match classify(info) {
             FailureClass::PolicyRefusal(reason) => TerminalEvidence::Refused(RefusalEvidence {
                 reason,
