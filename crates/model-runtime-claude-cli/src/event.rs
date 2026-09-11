@@ -325,6 +325,22 @@ impl<C: Clone> EventDecoder<C> {
                 "Claude assistant event has invalid identity or nesting",
             ));
         }
+        if event.is_api_error_message {
+            if event.session_id.as_deref() != self.native_session_id.as_deref()
+                || event.message.model != "<synthetic>"
+                || event.message.content.is_empty()
+                || !event
+                    .message
+                    .content
+                    .iter()
+                    .all(|block| matches!(block, AssistantContent::Text { .. }))
+            {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude API error diagnostic has invalid session, model, or content",
+                ));
+            }
+            return Ok(());
+        }
         if self.acknowledgement_message(&event)? {
             return Ok(());
         }
