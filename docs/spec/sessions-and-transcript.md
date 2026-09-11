@@ -689,9 +689,11 @@ scope, and parent-alone does not evaluate descendants. Each evaluated edge
 applies its stored relationship policy: a background relationship keeps the
 child running, and a bound relationship takes its `on_parent_stopped` or
 `on_parent_cancelled` action according to the command. If a child already has
-its unique terminal result, the edge records already-terminal with the new
-parent command provenance and an exact check of that prior result, creating no
-second result; traversal still visits that child's outgoing relationships.
+its unique terminal result, or the exact delegated initial turn has
+reconciliation-required terminal lifecycle evidence, the edge records
+already-terminal with the new parent command provenance and an exact check of
+that prior evidence, creating no child result; traversal still visits that
+child's outgoing relationships.
 
 Delegation-message entries refer to message records and do not reclassify
 model-authored content as input from the user. Undelivered messages and
@@ -706,10 +708,12 @@ rejects the operation with typed recipient-sequence exhaustion.
 
 Returned content derives only from the proof-bearing completed call;
 independently supplied text cannot authorize a result. Reconciliation-required
-work is not terminal delegation evidence and produces no outcome while its
-ambiguity stands; automatic reconciliation seals the child as a failed result
-carrying child-result-unavailable and the exact reconciled child turn, in the
-transaction that commits the terminal transition.
+work produces no child result or relationship outcome when its ambiguity first
+terminalizes the turn. Its authenticated terminal lifecycle evidence can later
+satisfy a descendant cascade's already-terminal classification; automatic
+reconciliation seals the child as a failed result carrying
+child-result-unavailable and the exact reconciled child turn, in the transaction
+that commits the terminal transition.
 
 A parent-policy stop or cancellation carries opaque authority from the exact
 applied parent termination result, exposing the parent session, durable user

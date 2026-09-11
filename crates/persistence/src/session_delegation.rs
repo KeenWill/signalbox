@@ -1597,6 +1597,7 @@ async fn load_relation(
     let parent_turn = turn_id_from_uuid(required(&row, "parent_turn_id")?);
     let child = session_id_from_uuid(required(&row, "child_session_id")?);
     let child_turn = turn_id_from_uuid(required(&row, "child_turn_id")?);
+    let reconciliation_required_child: bool = required(&row, "reconciliation_required_child")?;
     let policy = decode_policy(&row)?;
     let request = load_request_by_id(connection, spawning_request)
         .await?
@@ -1610,7 +1611,11 @@ async fn load_relation(
     let spawn = DelegatedSpawnRequest::parse(request, task, policy)
         .map_err(|_| SessionDelegationCorruption::Inconsistent("spawning request purpose"))?;
     let events = load_events(connection, &spawn, parent, child).await?;
-    SessionDelegationReconstitutionInput::new(spawn, child, child_turn, events)
+    let mut input = SessionDelegationReconstitutionInput::new(spawn, child, child_turn, events);
+    if reconciliation_required_child {
+        input = input.with_reconciliation_required_child();
+    }
+    input
         .reconstitute()
         .map_err(|error| SessionDelegationCorruption::Reconstitution(error.failure()).into())
 }

@@ -213,6 +213,86 @@ fn relation_reconstitution_derives_terminal_lifecycle_from_history() {
     assert_eq!(reconstituted.lifecycle(), relation.lifecycle());
 }
 
+/// restart accepts a parent terminal evaluation when the delegated child has independent
+/// reconciliation-required terminal evidence but no child-result event.
+#[test]
+fn relation_reconstitution_accepts_parent_terminal_evaluation_without_child_result_event() {
+    let policy = ChildRelationshipPolicy::Background;
+    let spawning = spawn_request(policy);
+    let relation = SessionDelegation::spawn_fixture(spawning.clone(), session_id(3), turn_id(7))
+        .expect("fixture parent and child are distinct");
+    let authority = parent_authority(
+        TerminationAuthoritySource::Parent,
+        ParentTerminationKind::Stopped,
+        DescendantTerminationScope::ParentAndDescendants,
+    );
+    let already_terminal = DelegationOutcome::from_parent_already_terminal(authority)
+        .expect("descendant-scoped authority records terminal evaluation");
+    let input = SessionDelegationReconstitutionInput::new(
+        spawning,
+        relation.child(),
+        relation.child_turn(),
+        vec![
+            relation.events()[0].clone(),
+            DelegationEvent::OutcomeRecorded {
+                ordinal: DelegationEventOrdinal::new(NonZeroU64::new(2).expect("two is positive")),
+                outcome: already_terminal,
+            },
+        ],
+    )
+    .with_reconciliation_required_child();
+
+    let reconstituted = input
+        .reconstitute()
+        .expect("reconciliation-required child evidence authenticates terminal evaluation");
+
+    assert_eq!(reconstituted.lifecycle(), DelegationLifecycle::Terminal);
+    assert_eq!(
+        reconstituted.events()[1]
+            .outcome()
+            .expect("terminal evaluation is retained")
+            .kind(),
+        DelegationOutcomeKind::AlreadyTerminal
+    );
+}
+
+/// restart rejects a parent terminal evaluation when no canonical child-terminal fact exists.
+#[test]
+fn relation_reconstitution_rejects_parent_terminal_evaluation_without_child_terminal_evidence() {
+    let policy = ChildRelationshipPolicy::Background;
+    let spawning = spawn_request(policy);
+    let relation = SessionDelegation::spawn_fixture(spawning.clone(), session_id(3), turn_id(7))
+        .expect("fixture parent and child are distinct");
+    let authority = parent_authority(
+        TerminationAuthoritySource::Parent,
+        ParentTerminationKind::Stopped,
+        DescendantTerminationScope::ParentAndDescendants,
+    );
+    let already_terminal = DelegationOutcome::from_parent_already_terminal(authority)
+        .expect("descendant-scoped authority records terminal evaluation");
+    let input = SessionDelegationReconstitutionInput::new(
+        spawning,
+        relation.child(),
+        relation.child_turn(),
+        vec![
+            relation.events()[0].clone(),
+            DelegationEvent::OutcomeRecorded {
+                ordinal: DelegationEventOrdinal::new(NonZeroU64::new(2).expect("two is positive")),
+                outcome: already_terminal,
+            },
+        ],
+    );
+
+    let error = input
+        .reconstitute()
+        .expect_err("already-terminal requires canonical child-terminal evidence");
+
+    assert_eq!(
+        error.failure(),
+        SessionDelegationReconstitutionFailure::OutcomeReasonMismatch
+    );
+}
+
 /// restart rejects a gap in relationship history.
 #[test]
 fn relation_reconstitution_rejects_noncontiguous_history() {
