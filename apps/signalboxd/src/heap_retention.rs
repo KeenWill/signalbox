@@ -1,14 +1,11 @@
-#![cfg(target_os = "linux")]
 #![allow(
     clippy::expect_used,
     reason = "the isolated allocation fixture requires Linux process counters and successful worker joins"
 )]
 
-#[path = "../src/heap_allocator.rs"]
-mod heap_allocator;
-
 use std::{
     hint::black_box,
+    process::Command,
     sync::{Arc, Barrier},
     thread,
     time::Duration,
@@ -16,9 +13,34 @@ use std::{
 
 // Arbitrary nonzero fill makes each allocated page resident.
 const PAGE_FILL: u8 = 0x55;
+const COMPLETION: &str = "heap retention verified";
 
 #[test]
 fn freed_worker_buffers_do_not_stay_resident_behind_small_live_objects() {
+    let output = Command::new(std::env::current_exe().expect("daemon test executable"))
+        .args([
+            "--exact",
+            "heap_retention::allocation_workload",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .expect("isolated daemon allocation test starts");
+    assert!(
+        output.status.success(),
+        "isolated allocator regression failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(COMPLETION),
+        "the daemon test executable did not run its allocation workload"
+    );
+}
+
+#[test]
+#[ignore = "invoked by the parent regression in an isolated daemon test process"]
+fn allocation_workload() {
     // Each worker frees 4 MiB while retaining 2 KiB interleaved with those buffers.
     let workload = WorkerBuffers {
         workers: 32,
@@ -34,6 +56,7 @@ fn freed_worker_buffers_do_not_stay_resident_behind_small_live_objects() {
         resident.peak_kib.saturating_sub(resident.after_kib) >= 96 * 1024,
         "temporary buffers stayed resident: {resident:?}"
     );
+    println!("{COMPLETION}: {resident:?}");
 }
 
 struct WorkerBuffers {

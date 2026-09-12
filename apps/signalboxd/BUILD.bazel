@@ -73,12 +73,6 @@ TEST_DEPS = [
 
 rust_package()
 
-rust_integration_test(
-    name = "heap_retention",
-    crate_root = "tests/heap_retention.rs",
-    srcs = ["tests/heap_retention.rs", "src/heap_allocator.rs"],
-)
-
 rust_library(
     name = "signalboxd_lib",
     compile_data = CRATE_COMPILE_DATA,

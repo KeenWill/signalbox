@@ -8,6 +8,8 @@
 //! boundary.
 
 mod heap_allocator;
+#[cfg(all(test, target_os = "linux"))]
+mod heap_retention;
 
 #[cfg(test)]
 use signalboxd::credential_files_conflict;
