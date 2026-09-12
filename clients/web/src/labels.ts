@@ -10,7 +10,7 @@ const labels = new Map<string, string>(
     scale: 'Scale',
     fast: 'Fast',
     abandoned: 'Abandoned',
-    accepted_input: 'Accepted message',
+    accepted_input: 'Message',
     achieved: 'Achieved',
     achieved_declared: 'Completion reported',
     achieved_verified: 'Completion verified',
@@ -77,7 +77,7 @@ const labels = new Map<string, string>(
     configuration_unavailable: 'Pricing unavailable',
     connected: 'Connected',
     context_compacted: 'Context summarized',
-    context_compaction: 'Context summary',
+    context_compaction: 'Context trim',
     continue_running: 'Continue running',
     crash_lost: 'Attempt lost on restart',
     created: 'Created',
@@ -93,7 +93,7 @@ const labels = new Map<string, string>(
     derived_text_artifact: 'Derived text',
     direct: 'Direct',
     disabled: 'Disabled',
-    dispatched: 'Dispatched',
+    dispatched: 'Queued',
     document: 'Document',
     download: 'Download',
     effect_free: 'No external effects on crash',
@@ -121,7 +121,7 @@ const labels = new Map<string, string>(
     image: 'Image',
     in_flight: 'In progress',
     incomplete_cache_axes: 'Cache token counts incomplete',
-    injection_settled: 'Message delivery outcome recorded',
+    injection_settled: 'Message delivery',
     input_accepted: 'Message accepted',
     interactive: 'Interactive',
     invalid_arguments: 'Invalid arguments',
@@ -257,3 +257,14 @@ const labels = new Map<string, string>(
 )
 
 export const enumLabel = (value: string): string => labels.get(value) ?? value
+
+export const productLabels = {
+  you: 'You',
+  yourMessage: 'Your message',
+  snapshot: 'Snapshot',
+  live: 'Live',
+  paused: 'Paused',
+  disconnected: 'Disconnected',
+  openSession: 'Open session',
+  preview: 'Preview',
+} as const

@@ -630,10 +630,25 @@ fn reference_evidence(
             OperatorFailureClass::FailClosedCorruption,
         ));
     };
-    let text = json!({"status":"read", "output":"image", "digest":identity.digest().to_string(), "media_type":identity.media_type(), "byte_length":reference.byte_length().get().to_string()});
-    let Some(reference) =
-        signalbox_domain::ToolMediaReference::image(identity, source, reference.byte_length())
-    else {
+    let output = match reference.kind() {
+        signalbox_file_media_runtime::MediaPresentationKind::Image => "image",
+        signalbox_file_media_runtime::MediaPresentationKind::Document => "document",
+    };
+    let text = json!({"status":"read", "output":output, "digest":identity.digest().to_string(), "media_type":identity.media_type(), "byte_length":reference.byte_length().get().to_string()});
+    let durable = match reference.kind() {
+        signalbox_file_media_runtime::MediaPresentationKind::Image => {
+            signalbox_domain::ToolMediaReference::image(identity, source, reference.byte_length())
+        }
+        signalbox_file_media_runtime::MediaPresentationKind::Document if identity == source => {
+            signalbox_domain::ToolMediaReference::direct_document(identity, reference.byte_length())
+        }
+        signalbox_file_media_runtime::MediaPresentationKind::Document => {
+            return Err(FileMediaExecutorError::from_class(
+                OperatorFailureClass::FailClosedCorruption,
+            ));
+        }
+    };
+    let Some(reference) = durable else {
         return failure_evidence(FileMediaFailure::OutputUnitTooLarge);
     };
     match ToolResultText::try_new(text.to_string()) {
