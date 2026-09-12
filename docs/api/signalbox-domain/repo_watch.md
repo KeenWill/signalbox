@@ -335,6 +335,13 @@ impl RepoWatchMatcherV1 {
     pub fn mergeable_state(&self) -> &[MergeableState];
     pub fn conclusion(&self) -> &[CheckConclusion];
     pub fn matches(&self, event: &RepoWatchEvent) -> bool;
+    pub fn matches_activation(
+        &self,
+        repository: &RepositorySlug,
+        context: &PullRequestEventContext,
+        mergeable_state: MergeableState,
+        conclusions: impl iterator::Iterator<Item = CheckConclusion>,
+    ) -> bool;
 }
 ```
 

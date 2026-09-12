@@ -28,7 +28,14 @@ use signalbox_session_ownership::{
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+mod activation;
 mod baseline;
+
+#[derive(Clone, Copy)]
+enum Reevaluation<'a> {
+    Retry(&'a retry::RetryAdmission),
+    Activation(&'a [u8]),
+}
 pub mod checkout;
 pub mod dispatch;
 mod event_decode;
@@ -1862,6 +1869,7 @@ async fn insert_rule_revision(
         .execute(&mut **transaction)
         .await?;
     }
+    activation::seed(transaction, repository, rule).await?;
     Ok(())
 }
 
@@ -1883,6 +1891,8 @@ async fn retire_rule_revision(
     .bind(retired_at)
     .execute(&mut **transaction)
     .await?;
+    sqlx::query("DELETE FROM rule_activation_candidate WHERE repository=$1 AND rule_id=$2 AND rule_revision=$3")
+        .bind(repository).bind(rule_id).bind(revision).execute(&mut **transaction).await?;
     Ok(())
 }
 
@@ -2125,8 +2135,16 @@ impl RepoWatchStore {
         issued_at: OffsetDateTime,
         codec: &mut Codec,
         admission: Option<(&str, std::time::Duration)>,
-        retry: Option<&retry::RetryAdmission>,
+        reevaluation: Option<Reevaluation<'_>>,
     ) -> Result<DispatchAdmission, StoreError> {
+        let retry = match reevaluation {
+            Some(Reevaluation::Retry(retry)) => Some(retry),
+            _ => None,
+        };
+        let activation = match reevaluation {
+            Some(Reevaluation::Activation(activation)) => Some(activation),
+            _ => None,
+        };
         let Some(first) = planned.first() else {
             return Err(StoreError::InvalidDispatchBatch);
         };
@@ -2178,8 +2196,20 @@ impl RepoWatchStore {
         } else {
             None
         };
-        let retry_event: Option<Vec<u8>> = if let Some(retry) = retry {
+        let activation_event: Option<Vec<u8>> = if let Some(activation) = activation {
+            Some(activation.to_vec())
+        } else if let Some(retry) =
+            retry.filter(|retry| retry.source == retry::MatchSource::Activation)
+        {
             Some(retry.event.clone())
+        } else if !initial_batch {
+            sqlx::query_scalar("SELECT activation_event FROM dispatch_ledger WHERE dispatch_ref=$1 AND trigger_sequence IS NULL AND command_kind='create_session' ORDER BY action_ordinal LIMIT 1")
+                .bind(first.dispatch().into_uuid()).fetch_optional(&mut **transaction).await?.flatten()
+        } else {
+            None
+        };
+        let retry_event: Option<Vec<u8>> = if let Some(retry) = retry {
+            (retry.source == retry::MatchSource::ProviderEvent).then(|| retry.event.clone())
         } else if retry_parent.is_some() {
             sqlx::query_scalar("SELECT retry_event FROM dispatch_ledger WHERE dispatch_ref = $1 AND trigger_sequence IS NULL AND command_kind = 'create_session' ORDER BY action_ordinal LIMIT 1")
                 .bind(first.dispatch().into_uuid()).fetch_optional(&mut **transaction).await?.flatten()
@@ -2280,13 +2310,14 @@ impl RepoWatchStore {
                    JOIN gh_readable_event AS event
                      ON event.event_id = $3
                   WHERE active.repository = $1 AND active.rule_id = $2
-                    AND event.repository_event_ordinal
-                        > revision.activated_after_event_ordinal
+                    AND (event.repository_event_ordinal
+                        > revision.activated_after_event_ordinal OR $4)
                   FOR UPDATE OF active",
             )
             .bind(first.repository().as_str())
             .bind(first.rule_id().as_str())
             .bind(first.event_id().into_uuid())
+            .bind(reevaluation.is_some())
             .fetch_optional(&mut **transaction)
             .await?;
             if active_revision != Some(Decimal::from(first.rule_revision().get())) {
@@ -2306,7 +2337,7 @@ impl RepoWatchStore {
                 .bind(issued_at).bind(Decimal::from(cooldown.as_secs()))
                 .fetch_one(&mut **transaction).await?;
             if suppressed {
-                if retry.is_none() {
+                if reevaluation.is_none() {
                     advance_evaluation(transaction, first).await?;
                 }
                 return Ok(DispatchAdmission::Suppressed);
@@ -2333,7 +2364,10 @@ impl RepoWatchStore {
                 .await?;
                 let event = crate::event_decode::event(
                     command.event_id(),
-                    retry_event.as_deref().unwrap_or(&event_payload),
+                    activation_event
+                        .as_deref()
+                        .or(retry_event.as_deref())
+                        .unwrap_or(&event_payload),
                 )
                 .ok_or(StoreError::InvalidRetainedEvent)?;
                 let observation = baseline
@@ -2352,8 +2386,8 @@ impl RepoWatchStore {
                     "INSERT INTO dispatch_ledger
                         (dispatch_ref, action_ordinal, command_id, repository, rule_id,
                          rule_revision, event_id, trigger_sequence, command_kind, command_payload,
-                         status, issued_at, singleton_key, kickoff_text, retry_of, retry_event)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12, $13, $14, $15)
+                         status, issued_at, singleton_key, kickoff_text, retry_of, retry_event, activation_event)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12, $13, $14, $15, $16)
                      ON CONFLICT DO NOTHING",
                 )
                 .bind(command.dispatch().into_uuid())
@@ -2371,6 +2405,7 @@ impl RepoWatchStore {
                 .bind(kickoff)
                 .bind(retry_parent)
                 .bind(&retry_event)
+                .bind(&activation_event)
                 .execute(&mut **transaction)
                 .await?
                 .rows_affected()
@@ -2378,7 +2413,7 @@ impl RepoWatchStore {
             );
         }
         if inserted_count == planned.len() {
-            if admission.is_some() && retry.is_none() {
+            if admission.is_some() && reevaluation.is_none() {
                 advance_evaluation(transaction, first).await?;
             }
             return Ok(DispatchAdmission::Inserted);
@@ -2702,32 +2737,40 @@ where
 {
     let mut batches = Vec::new();
     for rule in matching_rules(rules, event) {
-        let dispatch = ids.next_dispatch();
-        let mut commands = Vec::with_capacity(rule.actions().len());
-        for (index, action) in rule.actions().iter().enumerate() {
-            let RepoWatchRuleActionV1::DispatchSession { template } = action;
-            let command = factory
-                .create_session(dispatch, template, event)
-                .map_err(PlanRepositoryEventError::Factory)?
-                .with_lifecycle(
-                    StartGate::Held,
-                    SessionOwnership::Owned,
-                    Some(FinishCondition::ExternalGate),
-                );
-            commands.push(PlannedCommand::new(
-                dispatch,
-                u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
-                rule,
-                event,
-                None,
-                SessionCommand::create_session(command).map_err(|_: CommandOutsideSeam| {
-                    PlanRepositoryEventError::CommandOutsideSeam
-                })?,
-            ));
-        }
-        batches.push(commands);
+        batches.push(plan_rule_commands(rule, event, ids, factory)?);
     }
     Ok(batches)
+}
+
+fn plan_rule_commands<Ids: DispatchReferenceGenerator, Factory: CreateSessionCommandFactory>(
+    rule: &RepoWatchRule,
+    event: &RepoWatchEvent,
+    ids: &mut Ids,
+    factory: &mut Factory,
+) -> Result<Vec<PlannedCommand>, PlanRepositoryEventError<Factory::Error>> {
+    let dispatch = ids.next_dispatch();
+    let mut commands = Vec::with_capacity(rule.actions().len());
+    for (index, action) in rule.actions().iter().enumerate() {
+        let RepoWatchRuleActionV1::DispatchSession { template } = action;
+        let command = factory
+            .create_session(dispatch, template, event)
+            .map_err(PlanRepositoryEventError::Factory)?
+            .with_lifecycle(
+                StartGate::Held,
+                SessionOwnership::Owned,
+                Some(FinishCondition::ExternalGate),
+            );
+        commands.push(PlannedCommand::new(
+            dispatch,
+            u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
+            rule,
+            event,
+            None,
+            SessionCommand::create_session(command)
+                .map_err(|_: CommandOutsideSeam| PlanRepositoryEventError::CommandOutsideSeam)?,
+        ));
+    }
+    Ok(commands)
 }
 
 /// Admits a start release or stop driven by a lifecycle event.

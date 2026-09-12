@@ -1,7 +1,7 @@
 use super::*;
 use signalbox_session_ownership::RepoWatchEventTarget;
 
-fn observation(
+pub(super) fn observation(
     repository: &RepositorySlug,
     state: MergeableState,
     lifecycle: RepoWatchPullRequestLifecycle,
