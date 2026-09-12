@@ -642,3 +642,69 @@
     flex-direction: column;
   }
 }
+
+.inline-attachments {
+  margin: 0.5rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.inline-attachment {
+  min-width: 0;
+  margin-bottom: 0.5rem;
+}
+
+.inline-attachment-chip {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+}
+
+.inline-attachment-chip button {
+  text-align: left;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.5rem;
+  background: var(--surface-1);
+}
+
+.inline-attachment-chip a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.inline-attachment .artifact-row {
+  display: block;
+  margin-top: 0.4rem;
+}
+
+.inline-attachment .artifact-visual {
+  min-height: 0;
+}
+
+.attachment-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgb(0 0 0 / 35%);
+}
+
+.attachment-detail-pane {
+  position: fixed;
+  inset: 0 0 0 auto;
+  width: min(40rem, 100vw);
+  z-index: 91;
+  padding: 1rem;
+  overflow: auto;
+  color: var(--text);
+  background: var(--canvas);
+  border-left: 1px solid var(--border);
+}
+
+.inline-attachment button:focus-visible,
+.inline-attachment a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}

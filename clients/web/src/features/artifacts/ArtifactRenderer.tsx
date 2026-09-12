@@ -621,9 +621,11 @@ const artifactIcon = (artifact: ArtifactItem) => {
 export function ArtifactRenderer({
   artifact,
   commandContext,
+  onInspect,
 }: {
   artifact: ArtifactItem
   commandContext: CommandContext
+  onInspect?: () => void
 }) {
   const selected = useAppSelector((state) => state.app.selectedArtifact === artifact.id)
   return (
@@ -636,7 +638,10 @@ export function ArtifactRenderer({
         type="button"
         className="artifact-heading"
         aria-pressed={selected}
-        onClick={() => selectArtifact(commandContext, artifact.id)}
+        onClick={() => {
+          selectArtifact(commandContext, artifact.id)
+          onInspect?.()
+        }}
       >
         {artifactIcon(artifact)}
         <div>
