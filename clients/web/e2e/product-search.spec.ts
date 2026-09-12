@@ -117,7 +117,6 @@ const resultsHeading = (results: readonly unknown[]) =>
 
 const submitSearch = async (page: Page) => {
   await page.getByRole('textbox', { name: 'Search text' }).fill('release evidence')
-  await page.getByRole('textbox', { name: /Session ID/ }).fill(sessionId)
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
   await expect(page.getByRole('heading', { name: resultsHeading(firstPage.results) })).toBeVisible()
 }
@@ -129,7 +128,7 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   )
 }
 
-test('searches without advertising an unavailable session reveal', async ({ page }) => {
+test('searches and links each result to its session position', async ({ page }) => {
   const problems = watchBrowser(page)
   await useSearchFixture(page)
   await page.goto('/search')
@@ -137,7 +136,11 @@ test('searches without advertising an unavailable session reveal', async ({ page
 
   await expect(page).toHaveURL(/q=release(?:\+|%20)evidence/)
   await expect(page.getByText('durable release evidence')).toContainText('release')
-  await expect(page.getByRole('link', { name: 'Reveal in session' })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: /durable release evidence/ })).toHaveAttribute(
+    'href',
+    /around=901/,
+  )
+  await expect(page.getByRole('textbox', { name: 'Session ID' })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -285,7 +288,6 @@ test('does not write malformed search drafts into browser history', async ({ pag
 
   const search = page.getByRole('textbox', { name: 'Search text' })
   await search.fill('é'.repeat(257))
-  await page.getByRole('textbox', { name: /Session ID/ }).fill('not-a-session')
   await search.press('Enter')
 
   await expect(page).toHaveURL(/\/search$/)
@@ -298,12 +300,9 @@ test('bounds search drafts while they are being edited', async ({ page }) => {
   await page.goto('/search')
 
   const search = page.getByRole('textbox', { name: 'Search text' })
-  const session = page.getByRole('textbox', { name: /Session ID/ })
   await search.fill('é'.repeat(bootstrapFixture.limits.max_search_query_bytes))
-  await session.fill('x'.repeat(1000))
 
   await expect(search).toHaveValue('é'.repeat(bootstrapFixture.limits.max_search_query_bytes / 2))
-  await expect(session).toHaveValue('x'.repeat(45))
 })
 
 test('restores focus to validation after malformed browser history', async ({ page }) => {
@@ -506,14 +505,6 @@ test('rejects overflowing drafts instead of submitting a valid prefix', async ({
   })
   await page.goto('/search')
   const search = page.getByRole('textbox', { name: 'Search text' })
-  const session = page.getByRole('textbox', { name: 'Session ID', exact: true })
-  await search.fill('release')
-  await session.fill(`urn:uuid:${sessionId}junk`)
-  await search.press('Enter')
-  await expect(page.getByRole('alert')).toBeVisible()
-  await expect(page).toHaveURL(/\/search$/)
-  expect(requests).toBe(0)
-  await session.fill('')
   await search.fill('é'.repeat(513))
   await search.press('Enter')
   await expect(page.getByRole('alert')).toBeVisible()
@@ -534,7 +525,7 @@ test('clears a draft error when history restores a valid search', async ({ page 
   await search.fill('different')
   await search.press('Enter')
   await expect(page).toHaveURL(/q=different/)
-  await page.getByRole('textbox', { name: 'Session ID', exact: true }).fill('bad')
+  await search.fill('é'.repeat(513))
   await search.press('Enter')
   await expect(page.getByRole('alert')).toBeVisible()
   await page.goBack()
@@ -654,4 +645,19 @@ test('releases the imports title when the next scenario fails to load', async ({
   await page.getByRole('link', { name: /^Streaming session/ }).click()
   await expect(page.getByText('Scenario studio failed to load.')).toBeVisible()
   await expect(page).not.toHaveTitle('Signalbox Scenario Studio — Imports')
+})
+
+test('searches a session from its URL and can return to all sessions', async ({ page }) => {
+  await useSearchFixture(page)
+  const requestedSessions: Array<string | null> = []
+  await page.route('**/api/search?**', (route) => {
+    requestedSessions.push(new URL(route.request().url()).searchParams.get('session_id'))
+    return route.fulfill({ json: firstPage })
+  })
+  await page.goto(`/search?q=release&session=${sessionId}`)
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
+  expect(requestedSessions).toEqual([sessionId])
+  await page.getByRole('button', { name: 'Search all sessions' }).click()
+  await expect.poll(() => requestedSessions.at(-1)).toBeNull()
+  await expect(page).not.toHaveURL(/session=/)
 })

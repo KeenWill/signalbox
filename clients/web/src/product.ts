@@ -113,6 +113,7 @@ export interface ProductSearchState {
 }
 
 export interface ProductSessionState {
+  around?: string
   q?: string
   sort?: 'activity' | 'identity'
   archived?: boolean
@@ -233,6 +234,12 @@ export const admittedSessionSearch = (value: unknown) => {
 }
 
 export const readProductSessionState = (value: Record<string, unknown>): ProductSessionState => {
+  const around =
+    typeof value.around === 'string' &&
+    /^[1-9][0-9]{0,19}$/.test(value.around) &&
+    BigInt(value.around) <= MAX_UNSIGNED_64
+      ? value.around
+      : undefined
   const sort = value.sort === 'identity' ? 'identity' : undefined
   const afterSession = admittedSessionIdentity(value.afterSession)
   const afterActivity = admittedActivityCursor(value.afterActivity)
@@ -248,6 +255,7 @@ export const readProductSessionState = (value: Record<string, unknown>): Product
     afterActivity: validContinuation && sort !== 'identity' ? afterActivity : undefined,
     session: admittedSessionIdentity(value.session),
     workspace: value.workspace === true ? true : undefined,
+    ...(around ? { around } : {}),
   }
 }
 
@@ -781,7 +789,7 @@ export const readProductSearchState = (
 ): ProductSearchState => {
   const text = (key: keyof ProductSearchState) =>
     typeof value[key] === 'string' && value[key].length > 0 ? value[key] : undefined
-  const cursorText = (key: 'afterAddress' | 'afterProjection') => {
+  const cursorText = (key: 'afterAddress' | 'afterProjection' | 'around') => {
     const field = value[key]
     if (typeof field === 'string') return field.length > 0 ? field : undefined
     return typeof field === 'number' && Number.isFinite(field) ? String(field) : undefined
@@ -810,7 +818,7 @@ export const readProductSearchState = (
     ...(Array.isArray(value.afterAddress) || Array.isArray(value.afterProjection)
       ? { cursorParametersAreValid: false as const }
       : {}),
-    around: text('around'),
+    around: cursorText('around'),
   }
 }
 

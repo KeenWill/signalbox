@@ -1819,3 +1819,16 @@ it('bounds malformed search deep links without admitting their prefixes', () => 
   expect(new TextEncoder().encode(state.q).length).toBeLessThanOrEqual(512)
   expect(state.session?.length).toBeLessThanOrEqual(45)
 })
+
+it('preserves valid exact search positions through session route admission', () => {
+  for (const around of [41, '41', '18446744073709551615']) {
+    expect(
+      readProductSessionState({ ...readProductRouteState({ session: sessionId, around }) }).around,
+    ).toBe(String(around))
+  }
+  for (const around of ['0', '-1', '01', '1.5', '18446744073709551616', ['41'], 'bad']) {
+    expect(
+      readProductSessionState({ ...readProductRouteState({ session: sessionId, around }) }).around,
+    ).toBeUndefined()
+  }
+})
