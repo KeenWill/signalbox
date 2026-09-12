@@ -126,6 +126,33 @@ use family::workspace::*;
 use fixtures::*;
 use report::*;
 
+#[tokio::test(start_paused = true)]
+async fn turn_budget_covers_session_exchanges_and_two_delegated_web_judges() {
+    let completion = timeout(TURN_TIMEOUT, async {
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Session requests a search.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Judge evaluates the search.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Session requests a fetch.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Judge evaluates the fetch.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Third tool-enabled session call.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Final session answer.
+        tokio::time::sleep(Duration::from_secs(59)).await; // Local work within its minute.
+    })
+    .await;
+
+    assert!(completion.is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn turn_budget_expires_after_thirteen_minutes() {
+    let completion = timeout(
+        TURN_TIMEOUT,
+        tokio::time::sleep(Duration::from_secs(13 * 60 + 1)),
+    )
+    .await;
+
+    assert!(completion.is_err());
+}
+
 #[test]
 #[ignore = "spends real OpenAI exchanges; run only from the gated tool-eval workflow"]
 fn live_model_in_the_loop_evaluates_one_daemon_tool_family() -> EvalResult {

@@ -22,9 +22,11 @@ pub(crate) const MAX_OUTPUT_TOKENS: u32 = 16_384;
 pub(crate) const MAX_NATURAL_APPROVAL_CONTINUATIONS: usize = 2;
 pub(crate) const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 pub(crate) const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-/// Three tool-enabled exchanges plus the final answer cover every accepted
-/// natural path, with one minute for local persistence and dispatch.
-pub(crate) const TURN_TIMEOUT: Duration = Duration::from_secs(4 * 2 * 60 + 60);
+/// Three tool-enabled session exchanges, the final answer, and two delegated
+/// web approval-judge exchanges each receive the exchange budget, with one
+/// additional minute for local persistence and dispatch.
+pub(crate) const TURN_TIMEOUT: Duration =
+    Duration::from_secs((4 + 2) * EXCHANGE_TIMEOUT.as_secs() + 60);
 pub(crate) const MAX_NATURAL_TOOL_EXCHANGES: usize = 3;
 pub(crate) const MAX_NATURAL_MODEL_CALLS: i64 = MAX_NATURAL_TOOL_EXCHANGES as i64 + 1;
 pub(crate) const LIVE_EVAL_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
