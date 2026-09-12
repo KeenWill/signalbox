@@ -12,12 +12,19 @@ import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { conversationEntryKey } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
-import { readTranscriptWindow, TRANSCRIPT_RETAINED_WINDOWS } from './session-timeline/transcript'
-import { groupTranscriptTurns, type TranscriptTurn } from './session-timeline/turns'
+import {
+  readTranscriptWindow,
+  TRANSCRIPT_RETAINED_WINDOWS,
+  TRANSCRIPT_WINDOW_ITEMS,
+} from './session-timeline/transcript'
+import {
+  groupTranscriptTurns,
+  type TranscriptTurn,
+  turnSummaryParts,
+} from './session-timeline/turns'
+import { SESSION_WINDOW_ITEMS } from './session-workspace'
 import type { DetailMode } from './state'
 import { VirtualTranscript } from './Transcript'
-import { SESSION_WINDOW_ITEMS } from './session-workspace'
-import { TRANSCRIPT_WINDOW_ITEMS } from './session-timeline/transcript'
 
 function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextExcerpt }) {
   let content = excerpt.text
@@ -151,7 +158,7 @@ function TranscriptWindow({
   const turns = useMemo(
     () =>
       groupTranscriptTurns(entries).filter(
-        (turn) => turn.messages.length > 0 || turn.result || turn.tools.length > 0,
+        (turn) => turn.messages.length > 0 || turn.result || turn.tools.length > 0 || turn.outcome,
       ),
     [entries],
   )
@@ -189,7 +196,9 @@ function TranscriptWindow({
           </button>
         </p>
       )}
-      {!transcript.isPending && !transcript.isFetching && turns.length === 0 && <p>No messages in this part of the conversation. Scroll up to keep looking.</p>}
+      {!transcript.isPending && !transcript.isFetching && turns.length === 0 && (
+        <p>No messages in this part of the conversation. Scroll up to keep looking.</p>
+      )}
       <VirtualTranscript
         ids={ids}
         initialEnd={!eventSequence}
@@ -216,7 +225,13 @@ function TranscriptWindow({
               className="session-message-entry session-turn"
               data-turn-id={turn.turnId}
             >
-              <TurnSummary turn={turn} renderTool={renderTool} detailPages={pages?.flatMap((page) => page.details) ?? []} sessionId={sessionId} limits={limits} />
+              <TurnSummary
+                turn={turn}
+                renderTool={renderTool}
+                detailPages={pages?.flatMap((page) => page.details) ?? []}
+                sessionId={sessionId}
+                limits={limits}
+              />
             </div>
           )
         }}
@@ -245,42 +260,53 @@ function TurnSummary({
   const tool = turn.tools.find((entry) => entry.request_id === openTool)
   const more = (sequence: string) => {
     const page = detailPages.find((page) => page.items.at(-1)?.address.event_sequence === sequence)
-    return page?.continuation ? <ContinuedEvent sessionId={sessionId} page={page} limits={limits} /> : null
+    return page?.continuation ? (
+      <ContinuedEvent sessionId={sessionId} page={page} limits={limits} />
+    ) : null
   }
   return (
     <>
-      {turn.messages.map((item) => (
-        <div key={conversationEntryKey(item)} data-event-sequence={item.address.event_sequence}>
-          <BodyText body={item.body} />
-          {more(item.address.event_sequence)}
-        </div>
-      ))}
-      {turn.tools.length > 0 && (
-        <section className="session-tool-chips" aria-label="Tools used">
-          {turn.tools.map((entry) => (
-            <button
-              type="button"
-              key={entry.request_id}
-              aria-expanded={openTool === entry.request_id}
-              onClick={() => setOpenTool(openTool === entry.request_id ? null : entry.request_id)}
-            >
-              {entry.tool_name}
-            </button>
-          ))}
-        </section>
+      {turnSummaryParts(turn).map((part) =>
+        part.kind === 'message' ? (
+          <div
+            key={conversationEntryKey(part.item)}
+            data-event-sequence={part.item.address.event_sequence}
+          >
+            <BodyText body={part.item.body} />
+            {more(part.item.address.event_sequence)}
+          </div>
+        ) : (
+          <section
+            className="session-tool-chips"
+            aria-label="Tools used"
+            key={part.tools[0]?.request_id}
+          >
+            {part.tools.map((entry) => (
+              <button
+                type="button"
+                key={entry.request_id}
+                aria-expanded={openTool === entry.request_id}
+                onClick={() => setOpenTool(openTool === entry.request_id ? null : entry.request_id)}
+              >
+                {entry.tool_name}
+              </button>
+            ))}
+          </section>
+        ),
       )}
       {tool && (
         <div className="session-tool-slot">
           {renderTool ? renderTool(tool, 'condensed') : <ToolSummary tool={tool} />}
-          {more(turn.events.find((event) => event.body.type === 'tool_batch' && event.body.tools.some((entry) => entry.request_id === tool.request_id))?.address.event_sequence ?? '')}
+          {more(
+            turn.events.find(
+              (event) =>
+                event.body.type === 'tool_batch' &&
+                event.body.tools.some((entry) => entry.request_id === tool.request_id),
+            )?.address.event_sequence ?? '',
+          )}
         </div>
       )}
-      {turn.result && (
-        <div data-event-sequence={turn.result.address.event_sequence}>
-          <BodyText body={turn.result.body} />
-          {more(turn.result.address.event_sequence)}
-        </div>
-      )}
+      {turn.outcome && <BodyText body={turn.outcome.body} />}
     </>
   )
 }
@@ -290,9 +316,13 @@ function ToolSummary({ tool }: { tool: WebTimelineToolAttempt }) {
   return (
     <section aria-label={`${tool.tool_name} details`}>
       <strong>{tool.tool_name}</strong>
+      <small>Argument and output summaries</small>
       {tool.arguments && <p className="session-tool-summary">{tool.arguments.text}</p>}
       {evidence?.result && <p className="session-tool-summary">{evidence.result.text}</p>}
       {evidence?.failure && <p className="session-tool-summary">{evidence.failure.text}</p>}
+      {[tool.arguments, evidence?.result, evidence?.failure].some(
+        (excerpt) => excerpt && (excerpt.offset_bytes !== '0' || excerpt.continuation != null),
+      ) && <small>Excerpt · more text available</small>}
     </section>
   )
 }
