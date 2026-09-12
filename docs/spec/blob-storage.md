@@ -279,13 +279,16 @@ attachment stubs in the rendered frontier; a catalogued digest outside that set
 is unauthorized. A digest absent from the frontier closes the prepared attempt
 as a known failure with the fixed detail `blob_not_visible`.
 
-Before durable send authorization, preparation checks each distinct attachment's
-catalogued length against its rendered stub and the per-blob maximum, then opens
-at least one recorded replica and checks its length without reading the body. A
-missing replica or a definitive catalog or length mismatch closes the unsent
-call before provider interaction. If no replica is usable and one is temporarily
-unavailable, the call stays prepared for retry with a sanitized unavailable
-failure.
+For ordinary model calls, attachment verification follows provider capability
+preparation. Before durable send authorization, preparation checks each distinct
+attachment's catalogued length against its rendered stub and the per-blob
+maximum, then opens at least one recorded replica and checks its length without
+reading the body. A missing replica or a definitive catalog or length mismatch
+closes the unsent call before provider interaction. If no replica is usable and
+one is temporarily unavailable, the call stays prepared for retry with a
+sanitized unavailable failure unless another attachment has a definitive
+failure. Verification continues past unavailable attachments to find a
+definitive failure.
 
 Imported raw source records of [conversation-import](conversation-import.md)
 converge onto the blob catalog: the import satellite's content hash is an
