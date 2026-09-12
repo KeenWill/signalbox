@@ -769,7 +769,10 @@ export function ProductApp({
           : undefined,
       openSession: (sessionId) => {
         if (surface === 'sessions') {
-          updateSessionSearch({ ...sessionState, session: sessionId, workspace: true })
+          updateSessionSearch(
+            { ...sessionState, session: sessionId, workspace: true },
+            sessionState.workspace && sessionState.session === undefined ? 'replace' : 'push',
+          )
           return
         }
         void navigate({

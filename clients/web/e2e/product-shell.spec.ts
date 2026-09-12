@@ -2128,3 +2128,27 @@ for (const catalogState of [
       .toEqual(catalogState)
   })
 }
+
+test('opening a session by id from a direct empty workspace returns to the catalog', async ({
+  page,
+}) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/settings')
+  await page.goto('/sessions?workspace=true&q=review&archived=true')
+  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+  await page.getByRole('button', { name: /^Open session by id/ }).click()
+  await page
+    .getByRole('dialog', { name: 'Open session by id' })
+    .getByLabel('Session ID')
+    .fill(sessionWorkspaceFixture.id)
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`session=${sessionWorkspaceFixture.id}`))
+  await page.keyboard.press('Escape')
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/sessions')
+  await expect
+    .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
+    .toEqual({ q: 'review', archived: 'true' })
+  await page.goBack()
+  await expect(page).toHaveURL(/\/settings$/)
+})
