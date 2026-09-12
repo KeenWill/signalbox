@@ -216,3 +216,37 @@ test('keeps attachment space while revisiting an unloaded preview', async ({ pag
   await expect(page.getByRole('img', { name: 'Preview of Image' })).toBeVisible()
   expect(imageReads).toBe(2)
 })
+
+test('releases the phone height reservation after reloading at desktop width', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/blobs/**/descriptor?*', (route) =>
+    route.fulfill({
+      json: decodeURIComponent(route.request().url()).includes(imageDescriptor.digest)
+        ? imageAttachment
+        : fileAttachment,
+    }),
+  )
+  await page.route('**/api/blobs/**/content/image-png', (route) =>
+    route.fulfill({ body: preview, contentType: 'image/png' }),
+  )
+  await page.goto('/src/features/artifacts/scenario.html?revisit')
+  const image = page.getByRole('img', { name: 'Preview of Image' })
+  await expect(image).toBeVisible()
+  const attachment = page.locator('.inline-attachment').first()
+  const phone = await attachment.boundingBox()
+  if (!phone) throw new Error('Mounted attachment required')
+  await page.evaluate((top) => scrollTo(0, top), phone.y + phone.height + 1)
+  await expect(image).toHaveCount(0)
+  await page.setViewportSize({ width: 1440, height: 844 })
+  await page.evaluate(() => scrollTo(0, 0))
+  await expect(image).toBeVisible()
+  await expect
+    .poll(() => attachment.evaluate((element) => (element as HTMLElement).style.minHeight))
+    .toBe('')
+  const desktop = await attachment.boundingBox()
+  if (!desktop) throw new Error('Reloaded attachment required')
+  expect(desktop.height).toBeLessThan(phone.height)
+})
