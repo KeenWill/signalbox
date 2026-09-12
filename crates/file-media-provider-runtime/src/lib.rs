@@ -32,6 +32,7 @@ pub struct ResolvedFileUse<Source> {
     source: Source,
     selector: signalbox_file_media_runtime::VisiblePartSelector,
     image_target: Option<signalbox_model_runtime::ImagePresentationCapability>,
+    document_target: Option<signalbox_model_runtime::DocumentPresentationCapability>,
 }
 
 impl<Source> ResolvedFileUse<Source> {
@@ -46,6 +47,7 @@ impl<Source> ResolvedFileUse<Source> {
             source,
             selector,
             image_target: None,
+            document_target: None,
         }
     }
 
@@ -55,6 +57,15 @@ impl<Source> ResolvedFileUse<Source> {
         capability: Option<signalbox_model_runtime::ImagePresentationCapability>,
     ) -> Self {
         self.image_target = capability;
+        self
+    }
+
+    /// Attaches the issuing model's effective document presentation capability.
+    pub fn with_document_target(
+        mut self,
+        capability: Option<signalbox_model_runtime::DocumentPresentationCapability>,
+    ) -> Self {
+        self.document_target = capability;
         self
     }
 
@@ -241,6 +252,7 @@ where
                 .await
                 .map_err(FileMediaServiceFailure::from)?;
             let image_target = resolved.image_target.clone();
+            let document_target = resolved.document_target.clone();
             let (file_use, source, selector) = resolved.into_parts();
             if file_use.digest() != requested_digest {
                 return Err(FileMediaFailure::ProcessorFailed.into());
@@ -303,6 +315,19 @@ where
                 }
             };
             if let signalbox_file_media_runtime::FileReadResult::Reference(reference) = &result {
+                if reference.kind() == signalbox_file_media_runtime::MediaPresentationKind::Document
+                {
+                    let target = document_target
+                        .as_ref()
+                        .ok_or(FileMediaFailure::UnsupportedView)?;
+                    if !target.admits(
+                        reference.presented().media_type().as_str(),
+                        reference.byte_length().get(),
+                    ) {
+                        return Err(FileMediaFailure::OutputUnitTooLarge.into());
+                    }
+                    return Ok(result);
+                }
                 let target = image_target
                     .as_ref()
                     .ok_or(FileMediaFailure::UnsupportedView)?;
@@ -311,7 +336,9 @@ where
                     reference.byte_length().get(),
                 ) {
                     result = signalbox_file_media_runtime::FileReadResult::Structured {
-                        body: reference.large_image_description(),
+                        body: reference
+                            .large_image_description()
+                            .ok_or(FileMediaFailure::ProcessorFailed)?,
                         continuation: signalbox_file_media_runtime::ReadContinuation::Complete,
                     };
                 }

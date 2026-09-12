@@ -474,6 +474,15 @@ pub enum WebTemplateSourceKind {
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebTemplateSaveRequest
+
+```rust
+pub struct WebTemplateSaveRequest {
+    pub definition_toml: string::String,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>, schemars::JsonSchema
+```
+
 ## WebTemplateDetail
 
 ```rust
@@ -1975,18 +1984,4 @@ pub enum WebUsageInputSemantics {
     CacheInclusive,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebNullableU64
-
-```rust
-pub enum WebNullableU64 {
-    Value(WebU64),
-    Null,
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl WebNullableU64 {
-    #[must_use]
-    pub fn from_option(value: option::Option<u64>) -> Self;
-}
 ```
