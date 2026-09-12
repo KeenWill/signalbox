@@ -573,6 +573,8 @@ fn production_router_with_budget(
         .route("/sessions/{session_id}/live", get(session_live_snapshot))
         .route("/sessions/{session_id}/follow", get(session_live_follow))
         .route("/sessions", get(session_catalog))
+        .route("/templates", get(templates::list))
+        .route("/templates/{name}", get(templates::detail))
         .route("/sessions/rates", get(session_rates))
         .route("/search", get(search))
         .route("/usage/summary", get(usage_summary))
@@ -1041,6 +1043,7 @@ async fn wait_for_web_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
 }
 
 mod response;
+mod templates;
 use response::{api_not_found, static_assets_not_configured};
 pub(crate) use response::{application_error, transport_error};
 

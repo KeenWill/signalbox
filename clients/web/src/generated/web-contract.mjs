@@ -6957,6 +6957,410 @@ const schemas = {
     "title": "WebSubmitInputRequest",
     "type": "object"
   },
+  "WebTemplateDetail": {
+    "$defs": {
+      "WebModelSelection": {
+        "description": "Initial model-selection request for a continued native session.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Exact direct model-selection UUID.",
+            "properties": {
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              },
+              "selection_id": {
+                "description": "Direct model-selection UUID.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "selection_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Alias UUID resolved by the daemon at command admission.",
+            "properties": {
+              "alias_id": {
+                "description": "Model alias UUID.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "alias_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebTemplateApprovalPosture": {
+        "description": "Effective workflow approval selection.",
+        "enum": [
+          "auto",
+          "delegated",
+          "human"
+        ],
+        "type": "string"
+      },
+      "WebTemplateSourceKind": {
+        "description": "Source section that defines the selected template.",
+        "enum": [
+          "template",
+          "review_library"
+        ],
+        "type": "string"
+      },
+      "WebTemplateSummary": {
+        "additionalProperties": false,
+        "description": "Creation defaults and workflow authority for one loaded template.",
+        "properties": {
+          "dangerous_tool_auto_approval": {
+            "type": "boolean"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "model": {
+            "$ref": "#/$defs/WebModelSelection"
+          },
+          "model_label": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/$defs/WebPositiveU64"
+          },
+          "workflow_tools": {
+            "items": {
+              "$ref": "#/$defs/WebTemplateWorkflowTool"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "digest",
+          "version",
+          "model",
+          "model_label",
+          "dangerous_tool_auto_approval",
+          "workflow_tools"
+        ],
+        "type": "object"
+      },
+      "WebTemplateWorkflowGrant": {
+        "description": "Operation authority copied from the accepted template.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "enabled"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "all_registrations",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "registrations",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTemplateWorkflowTool": {
+        "additionalProperties": false,
+        "description": "One declared workflow operation with its effective approval posture.",
+        "properties": {
+          "grant": {
+            "$ref": "#/$defs/WebTemplateWorkflowGrant"
+          },
+          "name": {
+            "type": "string"
+          },
+          "posture": {
+            "$ref": "#/$defs/WebTemplateApprovalPosture"
+          }
+        },
+        "required": [
+          "name",
+          "grant",
+          "posture"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Full accepted definition, including retained external prompt contents.",
+    "properties": {
+      "definition_toml": {
+        "description": "Version-one TOML document containing this template or its shared review library.",
+        "type": "string"
+      },
+      "source_kind": {
+        "$ref": "#/$defs/WebTemplateSourceKind"
+      },
+      "summary": {
+        "$ref": "#/$defs/WebTemplateSummary"
+      },
+      "system_prompt": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "summary",
+      "system_prompt",
+      "source_kind",
+      "definition_toml"
+    ],
+    "title": "WebTemplateDetail",
+    "type": "object"
+  },
+  "WebTemplateList": {
+    "$defs": {
+      "WebModelSelection": {
+        "description": "Initial model-selection request for a continued native session.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Exact direct model-selection UUID.",
+            "properties": {
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              },
+              "selection_id": {
+                "description": "Direct model-selection UUID.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "selection_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Alias UUID resolved by the daemon at command admission.",
+            "properties": {
+              "alias_id": {
+                "description": "Model alias UUID.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "alias_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebTemplateApprovalPosture": {
+        "description": "Effective workflow approval selection.",
+        "enum": [
+          "auto",
+          "delegated",
+          "human"
+        ],
+        "type": "string"
+      },
+      "WebTemplateSummary": {
+        "additionalProperties": false,
+        "description": "Creation defaults and workflow authority for one loaded template.",
+        "properties": {
+          "dangerous_tool_auto_approval": {
+            "type": "boolean"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "model": {
+            "$ref": "#/$defs/WebModelSelection"
+          },
+          "model_label": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/$defs/WebPositiveU64"
+          },
+          "workflow_tools": {
+            "items": {
+              "$ref": "#/$defs/WebTemplateWorkflowTool"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "digest",
+          "version",
+          "model",
+          "model_label",
+          "dangerous_tool_auto_approval",
+          "workflow_tools"
+        ],
+        "type": "object"
+      },
+      "WebTemplateWorkflowGrant": {
+        "description": "Operation authority copied from the accepted template.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "enabled"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "all_registrations",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "registrations",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTemplateWorkflowTool": {
+        "additionalProperties": false,
+        "description": "One declared workflow operation with its effective approval posture.",
+        "properties": {
+          "grant": {
+            "$ref": "#/$defs/WebTemplateWorkflowGrant"
+          },
+          "name": {
+            "type": "string"
+          },
+          "posture": {
+            "$ref": "#/$defs/WebTemplateApprovalPosture"
+          }
+        },
+        "required": [
+          "name",
+          "grant",
+          "posture"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Complete loaded template catalog in name order.",
+    "properties": {
+      "templates": {
+        "items": {
+          "$ref": "#/$defs/WebTemplateSummary"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "templates"
+    ],
+    "title": "WebTemplateList",
+    "type": "object"
+  },
   "WebUsageCallPage": {
     "$defs": {
       "WebDollarAmount": {
@@ -9520,6 +9924,16 @@ export function decodeWebSessionLiveStreamEvent(value) {
   if (value.kind === "provider_text_delta" && new TextEncoder().encode(value.content).length > 8192) {
     fail("session_live_event.content", "at most 8192 UTF-8 bytes");
   }
+  return value;
+}
+
+export function decodeWebTemplateList(value) {
+  assertSchema(schemas.WebTemplateList, schemas.WebTemplateList, value, "webtemplatelist");
+  return value;
+}
+
+export function decodeWebTemplateDetail(value) {
+  assertSchema(schemas.WebTemplateDetail, schemas.WebTemplateDetail, value, "webtemplatedetail");
   return value;
 }
 
