@@ -43,7 +43,14 @@ pub(crate) const MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS: u32 = 1_024;
 
 /// Every delivery spelling the grammar recognizes, whether or not this build
 /// supplies a surface for it.
-const DELIVERY_KEYS: [&str; 4] = ["ambient", "file", "codex_home", "oauth"];
+const DELIVERY_KEYS: [&str; 6] = [
+    "ambient",
+    "file",
+    "environment",
+    "kubernetes_secret",
+    "codex_home",
+    "oauth",
+];
 
 /// Fields common to every credential profile, before its delivery adds its own.
 const PROFILE_COMMON_FIELDS: [&str; 4] = ["name", "adapter", "billing_kind", "delivery"];
@@ -66,6 +73,20 @@ pub enum CredentialDelivery {
         /// Absolute path the deployment writes the credential value to.
         path: PathBuf,
         /// Process environment key a spawned adapter supplies the value under.
+        env_key: Option<Arc<str>>,
+    },
+    /// A named variable in the daemon's process environment.
+    Environment {
+        /// Source variable; its value is never retained in configuration.
+        variable: Arc<str>,
+        /// Adapter delivery key, independent of the source variable.
+        env_key: Option<Arc<str>>,
+    },
+    /// A Kubernetes Secret projected into a mounted file.
+    KubernetesSecret {
+        /// Absolute projected file path, reread at use.
+        path: PathBuf,
+        /// Adapter delivery key.
         env_key: Option<Arc<str>>,
     },
     /// An operator-provisioned Codex login directory selected by reference.
@@ -191,6 +212,8 @@ impl fmt::Debug for CredentialDelivery {
             Self::Ambient => formatter.write_str("Ambient"),
             Self::AmbientTask(_) => formatter.write_str("AmbientTask([REDACTED])"),
             Self::Oauth(_) => formatter.write_str("Oauth"),
+            Self::Environment { .. } => formatter.write_str("Environment([REDACTED])"),
+            Self::KubernetesSecret { .. } => formatter.write_str("KubernetesSecret([REDACTED])"),
             Self::File { env_key, .. } => formatter
                 .debug_struct("File")
                 .field("path", &"[credential file path]")
@@ -216,6 +239,8 @@ impl CredentialDelivery {
             Self::AmbientTask(_) => "ambient",
             Self::Oauth(_) => "oauth",
             Self::File { .. } => "file",
+            Self::Environment { .. } => "environment",
+            Self::KubernetesSecret { .. } => "kubernetes_secret",
             Self::CodexHome { .. } => "codex_home",
         }
     }
@@ -223,8 +248,10 @@ impl CredentialDelivery {
     /// Absolute deployment path this delivery references, where it has one.
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Ambient | Self::Oauth(_) | Self::AmbientTask(_) => None,
-            Self::File { path, .. } => Some(path),
+            Self::Ambient | Self::Oauth(_) | Self::AmbientTask(_) | Self::Environment { .. } => {
+                None
+            }
+            Self::File { path, .. } | Self::KubernetesSecret { path, .. } => Some(path),
             Self::CodexHome { path, .. } => Some(path),
         }
     }
@@ -233,7 +260,9 @@ impl CredentialDelivery {
     pub fn env_key(&self) -> Option<&str> {
         match self {
             Self::Ambient | Self::Oauth(_) | Self::AmbientTask(_) => None,
-            Self::File { env_key, .. } => env_key.as_deref(),
+            Self::File { env_key, .. }
+            | Self::Environment { env_key, .. }
+            | Self::KubernetesSecret { env_key, .. } => env_key.as_deref(),
             Self::CodexHome { .. } => None,
         }
     }
@@ -270,6 +299,24 @@ impl CredentialDelivery {
                 let env_key = parse_file_env_key(profile, adapter)?;
                 reject_undelivered(adapter, key)?;
                 Ok(Self::File { path, env_key })
+            }
+            "environment" => {
+                let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
+                allowed.extend_from_slice(&["variable", "env_key"]);
+                reject_unknown_fields(profile, &allowed)?;
+                let variable = parse_environment_variable(profile)?;
+                let env_key = parse_file_env_key(profile, adapter)?;
+                reject_undelivered(adapter, key)?;
+                Ok(Self::Environment { variable, env_key })
+            }
+            "kubernetes_secret" => {
+                let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
+                allowed.extend_from_slice(&["file", "env_key"]);
+                reject_unknown_fields(profile, &allowed)?;
+                let path = normalize_absolute_path(required_string(profile, "file")?)?;
+                let env_key = parse_file_env_key(profile, adapter)?;
+                reject_undelivered(adapter, key)?;
+                Ok(Self::KubernetesSecret { path, env_key })
             }
             "codex_home" => {
                 let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
@@ -309,6 +356,14 @@ impl CredentialDelivery {
             _ => Err(HubModelConfigurationError::InvalidCredentialDelivery),
         }
     }
+}
+
+fn parse_environment_variable(profile: &Table) -> Result<Arc<str>, HubModelConfigurationError> {
+    let variable = required_string(profile, "variable")?;
+    if variable.is_empty() || variable.contains(['=', '\0']) {
+        return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+    }
+    Ok(Arc::from(variable))
 }
 
 fn admit_credential_home(
@@ -358,7 +413,7 @@ fn reject_disagreeing_billing_kind(
     billing_kind: BillingKind,
 ) -> Result<(), HubModelConfigurationError> {
     let admitted = match delivery {
-        "file" => billing_kind == BillingKind::ApiMetered,
+        "file" | "environment" | "kubernetes_secret" => billing_kind == BillingKind::ApiMetered,
         "oauth" => billing_kind == BillingKind::Subscription,
         // `ambient` and `codex_home` admit either, so nothing is checked.
         _ => true,
@@ -826,6 +881,7 @@ fn parse_credential_profiles_with_home_admission(
     let mut profiles: HashMap<Arc<str>, CredentialProfile> = HashMap::with_capacity(tables.len());
     let mut ambient_adapters = HashSet::new();
     let mut file_paths = HashSet::new();
+    let mut environment_variables = HashSet::new();
     for profile in tables {
         if matches!(
             profile.get("adapter").and_then(Item::as_str),
@@ -867,11 +923,18 @@ fn parse_credential_profiles_with_home_admission(
         if delivery == CredentialDelivery::Ambient && !ambient_adapters.insert(adapter) {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
+        if let CredentialDelivery::Environment { variable, .. } = &delivery
+            && !environment_variables.insert((adapter, variable.clone()))
+        {
+            return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+        }
         let path = match &delivery {
-            CredentialDelivery::File { path, .. } => Some(path),
+            CredentialDelivery::File { path, .. }
+            | CredentialDelivery::KubernetesSecret { path, .. } => Some(path),
             CredentialDelivery::CodexHome { path, .. } if admit_credential_homes => Some(path),
             CredentialDelivery::Ambient
             | CredentialDelivery::AmbientTask(_)
+            | CredentialDelivery::Environment { .. }
             | CredentialDelivery::Oauth(_)
             | CredentialDelivery::CodexHome { .. } => None,
         };
@@ -1131,6 +1194,10 @@ fn reject_unobserved_capacity_policy(
 pub enum GithubCredentialDelivery {
     /// Token file resolved at each use.
     File(PathBuf),
+    /// Token supplied by a named process environment variable.
+    Environment(Arc<str>),
+    /// Token supplied by a mounted Kubernetes Secret.
+    KubernetesSecret(PathBuf),
     /// App installation authenticated with a deployment-owned RSA private key.
     GithubApp {
         /// GitHub App identifier.
@@ -1199,6 +1266,24 @@ pub(crate) fn parse_github_credential_profiles(
         }
         validated_credential_catalog_name(name)?;
         let profile = match required_string(table, "delivery")? {
+            "environment" => {
+                reject_unknown_fields(table, &["name", "adapter", "delivery", "variable"])?;
+                GithubCredentialProfile {
+                    delivery: GithubCredentialDelivery::Environment(parse_environment_variable(
+                        table,
+                    )?),
+                    authentication: None,
+                }
+            }
+            "kubernetes_secret" => {
+                reject_unknown_fields(table, &["name", "adapter", "delivery", "file"])?;
+                GithubCredentialProfile {
+                    delivery: GithubCredentialDelivery::KubernetesSecret(normalize_absolute_path(
+                        required_string(table, "file")?,
+                    )?),
+                    authentication: None,
+                }
+            }
             "file" => {
                 reject_unknown_fields(table, &["name", "adapter", "delivery", "file"])?;
                 GithubCredentialProfile::file(normalize_absolute_path(required_string(

@@ -1932,6 +1932,35 @@ fn repository_watch_rejects_duplicate_canonical_signal_reviewers() {
 }
 
 #[test]
+fn repository_watch_rejects_shared_environment_sources_across_repositories() {
+    let distinct = format!(
+        "{}\n[[credential_profiles]]\nname = \"watch-first\"\nadapter = \"github\"\ndelivery = \"environment\"\nvariable = \"WATCH_FIRST_TOKEN\"\n[[credential_profiles]]\nname = \"watch-second\"\nadapter = \"github\"\ndelivery = \"environment\"\nvariable = \"WATCH_SECOND_TOKEN\"\n",
+        configuration_with_repository_watch()
+            .replace(
+                &format!("credential_file = {WATCH_CREDENTIAL_FILE:?}"),
+                "credential_profile = \"watch-first\""
+            )
+            .replace(
+                &format!("credential_file = {SECOND_WATCH_CREDENTIAL_FILE:?}"),
+                "credential_profile = \"watch-second\""
+            )
+    );
+    HubModelConfiguration::parse(&distinct).expect("distinct environment sources admitted");
+    for shared in [
+        distinct.replace("WATCH_SECOND_TOKEN", "WATCH_FIRST_TOKEN"),
+        distinct.replace(
+            "credential_profile = \"watch-second\"",
+            "credential_profile = \"watch-first\"",
+        ),
+    ] {
+        assert_eq!(
+            HubModelConfiguration::parse(&shared).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialVariable)
+        );
+    }
+}
+
+#[test]
 fn repository_watch_rejects_a_shared_credential_file_reference() {
     let configured = configuration_with_repository_watch()
         .replace(SECOND_WATCH_CREDENTIAL_FILE, WATCH_CREDENTIAL_FILE);
@@ -4091,6 +4120,23 @@ fn configuration_rejects_an_unknown_delivery() {
 }
 
 #[test]
+fn configuration_rejects_invalid_external_credential_sources() {
+    for delivery in [
+        "delivery = \"environment\"\nvariable = \"\"",
+        "delivery = \"environment\"\nvariable = \"KEY=value\"",
+        "delivery = \"environment\"\nvariable = \"KEY\"\nfile = \"/run/secret\"",
+        "delivery = \"kubernetes_secret\"\nfile = \"relative/secret\"",
+        "delivery = \"kubernetes_secret\"",
+    ] {
+        let source = CONFIGURATION.replace(
+            "delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"",
+            delivery,
+        );
+        assert!(HubModelConfiguration::parse(&source).is_err(), "{delivery}");
+    }
+}
+
+#[test]
 fn configuration_rejects_a_relative_credential_file() {
     let relative_file = CONFIGURATION.replace(
         "file = \"/run/secrets/anthropic-primary\"",
@@ -4162,6 +4208,20 @@ env_key = "HOME""#,
 
     assert_eq!(
         HubModelConfiguration::parse(&claude_file).err(),
+        Some(HubModelConfigurationError::InvalidCredentialDelivery)
+    );
+}
+
+#[test]
+fn configuration_rejects_duplicate_environment_sources_for_one_adapter() {
+    let distinct = CONFIGURATION
+        .replace("members = [{ profile = \"anthropic-primary\", priority = 1 }]", "members = [{ profile = \"anthropic-primary\", priority = 1 }, { profile = \"anthropic-overflow\", priority = 2 }]")
+        .replace("delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"", "delivery = \"environment\"\nvariable = \"FIXTURE_PRIMARY_TOKEN\"")
+        .replace("delivery = \"file\"\nfile = \"/run/secrets/anthropic-overflow\"", "delivery = \"environment\"\nvariable = \"FIXTURE_OVERFLOW_TOKEN\"");
+    HubModelConfiguration::parse(&distinct).expect("distinct environment sources are independent");
+    let duplicate = distinct.replace("FIXTURE_OVERFLOW_TOKEN", "FIXTURE_PRIMARY_TOKEN");
+    assert_eq!(
+        HubModelConfiguration::parse(&duplicate).err(),
         Some(HubModelConfigurationError::InvalidCredentialDelivery)
     );
 }
@@ -6491,6 +6551,26 @@ fn declared_github_token_file_preserves_polling_credential_isolation() {
     );
     let configuration = HubModelConfiguration::parse(&source).expect("token-file profile parses");
     assert!(configuration.github_tool_credential_conflicts(Path::new("/unused/environment-token")));
+}
+
+#[test]
+fn github_environment_profiles_preserve_polling_source_isolation() {
+    let source = configuration_with_repository_watch().replace(
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+        "credential_profile = \"polling-environment\"",
+    );
+    let source = format!(
+        "{source}\n[[credential_profiles]]\nname = \"github-primary\"\nadapter = \"github\"\ndelivery = \"environment\"\nvariable = \"SHARED_TEST_TOKEN\"\n\n[[credential_profiles]]\nname = \"polling-environment\"\nadapter = \"github\"\ndelivery = \"environment\"\nvariable = \"SHARED_TEST_TOKEN\"\n"
+    );
+    let shared = HubModelConfiguration::parse(&source).expect("shared environment profiles");
+    assert!(shared.github_tool_credential_conflicts(Path::new("/unused/fallback")));
+    let distinct = source.replacen(
+        "variable = \"SHARED_TEST_TOKEN\"",
+        "variable = \"TOOL_TEST_TOKEN\"",
+        1,
+    );
+    let distinct = HubModelConfiguration::parse(&distinct).expect("distinct environment profiles");
+    assert!(!distinct.github_tool_credential_conflicts(Path::new("/unused/fallback")));
 }
 
 #[test]
