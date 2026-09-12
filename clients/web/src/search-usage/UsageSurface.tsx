@@ -3,14 +3,9 @@ import { useState } from 'react'
 import type { WebUsageCallPage } from '../generated/web-contract.mjs'
 import { costText, tokenSummary, UsageTable, usageGroupIdentity } from '../SearchUsage'
 import { costTotalText, totalCost } from './cost'
-import { HttpSearchUsageSource, type SearchUsageSource, type UsageFilters } from './model'
+import type { SearchUsageSource, UsageFilters } from './model'
+import { usageSourceOptions } from './queries'
 import './usage.css'
-
-export const usageSourceOptions = {
-  queryKey: ['usage-http-source'],
-  queryFn: () => HttpSearchUsageSource.connect(),
-  staleTime: Infinity,
-}
 
 export function UsageSurface() {
   const source = useQuery(usageSourceOptions)
