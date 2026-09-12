@@ -3,7 +3,32 @@
 import base64
 import hashlib
 import json
+import shutil
 import socket
+import subprocess
+
+
+def prepare_workspace(workspace, session_id, checkout, head_sha, patch, context):
+    """Provision the daemon's existing per-session root before submitting input."""
+    root = workspace.with_name(workspace.name + ".sessions") / session_id
+    root.mkdir(parents=True, exist_ok=True)
+
+    def git(*arguments):
+        return subprocess.run(["git", *map(str, arguments)], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    if not (root / ".git").exists():
+        git("init", root)
+    head = root / "head"
+    if not head.exists():
+        git("clone", "--local", "--shared", "--no-checkout", checkout, head)
+        git("-C", head, "checkout", "--detach", head_sha)
+    if git("-C", head, "rev-parse", "HEAD") != head_sha:
+        raise ValueError("agentic workspace differs from the reviewed head")
+    git("-C", head, "diff", "--exit-code", "HEAD", "--")
+    shutil.copyfile(patch, root / "change.patch")
+    (root / "context.txt").write_text(context)
+    return head
 
 
 def retained_context(snapshot, *, pr, head_sha, finding_ids, source_thread_ids):

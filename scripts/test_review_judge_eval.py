@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_judge_eval import Trial, git, prepare_checkout, run_trials, validate_result
+from review_judge_agentic import prepare_workspace
 
 
 class JudgmentResultTests(unittest.TestCase):
@@ -83,6 +84,23 @@ class ScratchCheckoutTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             prepare_checkout(self.repository, self.workspace, self.head)
         self.assertEqual((tree / "source.txt").read_text(), "changed by a case")
+
+    def test_agentic_workspace_contains_only_its_head_and_case_evidence(self):
+        tree = prepare_checkout(self.repository, self.workspace, self.head)
+        (self.workspace / "other-result.json").write_text("Another verdict")
+        evidence = self.repository.parent / "change.patch"
+        evidence.write_text("This case's diff")
+        first = prepare_workspace(self.workspace, "first-session", tree, self.head, evidence, "First context")
+        second = prepare_workspace(self.workspace, "second-session", tree, self.head, evidence, "Second context")
+        for head, context in ((first, "First context"), (second, "Second context")):
+            self.assertFalse(head.parent.is_relative_to(self.workspace))
+            self.assertTrue((head.parent / ".git").is_dir())
+            self.assertEqual(set(path.name for path in head.parent.iterdir()), {".git", "head", "change.patch", "context.txt"})
+            self.assertEqual(git(head, "rev-parse", "HEAD"), self.head)
+            self.assertEqual((head / "source.txt").read_text(), "first")
+            self.assertEqual((head.parent / "context.txt").read_text(), context)
+        self.assertNotEqual(first.parent, second.parent)
+        self.assertEqual(prepare_workspace(self.workspace, "first-session", tree, self.head, evidence, "First context"), first)
 
     def test_citations_are_resolved_before_the_judge_session_is_created(self):
         args = SimpleNamespace(repository=self.repository, workspace=self.workspace,

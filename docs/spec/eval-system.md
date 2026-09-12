@@ -26,6 +26,11 @@ call's assistant text as the judgment and retains its entry witnesses and
 per-judgment totals for all reported token-usage axes; any unknown component
 leaves that axis's total unknown.
 
+Before submitting agentic input, the harness provisions the session's
+[derived workspace](configuration-and-credentials.md) with a detached `head/`
+checkout, `change.patch`, and `context.txt`. File reads are confined to that
+session's root; other cases and results remain outside it.
+
 Before judgment, `scripts/review_citations.py` attaches structured resolution of
 the finding location, cited paths and line ranges, and explicit identifiers to
 each candidate. Evidence names the checked-out head and includes matching
