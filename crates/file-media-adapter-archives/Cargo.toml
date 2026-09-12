@@ -24,7 +24,7 @@ tokio = { version = "1.53.0", default-features = false, features = [
 zip = { version = "8.1.0", default-features = false, features = [
     "deflate-flate2-zlib-rs",
 ] }
-zstd = { version = "0.13.3", default-features = false }
+zstd = { version = "0.14.0", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1.53.0", default-features = false, features = [
