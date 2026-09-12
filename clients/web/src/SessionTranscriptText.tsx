@@ -15,9 +15,18 @@ import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { conversationEntryKey } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
-import { readTranscriptWindow, TRANSCRIPT_RETAINED_WINDOWS } from './session-timeline/transcript'
+import {
+  readTranscriptWindow,
+  TRANSCRIPT_RETAINED_WINDOWS,
+  TRANSCRIPT_WINDOW_ITEMS,
+} from './session-timeline/transcript'
 import { readTurnTranscript } from './session-timeline/turn-detail'
-import { groupTranscriptTurns, type TranscriptTurn } from './session-timeline/turns'
+import {
+  groupTranscriptTurns,
+  type TranscriptTurn,
+  turnSummaryParts,
+} from './session-timeline/turns'
+import { SESSION_WINDOW_ITEMS } from './session-workspace'
 import { type DetailMode, store, useAppDispatch, useAppSelector } from './state'
 import { VirtualTranscript } from './Transcript'
 
@@ -205,7 +214,8 @@ function TranscriptWindow({
           turn.events.some((event) => event.address.event_sequence === eventSequence) ||
           turn.messages.length > 0 ||
           turn.result ||
-          turn.tools.length > 0,
+          turn.tools.length > 0 ||
+          turn.outcome,
       ),
     [entries, detail, turnModes, eventSequence],
   )
@@ -218,6 +228,28 @@ function TranscriptWindow({
         : current,
     )
   }, [entries])
+  const emptyScanned = useRef(0)
+  useEffect(() => {
+    if (turns.length > 0) {
+      emptyScanned.current = 0
+      return
+    }
+    if (
+      transcript.isFetching ||
+      transcript.isError ||
+      !transcript.hasPreviousPage ||
+      emptyScanned.current >= SESSION_WINDOW_ITEMS
+    )
+      return
+    emptyScanned.current += TRANSCRIPT_WINDOW_ITEMS
+    void transcript.fetchPreviousPage()
+  }, [
+    turns.length,
+    transcript.isFetching,
+    transcript.isError,
+    transcript.hasPreviousPage,
+    transcript.fetchPreviousPage,
+  ])
   return (
     <section className="session-transcript-text" aria-label="Transcript text">
       <fieldset className="session-transcript-levels">
@@ -251,6 +283,9 @@ function TranscriptWindow({
             Retry transcript
           </button>
         </p>
+      )}
+      {!transcript.isPending && !transcript.isFetching && turns.length === 0 && (
+        <p>No messages in this part of the conversation. Scroll up to keep looking.</p>
       )}
       <VirtualTranscript
         ids={ids}
@@ -288,6 +323,7 @@ function TranscriptWindow({
                     ? 'full'
                     : detail)
                 }
+                detailPages={pages?.flatMap((page) => page.details) ?? []}
                 renderTool={renderTool}
                 sessionId={sessionId}
                 limits={limits}
@@ -307,6 +343,7 @@ function TranscriptWindow({
 
 function TurnContent({
   turn,
+  detailPages,
   renderTool,
   detail,
   sessionId,
@@ -315,6 +352,7 @@ function TurnContent({
   onExpand,
 }: {
   turn: TranscriptTurn
+  detailPages: readonly WebSessionTimelineDetailPage[]
   renderTool?: SessionTranscriptTextProps['renderTool']
   detail: DetailMode
   sessionId: string
@@ -324,6 +362,12 @@ function TurnContent({
 }) {
   const [openTool, setOpenTool] = useState<string | null>(null)
   const tool = turn.tools.find((entry) => entry.request_id === openTool)
+  const more = (sequence: string) => {
+    const page = detailPages.find((page) => page.items.at(-1)?.address.event_sequence === sequence)
+    return page?.continuation ? (
+      <ContinuedEvent sessionId={sessionId} page={page} limits={limits} />
+    ) : null
+  }
   const events = [
     ...new Map(turn.events.map((event) => [event.address.event_sequence, event])).values(),
   ]
@@ -360,35 +404,48 @@ function TurnContent({
           Open turn details
         </button>
       </header>
-      {turn.messages.map((item) => (
-        <div key={conversationEntryKey(item)} data-event-sequence={item.address.event_sequence}>
-          <BodyText body={item.body} />
-        </div>
-      ))}
-      {turn.tools.length > 0 && (
-        <section className="session-tool-chips" aria-label="Tools used">
-          {turn.tools.map((entry) => (
-            <button
-              type="button"
-              key={entry.request_id}
-              aria-expanded={openTool === entry.request_id}
-              onClick={() => setOpenTool(openTool === entry.request_id ? null : entry.request_id)}
-            >
-              {entry.tool_name}
-            </button>
-          ))}
-        </section>
-      )}
-      {detail === 'condensed' &&
-        turn.tools.map((entry) => (
-          <div className="session-tool-slot" key={entry.request_id}>
-            {renderTool ? (
-              renderTool(entry, 'condensed')
-            ) : (
-              <ToolSummary tool={entry} turn={turn} sessionId={sessionId} limits={limits} />
-            )}
+      {turnSummaryParts(turn).map((part) =>
+        part.kind === 'message' ? (
+          <div
+            key={conversationEntryKey(part.item)}
+            data-event-sequence={part.item.address.event_sequence}
+          >
+            <BodyText body={part.item.body} />
+            {more(part.item.address.event_sequence)}
           </div>
-        ))}
+        ) : (
+          <section
+            className="session-tool-chips"
+            aria-label="Tools used"
+            key={part.tools[0]?.request_id}
+          >
+            {part.tools.map((entry) => (
+              <button
+                type="button"
+                key={entry.request_id}
+                aria-expanded={detail === 'condensed' || openTool === entry.request_id}
+                onClick={() =>
+                  detail === 'condensed'
+                    ? onExpand('full')
+                    : setOpenTool(openTool === entry.request_id ? null : entry.request_id)
+                }
+              >
+                {entry.tool_name}
+              </button>
+            ))}
+            {detail === 'condensed' &&
+              part.tools.map((entry) => (
+                <div className="session-tool-slot" key={entry.request_id}>
+                  {renderTool ? (
+                    renderTool(entry, 'condensed')
+                  ) : (
+                    <ToolSummary tool={entry} turn={turn} sessionId={sessionId} limits={limits} />
+                  )}
+                </div>
+              ))}
+          </section>
+        ),
+      )}
       {detail === 'results' && tool && (
         <div className="session-tool-slot">
           {renderTool ? (
@@ -396,13 +453,16 @@ function TurnContent({
           ) : (
             <ToolSummary tool={tool} turn={turn} sessionId={sessionId} limits={limits} />
           )}
+          {more(
+            turn.events.find(
+              (event) =>
+                event.body.type === 'tool_batch' &&
+                event.body.tools.some((entry) => entry.request_id === tool.request_id),
+            )?.address.event_sequence ?? '',
+          )}
         </div>
       )}
-      {turn.result && (
-        <div data-event-sequence={turn.result.address.event_sequence}>
-          <BodyText body={turn.result.body} />
-        </div>
-      )}
+      {turn.outcome && <BodyText body={turn.outcome.body} />}
     </>
   )
 }
@@ -467,6 +527,7 @@ function ToolSummary({
   return (
     <section aria-label={`${tool.tool_name} details`}>
       <strong>{tool.tool_name}</strong>
+      <small>Argument and output summaries</small>
       {tool.arguments && <p className="session-tool-summary">{tool.arguments.text}</p>}
       {(evidence?.result ?? loaded?.result) && (
         <p className="session-tool-summary">{(evidence?.result ?? loaded?.result)?.text}</p>
@@ -576,5 +637,82 @@ function EventDetail({
         </>
       )}
     </div>
+  )
+}
+
+function ContinuedEvent({
+  sessionId,
+  page,
+  limits,
+}: {
+  sessionId: string
+  page: WebSessionTimelineDetailPage
+  limits: SessionTranscriptLimits
+}) {
+  const [open, setOpen] = useState(false)
+  const [cursor, setCursor] = useState(page.continuation ?? null)
+  const previous = useRef(page)
+  const sequence = page.items.at(-1)?.address.event_sequence ?? ''
+  const detail = useQuery({
+    queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
+    enabled: open,
+    queryFn: ({ signal }) =>
+      readSessionTranscript(
+        sessionId,
+        sequence,
+        sequence,
+        cursor,
+        limits,
+        signal,
+        previous.current,
+      ),
+    gcTime: 0,
+  })
+  if (!open)
+    return (
+      <button type="button" onClick={() => setOpen(true)}>
+        Read more
+      </button>
+    )
+  return (
+    <section aria-label="More message text">
+      {detail.isPending && <p role="status">Loading details…</p>}
+      {detail.isError && (
+        <p role="alert">
+          Details could not be loaded.{' '}
+          <button type="button" onClick={() => void detail.refetch()}>
+            Retry details
+          </button>
+        </p>
+      )}
+      {detail.data?.items.map((item) => (
+        <div key={conversationEntryKey(item)}>
+          <BodyText body={item.body} />
+        </div>
+      ))}
+      {detail.data?.continuation && (
+        <button
+          type="button"
+          onClick={() => {
+            if (detail.data) {
+              previous.current = detail.data
+              setCursor(detail.data.continuation ?? null)
+            }
+          }}
+        >
+          Continue reading
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(false)
+          setCursor(page.continuation ?? null)
+          previous.current = page
+        }}
+      >
+        Close details
+      </button>
+    </section>
   )
 }

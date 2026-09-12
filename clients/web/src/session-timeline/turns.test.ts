@@ -47,3 +47,39 @@ it('does not assign session-level lifecycle noise to a neighboring turn', () => 
   expect(turns).toHaveLength(2)
   expect(turns[1]).toMatchObject({ turnId: null, messages: [], result: undefined, tools: [] })
 })
+
+it('requires a completed turn before presenting a completed model response as final', () => {
+  expect(groupTranscriptTurns(detailItems.slice(0, 4))[0]?.result).toBeUndefined()
+})
+
+it('preserves steering messages after the tools that precede them', async () => {
+  const { turnSummaryParts } = await import('./turns')
+  const input = detailItems[0]
+  if (!input) throw new Error('input fixture missing')
+  const turn = groupTranscriptTurns([
+    input,
+    ...detailItems.slice(1, 3),
+    { ...input, address: { event_sequence: '4' } },
+    ...detailItems.slice(3),
+  ])[0]
+  if (!turn) throw new Error('turn fixture missing')
+  expect(turnSummaryParts(turn).map((part) => part.kind)).toEqual([
+    'message',
+    'tools',
+    'message',
+    'message',
+  ])
+})
+
+it('retains an unsuccessful turn outcome without a completed assistant response', () => {
+  const terminal = detailItems[4]
+  if (terminal?.body.type !== 'turn_lifecycle') throw new Error('terminal fixture missing')
+  const failure = {
+    ...terminal,
+    kind: 'turn_failed' as const,
+    body: { ...terminal.body, cause_code: 'failed' },
+  }
+  const turn = groupTranscriptTurns([...detailItems.slice(0, 4), failure])[0]
+  expect(turn?.result).toBeUndefined()
+  expect(turn?.outcome).toEqual(failure)
+})

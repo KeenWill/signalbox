@@ -10,6 +10,7 @@ export interface TranscriptTurn {
   messages: WebSessionTimelineDetail[]
   result: WebSessionTimelineDetail | undefined
   tools: WebTimelineToolAttempt[]
+  outcome?: WebSessionTimelineDetail
 }
 
 export function detailTurnId(item: WebSessionTimelineDetail): string | null {
@@ -31,6 +32,13 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
       groups.set(id, group)
     }
     group.events.push(item)
+    if (
+      item.body.type === 'reconciliation' ||
+      (item.body.type === 'turn_lifecycle' &&
+        item.body.lifecycle === 'terminalized' &&
+        item.body.cause_code !== 'completed')
+    )
+      group.outcome = item
     if (item.body.type === 'user_input') group.messages.push(item)
     if (
       item.body.type === 'model_call' &&
@@ -54,6 +62,17 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
     }
   }
   for (const group of groups.values()) {
+    if (
+      !group.events.some(
+        (event) =>
+          event.body.type === 'turn_lifecycle' &&
+          event.body.lifecycle === 'terminalized' &&
+          event.body.cause_code === 'completed' &&
+          BigInt(event.address.event_sequence) >
+            BigInt(group.result?.address.event_sequence ?? '0'),
+      )
+    )
+      group.result = undefined
     // A tool-producing model response is intermediate conversation, not the turn's final text.
     if (group.result?.body.type === 'model_call') {
       const callId = group.result.body.model_call_id
@@ -67,4 +86,28 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
     }
   }
   return [...groups.values()]
+}
+
+export type TurnSummaryPart =
+  | { kind: 'message'; item: WebSessionTimelineDetail }
+  | { kind: 'tools'; tools: WebTimelineToolAttempt[] }
+
+export function turnSummaryParts(turn: TranscriptTurn): TurnSummaryPart[] {
+  const parts: TurnSummaryPart[] = []
+  const seen = new Set<string>()
+  for (const item of turn.events) {
+    if (item.body.type === 'user_input' || item === turn.result)
+      parts.push({ kind: 'message', item })
+    if (item.body.type !== 'tool_batch') continue
+    for (const evidence of item.body.tools) {
+      if (seen.has(evidence.request_id)) continue
+      seen.add(evidence.request_id)
+      const tool = turn.tools.find((tool) => tool.request_id === evidence.request_id)
+      if (!tool) continue
+      const last = parts.at(-1)
+      if (last?.kind === 'tools') last.tools.push(tool)
+      else parts.push({ kind: 'tools', tools: [tool] })
+    }
+  }
+  return parts
 }
