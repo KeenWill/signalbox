@@ -1,6 +1,30 @@
 load("@python_deps//:requirements.bzl", "requirement")
 load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 
+py_library(
+    name = "review_citations",
+    srcs = ["review_citations.py"],
+    imports = ["."],
+)
+
+py_library(
+    name = "review_judge_eval",
+    srcs = ["review_judge_eval.py"],
+    imports = ["."],
+    deps = [":review_citations"],
+)
+
+[
+    py_test(
+        name = "test_" + module,
+        size = "small",
+        srcs = ["test_" + module + ".py"],
+        tags = ["external"],
+        deps = [":" + module],
+    )
+    for module in ["review_citations", "review_judge_eval"]
+]
+
 [
     py_library(
         name = checker,

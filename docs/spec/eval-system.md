@@ -15,6 +15,15 @@ and override reasoning with `--effort`. It performs no publication. A failed
 trial with no observed terminal frontier stops new session submissions until the
 caller resolves it. Labels and scoring stay with the caller.
 
+Before judgment, `scripts/review_citations.py` attaches structured resolution of
+the finding location, cited paths and line ranges, and explicit identifiers to
+each candidate. Evidence names the checked-out head and includes matching
+tracked source text at one representative location, or `absent_at_head`.
+Identifier evidence prefers the cited file and nearest line, preserves the
+source match count, and matches the final name in a qualified identifier. Source
+presence does not establish runtime database state. The judgment template is
+unchanged.
+
 ## Overview
 
 The evaluation system defines, on top of the [workflows](workflows.md) layer,

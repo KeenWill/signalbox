@@ -49,6 +49,12 @@ workload supply, while preserving validation and recovery boundaries the change
 commissions. The [process protocol](process-protocol.md) and the terminal client
 expose the primitive and orchestration operations.
 
+The client-side judgment input helper `scripts/review_citations.py` resolves
+candidate citations against tracked source at the checked-out head before the
+judgment pass. It attaches found locations and current text or explicit absence
+to each candidate without changing its content or the judgment template. This is
+source evidence, not a runtime database catalog or an automatic verdict.
+
 The PostgreSQL store in `crates/persistence/src/review_workflow.rs` and
 `crates/persistence/src/review_orchestration.rs` keeps append-only content and
 history records beside mutable run and pass state projections. Loaders read a
