@@ -747,6 +747,9 @@ fn startup_sections(source: &str) -> Result<toml::Table, ReloadResult> {
         .and_then(toml::Value::as_array_mut)
     {
         for profile in profiles {
+            if profile.get("adapter").and_then(toml::Value::as_str) == Some("github") {
+                continue;
+            }
             if matches!(
                 profile.get("delivery").and_then(toml::Value::as_str),
                 Some("file" | "environment" | "kubernetes_secret")
@@ -1054,6 +1057,41 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stdout)
         );
+    }
+
+    #[tokio::test]
+    async fn reload_refuses_changed_github_credential_sources() {
+        let (_directory, initial) = fixture();
+        let base = format!(
+            "{}\n[[credential_profiles]]\nname = \"github-reload-fixture\"\nadapter = \"github\"\ndelivery = \"file\"\nfile = \"/unused/original\"\n",
+            initial.catalogs().models.source()
+        );
+        let reload = ConfigurationReload::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@localhost/unused")
+                .expect("lazy pool"),
+            HubModelConfiguration::parse(&base).expect("initial profiles"),
+            SessionTemplateConfiguration::default(),
+            initial.model_path,
+            initial.template_path,
+            None,
+        )
+        .expect("reload");
+        for replacement in [
+            base.replace("/unused/original", "/unused/replacement"),
+            base.replace(
+                "delivery = \"file\"\nfile = \"/unused/original\"",
+                "delivery = \"environment\"\nvariable = \"UNUSED_TOKEN\"",
+            ),
+        ] {
+            std::fs::write(&reload.model_path, replacement).expect("replacement");
+            assert_eq!(
+                reload
+                    .read_replacement()
+                    .expect_err("startup credential source cannot reload"),
+                failure(ReloadPhase::Validate, "startup-only configuration differs")
+            );
+        }
     }
 
     #[tokio::test]

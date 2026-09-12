@@ -6510,6 +6510,26 @@ fn declared_github_token_file_preserves_polling_credential_isolation() {
 }
 
 #[test]
+fn github_environment_profiles_preserve_polling_source_isolation() {
+    let source = configuration_with_repository_watch().replace(
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+        "credential_profile = \"polling-environment\"",
+    );
+    let source = format!(
+        "{source}\n[[credential_profiles]]\nname = \"github-primary\"\nadapter = \"github\"\ndelivery = \"environment\"\nvariable = \"SHARED_TEST_TOKEN\"\n\n[[credential_profiles]]\nname = \"polling-environment\"\nadapter = \"github\"\ndelivery = \"environment\"\nvariable = \"SHARED_TEST_TOKEN\"\n"
+    );
+    let shared = HubModelConfiguration::parse(&source).expect("shared environment profiles");
+    assert!(shared.github_tool_credential_conflicts(Path::new("/unused/fallback")));
+    let distinct = source.replacen(
+        "variable = \"SHARED_TEST_TOKEN\"",
+        "variable = \"TOOL_TEST_TOKEN\"",
+        1,
+    );
+    let distinct = HubModelConfiguration::parse(&distinct).expect("distinct environment profiles");
+    assert!(!distinct.github_tool_credential_conflicts(Path::new("/unused/fallback")));
+}
+
+#[test]
 fn file_media_requires_blob_storage_before_worker_startup() {
     let enabled = format!("file_media = true\n{CONFIGURATION}");
     assert_eq!(

@@ -216,7 +216,8 @@ integers and an absolute `private_key_file`. Validation names a missing or
 invalid App field. The `code_host` and `github` mappings use `github-primary`; a
 declared profile supplies that reference, otherwise `GITHUB_TOKEN_FILE` supplies
 it. Repository-watch entries select either `credential_file` or
-`credential_profile`.
+`credential_profile`. Environment-backed tool and polling profiles conflict when
+they name the same source variable.
 
 The App key is read at token minting under the credential-file admission rules,
 never at boot. The daemon signs an RS256 JWT with issuance sixty seconds in the
@@ -639,11 +640,12 @@ opaque to code: no build-provided constant is compared against it. Catalogs are
 read at startup. `reload_configuration` validates the complete replacement and
 atomically replaces the model and alias catalog, session-template catalog, and
 repository-watch configuration, existing Codex-home profile paths, and the
-source delivery, file path, or variable of existing byte-delivered profiles.
-Other profile fields, pool policies, and other sections are startup-only. A
-replacement whose startup-only sections differ leaves the running configuration
-in place. Reload never rewrites evidence already recorded. File watching and
-polling are external callers of the verb.
+source delivery, file path, or variable of existing byte-delivered model
+profiles. GitHub profile source fields are startup-only; changing them rejects
+reload. Other profile fields, pool policies, and other sections are
+startup-only. A replacement whose startup-only sections differ leaves the
+running configuration in place. Reload never rewrites evidence already recorded.
+File watching and polling are external callers of the verb.
 
 Every serving record states its family, and the adapter mapping rather than the
 selectable record pointing at it supplies its adapter and credential pool. Input

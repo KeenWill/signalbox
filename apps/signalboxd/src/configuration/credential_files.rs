@@ -460,7 +460,7 @@ impl CredentialAccess for FileCredentialAccess {
 }
 
 impl super::HubModelConfiguration {
-    /// Checks token-file isolation between the GitHub tools and repository polling.
+    /// Checks source isolation between the GitHub tools and repository polling.
     pub fn github_tool_credential_conflicts(&self, fallback: &Path) -> bool {
         use crate::credential_pools::GithubCredentialDelivery;
         let path = match self
@@ -469,8 +469,14 @@ impl super::HubModelConfiguration {
             Some(profile) => match profile.delivery() {
                 GithubCredentialDelivery::File(path)
                 | GithubCredentialDelivery::KubernetesSecret(path) => path.as_path(),
-                GithubCredentialDelivery::GithubApp { .. }
-                | GithubCredentialDelivery::Environment(_) => return false,
+                GithubCredentialDelivery::Environment(variable) => {
+                    return self.repository_watch().is_some_and(|watch| {
+                        watch.repositories().iter().any(|repository| {
+                            matches!(repository.credential().delivery(), GithubCredentialDelivery::Environment(polling) if polling == variable)
+                        })
+                    });
+                }
+                GithubCredentialDelivery::GithubApp { .. } => return false,
             },
             None => fallback,
         };
