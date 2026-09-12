@@ -1645,8 +1645,6 @@ kbd {
   padding: 0.8rem 0.75rem 0.65rem;
 }
 .product-brand {
-  display: flex;
-  min-height: 54px;
   color: var(--text);
   text-decoration: none;
 }

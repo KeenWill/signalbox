@@ -124,6 +124,7 @@ export function ProductNavigation({
           invokeProductCommand('navigate.attention', context)
         }}
       >
+        <span className="brand-mark">SB</span>
         <strong>Signalbox</strong>
       </Link>
       <nav aria-label="Product">

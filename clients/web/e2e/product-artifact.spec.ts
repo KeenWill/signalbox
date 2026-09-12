@@ -335,7 +335,7 @@ test('preserves an intentional blur during a pending descriptor retry', async ({
   const request = page.waitForRequest('**/api/blobs/**/descriptor?*')
   await page.getByRole('button', { name: 'Retry', exact: true }).click()
   await request
-  await page.getByText('Signalbox', { exact: true }).click()
+  await page.getByRole('heading', { name: 'Sessions', level: 1 }).click()
   await expect(page.locator('body')).toBeFocused()
   response.resolve()
   await expect(
@@ -361,7 +361,7 @@ test('preserves an intentional blur during a pending bootstrap retry', async ({ 
   const request = page.waitForRequest('**/api/bootstrap')
   await page.getByRole('button', { name: 'Retry connection' }).click()
   await request
-  await page.getByText('Signalbox', { exact: true }).click()
+  await page.getByRole('heading', { name: 'Sessions', level: 1 }).click()
   await expect(page.locator('body')).toBeFocused()
   response.resolve()
   await expect(page.locator('.product-connection')).toHaveCount(0)
