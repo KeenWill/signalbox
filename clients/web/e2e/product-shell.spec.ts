@@ -2013,3 +2013,15 @@ test('retained continuation availability locks navigation before bootstrap and t
   await settings.click()
   await expect(page).toHaveURL(/\/settings$/)
 })
+
+test('the wordmark returns home with keyboard activation', async ({ page }, testInfo) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/settings')
+  const home = page.getByRole('link', { name: 'Signalbox home' })
+  await expect(home).toHaveAttribute('href', '/attention')
+  await home.focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('wordmark-home.png') })
+})
