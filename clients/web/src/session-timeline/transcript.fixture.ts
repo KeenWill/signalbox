@@ -2,7 +2,7 @@ import { webContractBootstrapFixture } from '../product.fixture'
 
 export const transcriptSessionId = '00000000-0000-0000-0000-000000000991'
 export const transcriptSize = 100_000
-export function transcriptFixture(url: URL): unknown {
+export function transcriptFixture(url: URL, latest = transcriptSize): unknown {
   if (url.pathname === '/api/bootstrap') return webContractBootstrapFixture
   if (url.pathname.endsWith('/timeline-detail')) {
     const sequence = url.searchParams.get('first') ?? '1'
@@ -33,7 +33,7 @@ export function transcriptFixture(url: URL): unknown {
     const first = Math.max(
       1,
       anchor === 'latest'
-        ? transcriptSize - count + 1
+        ? latest - count + 1
         : anchor === 'before'
           ? address - count
           : anchor === 'after'
@@ -42,11 +42,7 @@ export function transcriptFixture(url: URL): unknown {
               ? address - Math.floor(count / 2)
               : 1,
     )
-    const last = Math.min(
-      transcriptSize,
-      first + count - 1,
-      anchor === 'before' ? address - 1 : transcriptSize,
-    )
+    const last = Math.min(latest, first + count - 1, anchor === 'before' ? address - 1 : latest)
     const items = Array.from({ length: Math.max(0, last - first + 1) }, (_, index) => ({
       address: { event_sequence: String(first + index) },
       kind: 'input_accepted',
@@ -57,13 +53,13 @@ export function transcriptFixture(url: URL): unknown {
       items,
       projected_structured_bytes: items.length * 78,
       continuation_before: first > 1 ? { event_sequence: String(first) } : null,
-      continuation_after: last < transcriptSize ? { event_sequence: String(last) } : null,
+      continuation_after: last < latest ? { event_sequence: String(last) } : null,
     }
   }
   if (url.pathname.endsWith('/live'))
     return {
       session_id: transcriptSessionId,
-      observed_through: String(transcriptSize),
+      observed_through: String(latest),
       active: null,
       queued_turn_count: '0',
       queued_turn_ids: [],
@@ -76,15 +72,15 @@ export function transcriptFixture(url: URL): unknown {
     repository_watch: null,
     workspace_root_kind: null,
     sizes: {
-      item_count: String(transcriptSize),
-      projected_text_bytes: String(transcriptSize * 12),
-      projected_structured_bytes: String(transcriptSize * 78),
+      item_count: String(latest),
+      projected_text_bytes: String(latest * 12),
+      projected_structured_bytes: String(latest * 78),
       referenced_blob_count: '0',
       referenced_blob_bytes: '0',
     },
     first_address: { event_sequence: '1' },
-    latest_address: { event_sequence: String(transcriptSize) },
-    observed_through: String(transcriptSize),
+    latest_address: { event_sequence: String(latest) },
+    observed_through: String(latest),
     work: { active_turn_count: '0', queued_turn_count: '0' },
   }
 }

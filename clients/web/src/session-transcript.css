@@ -95,3 +95,13 @@
 .session-event-facts {
   font-size: 0.75rem;
 }
+.session-tool-slot {
+  flex-basis: 100%;
+}
+.session-tool-slot strong,
+.session-tool-slot small {
+  display: block;
+}
+.session-tool-slot small {
+  color: var(--muted);
+}

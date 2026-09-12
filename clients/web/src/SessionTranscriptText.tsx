@@ -290,6 +290,7 @@ function TranscriptWindow({
       <VirtualTranscript
         ids={ids}
         initialEnd={!eventSequence}
+        followEnd={!eventSequence}
         selectedId={
           turns.find((turn) =>
             turn.events.some((event) => event.address.event_sequence === eventSequence),
