@@ -15,12 +15,22 @@ use signalbox_file_media_runtime::{
 
 struct DirectProcessor {
     provider: PdfProvider,
+    image: signalbox_file_media_adapters_image::ImageFamilyProvider,
 }
 
 impl DirectProcessor {
     const fn new() -> Self {
         Self {
             provider: PdfProvider::new(),
+            image: signalbox_file_media_adapters_image::ImageFamilyProvider,
+        }
+    }
+
+    fn provider(&self, reader: &ReaderIdentity) -> &dyn FileMediaProvider {
+        if reader.provider().as_str() == "signalbox_image" {
+            &self.image
+        } else {
+            &self.provider
         }
     }
 }
@@ -33,7 +43,7 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
         Box::pin(async move {
-            self.provider
+            self.provider(reader)
                 .probe(reader, source, cancellation)
                 .await
                 .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
@@ -48,7 +58,7 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
         Box::pin(async move {
-            self.provider
+            self.provider(reader)
                 .inspect(reader, request, source, cancellation)
                 .await
                 .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
@@ -63,7 +73,7 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
         Box::pin(async move {
-            self.provider
+            self.provider(reader)
                 .read(reader, request, source, cancellation)
                 .await
                 .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
@@ -127,7 +137,7 @@ async fn generated_pdf_validates_and_exposes_declared_views() -> Result<(), Box<
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Validated);
-    assert_eq!(validated_view_count(&inspection)?, 2);
+    assert_eq!(validated_view_count(&inspection)?, 3);
     Ok(())
 }
 
@@ -374,6 +384,184 @@ async fn adversarial_decoder_text_is_rejected_by_registry_sanitization()
 
     assert_eq!(result, Err(FileMediaFailure::ProcessorFailed));
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn page_image_selects_a_page_and_preserves_pdf_source_identity() -> Result<(), Box<dyn Error>>
+{
+    let source = PdfFixture::colored_pages()?.into_source()?;
+    let registry = raster_registry(16)?;
+    let output = page_image(
+        &registry,
+        &DirectProcessor::new(),
+        &source,
+        serde_json::json!({"page":2}),
+    )
+    .await?;
+    assert_eq!(output.reference().source().digest(), source.digest());
+    assert_eq!(
+        output.reference().source().media_type().as_str(),
+        "application/pdf"
+    );
+    assert_ne!(output.reference().presented().digest(), source.digest());
+    assert_eq!(
+        output.reference().presented().media_type().as_str(),
+        "image/png"
+    );
+    let decoded = image::load_from_memory(output.bytes())?.into_rgba8();
+    assert_eq!(decoded.dimensions(), (16, 8));
+    assert!(decoded.pixels().all(|pixel| pixel.0 == [0, 0, 255, 255]));
+    let repeated = page_image(
+        &registry,
+        &DirectProcessor::new(),
+        &source,
+        serde_json::json!({"page":2}),
+    )
+    .await?;
+    assert_eq!(output.bytes(), repeated.bytes());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn page_image_scales_the_requested_page() -> Result<(), Box<dyn Error>> {
+    let source = PdfFixture::colored_pages()?.into_source()?;
+    let registry = raster_registry(256)?;
+    let original = page_image(
+        &registry,
+        &DirectProcessor::new(),
+        &source,
+        serde_json::json!({"page":1}),
+    )
+    .await?;
+    let enlarged = page_image(
+        &registry,
+        &DirectProcessor::new(),
+        &source,
+        serde_json::json!({"page":1,"scale":2}),
+    )
+    .await?;
+    let original = image::load_from_memory(original.bytes())?.into_rgba8();
+    let enlarged = image::load_from_memory(enlarged.bytes())?.into_rgba8();
+    assert_eq!(original.dimensions(), (64, 32));
+    assert_eq!(enlarged.dimensions(), (128, 64));
+    assert!(enlarged.pixels().all(|pixel| pixel.0 == [255, 0, 0, 255]));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn page_image_renders_standard_pdf_fonts() -> Result<(), Box<dyn Error>> {
+    let source = PdfFixture::ordinary()?.into_source()?;
+    let output = page_image(
+        &raster_registry(1024)?,
+        &DirectProcessor::new(),
+        &source,
+        serde_json::json!({"page":1}),
+    )
+    .await?;
+    let decoded = image::load_from_memory(output.bytes())?.into_rgba8();
+    assert!(decoded.pixels().any(|pixel| pixel[0] < 128));
+    Ok(())
+}
+
+#[tokio::test]
+async fn page_image_rejects_missing_or_out_of_range_pages_and_nonpositive_scale()
+-> Result<(), Box<dyn Error>> {
+    let source = PdfFixture::colored_pages()?.into_source()?;
+    for options in [
+        serde_json::json!({}),
+        serde_json::json!({"page":0}),
+        serde_json::json!({"page":3}),
+        serde_json::json!({"page":1,"scale":0}),
+        serde_json::json!({"page":1,"scale":-1}),
+    ] {
+        assert_eq!(
+            read(&DirectProcessor::new(), &source, "page_image", options).await,
+            Err(FileMediaFailure::InvalidViewArguments)
+        );
+    }
+    Ok(())
+}
+
+fn raster_registry(maximum_dimension: u32) -> Result<FileMediaRegistry, Box<dyn Error>> {
+    Ok(FileMediaRegistry::try_new(
+        vec![
+            signalbox_file_media_adapter_pdf::declaration_with_raster_dimension(maximum_dimension)?,
+            signalbox_file_media_adapters_image::image_family_declaration()
+                .map_err(|error| -> Box<dyn Error> { error })?,
+        ],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )?)
+}
+
+#[tokio::test]
+#[ignore = "requires the delegated real file-media sandbox profile"]
+async fn page_image_uses_the_isolated_binary_channel() -> Result<(), Box<dyn Error>> {
+    use signalbox_file_media_processor_runtime::{SandboxedFileMediaProcessor, WorkerBinding};
+    let pdf = declaration()?;
+    let image = signalbox_file_media_adapters_image::image_family_declaration()
+        .map_err(|error| -> Box<dyn Error> { error })?;
+    let pdf_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_pdf_worker")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_signalbox-file-media-pdf-worker").into());
+    let image_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_image_worker")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| pdf_worker.with_file_name("signalbox-file-media-image-worker"));
+    let processor = SandboxedFileMediaProcessor::try_new(
+        "/usr/bin/bwrap",
+        vec![
+            WorkerBinding::try_new(pdf_worker, pdf)?,
+            WorkerBinding::try_new(image_worker, image)?,
+        ],
+        signalbox_file_media_runtime::FileMediaProcessCeilings::version_one(),
+    )?;
+    assert_eq!(
+        processor.verify_isolation().await,
+        ProcessorIsolation::Available
+    );
+    let source = PdfFixture::colored_pages()?.into_source()?;
+    let output = page_image(
+        &raster_registry(16)?,
+        &processor,
+        &source,
+        serde_json::json!({"page":2}),
+    )
+    .await?;
+    assert_eq!(output.reference().source().digest(), source.digest());
+    let decoded = image::load_from_memory(output.bytes())?.into_rgba8();
+    assert_eq!(decoded.dimensions(), (16, 8));
+    assert!(decoded.pixels().all(|pixel| pixel.0 == [0, 0, 255, 255]));
+    Ok(())
+}
+
+async fn page_image(
+    registry: &FileMediaRegistry,
+    processor: &dyn FileMediaProcessor,
+    source: &MemorySource,
+    options: serde_json::Value,
+) -> Result<signalbox_file_media_runtime::ValidatedMediaArtifact, Box<dyn Error>> {
+    let (_, prepared) = registry
+        .prepare_read_with_reader(
+            processor,
+            FileReadRequest {
+                inspection: InspectionRequest {
+                    source: source.file_use()?,
+                    visible_part: None,
+                },
+                view: ReadViewName::try_new("page_image")?,
+                input: FileReadInput::Initial { options },
+            },
+            source,
+            &NeverCancelled,
+            None,
+        )
+        .await?;
+    let signalbox_file_media_runtime::PreparedFileRead::Generated(generated) = prepared else {
+        return Err("expected generated PDF page".into());
+    };
+    Ok(registry
+        .validate_generated(processor, generated, &NeverCancelled)
+        .await?)
 }
 
 fn registry() -> Result<FileMediaRegistry, Box<dyn Error>> {

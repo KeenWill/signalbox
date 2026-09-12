@@ -111,7 +111,12 @@ impl DaemonFileMediaExecutor {
             WorkerBinding::try_new(pdf_worker, pdf.clone())
                 .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
         );
-        declarations.push(pdf);
+        declarations.push(
+            signalbox_file_media_adapter_pdf::declaration_with_raster_dimension(
+                maximum_raster_dimension,
+            )
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
+        );
         let svg = signalbox_file_media_adapter_svg::declaration()
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
         bindings.push(
