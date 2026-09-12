@@ -1500,6 +1500,7 @@ where
             observations: Vec::new(),
             rate_limits: None,
         };
+        let started = std::time::Instant::now();
         let report = self
             .runtime
             .execute(
@@ -1525,6 +1526,11 @@ where
                 None,
             ));
         }
+        let ambiguity_evidence = ambiguity_evidence(
+            &report.evidence,
+            &observations.observations,
+            started.elapsed(),
+        );
         let usage = provider_reported_token_usage(&report.evidence);
         let rate_limits = observations.rate_limits.take();
         let retry_after = match &report.evidence {
@@ -1571,9 +1577,79 @@ where
             ),
             None => correlation.bind_terminal_observation_with_usage(classified.observation, usage),
         })
+        .with_ambiguity_evidence(ambiguity_evidence)
         .with_credential_recovery(credential_recovery)
         .with_rate_limits(rate_limits))
     }
+}
+
+/// Retains facts already redacted by the adapter, without request bodies,
+/// response content, credentials, or any effect on classification.
+fn ambiguity_evidence(
+    evidence: &TerminalEvidence,
+    observations: &[Observation<ModelCallId>],
+    elapsed: std::time::Duration,
+) -> Option<signalbox_domain::ModelCallAmbiguityEvidence> {
+    use signalbox_model_runtime::StreamInterruption;
+    let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+        return None;
+    };
+    let (point, detail) = match &loss.cause {
+        LossCause::TimedOut(facts) => ("timeout", facts.detail.as_str()),
+        LossCause::TransportFailed(facts) => ("transport_failure", facts.detail.as_str()),
+        LossCause::ResponseBodyLost(facts) => ("response_body_lost", facts.detail.as_str()),
+        LossCause::ResponseUnintelligible { detail } => {
+            ("response_unintelligible", detail.as_str())
+        }
+        LossCause::ResponseEnvelopeRejected { stage, detail } => (stage.as_str(), detail.as_str()),
+        LossCause::StreamProtocolViolation { detail } => {
+            ("stream_protocol_violation", detail.as_str())
+        }
+        LossCause::StreamEndedWithoutTerminalMarker { interruption } => match interruption {
+            StreamInterruption::EndOfStream => ("stream_eof", ""),
+            StreamInterruption::TransportFailure(facts) => {
+                ("stream_transport_failure", facts.detail.as_str())
+            }
+            StreamInterruption::TimedOut(facts) => ("stream_timeout", facts.detail.as_str()),
+        },
+        LossCause::CancellationRequested => ("cancellation_after_send", ""),
+        LossCause::UnexpectedHttpStatus => ("unexpected_http_status", ""),
+    };
+    let send_commenced = observations
+        .iter()
+        .any(|o| matches!(o.fact, ObservationFact::SendCommenced));
+    let exchange_established = observations
+        .iter()
+        .any(|o| matches!(o.fact, ObservationFact::ExchangeEstablished(_)));
+    let content_bytes = observations.iter().fold(0u64, |total, o| {
+        total.saturating_add(match &o.fact {
+            ObservationFact::TextDelta { text, .. }
+            | ObservationFact::ThinkingDelta { text, .. } => text.len() as u64,
+            ObservationFact::ToolArgumentsDelta { fragment, .. } => fragment.len() as u64,
+            _ => 0,
+        })
+    });
+    let finish = loss.finish_reported.as_ref().map(|finish| match finish {
+        signalbox_model_runtime::FinishReason::EndTurn => "end_turn",
+        signalbox_model_runtime::FinishReason::MaxOutputTokens => "max_output_tokens",
+        signalbox_model_runtime::FinishReason::ContextWindowExceeded => "context_window_exceeded",
+        signalbox_model_runtime::FinishReason::StopSequence { .. } => "stop_sequence",
+        signalbox_model_runtime::FinishReason::ToolUse => "tool_use",
+        signalbox_model_runtime::FinishReason::Refusal => "refusal",
+        signalbox_model_runtime::FinishReason::Unrecognized { .. } => "unrecognized",
+    });
+    // Detail comes last so truncation cannot remove the classification facts.
+    Some(signalbox_domain::ModelCallAmbiguityEvidence::new(&format!(
+        "classification_point=runtime_terminal_report\ncause={}\nloss_point={point}\nelapsed_ms={}\nsend_commenced={send_commenced}\nexchange_established={exchange_established}\nhttp_status={:?}\nresponse_content_observed={}\nobserved_content_bytes={content_bytes}\ntool_calls={:?}\nfinish_reported={:?}\ndetail_original_bytes={}\ndetail={:?}",
+        BoundaryLossCode::of(&loss.cause).as_str(),
+        elapsed.as_millis(),
+        loss.exchange.http_status,
+        loss.response_content_observed,
+        loss.tool_calls,
+        finish,
+        detail.len(),
+        &detail[..detail.floor_char_boundary(detail.len().min(4096))],
+    )))
 }
 
 /// Records a provider dispatch only from correctly correlated send evidence.
@@ -3621,6 +3697,68 @@ mod tests {
             .observation,
             ModelCallTerminalObservation::Ambiguous
         );
+    }
+
+    /// A partial-response timeout keeps its classification facts after the
+    /// stream itself is gone; content is not copied into diagnostics.
+    #[test]
+    fn ambiguous_model_call_evidence_retains_the_stream_timeout_boundary() {
+        let loss = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: true,
+            cause: LossCause::StreamEndedWithoutTerminalMarker {
+                interruption: signalbox_model_runtime::StreamInterruption::TimedOut(
+                    TransportFacts::new("read deadline"),
+                ),
+            },
+            exchange: ExchangeFacts {
+                http_status: Some(200),
+                ..ExchangeFacts::default()
+            },
+            reported_model: None,
+            finish_reported: None,
+            tool_calls: ToolCallsAtLoss::NoneOpened,
+            usage: TokenUsage::unreported(),
+        });
+        let observations = [
+            Observation {
+                correlation: call(),
+                fact: ObservationFact::SendCommenced,
+            },
+            Observation {
+                correlation: call(),
+                fact: ObservationFact::ExchangeEstablished(ExchangeFacts::default()),
+            },
+            Observation {
+                correlation: call(),
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "secret".into(),
+                },
+            },
+        ];
+        let evidence =
+            super::ambiguity_evidence(&loss, &observations, std::time::Duration::from_secs(2))
+                .expect("boundary loss supplies evidence");
+        assert_eq!(
+            evidence.summary(),
+            "classification_point=runtime_terminal_report\ncause=boundary_loss_stream_incomplete\nloss_point=stream_timeout\nelapsed_ms=2000\nsend_commenced=true\nexchange_established=true\nhttp_status=Some(200)\nresponse_content_observed=true\nobserved_content_bytes=6\ntool_calls=NoneOpened\nfinish_reported=None\ndetail_original_bytes=13\ndetail=\"read deadline\""
+        );
+        assert_eq!(
+            classify_terminal(loss, &observations, &configured("model-exact"))
+                .unwrap()
+                .observation,
+            ModelCallTerminalObservation::Ambiguous
+        );
+    }
+
+    #[test]
+    fn ambiguous_model_call_evidence_bounds_multibyte_diagnostics() {
+        // 1,025 four-byte characters exceed the 4,096-byte retained prefix by four bytes.
+        let detail = "💡".repeat(1025);
+        let evidence = signalbox_domain::ModelCallAmbiguityEvidence::new(&detail);
+        assert_eq!(evidence.summary().len(), 4096);
+        assert_eq!(evidence.original_bytes(), 4100);
+        assert_eq!(evidence.summary().chars().count(), 1024);
     }
 
     #[test]

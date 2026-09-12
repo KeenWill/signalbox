@@ -213,10 +213,17 @@ pub enum ModelCallTerminalIdentityCandidates {
     },
 }
 
-/// Fresh transaction committing a provider-neutral terminal observation.
+/// Transactions recording provider observations and diagnostic evidence.
 pub trait CommitModelCallObservationTransaction {
     /// Adapter-specific classified failure.
     type Error: ClassifyOperatorFailure;
+
+    /// Records bounded provider-stage failure evidence without classifying the call.
+    fn retain_provider_failure_evidence(
+        &mut self,
+        correlation: signalbox_domain::IssuedModelCallCorrelation,
+        evidence: signalbox_domain::ModelCallAmbiguityEvidence,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Reloads issued authority and atomically applies one observation.
     ///

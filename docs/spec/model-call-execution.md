@@ -579,3 +579,21 @@ rendering instead of inventing text.
 - Unstopped ambiguity recovery ([design](../design/model-call-execution.md)).
 - The workspace-instruction region of the prepared model operation
   ([design](../design/model-call-execution.md)).
+
+## Ambiguous-call diagnostic evidence
+
+An ambiguous ordinary model call retains at most 4,096 UTF-8 bytes of
+adapter-redacted terminal diagnostics, with the original diagnostic byte count.
+The record names the loss or timeout/classification point, elapsed invocation
+time, observed send and response progress, status, partial content byte count,
+tool/finish progress, and bounded transport detail. The exact call links this
+evidence to its retained request context frontier, target, credential reference,
+settings and token usage; it does not duplicate request bodies or retain partial
+model text as transcript. A provider-stage error retains its closed cause token
+before the unchanged error propagates. If the database cannot accept that
+diagnostic, the original failure still propagates. An absent runtime report is
+recorded explicitly at terminalization with the prior call state; response
+progress then remains unknown. The restart-recovery origin identifies a restart
+classification. These diagnostics never change disposition, retry policy or
+reconciliation authority. SQL readers inspect the model-call record; no browser
+or transcript protocol is added.

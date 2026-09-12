@@ -653,6 +653,8 @@ where
         };
         let acceptance_possible = move || drop(permit);
         let invocation_cancellation = self.authorization.cancellation_signal(session, call);
+        let correlation = authorized.observation_correlation();
+        let started = std::time::Instant::now();
         let observation = self
             .provider
             .invoke(
@@ -662,7 +664,26 @@ where
                 invocation_cancellation,
             )
             .await;
-        let observation = observation.map_err(ModelCallExecutionError::Provider)?;
+        let observation = match observation {
+            Ok(observation) => observation,
+            Err(error) => {
+                let evidence = signalbox_domain::ModelCallAmbiguityEvidence::new(&format!(
+                    "classification_point=provider_invocation_error\ncause={}\nelapsed_ms={}\nresponse_progress=unknown",
+                    error.operator_failure_cause_code(),
+                    started.elapsed().as_millis(),
+                ));
+                if let Err(record_error) = self
+                    .observation
+                    .retain_provider_failure_evidence(correlation, evidence)
+                    .await
+                {
+                    tracing::warn!(session_id = %session.as_uuid(), model_call_id = %call.as_uuid(),
+                        cause_code = record_error.operator_failure_cause_code(),
+                        "provider failure diagnostic could not be retained");
+                }
+                return Err(ModelCallExecutionError::Provider(error));
+            }
+        };
 
         let tool_approvals = self.tool_approvals(
             observation.observation(),
