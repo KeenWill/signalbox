@@ -90,11 +90,14 @@ impl ModelAdapter {
     pub(crate) fn admits_delivery(self, delivery: &str) -> bool {
         match self {
             Self::Anthropic | Self::OpenAi => {
-                matches!(delivery, "file" | "environment" | "kubernetes_secret")
+                matches!(
+                    delivery,
+                    "file" | "onepassword" | "environment" | "kubernetes_secret"
+                )
             }
             Self::ClaudeCli => matches!(
                 delivery,
-                "ambient" | "file" | "environment" | "kubernetes_secret"
+                "ambient" | "file" | "onepassword" | "environment" | "kubernetes_secret"
             ),
             Self::CodexCli => matches!(delivery, "ambient" | "file" | "codex_home" | "oauth"),
         }
@@ -108,11 +111,14 @@ impl ModelAdapter {
     pub(crate) fn delivers(self, delivery: &str) -> bool {
         match self {
             Self::Anthropic | Self::OpenAi => {
-                matches!(delivery, "file" | "environment" | "kubernetes_secret")
+                matches!(
+                    delivery,
+                    "file" | "onepassword" | "environment" | "kubernetes_secret"
+                )
             }
             Self::ClaudeCli => matches!(
                 delivery,
-                "ambient" | "file" | "environment" | "kubernetes_secret"
+                "ambient" | "file" | "onepassword" | "environment" | "kubernetes_secret"
             ),
             Self::CodexCli => matches!(delivery, "ambient" | "codex_home"),
         }

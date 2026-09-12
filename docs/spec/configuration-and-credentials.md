@@ -197,27 +197,32 @@ name; the two integration constants are `brave-search-primary` and
 mapping names nothing else. A profile's delivery states how its secret reaches
 the provider. `file` reads an external credential file, `environment` reads the
 process variable named by `variable`, and `kubernetes_secret` reads the mounted
-Secret projection named by `file`. These deliveries serve Anthropic, OpenAI,
-Claude CLI, and GitHub profiles; a direct-HTTP adapter forms its header from the
-resolved value and rejects `env_key` because it uses no child environment. Each
-`FileCredentialAccess` instance binds one consumer-scoped map of references to
-sources, and a model adapter receives the complete byte-delivered profile
-catalog declared for it. `ambient` leaves login resolution to a CLI.
-`codex_home` names the Codex login directory; a configured home is an existing
-readable directory. An empty home makes that pool member unavailable. Delivery
-links the selected profile's `auth.json` into a private per-operation
-`CODEX_HOME` with an empty `config.toml`.
+Secret projection named by `file`. `onepassword` resolves the `op://` field
+reference in `item` through the absolute CLI path in `executable`. These
+deliveries serve Anthropic, OpenAI, Claude CLI, and GitHub profiles; a
+direct-HTTP adapter forms its header from the resolved value and rejects
+`env_key` because it uses no child environment. Each `FileCredentialAccess`
+instance binds one consumer-scoped map of references to sources, and a model
+adapter receives the complete byte-delivered profile catalog declared for it.
+`ambient` leaves login resolution to a CLI. `codex_home` names the Codex login
+directory; a configured home is an existing readable directory. An empty home
+makes that pool member unavailable. Delivery links the selected profile's
+`auth.json` into a private per-operation `CODEX_HOME` with an empty
+`config.toml`.
 
 GitHub integration profiles declare `adapter = "github"` without model billing
 or pool membership. `delivery = "file"` and `delivery = "kubernetes_secret"`
 require `file`; `delivery = "environment"` requires `variable`;
+`delivery = "onepassword"` requires `item` and `executable`;
 `delivery = "github_app"` requires positive `app_id` and `installation_id`
 integers and an absolute `private_key_file`. Validation names a missing or
 invalid App field. The `code_host` and `github` mappings use `github-primary`; a
 declared profile supplies that reference, otherwise `GITHUB_TOKEN_FILE` supplies
 it. Repository-watch entries select either `credential_file` or
 `credential_profile`. Environment-backed tool and polling profiles conflict when
-they name the same source variable.
+they name the same source variable. Vault item identity is independent of the
+CLI executable: model profiles within one adapter, different watched
+repositories, and the GitHub tool and polling roles may not share one item.
 
 The App key is read at token minting under the credential-file admission rules,
 never at boot. The daemon signs an RS256 JWT with issuance sixty seconds in the
@@ -510,7 +515,9 @@ copy of it; a stored copy would be a second source.
 
 Each profile is its own credential; pointing two profiles at one vault item
 gives one account two names and two availability judgments, not a second
-account.
+account. Item identity is the vault and item components of the `op://`
+reference; section, field, and executable differences do not establish
+independence.
 
 Model-provider credentials are daemon-only and cannot be granted or injected to
 a runner. An explicit `ambient` login nevertheless retains same-user filesystem
@@ -575,12 +582,12 @@ contents. The credential of a currently routed S3 blob store is read after the
 recovery scan and before socket admission, as [blob storage](blob-storage.md)
 requires.
 
-Environment sources are checked at startup, reload, and use for presence and the
-same 64 KiB ceiling. Mounted Kubernetes Secrets use the file admission rules,
-including final-target checks through projection symlinks. Both sources are read
-at each use, trim trailing line termination, and seed the same exact-value
-redaction as file credentials. Source values never enter configuration
-snapshots.
+Environment sources are checked at startup, reload, and use for presence, a
+nonempty value after trimming trailing line termination, and the same 64 KiB
+ceiling. Mounted Kubernetes Secrets use the file admission rules, including
+final-target checks through projection symlinks. Both sources are read at each
+use, trim trailing line termination, and seed the same exact-value redaction as
+file credentials. Source values never enter configuration snapshots.
 
 Unauthenticated session, search, usage, attention, and blob reads require an IP
 or `localhost` `Host` authority; another authority receives a 403
@@ -641,12 +648,13 @@ opaque to code: no build-provided constant is compared against it. Catalogs are
 read at startup. `reload_configuration` validates the complete replacement and
 atomically replaces the model and alias catalog, session-template catalog, and
 repository-watch configuration, existing Codex-home profile paths, and the
-source delivery, file path, or variable of existing byte-delivered model
-profiles. GitHub profile source fields are startup-only; changing them rejects
-reload. Other profile fields, pool policies, and other sections are
-startup-only. A replacement whose startup-only sections differ leaves the
-running configuration in place. Reload never rewrites evidence already recorded.
-File watching and polling are external callers of the verb.
+source delivery, file path, variable, item reference, or executable of existing
+byte-delivered model profiles, including switches to and from 1Password. GitHub
+profile source fields are startup-only; changing them rejects reload. Other
+profile fields, pool policies, and other sections are startup-only. A
+replacement whose startup-only sections differ leaves the running configuration
+in place. Reload never rewrites evidence already recorded. File watching and
+polling are external callers of the verb.
 
 Every serving record states its family, and the adapter mapping rather than the
 selectable record pointing at it supplies its adapter and credential pool. Input
@@ -802,6 +810,19 @@ cannot form an HTTP header, is a typed known preparation failure: the call ends
 `KnownFailed` with no automatic retry and no fallback. A provider rejecting the
 credential after send is ordinary outcome evidence, not a preparation failure;
 [model-call execution](model-call-execution.md) owns that outcome.
+
+1Password resolution runs
+[`op read`](https://developer.1password.com/docs/cli/reference/commands/read/)
+with no appended newline and caching disabled on each use. The daemon retains no
+secret cache, caps stdout at 64 KiB, discards stderr, and cancels the child when
+resolution is dropped. A single thirty-second deadline bounds capture and exit;
+timeout is credential unavailability. Source admission requires an `op://`
+reference with three or four non-empty slash-separated segments (vault, item,
+and field, with an optional section) and an absolute executable path without
+contacting the vault. Missing CLI, failed reads, unsuccessful exits, empty
+values, and oversized output are credential unavailability, never provider
+failures. Resolved bytes seed the same exact-value redaction as file credentials
+and never enter configuration snapshots.
 
 A code-host tool resolves its fixed `github-primary` reference only after the
 durable tool attempt is authorized `InFlight` and immediately before its

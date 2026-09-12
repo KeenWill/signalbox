@@ -65,9 +65,9 @@ its walk never enters this machine: each precedes any provider request, is typed
 as its own failure and quarantines the profile under
 [configuration and credentials](configuration-and-credentials.md). Why: a
 deployment misconfiguration is not a provider condition the pool's trigger
-policy routes around. A `file`, `environment`, or `kubernetes_secret` delivery
-that cannot produce a usable credential quarantines nothing; its prepared call
-fails with that typed cause and reaches terminal.
+policy routes around. A `file`, `environment`, `kubernetes_secret`, or
+`onepassword` delivery that cannot produce a usable credential quarantines
+nothing; its prepared call fails with that typed cause and reaches terminal.
 
 ## Boundary contracts
 

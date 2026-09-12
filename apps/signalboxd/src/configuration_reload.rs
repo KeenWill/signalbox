@@ -752,7 +752,7 @@ fn startup_sections(source: &str) -> Result<toml::Table, ReloadResult> {
             }
             if matches!(
                 profile.get("delivery").and_then(toml::Value::as_str),
-                Some("file" | "environment" | "kubernetes_secret")
+                Some("file" | "environment" | "kubernetes_secret" | "onepassword")
             ) && let Some(profile) = profile.as_table_mut()
             {
                 profile.insert(
@@ -761,6 +761,8 @@ fn startup_sections(source: &str) -> Result<toml::Table, ReloadResult> {
                 );
                 profile.remove("file");
                 profile.remove("variable");
+                profile.remove("item");
+                profile.remove("executable");
             }
             if profile.get("delivery").and_then(toml::Value::as_str) == Some("codex_home")
                 && let Some(profile) = profile.as_table_mut()
@@ -1050,6 +1052,8 @@ mod tests {
                 "synthetic-second-secret",
             )
             .env_remove("SIGNALBOX_TEST_CREDENTIAL_MISSING")
+            .env("SIGNALBOX_TEST_CREDENTIAL_EMPTY", "")
+            .env("SIGNALBOX_TEST_CREDENTIAL_TERMINATORS", "\r\n")
             .output()
             .expect("isolated environment fixture");
         assert!(
@@ -1119,7 +1123,7 @@ mod tests {
                 .finish(),
         )
         .expect("isolated log subscriber");
-        let (_directory, reload) = fixture();
+        let (directory, reload) = fixture();
         let reference = CredentialReference::new("anthropic-overflow");
         let mut document = reload
             .catalogs()
@@ -1185,23 +1189,102 @@ mod tests {
                 .expose_bytes(),
             b"synthetic-second-secret"
         );
-        std::fs::write(
-            &reload.model_path,
-            replacement.replace(
-                "SIGNALBOX_TEST_CREDENTIAL_SECOND",
-                "SIGNALBOX_TEST_CREDENTIAL_MISSING",
-            ),
+        for variable in [
+            "SIGNALBOX_TEST_CREDENTIAL_MISSING",
+            "SIGNALBOX_TEST_CREDENTIAL_EMPTY",
+            "SIGNALBOX_TEST_CREDENTIAL_TERMINATORS",
+        ] {
+            let source = replacement.replace("SIGNALBOX_TEST_CREDENTIAL_SECOND", variable);
+            let models = HubModelConfiguration::parse(&source).expect("environment source");
+            assert_eq!(
+                models
+                    .validate_credential_files()
+                    .expect_err("unavailable at load")
+                    .failure,
+                signalbox_model_runtime::CredentialAccessFailure::Unavailable
+            );
+            assert_eq!(
+                FileCredentialAccess::from_configuration(&models, ModelAdapter::Anthropic)
+                    .resolve(&reference)
+                    .await
+                    .expect_err("unavailable at use")
+                    .failure,
+                signalbox_model_runtime::CredentialAccessFailure::Unavailable
+            );
+            std::fs::write(&reload.model_path, source).expect("unavailable source");
+            assert_eq!(
+                reload
+                    .read_replacement()
+                    .expect_err("unavailable at reload"),
+                failure(
+                    ReloadPhase::Validate,
+                    "credential reference `anthropic-overflow` could not be resolved: Unavailable"
+                )
+            );
+        }
+
+        let executable = directory.path().join("op");
+        std::fs::write(&executable, "#!/bin/sh\nprintf synthetic-vault-secret\n")
+            .expect("vault CLI");
+        std::fs::set_permissions(
+            &executable,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
         )
-        .expect("missing source");
-        assert_eq!(
-            reload
-                .read_replacement()
-                .expect_err("missing variable rejected"),
-            failure(
-                ReloadPhase::Validate,
-                "credential reference `anthropic-overflow` could not be resolved: Unavailable"
-            )
+        .expect("executable");
+        let file = directory.path().join("switching-token");
+        std::fs::write(&file, b"synthetic-first-secret").expect("file source");
+        let file_source = format!("delivery = \"file\"\nfile = {file:?}");
+        let mounted_source = format!("delivery = \"kubernetes_secret\"\nfile = {file:?}");
+        let environment_source =
+            "delivery = \"environment\"\nvariable = \"SIGNALBOX_TEST_CREDENTIAL_FIRST\"";
+        let vault_source = format!(
+            "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = {executable:?}"
         );
+        for source in [
+            file_source.as_str(),
+            vault_source.as_str(),
+            file_source.as_str(),
+            vault_source.as_str(),
+            mounted_source.as_str(),
+            vault_source.as_str(),
+            environment_source,
+            vault_source.as_str(),
+            environment_source,
+        ] {
+            let profile = document["credential_profiles"]
+                .as_array_of_tables_mut()
+                .expect("profiles")
+                .iter_mut()
+                .find(|profile| profile["name"].as_str() == Some(reference.as_str()))
+                .expect("profile");
+            for field in ["delivery", "file", "variable", "item", "executable"] {
+                profile.remove(field);
+            }
+            let fields = source
+                .parse::<toml_edit::DocumentMut>()
+                .expect("delivery fields");
+            for (field, value) in fields.iter() {
+                profile.insert(field, value.clone());
+            }
+            std::fs::write(&reload.model_path, document.to_string()).expect("switched delivery");
+            let next = reload
+                .read_replacement()
+                .expect("byte delivery switches live");
+            let expected: &[u8] = if source == vault_source {
+                b"synthetic-vault-secret"
+            } else {
+                b"synthetic-first-secret"
+            };
+            assert_eq!(
+                FileCredentialAccess::from_configuration(&next.models, ModelAdapter::Anthropic)
+                    .resolve(&reference)
+                    .await
+                    .expect("new source resolves")
+                    .expose_bytes(),
+                expected
+            );
+            *reload.current.write().expect("catalog lock") = next;
+        }
     }
 
     #[tokio::test]
@@ -1266,6 +1349,114 @@ mod tests {
                 ReloadPhase::Validate,
                 "credential reference `anthropic-overflow` could not be resolved: Unavailable"
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_refuses_changed_github_onepassword_sources() {
+        let (_directory, initial) = fixture();
+        let base = format!(
+            "{}\n[[credential_profiles]]\nname = \"github-reload-fixture\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/account/first\"\nexecutable = \"/unused/op\"\n",
+            initial.catalogs().models.source()
+        );
+        let reload = ConfigurationReload::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@localhost/unused")
+                .expect("lazy pool"),
+            HubModelConfiguration::parse(&base).expect("initial profiles"),
+            SessionTemplateConfiguration::default(),
+            initial.model_path,
+            initial.template_path,
+            None,
+        )
+        .expect("reload");
+        for replacement in [
+            base.replace("op://fixture/account/first", "op://fixture/account/second"),
+            base.replace("/unused/op", "/unused/replacement-op"),
+            base.replace(
+                "delivery = \"onepassword\"\nitem = \"op://fixture/account/first\"\nexecutable = \"/unused/op\"",
+                "delivery = \"file\"\nfile = \"/unused/token\"",
+            ),
+        ] {
+            std::fs::write(&reload.model_path, replacement).expect("replacement");
+            assert_eq!(
+                reload
+                    .read_replacement()
+                    .expect_err("startup credential source cannot reload"),
+                failure(ReloadPhase::Validate, "startup-only configuration differs")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn onepassword_reload_replaces_the_live_item_reference() {
+        use crate::{FileCredentialAccess, configuration::ModelAdapter};
+        use signalbox_model_runtime::{CredentialAccess, CredentialReference};
+        let (directory, initial) = fixture();
+        let executable = directory.path().join("op");
+        std::fs::write(&executable, "#!/bin/sh\ncase \"$5\" in\nop://fixture/account/first) printf synthetic-first-secret ;;\nop://fixture/account/second) printf synthetic-second-secret ;;\n*) exit 1 ;;\nesac\n").expect("fake CLI");
+        std::fs::set_permissions(
+            &executable,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("executable");
+        let reference = CredentialReference::new("anthropic-overflow");
+        let mut document = initial
+            .catalogs()
+            .models
+            .source()
+            .parse::<toml_edit::DocumentMut>()
+            .expect("catalog");
+        let profile = document["credential_profiles"]
+            .as_array_of_tables_mut()
+            .expect("profiles")
+            .iter_mut()
+            .find(|profile| profile["name"].as_str() == Some(reference.as_str()))
+            .expect("profile");
+        profile["delivery"] = toml_edit::value("onepassword");
+        profile.remove("file");
+        profile["item"] = toml_edit::value("op://fixture/account/first");
+        profile["executable"] = toml_edit::value(executable.to_str().expect("CLI path"));
+        let models =
+            HubModelConfiguration::parse(&document.to_string()).expect("1Password catalog");
+        let reload = ConfigurationReload::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@localhost/unused")
+                .expect("lazy pool"),
+            models,
+            SessionTemplateConfiguration::default(),
+            initial.model_path,
+            initial.template_path,
+            None,
+        )
+        .expect("reload composition");
+        std::fs::write(&reload.model_path, document.to_string()).expect("initial source");
+        let first = reload
+            .read_replacement()
+            .expect("1Password source admitted");
+        assert_eq!(
+            FileCredentialAccess::from_configuration(&first.models, ModelAdapter::Anthropic)
+                .resolve(&reference)
+                .await
+                .expect("first item")
+                .expose_bytes(),
+            b"synthetic-first-secret"
+        );
+        std::fs::write(
+            &reload.model_path,
+            document
+                .to_string()
+                .replace("op://fixture/account/first", "op://fixture/account/second"),
+        )
+        .expect("replacement source");
+        let replacement = reload.read_replacement().expect("item reference reloads");
+        assert_eq!(
+            FileCredentialAccess::from_configuration(&replacement.models, ModelAdapter::Anthropic)
+                .resolve(&reference)
+                .await
+                .expect("replacement item")
+                .expose_bytes(),
+            b"synthetic-second-secret"
         );
     }
 

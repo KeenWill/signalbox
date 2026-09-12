@@ -1,6 +1,144 @@
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+/// A fake CLI exposing only synthetic fixture fields.
+fn onepassword_fixture() -> (tempfile::TempDir, FileCredentialAccess, CredentialReference) {
+    let directory = tempfile::tempdir().expect("CLI fixture");
+    let executable = directory.path().join("op");
+    fs::write(&executable, r#"#!/bin/sh
+test "$1" = read && test "$2" = --no-newline && test "$3" = --cache=false && test "$4" = -- || exit 2
+case "$5" in
+  op://fixture/account/token) cat "$(dirname "$0")/value" ;;
+  op://fixture/account/failure) printf 'synthetic-secret-error' >&2; exit 1 ;;
+  op://fixture/account/empty) exit 0 ;;
+  *) exit 2 ;;
+esac
+"#).expect("fake CLI");
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).expect("executable");
+    fs::write(directory.path().join("value"), b"synthetic-first-secret").expect("field value");
+    let models = crate::configuration::checked_in_example_configuration().expect("example");
+    let source = format!(
+        "{}\n[[credential_profiles]]\nname = \"vault-token\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = {:?}\n",
+        models.source(),
+        executable
+    );
+    let models = crate::HubModelConfiguration::parse(&source).expect("1Password profile");
+    let reference = CredentialReference::new("vault-token");
+    let access = FileCredentialAccess::from_github(
+        models
+            .github_credential_profile(reference.as_str())
+            .expect("profile"),
+        reference.clone(),
+    );
+    (directory, access, reference)
+}
+
+#[tokio::test]
+async fn onepassword_reads_each_request_without_caching_the_value() {
+    let (directory, access, reference) = onepassword_fixture();
+    access
+        .validate()
+        .expect("source admitted without contacting vault");
+    let first = access.resolve(&reference).await.expect("live field");
+    assert_eq!(first.expose_bytes(), b"synthetic-first-secret");
+    fs::write(directory.path().join("value"), b"synthetic-second-secret")
+        .expect("rotate vault field");
+    assert_eq!(
+        access
+            .resolve(&reference)
+            .await
+            .expect("rotated field")
+            .expose_bytes(),
+        b"synthetic-second-secret"
+    );
+    assert_eq!(
+        access
+            .resolve(&CredentialReference::new("unmapped-profile"))
+            .await
+            .expect_err("foreign reference")
+            .failure,
+        CredentialAccessFailure::Unmapped
+    );
+    let mut observations = Vec::new();
+    let mut sink = signalbox_model_runtime::CredentialRedactingSink::new(&mut observations, &first);
+    signalbox_model_runtime::ObservationSink::observe(
+        &mut sink,
+        signalbox_model_runtime::Observation {
+            correlation: (),
+            fact: signalbox_model_runtime::ObservationFact::TextDelta {
+                index: 0,
+                text: "provider echoed synthetic-first-secret".to_owned(),
+            },
+        },
+    );
+    sink.flush();
+    assert!(!format!("{access:?} {first:?} {observations:?}").contains("synthetic-first-secret"));
+}
+
+#[tokio::test]
+async fn onepassword_failures_are_sanitized_credential_unavailability() {
+    let (directory, _, _) = onepassword_fixture();
+    let executable = directory.path().join("op");
+    for item in ["op://fixture/account/failure", "op://fixture/account/empty"] {
+        let failure = read_onepassword(item, &executable)
+            .await
+            .expect_err("unavailable field");
+        assert_eq!(failure, CredentialAccessFailure::Unavailable);
+        assert!(!format!("{failure:?}").contains("synthetic-secret-error"));
+    }
+    fs::write(directory.path().join("value"), vec![b'x'; 65_537]).expect("oversized field");
+    assert_eq!(
+        read_onepassword("op://fixture/account/token", &executable)
+            .await
+            .expect_err("oversized field"),
+        CredentialAccessFailure::Unavailable
+    );
+    fs::remove_file(executable).expect("remove CLI");
+    assert_eq!(
+        read_onepassword("op://fixture/account/token", &directory.path().join("op"))
+            .await
+            .expect_err("missing CLI"),
+        CredentialAccessFailure::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn onepassword_deadline_bounds_capture_and_child_exit() {
+    use std::time::Duration;
+    const FIXTURE_START_TIMEOUT: Duration = Duration::from_secs(5);
+    const FIXTURE_START_POLL: Duration = Duration::from_millis(10);
+    for stdout_setup in ["", "exec 1>&-"] {
+        let (directory, _, _) = onepassword_fixture();
+        let executable = directory.path().join("op");
+        let started = directory.path().join("started");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n{stdout_setup}\n: > {:?}\nwhile :; do :; done\n",
+                started
+            ),
+        )
+        .expect("never-exiting CLI");
+        let task = tokio::spawn(async move {
+            read_onepassword("op://fixture/account/token", &executable).await
+        });
+        tokio::time::timeout(FIXTURE_START_TIMEOUT, async {
+            while !started.exists() {
+                tokio::time::sleep(FIXTURE_START_POLL).await;
+            }
+        })
+        .await
+        .expect("CLI started before advancing its deadline");
+        tokio::time::pause();
+        tokio::time::advance(ONEPASSWORD_READ_TIMEOUT).await;
+        assert_eq!(
+            task.await.expect("credential read task"),
+            Err(CredentialAccessFailure::Unavailable)
+        );
+        tokio::time::resume();
+    }
+}
+
 /// A private file with arbitrary nonempty synthetic credential bytes.
 fn fixture() -> (
     tempfile::NamedTempFile,

@@ -277,29 +277,76 @@ pub struct FileCredentialAccess {
 #[derive(Clone)]
 enum CredentialSource {
     File(PathBuf),
+    Onepassword { item: Arc<str>, executable: PathBuf },
     Environment(Arc<str>),
 }
 
-impl CredentialSource {
-    fn read(&self) -> Result<Vec<u8>, CredentialAccessFailure> {
-        match self {
-            Self::File(path) => read_credential_file(path),
-            Self::Environment(variable) => {
-                let value = std::env::var_os(variable.as_ref())
-                    .ok_or(CredentialAccessFailure::Unavailable)?;
-                let bytes = value.as_encoded_bytes();
-                if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
-                    return Err(CredentialAccessFailure::TooLarge);
-                }
-                Ok(bytes.to_vec())
-            }
-        }
-    }
+/// Bounds a local vault CLI read, including capture and exit, to thirty seconds.
+const ONEPASSWORD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+async fn read_onepassword(
+    item: &str,
+    executable: &Path,
+) -> Result<Vec<u8>, CredentialAccessFailure> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(ONEPASSWORD_READ_TIMEOUT, async {
+        let mut child = tokio::process::Command::new(executable)
+            // https://developer.1password.com/docs/cli/reference/commands/read/
+            .args(["read", "--no-newline", "--cache=false", "--"])
+            .arg(item)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| CredentialAccessFailure::Unavailable)?;
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()
+            .ok_or(CredentialAccessFailure::Unavailable)?
+            .take(MAX_CREDENTIAL_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| CredentialAccessFailure::Unavailable)?;
+        if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
+            let _ = child.kill().await;
+            return Err(CredentialAccessFailure::Unavailable);
+        }
+        if !child
+            .wait()
+            .await
+            .map_err(|_| CredentialAccessFailure::Unavailable)?
+            .success()
+            || credential_bytes(&bytes).is_empty()
+        {
+            return Err(CredentialAccessFailure::Unavailable);
+        }
+        Ok(bytes)
+    })
+    .await
+    .unwrap_or(Err(CredentialAccessFailure::Unavailable))
+}
+
+fn read_environment(variable: &str) -> Result<Vec<u8>, CredentialAccessFailure> {
+    let value = std::env::var_os(variable).ok_or(CredentialAccessFailure::Unavailable)?;
+    let bytes = value.as_encoded_bytes();
+    if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
+        return Err(CredentialAccessFailure::TooLarge);
+    }
+    if credential_bytes(bytes).is_empty() {
+        return Err(CredentialAccessFailure::Unavailable);
+    }
+    Ok(bytes.to_vec())
+}
+
+impl CredentialSource {
     fn validate(&self) -> Result<(), CredentialAccessFailure> {
         match self {
             Self::File(path) => open_credential_file(path).map(|_| ()),
-            Self::Environment(_) => self.read().map(|_| ()),
+            Self::Environment(variable) => read_environment(variable).map(|_| ()),
+            Self::Onepassword { .. } => Ok(()),
         }
     }
 }
@@ -314,6 +361,19 @@ impl FileCredentialAccess {
             crate::credential_pools::GithubCredentialDelivery::File(path)
             | crate::credential_pools::GithubCredentialDelivery::KubernetesSecret(path) => {
                 Self::new(path.clone(), reference)
+            }
+            crate::credential_pools::GithubCredentialDelivery::Onepassword { item, executable } => {
+                Self {
+                    sources: Arc::new(HashMap::from([(
+                        reference,
+                        CredentialSource::Onepassword {
+                            item: item.clone(),
+                            executable: executable.clone(),
+                        },
+                    )])),
+                    request_timeout: None,
+                    app: None,
+                }
             }
             crate::credential_pools::GithubCredentialDelivery::Environment(variable) => Self {
                 sources: Arc::new(HashMap::from([(
@@ -390,6 +450,12 @@ impl FileCredentialAccess {
                     CredentialDelivery::Environment { variable, .. } => {
                         CredentialSource::Environment(variable.clone())
                     }
+                    CredentialDelivery::Onepassword {
+                        item, executable, ..
+                    } => CredentialSource::Onepassword {
+                        item: item.clone(),
+                        executable: executable.clone(),
+                    },
                     _ => return None,
                 };
                 Some((CredentialReference::new(profile.name()), source))
@@ -450,11 +516,19 @@ impl CredentialAccess for FileCredentialAccess {
         let source = self.sources.get(reference).ok_or_else(|| {
             CredentialAccessError::new(reference.clone(), CredentialAccessFailure::Unmapped)
         })?;
-        let source = source.clone();
-        let file_bytes = tokio::task::spawn_blocking(move || source.read())
-            .await
-            .unwrap_or(Err(CredentialAccessFailure::Unreadable))
-            .map_err(|failure| CredentialAccessError::new(reference.clone(), failure))?;
+        let file_bytes = match source {
+            CredentialSource::File(path) => {
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || read_credential_file(&path))
+                    .await
+                    .unwrap_or(Err(CredentialAccessFailure::Unreadable))
+            }
+            CredentialSource::Environment(variable) => read_environment(variable),
+            CredentialSource::Onepassword { item, executable } => {
+                read_onepassword(item, executable).await
+            }
+        }
+        .map_err(|failure| CredentialAccessError::new(reference.clone(), failure))?;
         Ok(CredentialValue::new(credential_bytes(&file_bytes)))
     }
 }
@@ -477,6 +551,13 @@ impl super::HubModelConfiguration {
                     });
                 }
                 GithubCredentialDelivery::GithubApp { .. } => return false,
+                GithubCredentialDelivery::Onepassword { item, .. } => {
+                    return self.repository_watch().is_some_and(|watch| {
+                        watch.repositories().iter().any(|repository| {
+                            matches!(repository.credential().delivery(), GithubCredentialDelivery::Onepassword { item: polling, .. } if crate::credential_pools::onepassword_item_identity(polling) == crate::credential_pools::onepassword_item_identity(item))
+                        })
+                    });
+                }
             },
             None => fallback,
         };
@@ -509,6 +590,7 @@ impl super::HubModelConfiguration {
                         })?
                 }
                 CredentialDelivery::Ambient
+                | CredentialDelivery::Onepassword { .. }
                 | CredentialDelivery::Oauth(_)
                 | CredentialDelivery::CodexHome { .. } => {}
             }
