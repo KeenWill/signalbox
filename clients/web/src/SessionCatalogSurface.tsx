@@ -198,22 +198,23 @@ export function SessionCatalogSurface({
         onSubmit={submit}
         key={JSON.stringify([state.q ?? null, state.sort ?? null, state.archived ?? null])}
       >
-        <label className="catalog-search">
-          <span>Search conversations</span>
-          <span>
-            <Search aria-hidden="true" />
-            <input
-              name="q"
-              disabled={!searchAvailable}
-              defaultValue={state.q}
-              placeholder="Messages, tool arguments and results"
-              onKeyDown={(event) => {
-                if (event.key !== 'Escape') return
-                event.currentTarget.closest('main')?.focus()
-              }}
-            />
-          </span>
-        </label>
+        {searchAvailable && (
+          <label className="catalog-search">
+            <span>Search conversations</span>
+            <span>
+              <Search aria-hidden="true" />
+              <input
+                name="q"
+                defaultValue={state.q}
+                placeholder="Messages, tool arguments and results"
+                onKeyDown={(event) => {
+                  if (event.key !== 'Escape') return
+                  event.currentTarget.closest('main')?.focus()
+                }}
+              />
+            </span>
+          </label>
+        )}
         <label>
           <span>Order</span>
           <select name="sort" defaultValue={state.sort ?? 'activity'}>
