@@ -35,20 +35,26 @@ impl ProcessRunner for AmbientRunner {
             Some(OsStr::new("bwrap"))
         );
         assert!(request.arguments.contains(&"--unshare-net".into()));
-        assert!(!request.environment.contains_key(OsStr::new(VARIABLE)));
+        assert_eq!(
+            request.environment_inheritance,
+            signalbox_tools_exec::ProcessEnvironment::Clear
+        );
+        assert!(request.arguments.iter().all(|argument| {
+            !argument
+                .as_encoded_bytes()
+                .windows(SECRET.len())
+                .any(|bytes| bytes == SECRET.as_bytes())
+        }));
         let mount = request
             .arguments
             .windows(3)
             .find(|args| args[0] == "--ro-bind" && args[2] == self.destination.as_os_str());
-        let environment = request
-            .arguments
-            .windows(3)
-            .find(|args| args[0] == "--setenv" && args[1] == VARIABLE);
+        let environment = request.environment.get(OsStr::new(VARIABLE));
         let secret = if let Some(mount) = mount {
             assert_ne!(mount[1], self.destination.as_os_str());
             fs::read(&mount[1]).expect("task snapshot exists during execution")
         } else if let Some(environment) = environment {
-            environment[2].as_encoded_bytes().to_vec()
+            environment.as_encoded_bytes().to_vec()
         } else {
             Vec::new()
         };
@@ -184,6 +190,7 @@ async fn judge_gates_each_ambient_task_and_credentials_end_with_the_task()
                 if recommendation == "approve" { 2 } else { 1 }
             );
             let ordinary = requests.last().expect("ordinary task executes");
+            assert!(!ordinary.environment.contains_key(OsStr::new(VARIABLE)));
             assert!(
                 !ordinary
                     .arguments

@@ -12,7 +12,7 @@ use std::os::{fd::AsFd, unix::fs::MetadataExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fmt,
     future::Future,
     io::{Read, Write},
@@ -955,7 +955,7 @@ pub struct SandboxConfiguration {
     pub rustup_home: Option<PathBuf>,
     /// Installed rustup toolchain selected without automatic installation.
     pub rustup_toolchain: Option<String>,
-    /// Explicit operation-local environment set inside bubblewrap.
+    /// Operation-local environment supplied through the cleared supervisor and bubblewrap environment.
     pub environment: BTreeMap<OsString, OsString>,
 }
 
@@ -2278,10 +2278,17 @@ fn bwrap_request(
     bwrap_arguments.extend([
         OsString::from("--chdir"),
         OsString::from(&sandbox_directory),
-        OsString::from("--setenv"),
-        OsString::from("HOME"),
-        OsString::from(SANDBOX_WORKSPACE),
     ]);
+    let mut set_default_environment = |name: &str, value: OsString| {
+        if !context
+            .configuration
+            .environment
+            .contains_key(OsStr::new(name))
+        {
+            bwrap_arguments.extend([OsString::from("--setenv"), OsString::from(name), value]);
+        }
+    };
+    set_default_environment("HOME", OsString::from(SANDBOX_WORKSPACE));
     for (name, value) in [
         (
             "CARGO_HOME",
@@ -2294,37 +2301,23 @@ fn bwrap_request(
         ("npm_config_cache", OsString::from("/workspace/.npm")),
         ("RUSTUP_AUTO_INSTALL", OsString::from("0")),
     ] {
-        bwrap_arguments.extend([OsString::from("--setenv"), OsString::from(name), value]);
+        set_default_environment(name, value);
     }
     if let Some(home) = &context.configuration.rustup_home {
-        bwrap_arguments.extend([
-            OsString::from("--setenv"),
-            OsString::from("RUSTUP_HOME"),
-            home.as_os_str().to_owned(),
-        ]);
+        set_default_environment("RUSTUP_HOME", home.as_os_str().to_owned());
     }
     if let Some(toolchain) = &context.configuration.rustup_toolchain {
-        bwrap_arguments.extend([
-            OsString::from("--setenv"),
-            OsString::from("RUSTUP_TOOLCHAIN"),
-            OsString::from(toolchain),
-        ]);
+        set_default_environment("RUSTUP_TOOLCHAIN", OsString::from(toolchain));
     }
     #[cfg(target_os = "linux")]
     if let Some((administration, worktree)) = sandbox_git_directory.zip(context.git_worktree) {
-        bwrap_arguments.extend([
-            OsString::from("--setenv"),
-            OsString::from("GIT_DIR"),
-            administration.into_os_string(),
-            OsString::from("--setenv"),
-            OsString::from("GIT_WORK_TREE"),
+        set_default_environment("GIT_DIR", administration.into_os_string());
+        set_default_environment(
+            "GIT_WORK_TREE",
             Path::new(SANDBOX_WORKSPACE)
                 .join(&worktree.relative_path)
                 .into_os_string(),
-        ]);
-    }
-    for (name, value) in &context.configuration.environment {
-        bwrap_arguments.extend([OsString::from("--setenv"), name.clone(), value.clone()]);
+        );
     }
     bwrap_arguments.extend([
         OsString::from("--"),
@@ -2343,7 +2336,10 @@ fn bwrap_request(
             (OsString::from("LANG"), OsString::from("C.UTF-8")),
             (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
             (OsString::from("PATH"), sandbox_path),
-        ]),
+        ])
+        .into_iter()
+        .chain(context.configuration.environment.clone())
+        .collect(),
         environment_inheritance: ProcessEnvironment::Clear,
         status_protocol: ProcessStatusProtocol::SandboxDispatch,
     }
@@ -4941,6 +4937,64 @@ mod tests {
             finite_schema.pointer("/properties/timeout_seconds/default"),
             Some(&serde_json::json!(60))
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ambient_environment_never_enters_bubblewrap_arguments() -> Result<(), Box<dyn Error>> {
+        const SECRET: &str = "synthetic-environment-credential";
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(b""),
+        );
+        let (_, mut executor) =
+            SandboxedExecTool::try_new(runner.clone(), std::env::current_dir()?, None)?
+                .into_parts();
+        let configuration = SandboxConfiguration {
+            environment: BTreeMap::from([
+                (OsString::from("FIXTURE_TOKEN"), OsString::from(SECRET)),
+                (OsString::from("HOME"), OsString::from(SECRET)),
+            ]),
+            ..Default::default()
+        };
+        executor
+            .run_with_configuration(
+                ExecArguments {
+                    program: "fixture".to_owned(),
+                    arguments: Vec::new(),
+                    working_directory: ".".to_owned(),
+                    timeout_seconds: 1,
+                },
+                configuration,
+            )
+            .await?;
+        for request in runner
+            .recorded_probes()
+            .into_iter()
+            .chain(runner.recorded_requests())
+        {
+            assert_eq!(request.environment_inheritance, ProcessEnvironment::Clear);
+            assert_eq!(
+                request.environment.get(OsStr::new("FIXTURE_TOKEN")),
+                Some(&OsString::from(SECRET))
+            );
+            assert_eq!(
+                request.environment.get(OsStr::new("HOME")),
+                Some(&OsString::from(SECRET))
+            );
+            assert!(
+                request
+                    .arguments
+                    .iter()
+                    .all(|argument| !argument.to_string_lossy().contains(SECRET))
+            );
+            assert!(
+                !request
+                    .arguments
+                    .windows(3)
+                    .any(|arguments| arguments[0] == "--setenv" && arguments[1] == "HOME")
+            );
+        }
         Ok(())
     }
 

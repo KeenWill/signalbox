@@ -453,7 +453,14 @@ fn ambient_environment(variable: &str) -> Result<Vec<u8>, CredentialAccessFailur
     if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
         return Err(CredentialAccessFailure::TooLarge);
     }
+    validate_ambient_utf8(bytes)?;
     Ok(bytes.to_vec())
+}
+
+fn validate_ambient_utf8(bytes: &[u8]) -> Result<(), CredentialAccessFailure> {
+    std::str::from_utf8(bytes)
+        .map(|_| ())
+        .map_err(|_| CredentialAccessFailure::InvalidUtf8)
 }
 
 fn validate_ambient_source(
@@ -461,9 +468,9 @@ fn validate_ambient_source(
     reference: CredentialReference,
 ) -> Result<(), CredentialAccessError> {
     match source {
-        crate::credential_pools::AmbientCredentialSource::File(path) => {
-            validate_credential_file(path, reference)
-        }
+        crate::credential_pools::AmbientCredentialSource::File(path) => read_credential_file(path)
+            .and_then(|bytes| validate_ambient_utf8(&bytes))
+            .map_err(|failure| CredentialAccessError::new(reference, failure)),
         crate::credential_pools::AmbientCredentialSource::Environment(variable) => {
             ambient_environment(variable)
                 .map(|_| ())
@@ -500,9 +507,11 @@ impl super::HubModelConfiguration {
             }
             AmbientCredentialSource::Environment(variable) => CredentialValue::new(
                 ambient_environment(variable)
-                    .map_err(|failure| CredentialAccessError::new(reference, failure))?,
+                    .map_err(|failure| CredentialAccessError::new(reference.clone(), failure))?,
             ),
         };
+        validate_ambient_utf8(value.expose_bytes())
+            .map_err(|failure| CredentialAccessError::new(reference, failure))?;
         Ok((source.clone(), value))
     }
 }

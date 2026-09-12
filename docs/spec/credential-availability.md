@@ -70,9 +70,9 @@ quarantines nothing; its prepared call fails with that typed cause and reaches
 terminal.
 
 Ambient sandboxed-task credentials are outside model-pool selection. A missing
-purpose or unavailable source fails the tool request without a provider call or
-profile quarantine; the approval judge must approve the exact request before
-credential resolution or task-local delivery.
+purpose, unavailable source, or invalid UTF-8 fails the tool request without a
+provider call or profile quarantine; the approval judge must approve the exact
+request before credential resolution or task-local delivery.
 
 ## Boundary contracts
 

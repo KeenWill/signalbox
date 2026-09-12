@@ -59,6 +59,8 @@ pub enum CredentialAccessFailure {
     Unavailable,
     /// The delivery artifact was present but could not be read as a value.
     Unreadable,
+    /// A text-only credential delivery contains invalid UTF-8 bytes.
+    InvalidUtf8,
     /// The credential file target is not a regular file.
     NotRegularFile,
     /// The credential file is not owned by the process's effective user.
