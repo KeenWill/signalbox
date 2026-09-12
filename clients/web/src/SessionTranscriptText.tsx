@@ -146,8 +146,18 @@ function TranscriptWindow({
     [pages],
   )
   const visible = useMemo(
-    () => entries.filter((item, index) => hasConversationContent(item, entries.slice(0, index))),
-    [entries],
+    () =>
+      entries.filter(
+        (item, index) =>
+          hasConversationContent(item, entries.slice(0, index)) ||
+          (item.body.type === 'tool_batch' &&
+            pages?.some((page) =>
+              page.details.some(
+                (detail) => detail.items.at(-1) === item && detail.continuation !== null,
+              ),
+            )),
+      ),
+    [entries, pages],
   )
   const ids = useMemo(() => visible.map(conversationEntryKey), [visible])
   const emptyScanned = useRef({ count: 0, first: '' })
@@ -215,7 +225,9 @@ function TranscriptWindow({
               className="session-message-entry"
               data-event-sequence={item.address.event_sequence}
             >
-              <BodyText body={item.body} />
+              {hasConversationContent(item, entries.slice(0, entries.indexOf(item))) && (
+                <BodyText body={item.body} />
+              )}
               {detailPage?.continuation && (
                 <ContinuedEvent sessionId={sessionId} page={detailPage} limits={limits} />
               )}
