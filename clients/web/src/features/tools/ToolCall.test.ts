@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { ToolApproval, ToolCall } from './ToolCall'
-import { excerptFields, webLink } from './toolPresentation'
+import { excerptFields, searchResultText, webLink } from './toolPresentation'
 import { toolExample, toolExcerpt } from './toolScenario'
 
 const render = (tool: ReturnType<typeof toolExample>) =>
@@ -56,6 +56,55 @@ describe('tool presentation', () => {
   it('keeps custom tools with familiar names in the labeled fallback', () => {
     const markup = render(toolExample('shell', { script: 'custom syntax' }, { answer: 'done' }))
     expect(markup).toContain('<dt>Script</dt><dd>custom syntax</dd>')
+  })
+
+  it('shows file tails as partial even when the tail is complete', () => {
+    expect(
+      render(
+        toolExample(
+          'read_file',
+          { path: 'file.txt', offset: 20 },
+          { content: 'tail', offset: 20, truncated: false },
+        ),
+      ),
+    ).toContain('Showing part of the file')
+  })
+
+  it('keeps collection query fields in the fallback', () => {
+    const markup = render(
+      toolExample(
+        'search_files',
+        { path: 'src', pattern: 'needle', glob: '*.rs' },
+        { matches: [], truncated: true },
+      ),
+    )
+    expect(markup).toContain('<dt>Pattern</dt><dd>needle</dd>')
+    expect(markup).toContain('<dt>Glob</dt><dd>*.rs</dd>')
+    expect(markup).not.toContain('Showing part of the file')
+  })
+
+  it('decodes exactly one layer of search-result escaping', () => {
+    expect(searchResultText('&lt;b&gt;&quot;Rust&quot; &amp; &#x27;HTML&#x27;&lt;/b&gt;')).toBe(
+      '<b>"Rust" & \'HTML\'</b>',
+    )
+    expect(searchResultText('&amp;lt;tag&amp;gt;')).toBe('&lt;tag&gt;')
+    const markup = render(
+      toolExample(
+        'web_search',
+        { query: 'Rust' },
+        {
+          results: [
+            {
+              url: 'https://example.com/',
+              title: '&lt;b&gt;Rust&lt;/b&gt;',
+              snippet: 'Rust &amp; HTML',
+            },
+          ],
+        },
+      ),
+    )
+    expect(markup).toContain('&lt;b&gt;Rust&lt;/b&gt;')
+    expect(markup).not.toContain('<b>Rust</b>')
   })
 
   it('does not interpret partial JSON as complete tool arguments', () => {

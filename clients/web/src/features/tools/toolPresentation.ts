@@ -49,3 +49,17 @@ export const fieldLabel = (key: string): string => {
   const words = key.replaceAll('_', ' ')
   return words.charAt(0).toUpperCase() + words.slice(1)
 }
+
+// Inverse of tools-web's quoted-attribute encoding, applied once before React text escaping.
+const searchEntities: Readonly<Record<string, string>> = {
+  '&amp;': '&',
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&#x27;': "'",
+}
+export const searchResultText = (value: unknown): string =>
+  textField(value).replace(
+    /&(amp|lt|gt|quot|#x27);/gu,
+    (entity) => searchEntities[entity] ?? entity,
+  )

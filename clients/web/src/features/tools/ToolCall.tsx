@@ -11,6 +11,7 @@ import {
   fieldLabel,
   fields,
   previewText,
+  searchResultText,
   textField,
   webLink,
 } from './toolPresentation'
@@ -139,7 +140,9 @@ function FileRead({ arguments: args, result, resultExcerpt }: RendererProps) {
       ) : (
         <Result result={result} resultExcerpt={resultExcerpt} />
       )}
-      {result.truncated === true && <small>Showing part of the file</small>}
+      {(result.truncated === true || (typeof result.offset === 'number' && result.offset > 0)) && (
+        <small>Showing part of the file</small>
+      )}
     </>
   )
 }
@@ -202,8 +205,8 @@ function Web({ arguments: args, result, resultExcerpt }: RendererProps) {
             return (
               // biome-ignore lint/suspicious/noArrayIndexKey: Search result positions are immutable and URLs can repeat.
               <li key={index}>
-                <Link url={entry.url} title={entry.title} />
-                <TextPreview text={textField(entry.snippet)} label="Summary" />
+                <Link url={entry.url} title={searchResultText(entry.title)} />
+                <TextPreview text={searchResultText(entry.snippet)} label="Summary" />
               </li>
             )
           })}
@@ -251,9 +254,7 @@ function Fallback({ arguments: args, result, resultExcerpt }: RendererProps) {
 
 export const toolRenderers: ReadonlyMap<string, ComponentType<RendererProps>> = new Map([
   ...['sandboxed_exec', 'unsandboxed_exec'].map((name) => [name, Command] as const),
-  ...['read_file', 'list_directory', 'glob_files', 'search_files'].map(
-    (name) => [name, FileRead] as const,
-  ),
+  ...['read_file'].map((name) => [name, FileRead] as const),
   ...['write_file', 'edit_file', 'apply_patch'].map((name) => [name, FileEdit] as const),
   ...['web_fetch', 'web_search'].map((name) => [name, Web] as const),
   ...[
