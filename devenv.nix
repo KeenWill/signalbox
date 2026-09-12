@@ -594,17 +594,17 @@ in
           signalboxd signalboxd
       )"
       # Cargo places the worker beside the daemon in the same target directory.
-      cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
+      # Strip worker symbols to fit the shared executable snapshot budget.
+      CARGO_PROFILE_DEV_STRIP=symbols cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
         "$DEVENV_ROOT/Cargo.toml" \
         signalbox-file-media-adapters-text signalbox-file-media-text-worker > /dev/null
-      cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
+      CARGO_PROFILE_DEV_STRIP=symbols cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
         "$DEVENV_ROOT/Cargo.toml" \
         signalbox-file-media-adapters-image signalbox-file-media-image-worker > /dev/null
-      # Keep the PDF worker within the shared executable snapshot budget.
-      CARGO_PROFILE_DEV_STRIP=debuginfo cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
+      CARGO_PROFILE_DEV_STRIP=symbols cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
         "$DEVENV_ROOT/Cargo.toml" \
         signalbox-file-media-adapter-pdf signalbox-file-media-pdf-worker > /dev/null
-      CARGO_PROFILE_DEV_STRIP=debuginfo cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
+      CARGO_PROFILE_DEV_STRIP=symbols cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
         "$DEVENV_ROOT/Cargo.toml" \
         signalbox-file-media-adapter-svg signalbox-file-media-svg-worker > /dev/null
       supervisor_executable="$(

@@ -23,6 +23,35 @@ pub struct PdfFixture {
 }
 
 impl PdfFixture {
+    pub fn colored_pages() -> Result<Self, Box<dyn Error>> {
+        let mut document = Document::with_version("1.5");
+        let pages_id = document.new_object_id();
+        let mut pages = Vec::new();
+        for color in ["1 0 0", "0 0 1"] {
+            let content_id = document.add_object(Stream::new(
+                dictionary! {},
+                format!("{color} rg 0 0 64 32 re f").into_bytes(),
+            ));
+            let page_id = document.add_object(dictionary! {
+                "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
+            });
+            pages.push(Object::Reference(page_id));
+        }
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => pages, "Count" => 2,
+                "MediaBox" => vec![0.into(), 0.into(), 64.into(), 32.into()],
+            }),
+        );
+        let catalog_id =
+            document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        document.trailer.set("Root", catalog_id);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes)?;
+        Ok(Self { bytes })
+    }
+
     pub fn ordinary() -> Result<Self, Box<dyn Error>> {
         Self::with_text(FIXTURE_TEXT)
     }
