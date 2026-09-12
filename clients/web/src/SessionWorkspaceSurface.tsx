@@ -114,6 +114,7 @@ export const pruneExpandedSessionItems = (
 
 export function SessionWorkspaceSurface({
   initialSessionId,
+  initialAround,
   focusEntry,
   onSessionOpen,
   onReturnToCatalog,
@@ -127,6 +128,7 @@ export function SessionWorkspaceSurface({
   windowRequest,
 }: {
   initialSessionId?: string
+  initialAround?: string
   focusEntry: boolean
   onSessionOpen: (sessionId: string) => void
   onReturnToCatalog: () => void
@@ -163,7 +165,9 @@ export function SessionWorkspaceSurface({
   const [showEvents, setShowEvents] = useState(false)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
-  const manualAnchorRef = useRef<SessionWindowAnchor | null>(null)
+  const manualAnchorRef = useRef<SessionWindowAnchor | null>(
+    initialAround ? { kind: 'around', eventSequence: initialAround } : null,
+  )
   const handledRefetchRequest = useRef(0)
   const boundaryRequest = useRef(0)
   const session = useQuery({
@@ -221,6 +225,7 @@ export function SessionWorkspaceSurface({
       }
       return {
         active: reconciledActive,
+        requestedAddress: initialAround,
         anchor,
         descriptor: reconciledDescriptor,
         history,

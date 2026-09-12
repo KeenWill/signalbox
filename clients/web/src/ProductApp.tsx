@@ -803,13 +803,14 @@ export function ProductApp({
       bootstrap.isSuccess &&
       (sessionState.workspace || sessionState.session) ? (
       <SessionWorkspaceSurface
-        key={sessionState.session ?? 'unselected'}
+        key={`${sessionState.session ?? 'unselected'}:${sessionState.around ?? ''}`}
         onSessionOpen={(session) =>
           updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')
         }
         focusEntry={sessionState.session === undefined}
         onReturnToCatalog={() => context.unwindSurface?.()}
         initialSessionId={sessionState.session}
+        initialAround={sessionState.around}
         onTimelineIds={updateTimelineIds}
         onTimelineWindowAvailable={setTimelineWindowAvailable}
         onWindowRequestConsumed={consumeWindowRequest}

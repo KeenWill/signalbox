@@ -441,18 +441,18 @@ test('restarts a failed Attention monitor in place', async ({ page }) => {
   const followRequests = await installRecoveringMonitorScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByText('Live updates unavailable')).toBeVisible()
+  await expect(page.getByText('Disconnected')).toBeVisible()
   await page.getByRole('button', { name: 'Reconnect' }).click()
 
   await expect.poll(followRequests).toBe(2)
-  await expect(page.getByText('Live updates paused')).toBeVisible()
+  await expect(page.getByText('Paused')).toBeVisible()
 })
 
 test('restarts a stale Attention monitor in place', async ({ page }) => {
   const followRequests = await installStaleMonitorScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByText('Live updates paused')).toBeVisible()
+  await expect(page.getByText('Paused')).toBeVisible()
   await page.getByRole('button', { name: 'Reconnect' }).click()
 
   await expect.poll(followRequests).toBe(2)
@@ -462,7 +462,7 @@ test('restarts the Attention monitor while the snapshot read is pending', async 
   const scenario = await installHeldSnapshotReadMonitorScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByText('Live updates paused')).toBeVisible()
+  await expect(page.getByText('Paused')).toBeVisible()
   await page.getByRole('button', { name: 'Reconnect' }).click()
 
   await expect.poll(scenario.followRequests).toBe(2)
@@ -541,7 +541,7 @@ test('applies the density preference to Attention rows', async ({ page }) => {
   await installAttentionScenario(page)
   await page.goto('/attention')
 
-  const row = page.getByRole('listitem').first().getByRole('button')
+  const row = page.getByRole('listitem').first().getByRole('link')
   await expect(row).toHaveCSS('min-height', '62px')
   await page.getByRole('main').focus()
   await page.keyboard.press('Shift+D')
@@ -553,7 +553,7 @@ test('uses the available Attention width and keeps arrows inside their rows', as
   await page.goto('/attention')
   for (const width of [1440, 1024, 390]) {
     await page.setViewportSize({ width, height: 900 })
-    const row = page.locator('.attention-list li > button').first()
+    const row = page.getByRole('listitem').first().getByRole('link')
     await expect(row).toBeVisible()
     const workbench = await page.locator('.attention-workbench').boundingBox()
     const list = await page.locator('.attention-list').boundingBox()
@@ -568,11 +568,34 @@ test('uses the available Attention width and keeps arrows inside their rows', as
       )
     }
     await checkArrow()
-    await row.click()
+    await page
+      .getByRole('button', { name: new RegExp(`Preview.*${approvalSessionId}`) })
+      .first()
+      .click()
     const close = page.getByRole('button', { name: 'Close attention inspector' })
     await expect(close).toBeVisible()
     if (width > 760) await checkArrow()
     await close.click()
     await expect(row).toBeVisible()
   }
+})
+
+test('opens the session from the row and exposes the same destination in Preview', async ({
+  page,
+}) => {
+  await installAttentionScenario(page)
+  await page.goto('/attention')
+  const row = page.getByRole('link', {
+    name: new RegExp(`Approval required.*${approvalSessionId}`),
+  })
+  await expect(row).toHaveAttribute('href', new RegExp(`session=${approvalSessionId}`))
+  await page.getByRole('button', { name: new RegExp(`Preview.*${approvalSessionId}`) }).click()
+  await expect(page.getByRole('link', { name: 'Open session' })).toHaveAttribute(
+    'href',
+    (await row.getAttribute('href')) ?? '',
+  )
+  await page.keyboard.press('Escape')
+  await row.focus()
+  await row.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`/sessions\\?.*session=${approvalSessionId}`))
 })

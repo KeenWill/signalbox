@@ -10,6 +10,7 @@ export const SESSION_WINDOW_BYTES = 64 * 1024
 
 export interface SessionWorkspace {
   active: boolean
+  requestedAddress?: string
   anchor: SessionWindowAnchor
   descriptor: WebSessionTimelineDescriptor
   history: BoundedSessionHistory
@@ -33,6 +34,7 @@ export async function extendSessionWorkspace(
     return
   let descriptor = await held.history.describe(signal)
   const anchor: SessionWindowAnchor =
+    held.requestedAddress === undefined &&
     held.anchor.kind === 'around' &&
     (descriptor.work.active_turn_count !== '0' || descriptor.work.queued_turn_count !== '0')
       ? { kind: 'latest' }
