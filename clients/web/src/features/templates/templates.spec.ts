@@ -64,3 +64,19 @@ test('restores list focus after browser Back', async ({ page }) => {
   await page.goBack()
   await expect(row).toBeFocused()
 })
+
+test('Tab reveals rows beyond the initial virtual range', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 300 })
+  const templates = Array.from({ length: 200 }, (_, index) => ({
+    ...templateFixture,
+    name: `template-${index}`,
+  }))
+  await page.route('**/api/templates', (route) => route.fulfill({ json: { templates } }))
+  await page.goto(scenario)
+  await page.getByRole('button', { name: /^template-0 / }).focus()
+  const targetIndex = 40
+  for (let index = 0; index < targetIndex; index += 1) await page.keyboard.press('Tab')
+  await expect(
+    page.getByRole('button', { name: new RegExp(`^template-${targetIndex} `) }),
+  ).toBeFocused()
+})
