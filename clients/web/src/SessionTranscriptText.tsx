@@ -552,7 +552,10 @@ function TurnContent({
               <button
                 type="button"
                 key={entry.request_id}
-                aria-expanded={detail === 'condensed' || openTool === entry.request_id}
+                aria-expanded={detail === 'condensed' ? undefined : openTool === entry.request_id}
+                aria-label={
+                  detail === 'condensed' ? `Open turn details for ${entry.tool_name}` : undefined
+                }
                 onClick={() =>
                   detail === 'condensed'
                     ? onExpand('full')

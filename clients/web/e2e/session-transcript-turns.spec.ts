@@ -50,6 +50,9 @@ test('persists levels and reads bounded turn detail', async ({ page }, testInfo)
   )
   await page.reload()
   await expect(page.getByRole('radio', { name: 'Tools', exact: true })).toBeChecked()
+  await expect(
+    transcript.getByRole('button', { name: 'Open turn details for exec_command', exact: true }),
+  ).not.toHaveAttribute('aria-expanded')
   await page.getByRole('radio', { name: 'All details', exact: true }).check()
   await expect.poll(() => turnReads.length).toBeGreaterThan(0)
   await expect(
