@@ -1,26 +1,22 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { WebUsageCallPage } from '../generated/web-contract.mjs'
 import { type CostTotal, costTotalText, totalCost } from './cost'
 import { usageSourceOptions } from './queries'
 import './usage.css'
 
 function useSummaryCost(sessionId: string, turnId?: string) {
-  const source = useQuery(usageSourceOptions)
+  const client = useQueryClient()
   const filters = { sessionId, turnId }
   const query = useQuery({
     queryKey: ['search-usage', 'summary', filters],
-    enabled: Boolean(sessionId && source.data),
-    queryFn: ({ signal }) => {
-      if (!source.data) throw new Error('Usage is not connected')
-      return source.data.usageSummary(filters, signal)
+    enabled: Boolean(sessionId),
+    queryFn: async ({ signal }) => {
+      const source = await client.ensureQueryData(usageSourceOptions)
+      return source.usageSummary(filters, signal)
     },
     select: (summary) => totalCost(summary.groups, summary.truncated),
   })
-  return {
-    ...query,
-    status: source.isError ? ('error' as const) : query.status,
-    error: source.error ?? query.error,
-  }
+  return query
 }
 
 export function useSessionCost(sessionId: string) {
@@ -41,28 +37,24 @@ export function turnCosts(page: WebUsageCallPage): ReadonlyMap<string, CostTotal
 }
 
 export function useTurnCosts(sessionId: string) {
-  const source = useQuery(usageSourceOptions)
+  const client = useQueryClient()
   const query = useQuery({
     queryKey: ['session-turn-costs', sessionId],
-    enabled: Boolean(sessionId && source.data),
-    queryFn: ({ signal }) => {
-      if (!source.data) throw new Error('Usage is not connected')
-      return source.data.usageCalls(
+    enabled: Boolean(sessionId),
+    queryFn: async ({ signal }) => {
+      const source = await client.ensureQueryData(usageSourceOptions)
+      return source.usageCalls(
         {
           filters: { sessionId },
           order: 'newest',
-          maxItems: source.data.limits.max_usage_call_page_items,
+          maxItems: source.limits.max_usage_call_page_items,
         },
         signal,
       )
     },
     select: turnCosts,
   })
-  return {
-    ...query,
-    status: source.isError ? ('error' as const) : query.status,
-    error: source.error ?? query.error,
-  }
+  return query
 }
 
 export function CostChip({
@@ -84,13 +76,20 @@ export function CostChip({
       : status === 'pending'
         ? 'Loading cost…'
         : cost
-          ? costTotalText(cost)
+          ? [
+              cost.unpricedModels.length ? 'unpriced' : '',
+              cost.rates.length || !cost.unpricedModels.length ? `$${cost.amountUsd}` : '',
+              cost.rates.length > 1 ? 'mixed pricing' : '',
+              cost.incomplete || cost.unpricedModels.length ? 'partial' : '',
+            ]
+              .filter(Boolean)
+              .join(' · ')
           : 'Cost not loaded'
   return (
     <a
       className="cost-chip"
       href={`/usage?${query}`}
-      title={[text, ...(cost?.rates ?? [])].join(' · ')}
+      title={cost ? [costTotalText(cost), ...cost.rates].join(' · ') : text}
     >
       {text}
     </a>

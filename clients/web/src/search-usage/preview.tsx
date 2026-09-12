@@ -3,17 +3,27 @@ import { createRoot } from 'react-dom/client'
 import '../app.css'
 import { AttentionCost } from './AttentionCost'
 import { SearchUsageScenarioSource } from './scenario'
-import { CostChip, SessionCostChip, TurnCostChip, useTurnCosts } from './session-cost'
+import {
+  CostChip,
+  SessionCostChip,
+  TurnCostChip,
+  useSessionCost,
+  useTurnCosts,
+} from './session-cost'
 import { UsageContent, UsageSurface } from './UsageSurface'
 
 function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string }) {
   const turns = useTurnCosts(sessionId)
+  const session = useSessionCost(sessionId)
   return (
     <>
       <section aria-label="Attention row" className="attention-cost-row">
         <a href={`/sessions?session=${sessionId}&workspace=true`}>Example session</a>
         <AttentionCost sessionId={sessionId} />
       </section>
+      <button type="button" onClick={() => void session.refetch()}>
+        Refresh costs
+      </button>
       <section aria-label="Session cost">
         <SessionCostChip sessionId={sessionId} />
       </section>
@@ -34,7 +44,9 @@ if (import.meta.env.DEV) {
   const query = new URLSearchParams(window.location.search)
   if (root)
     createRoot(root).render(
-      <QueryClientProvider client={new QueryClient()}>
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
         {query.get('preview') === 'cost' ? (
           <CostPreview sessionId={query.get('session') ?? ''} turnId={query.get('turn') ?? ''} />
         ) : query.has('http') ? (
