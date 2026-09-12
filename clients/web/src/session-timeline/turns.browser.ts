@@ -1,17 +1,17 @@
-import { expect, test } from '../../e2e/fontTest'
+import { expect, type Page, test } from '../../e2e/fontTest'
 import {
   detailItems,
   detailLive,
   detailPage,
   detailSessionId,
+  detailTurnId,
   detailWindow,
   resultCursor,
+  toolResultItem,
 } from '../../e2e/session-detail-fixture'
 import { transcriptFixture } from './transcript.fixture'
 
-test('shows final turn text and a tool chip while keeping lifecycle noise closed', async ({
-  page,
-}, testInfo) => {
+async function turnApi(page: Page) {
   await page.route('**/api/**', (route) => {
     const url = new URL(route.request().url())
     if (url.pathname.endsWith('/follow'))
@@ -24,8 +24,12 @@ test('shows final turn text and a tool chip while keeping lifecycle noise closed
     if (url.pathname.endsWith('/live')) return route.fulfill({ json: detailLive })
     if (url.pathname.endsWith('/timeline-detail')) {
       const item = detailItems.find(
-        (entry) => entry.address.event_sequence === url.searchParams.get('first'),
+        (entry) =>
+          entry.address.event_sequence ===
+          (url.searchParams.get('cursor_address') ?? url.searchParams.get('first') ?? '1'),
       )
+      if (url.searchParams.get('cursor_field') === 'tool_result')
+        return route.fulfill({ json: detailPage([toolResultItem()]) })
       const items = item
         ? [
             item.body.type === 'user_input'
@@ -59,7 +63,14 @@ test('shows final turn text and a tool chip while keeping lifecycle noise closed
       })
     return route.fulfill({ json: transcriptFixture(url) })
   })
+}
+
+test('shows final turn text and a tool chip while keeping lifecycle noise closed', async ({
+  page,
+}, testInfo) => {
+  await turnApi(page)
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'Summary', exact: true }).check()
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   await expect(
     transcript.getByText('The release checks passed. Publishing remains unapproved.'),
@@ -76,4 +87,47 @@ test('shows final turn text and a tool chip while keeping lifecycle noise closed
   )
   await expect(chip).toHaveAttribute('aria-expanded', 'true')
   await page.screenshot({ path: testInfo.outputPath('turn-summary.png') })
+})
+
+test('persists levels, reads turn detail, and keeps a linked event visible', async ({
+  page,
+}, testInfo) => {
+  await turnApi(page)
+  const turnReads: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/turns/')) turnReads.push(request.url())
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.getByRole('region', { name: 'exec_command details' })).toContainText(
+    'passed',
+  )
+  await page.reload()
+  await expect(page.getByRole('radio', { name: 'Tools', exact: true })).toBeChecked()
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  await expect.poll(() => turnReads.length).toBeGreaterThan(0)
+  await expect(
+    transcript.getByText('Publishing needs an operator decision during the release window.', {
+      exact: false,
+    }),
+  ).toBeVisible()
+  await page.getByRole('radio', { name: 'Summary', exact: true }).check()
+  await expect(
+    transcript.getByText('Publishing needs an operator decision during the release window.', {
+      exact: false,
+    }),
+  ).toHaveCount(0)
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}&around=3`)
+  const linked = transcript.locator('[data-event-sequence="3"]')
+  await expect(linked).toBeInViewport()
+  await expect(linked).toBeFocused()
+  await page.screenshot({ path: testInfo.outputPath('linked-turn-detail.png') })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}&turn=${detailTurnId}`)
+  await expect
+    .poll(() => turnReads.some((url) => !new URL(url).searchParams.has('cursor_address')))
+    .toBe(true)
+  await expect(
+    transcript.getByText('Inspect the release status and retain the result.'),
+  ).toBeVisible()
 })

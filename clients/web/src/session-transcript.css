@@ -53,3 +53,45 @@
   overflow: hidden;
   white-space: pre-wrap;
 }
+.session-transcript-levels {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  border: 0;
+  padding: 0.25rem 0 0.5rem;
+  margin: 0;
+  font-size: 0.75rem;
+}
+.session-transcript-levels legend {
+  float: left;
+  margin-right: 0.8rem;
+}
+.session-transcript-levels label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.session-turn-heading {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  font-size: 0.7rem;
+}
+.session-turn-heading button {
+  font-size: inherit;
+  padding: 0.15rem 0.4rem;
+}
+.session-turn-event {
+  padding-block: 0.5rem;
+}
+.session-turn-event:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+.session-turn-event header {
+  font-size: 0.75rem;
+}
+.session-event-facts {
+  font-size: 0.75rem;
+}
