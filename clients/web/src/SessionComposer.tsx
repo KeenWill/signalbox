@@ -186,9 +186,11 @@ export function SessionComposer({
         <span id="session-composer-status" role="status">
           {supervision?.pending
             ? 'Session recovery required'
-            : activeState === null && retained === null && !newInputBlocked
-              ? notice || disabledReason
-              : disabledReason || notice}
+            : notice.startsWith('Message rejected:')
+              ? [notice, disabledReason].filter(Boolean).join(' · ')
+              : activeState === null && retained === null && !newInputBlocked
+                ? notice || disabledReason
+                : disabledReason || notice}
         </span>
       </div>
     </form>

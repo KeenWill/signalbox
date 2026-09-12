@@ -228,11 +228,9 @@ test('filters and opens a session with Enter, then returns to the catalog', asyn
   const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
   await session.focus()
   await page.keyboard.press('Enter')
-  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
-    firstSessionId,
-  )
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(firstSessionId)
   await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeVisible()
-  await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
+  await page.getByRole('region', { name: 'Conversation', exact: true }).press('Escape')
   await expect(page).toHaveURL(/q=Release/)
   await expect(session).toBeFocused()
   await expect(page.getByRole('dialog')).toHaveCount(0)
@@ -250,7 +248,7 @@ test('leaves the composer before returning to the catalog on Escape', async ({ p
   const draft = 'Keep the draft while leaving the field.'
   await composer.fill(draft)
   await composer.press('Escape')
-  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toBeFocused()
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeFocused()
   await expect(composer).toHaveValue(draft)
   await page.keyboard.press('Escape')
   await expect(session).toBeFocused()
@@ -290,7 +288,7 @@ for (const returnMethod of ['Escape', 'Back'] as const) {
     await session.click()
     await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeVisible()
     if (returnMethod === 'Escape')
-      await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
+      await page.getByRole('region', { name: 'Conversation', exact: true }).press('Escape')
     else await page.goBack()
     await expect(lifecycle).toHaveValue('active')
     await expect(order).toHaveValue('failure')
@@ -309,7 +307,7 @@ test('consumes return focus before a later catalog remount', async ({ page }) =>
   const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
   await session.click()
   await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeVisible()
-  await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
+  await page.getByRole('region', { name: 'Conversation', exact: true }).press('Escape')
   await expect(session).toBeFocused()
   await page.getByRole('link', { name: /Settings/ }).click()
   const sessionsLink = page.getByRole('link', { name: /Sessions/ })
@@ -336,15 +334,13 @@ test('shows unavailable timelines after opening a catalog row', async ({ page },
   })
   await page.goto('/sessions')
   await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
-  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
-    firstSessionId,
-  )
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(firstSessionId)
   await page.screenshot({ path: testInfo.outputPath('timeline-unavailable.png') })
   await expect(
     page.getByRole('status').filter({ hasText: 'Session timeline unavailable' }),
   ).toBeVisible()
   await expect(page.getByText('Loading session…', { exact: true })).toBeHidden()
-  await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Open', exact: true })).toHaveCount(0)
   expect(timelineReads).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -494,14 +490,14 @@ test('opens the selected catalog row in the landed timeline workspace', async ({
   await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
 
   await expect.poll(() => new URL(page.url()).searchParams.get('workspace')).toBe('true')
-  await expect(page.getByRole('textbox', { name: 'Session ID' })).toHaveValue(firstSessionId)
-  await expect(page.getByRole('heading', { name: firstSessionId, exact: true })).toBeVisible()
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(firstSessionId)
+  await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.getByRole('main')).toBeFocused()
   await page.keyboard.press('Escape')
   const row = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
   await expect(row).toBeFocused()
   await page.keyboard.press('Enter')
-  await expect(page.getByRole('heading', { name: firstSessionId, exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -640,9 +636,7 @@ test('catalog keyboard selection opens a session', async ({ page }) => {
   await expect(page.locator('.catalog-list li').first().getByRole('button')).toBeFocused()
   await page.keyboard.press('j')
   await page.keyboard.press('Enter')
-  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
-    secondSessionId,
-  )
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(secondSessionId)
 })
 
 test('keeps catalog rows and their order while outcomes are pending or unavailable', async ({
@@ -700,9 +694,11 @@ test('replaces catalog continuation history instead of accumulating visited page
 })
 
 for (const entry of ['direct', 'reload'] as const) {
-  test(`focuses empty workspace entry after bootstrap on ${entry}`, async ({ page }) => {
+  test(`offers the catalog from an empty workspace after bootstrap on ${entry}`, async ({
+    page,
+  }) => {
     await useCatalogFixture(page)
-    const input = page.getByRole('textbox', { name: 'Session ID', exact: true })
+    const input = page.getByRole('button', { name: 'Choose a session', exact: true })
     if (entry === 'reload') {
       await page.goto('/sessions?workspace=true')
       await expect(input).toBeVisible()
@@ -719,10 +715,9 @@ for (const entry of ['direct', 'reload'] as const) {
       await expect(input).toHaveCount(0)
       bootstrapReady.resolve()
       await expect(input).toBeVisible()
-      await expect(input).toBeFocused()
-      await page.keyboard.insertText(firstSessionId)
-      await page.keyboard.press('Enter')
-      await expect(page.getByRole('heading', { name: firstSessionId, exact: true })).toBeVisible()
+      await input.click()
+      await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
+      await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
       await expect(page.getByRole('main')).toBeFocused()
     } finally {
       bootstrapReady.resolve()
@@ -735,22 +730,14 @@ test('keeps opened workspace identities in the URL and restores them on reload',
 }) => {
   await useCatalogFixture(page)
   await page.goto('/sessions')
-  await page.getByRole('button', { name: 'Open by ID' }).click()
-  const input = page.getByRole('textbox', { name: 'Session ID' })
-  await expect(input).toBeFocused()
-  await input.fill(firstSessionId)
-  await input.press('Enter')
+  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
   await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(firstSessionId)
-  await expect(page.getByRole('heading', { name: firstSessionId, exact: true })).toBeVisible()
-  await expect(page.getByRole('main')).toBeFocused()
-  await input.fill(secondSessionId)
-  await input.press('Enter')
+  await page.getByRole('region', { name: 'Conversation', exact: true }).press('Escape')
+  await page.getByRole('button', { name: firstPage.summaries[1].title_summary }).click()
   await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(secondSessionId)
-  await expect(page.getByRole('heading', { name: secondSessionId, exact: true })).toBeVisible()
-  await expect(page.getByRole('main')).toBeFocused()
   await page.reload()
-  await expect(input).toHaveValue(secondSessionId)
-  await expect(page.getByRole('heading', { name: secondSessionId, exact: true })).toBeVisible()
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(secondSessionId)
+  await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
 })
 
 test('classifies a catalog connection failure as transport unavailability', async ({ page }) => {
@@ -766,8 +753,6 @@ test('opens a session link directly on a phone without an inspector', async ({ p
   await useCatalogFixture(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(`/sessions?session=${firstSessionId}`)
-  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
-    firstSessionId,
-  )
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(firstSessionId)
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })
