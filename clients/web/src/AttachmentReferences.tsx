@@ -32,6 +32,7 @@ function AttachmentReference({
   available: boolean
 }) {
   const container = useRef<HTMLDivElement>(null)
+  const chip = useRef<HTMLButtonElement>(null)
   const [visible, setVisible] = useState(false)
   const [reservedHeight, setReservedHeight] = useState(0)
   useEffect(() => {
@@ -113,6 +114,7 @@ function AttachmentReference({
           <Dialog.Trigger asChild>
             <button
               type="button"
+              ref={chip}
               disabled={!available}
               onClick={() => invokeCommand('artifact.open', context)}
             >
@@ -139,7 +141,23 @@ function AttachmentReference({
         {descriptor.isError && (
           <p role="status">
             Attachment unavailable.{' '}
-            <button type="button" onClick={() => void descriptor.refetch()}>
+            <button
+              type="button"
+              onClick={(event) => {
+                const opener = event.currentTarget
+                const wasFocused = document.activeElement === opener
+                void descriptor.refetch().then((result) => {
+                  if (!result.isSuccess || !wasFocused) return
+                  requestAnimationFrame(() => {
+                    if (
+                      document.activeElement === opener ||
+                      (!opener.isConnected && document.activeElement === document.body)
+                    )
+                      chip.current?.focus()
+                  })
+                })
+              }}
+            >
               Retry attachment
             </button>
           </p>

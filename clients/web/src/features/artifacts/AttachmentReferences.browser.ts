@@ -132,3 +132,28 @@ test('releases the original image state when its detail pane closes', async ({ p
   await page.keyboard.press('Escape')
   await expect(page.getByLabel('Original image states')).toHaveText('0')
 })
+
+test('restores focus to the attachment after a successful retry', async ({ page }) => {
+  let unavailable = true
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/blobs/**/descriptor?*', (route) =>
+    route.fulfill({
+      json: unavailable
+        ? { invalid: true }
+        : decodeURIComponent(route.request().url()).includes(imageDescriptor.digest)
+          ? imageAttachment
+          : fileAttachment,
+    }),
+  )
+  await page.route('**/api/blobs/**/content/image-png', (route) =>
+    route.fulfill({ body: preview, contentType: 'image/png' }),
+  )
+  await page.goto('/src/features/artifacts/scenario.html')
+  const retry = page.getByRole('button', { name: 'Retry attachment' }).first()
+  await retry.focus()
+  unavailable = false
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('button', { name: /Image · image\/png/ })).toBeFocused()
+})
