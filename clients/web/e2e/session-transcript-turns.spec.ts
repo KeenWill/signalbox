@@ -75,5 +75,10 @@ test('shows final turn text and a tool chip while keeping lifecycle noise closed
     'release status',
   )
   await expect(chip).toHaveAttribute('aria-expanded', 'true')
+  await expect(transcript.locator('.session-message-text, .session-tool-slot')).toHaveText([
+    'Inspect the release status and retain the result.',
+    /release status/,
+    'The release checks passed. Publishing remains unapproved.',
+  ])
   await page.screenshot({ path: testInfo.outputPath('turn-summary.png') })
 })

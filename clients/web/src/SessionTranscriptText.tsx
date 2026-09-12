@@ -292,14 +292,14 @@ function TurnSummary({
                 {entry.tool_name}
               </button>
             ))}
+            {tool && part.tools.some((entry) => entry.request_id === tool.request_id) && (
+              <div className="session-tool-slot">
+                {renderTool ? renderTool(tool, 'condensed') : <ToolSummary tool={tool} />}
+                {more(toolContinuationSequence(turn, tool))}
+              </div>
+            )}
           </section>
         ),
-      )}
-      {tool && (
-        <div className="session-tool-slot">
-          {renderTool ? renderTool(tool, 'condensed') : <ToolSummary tool={tool} />}
-          {more(toolContinuationSequence(turn, tool))}
-        </div>
       )}
       {turn.outcome && <BodyText body={turn.outcome.body} />}
     </>

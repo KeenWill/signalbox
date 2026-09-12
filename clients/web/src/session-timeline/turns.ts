@@ -33,6 +33,9 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
     }
     group.events.push(item)
     if (
+      (item.body.type === 'model_call' &&
+        item.body.provider_failure_cause &&
+        !item.body.response) ||
       item.body.type === 'reconciliation' ||
       (item.body.type === 'event_fact' &&
         (item.body.kind === 'goal_turn_retired' ||
@@ -40,8 +43,14 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
       (item.body.type === 'turn_lifecycle' &&
         item.body.lifecycle === 'terminalized' &&
         item.body.cause_code !== 'completed')
-    )
-      group.outcome = item
+    ) {
+      if (
+        item.body.type !== 'turn_lifecycle' ||
+        item.body.cause_code !== 'failed' ||
+        group.outcome?.body.type !== 'model_call'
+      )
+        group.outcome = item
+    }
     if (item.body.type === 'user_input') group.messages.push(item)
     if (
       item.body.type === 'model_call' &&
