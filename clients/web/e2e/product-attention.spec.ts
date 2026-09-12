@@ -441,18 +441,18 @@ test('restarts a failed Attention monitor in place', async ({ page }) => {
   const followRequests = await installRecoveringMonitorScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByText('Live updates unavailable')).toBeVisible()
+  await expect(page.getByText('Disconnected')).toBeVisible()
   await page.getByRole('button', { name: 'Reconnect' }).click()
 
   await expect.poll(followRequests).toBe(2)
-  await expect(page.getByText('Live updates paused')).toBeVisible()
+  await expect(page.getByText('Paused')).toBeVisible()
 })
 
 test('restarts a stale Attention monitor in place', async ({ page }) => {
   const followRequests = await installStaleMonitorScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByText('Live updates paused')).toBeVisible()
+  await expect(page.getByText('Paused')).toBeVisible()
   await page.getByRole('button', { name: 'Reconnect' }).click()
 
   await expect.poll(followRequests).toBe(2)
@@ -462,7 +462,7 @@ test('restarts the Attention monitor while the snapshot read is pending', async 
   const scenario = await installHeldSnapshotReadMonitorScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByText('Live updates paused')).toBeVisible()
+  await expect(page.getByText('Paused')).toBeVisible()
   await page.getByRole('button', { name: 'Reconnect' }).click()
 
   await expect.poll(scenario.followRequests).toBe(2)
