@@ -5,7 +5,7 @@ import {
   detailTurnId,
   toolResultItem,
 } from '../../e2e/session-detail-fixture'
-import { groupTranscriptTurns } from './turns'
+import { groupTranscriptTurns, toolContinuationSequence } from './turns'
 
 it('groups final text, user messages, and repeated tool evidence under the durable turn identity', () => {
   const turns = groupTranscriptTurns([
@@ -88,4 +88,34 @@ it('retains an unsuccessful turn outcome without a completed assistant response'
   const turn = groupTranscriptTurns([...detailItems.slice(0, 4), failure])[0]
   expect(turn?.result).toBeUndefined()
   expect(turn?.outcome).toEqual(failure)
+})
+
+it('continues merged result text at the event that supplied its excerpt', () => {
+  const proposal = detailItems[1]
+  const result = toolResultItem()
+  if (!proposal || result.body.type !== 'tool_batch') throw new Error('tool fixture missing')
+  const tool = result.body.tools[0]
+  if (!tool || tool.evidence.type !== 'physical_attempt' || !tool.evidence.result)
+    throw new Error('result fixture missing')
+  const continued = {
+    ...tool,
+    evidence: {
+      ...tool.evidence,
+      result: {
+        ...tool.evidence.result,
+        continuation: {
+          address: { event_sequence: '6' },
+          field: 'tool_result' as const,
+          member_index: 0,
+          offset_bytes: '10',
+        },
+      },
+    },
+  }
+  const turn = groupTranscriptTurns([
+    proposal,
+    { ...result, address: { event_sequence: '6' }, body: { ...result.body, tools: [continued] } },
+  ])[0]
+  if (!turn?.tools[0]) throw new Error('grouped tool fixture missing')
+  expect(toolContinuationSequence(turn, turn.tools[0])).toBe('6')
 })

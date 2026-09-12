@@ -12,13 +12,11 @@ import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { conversationEntryKey } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
-import {
-  readTranscriptWindow,
-  TRANSCRIPT_RETAINED_WINDOWS,
-} from './session-timeline/transcript'
+import { readTranscriptWindow, TRANSCRIPT_RETAINED_WINDOWS } from './session-timeline/transcript'
 import {
   groupTranscriptTurns,
   type TranscriptTurn,
+  toolContinuationSequence,
   turnSummaryParts,
 } from './session-timeline/turns'
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
@@ -300,13 +298,7 @@ function TurnSummary({
       {tool && (
         <div className="session-tool-slot">
           {renderTool ? renderTool(tool, 'condensed') : <ToolSummary tool={tool} />}
-          {more(
-            turn.events.find(
-              (event) =>
-                event.body.type === 'tool_batch' &&
-                event.body.tools.some((entry) => entry.request_id === tool.request_id),
-            )?.address.event_sequence ?? '',
-          )}
+          {more(toolContinuationSequence(turn, tool))}
         </div>
       )}
       {turn.outcome && <BodyText body={turn.outcome.body} />}
