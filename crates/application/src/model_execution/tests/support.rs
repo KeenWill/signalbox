@@ -1193,6 +1193,13 @@ pub(super) struct UnusedObservation;
 
 impl CommitModelCallObservationTransaction for UnusedObservation {
     type Error = FakeError;
+    async fn retain_provider_failure_evidence(
+        &mut self,
+        _correlation: signalbox_domain::IssuedModelCallCorrelation,
+        _evidence: signalbox_domain::ModelCallAmbiguityEvidence,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
     async fn commit_observation<NextTurn>(
         &mut self,
@@ -1227,6 +1234,13 @@ pub(super) struct FakeObservation {
 
 impl CommitModelCallObservationTransaction for FakeObservation {
     type Error = FakeError;
+    async fn retain_provider_failure_evidence(
+        &mut self,
+        _correlation: signalbox_domain::IssuedModelCallCorrelation,
+        _evidence: signalbox_domain::ModelCallAmbiguityEvidence,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
     async fn commit_observation<NextTurn>(
         &mut self,
@@ -1563,4 +1577,43 @@ pub(super) fn counted_frontier_bytes(
         |accepted_input| request.origin_content(accepted_input),
         tool_entries.iter(),
     )
+}
+
+#[derive(Debug, Default)]
+pub(super) struct FailureEvidenceObservation {
+    pub(super) records: Vec<(
+        signalbox_domain::IssuedModelCallCorrelation,
+        signalbox_domain::ModelCallAmbiguityEvidence,
+    )>,
+}
+
+impl CommitModelCallObservationTransaction for FailureEvidenceObservation {
+    type Error = FakeError;
+    async fn retain_provider_failure_evidence(
+        &mut self,
+        correlation: signalbox_domain::IssuedModelCallCorrelation,
+        evidence: signalbox_domain::ModelCallAmbiguityEvidence,
+    ) -> Result<(), Self::Error> {
+        self.records.push((correlation, evidence));
+        Ok(())
+    }
+    async fn commit_observation<NextTurn>(
+        &mut self,
+        _session: SessionId,
+        _observation: CorrelatedModelCallTerminalObservation,
+        _identities: ModelCallTerminalIdentityCandidates,
+        _next: NextTurn,
+    ) -> Result<Option<ModelCallObservationCommitOutcome>, Self::Error>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
+        panic!("provider failure must not fabricate an outcome")
+    }
+    async fn reread_observation(
+        &mut self,
+        _session: SessionId,
+        _observation: &CorrelatedModelCallTerminalObservation,
+    ) -> Result<RetainedModelCallObservationStatus, Self::Error> {
+        panic!("provider failure must not reread an invented observation")
+    }
 }

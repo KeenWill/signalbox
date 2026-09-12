@@ -691,6 +691,13 @@ impl PostgresModelCallRepository {
                     )
                     .await?;
                 }
+                if let Some(evidence) = observation.ambiguity_evidence() {
+                    sqlx::query("UPDATE model_call SET terminal_ambiguity_evidence = $2, terminal_ambiguity_evidence_original_bytes = $3 WHERE model_call_id = $1")
+                        .bind(observation.call().into_uuid())
+                        .bind(evidence.summary())
+                        .bind(rust_decimal::Decimal::from(evidence.original_bytes() as u64))
+                        .execute(&mut *transaction).await?;
+                }
                 let retained_input_tokens = observation.observation().retained_input_tokens();
                 let retained_output_tokens = observation.observation().retained_output_tokens();
                 let provider_failure_cause = observation.provider_failure_cause();

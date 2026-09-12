@@ -76,6 +76,7 @@ impl IssuedModelCallCorrelation {
             non_acceptance_proven: false,
             rate_limits: None,
             credential_recovery: None,
+            ambiguity_evidence: None,
         }
     }
 
@@ -107,6 +108,7 @@ impl IssuedModelCallCorrelation {
             non_acceptance_proven,
             rate_limits: None,
             credential_recovery: None,
+            ambiguity_evidence: None,
         }
     }
 }
@@ -218,6 +220,7 @@ pub enum ProviderModelCallFailureCause {
 /// One provider-neutral terminal observation bound to exact issued authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CorrelatedModelCallTerminalObservation {
+    pub(super) ambiguity_evidence: Option<Box<ModelCallAmbiguityEvidence>>,
     pub(super) credential_recovery: Option<CredentialRejectionRecovery>,
     pub(super) rate_limits: Option<Box<crate::ProviderRateLimitSnapshot>>,
     pub(super) correlation: IssuedModelCallCorrelation,
@@ -237,7 +240,48 @@ pub enum CredentialRejectionRecovery {
     Unavailable,
 }
 
+/// Bounded, adapter-redacted diagnostic evidence; never an outcome authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelCallAmbiguityEvidence {
+    summary: String,
+    original_bytes: usize,
+}
+
+impl ModelCallAmbiguityEvidence {
+    /// Retains at most 4,096 UTF-8 bytes and the original byte count.
+    pub fn new(summary: &str) -> Self {
+        let end = summary.floor_char_boundary(summary.len().min(4096));
+        Self {
+            summary: summary[..end].to_owned(),
+            original_bytes: summary.len(),
+        }
+    }
+
+    /// Returns the retained diagnostic prefix.
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Returns its byte count before truncation.
+    pub const fn original_bytes(&self) -> usize {
+        self.original_bytes
+    }
+}
+
 impl CorrelatedModelCallTerminalObservation {
+    /// Attaches diagnostics only to an ambiguous physical outcome.
+    pub fn with_ambiguity_evidence(mut self, evidence: Option<ModelCallAmbiguityEvidence>) -> Self {
+        if self.observation == ModelCallTerminalObservation::Ambiguous {
+            self.ambiguity_evidence = evidence.map(Box::new);
+        }
+        self
+    }
+
+    /// Returns diagnostic evidence for this exact ambiguous call.
+    pub fn ambiguity_evidence(&self) -> Option<&ModelCallAmbiguityEvidence> {
+        self.ambiguity_evidence.as_deref()
+    }
+
     /// Attaches delivery recovery to this exact rejected provider call.
     pub fn with_credential_recovery(
         mut self,

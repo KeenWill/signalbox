@@ -493,6 +493,13 @@ pub enum ModelCallTerminalIdentityCandidates {
 ```rust
 pub trait CommitModelCallObservationTransaction {
     type Error: ClassifyOperatorFailure;
+    fn retain_provider_failure_evidence(
+        &mut self,
+        correlation: signalbox_domain::IssuedModelCallCorrelation,
+        evidence: signalbox_domain::ModelCallAmbiguityEvidence,
+    ) -> impl future::Future<
+        Output = result::Result<(), <Self as CommitModelCallObservationTransaction>::Error>,
+    > + marker::Send;
     fn commit_observation<NextTurn>(
         &mut self,
         session: signalbox_domain::SessionId,

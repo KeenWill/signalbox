@@ -4766,3 +4766,126 @@ async fn compacted_attachment_cannot_authorize_blob_read() -> Result<(), Box<dyn
     drop(container);
     Ok(())
 }
+
+/// Ambiguous-call census evidence commits with the physical outcome and retains
+/// the exact request correlation after the runtime report has been dropped.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ambiguous_model_call_diagnostic_evidence_survives_terminal_commit()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6e70;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let diagnostic = signalbox_domain::ModelCallAmbiguityEvidence::new(
+        "classification_point=runtime_terminal_report\nloss_point=stream_timeout",
+    );
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Ambiguous)
+        .with_ambiguity_evidence(Some(diagnostic.clone()));
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation.clone(),
+            ModelCallTerminalIdentities::Ambiguous(AmbiguousModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 20)),
+            )),
+            |_| panic!("no pending steering"),
+        )
+        .await?;
+    assert_eq!(
+        repository
+            .reread_terminal_observation(fixture.session, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    let stored: (String, String, Decimal, Uuid) = sqlx::query_as(
+        "SELECT terminal_disposition_kind, terminal_ambiguity_evidence, terminal_ambiguity_evidence_original_bytes, context_frontier_id FROM model_call WHERE model_call_id = $1",
+    ).bind(fixture.call.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(stored.0, "ambiguous");
+    assert_eq!(stored.1, diagnostic.summary());
+    assert_eq!(stored.2, Decimal::from(diagnostic.original_bytes() as u64));
+    assert_eq!(stored.3, observation.correlation().frontier().into_uuid());
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Lost runtime reports remain distinguishable from a report of no response.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ambiguous_model_call_without_a_report_retains_the_terminalization_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6f70;
+    let (fixture, repository, _authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    repository
+        .recover_after_restart(
+            fixture.session,
+            fixture.call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 19)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 20)),
+            ),
+        )
+        .await?;
+    let stored: String = sqlx::query_scalar(
+        "SELECT terminal_ambiguity_evidence FROM model_call WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored,
+        "classification_point=terminalization_without_runtime_report\nprior_call_state=in_flight"
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Error diagnostics are retained before crash classification and survive it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ambiguous_model_call_keeps_provider_error_evidence_through_crash_classification()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6f90;
+    let (fixture, mut repository, authorized) =
+        authorize_checkpointed_model_call(&pool, seed).await?;
+    let diagnostic = signalbox_domain::ModelCallAmbiguityEvidence::new(
+        "classification_point=provider_invocation_error\ncause=unsupported_completion_material",
+    );
+    signalbox_application::CommitModelCallObservationTransaction::retain_provider_failure_evidence(
+        &mut repository,
+        authorized.observation_correlation(),
+        diagnostic.clone(),
+    )
+    .await?;
+    let state: String =
+        sqlx::query_scalar("SELECT state_kind FROM model_call WHERE model_call_id = $1")
+            .bind(fixture.call.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(state, "in_flight");
+    repository
+        .recover_after_restart(
+            fixture.session,
+            fixture.call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 19)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 20)),
+            ),
+        )
+        .await?;
+    let stored: String = sqlx::query_scalar(
+        "SELECT terminal_ambiguity_evidence FROM model_call WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, diagnostic.summary());
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

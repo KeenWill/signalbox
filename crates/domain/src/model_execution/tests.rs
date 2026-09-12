@@ -591,6 +591,7 @@ fn correlated_observation(
         non_acceptance_proven: false,
         rate_limits: None,
         credential_recovery: None,
+        ambiguity_evidence: None,
     }
 }
 

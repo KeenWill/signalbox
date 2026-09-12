@@ -75,8 +75,8 @@ pub use prepared_call::{
 mod provider_call;
 pub use provider_call::{
     CorrelatedModelCallTerminalObservation, CredentialRejectionRecovery,
-    IssuedModelCallCorrelation, ModelCallTerminalObservation, ProviderModelCallFailureCause,
-    ProviderReportedTokenUsage,
+    IssuedModelCallCorrelation, ModelCallAmbiguityEvidence, ModelCallTerminalObservation,
+    ProviderModelCallFailureCause, ProviderReportedTokenUsage,
 };
 
 /// Complete domain facts for reconstituting one live model-call execution.
