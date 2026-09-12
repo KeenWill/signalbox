@@ -4184,6 +4184,20 @@ env_key = "HOME""#,
 }
 
 #[test]
+fn configuration_rejects_duplicate_environment_sources_for_one_adapter() {
+    let distinct = CONFIGURATION
+        .replace("members = [{ profile = \"anthropic-primary\", priority = 1 }]", "members = [{ profile = \"anthropic-primary\", priority = 1 }, { profile = \"anthropic-overflow\", priority = 2 }]")
+        .replace("delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"", "delivery = \"environment\"\nvariable = \"FIXTURE_PRIMARY_TOKEN\"")
+        .replace("delivery = \"file\"\nfile = \"/run/secrets/anthropic-overflow\"", "delivery = \"environment\"\nvariable = \"FIXTURE_OVERFLOW_TOKEN\"");
+    HubModelConfiguration::parse(&distinct).expect("distinct environment sources are independent");
+    let duplicate = distinct.replace("FIXTURE_OVERFLOW_TOKEN", "FIXTURE_PRIMARY_TOKEN");
+    assert_eq!(
+        HubModelConfiguration::parse(&duplicate).err(),
+        Some(HubModelConfigurationError::InvalidCredentialDelivery)
+    );
+}
+
+#[test]
 fn configuration_rejects_duplicate_normalized_file_paths_for_one_adapter() {
     let duplicate_path = CONFIGURATION.replace(
         "file = \"/run/secrets/anthropic-overflow\"",

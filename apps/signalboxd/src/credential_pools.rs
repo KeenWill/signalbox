@@ -822,6 +822,7 @@ fn parse_credential_profiles_with_home_admission(
     let mut profiles: HashMap<Arc<str>, CredentialProfile> = HashMap::with_capacity(tables.len());
     let mut ambient_adapters = HashSet::new();
     let mut file_paths = HashSet::new();
+    let mut environment_variables = HashSet::new();
     for profile in tables {
         if profile.get("adapter").and_then(Item::as_str) == Some("github") {
             continue;
@@ -858,6 +859,11 @@ fn parse_credential_profiles_with_home_admission(
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
         if delivery == CredentialDelivery::Ambient && !ambient_adapters.insert(adapter) {
+            return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+        }
+        if let CredentialDelivery::Environment { variable, .. } = &delivery
+            && !environment_variables.insert((adapter, variable.clone()))
+        {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
         let path = match &delivery {

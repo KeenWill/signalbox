@@ -711,12 +711,12 @@ case.
 Every two members of one pool that a successor may substitute between denote
 authorizations the provider meters, throttles, and rejects independently. The
 daemon establishes this where it can and requires it of the deployment where it
-cannot. `codex_home` independence is admitted by normalized path: two profiles
-may not name one normalized directory, and independence of the token families
-inside distinct directories remains a deployment assertion. Quarantine is
-durable and scoped to the profile rather than the pool, so a profile ranked in
-two pools is excluded from both and a shared authorization is removed everywhere
-at once.
+cannot. Environment profiles for one adapter may not name the same variable.
+`codex_home` independence is admitted by normalized path: two profiles may not
+name one normalized directory, and independence of the token families inside
+distinct directories remains a deployment assertion. Quarantine is durable and
+scoped to the profile rather than the pool, so a profile ranked in two pools is
+excluded from both and a shared authorization is removed everywhere at once.
 
 The Claude CLI credential value reaches the CLI through a private request-scoped
 settings store, never the child environment, and the store is removed when the

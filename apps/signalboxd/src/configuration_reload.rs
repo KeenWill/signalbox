@@ -1097,6 +1097,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "invoked with synthetic credentials by the isolated-process test"]
     async fn environment_credential_reload_fixture() {
+        if std::env::var("SIGNALBOX_TEST_CREDENTIAL_FIRST").as_deref()
+            != Ok("synthetic-first-secret")
+        {
+            environment_credentials_load_and_reload_in_an_isolated_process();
+            return;
+        }
         use crate::{FileCredentialAccess, configuration::ModelAdapter};
         use signalbox_model_runtime::{
             CredentialAccess, CredentialReference, redact_credential_text,
