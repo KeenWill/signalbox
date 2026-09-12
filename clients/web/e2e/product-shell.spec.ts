@@ -277,11 +277,11 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('focuses Scenario studio after cross-route navigation', async ({ page }) => {
+test('focuses Scenario studio when opened by URL', async ({ page }) => {
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
 
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   await expect(page.locator('main.workspace')).toBeFocused()
@@ -293,7 +293,7 @@ test('restores the scenario title after leaving product routes', async ({ page }
   await page.goto('/attention')
   await expect(page).toHaveTitle('Attention · Signalbox')
 
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   await expect(page).toHaveTitle('Streaming session · Signalbox scenarios')
@@ -827,7 +827,7 @@ test('clears scenario-only help when browser history returns to the product shel
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
 
   await page.getByRole('button', { name: 'Open command palette' }).click()
@@ -1029,9 +1029,10 @@ test('applies saved pane widths to the scenario workspace', async ({ page }) => 
   const paneSliders = page.getByRole('group', { name: 'Pane widths' }).getByRole('slider')
   await paneSliders.nth(0).fill('300')
   await paneSliders.nth(1).fill('400')
+  await paneSliders.nth(1).blur()
   await page.setViewportSize({ width: 1000, height: 800 })
   await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '300px')
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
 
   await expect(page.locator('.navigation-pane')).toHaveCSS('width', '300px')
   await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toBeHidden()
@@ -1066,8 +1067,13 @@ test('compacts the scenario toolbar at its pane width', async ({ page }, testInf
   const problems = watchBrowser(page)
   await page.setViewportSize({ width: 780, height: 720 })
   await page.goto('/settings')
-  await page.getByRole('group', { name: 'Pane widths' }).getByRole('slider').nth(0).fill('360')
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  const navigationWidth = page
+    .getByRole('group', { name: 'Pane widths' })
+    .getByRole('slider')
+    .nth(0)
+  await navigationWidth.fill('360')
+  await navigationWidth.blur()
+  await page.goto('/scenario/streaming')
 
   const toolbar = page.getByRole('toolbar', { name: 'Workspace controls' })
   await expect(toolbar).toBeVisible()
@@ -1098,14 +1104,18 @@ test('keeps Settings available without consulting daemon bootstrap', async ({ pa
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('offers Scenario Studio through the product command palette', async ({ page }) => {
+test('keeps Scenario Studio out of product navigation while preserving its URL', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
-  await page.getByRole('button', { name: /Go to Scenario studio/ }).click()
+  await expect(page.getByRole('button', { name: /Go to Scenario studio/ })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: /Scenario studio/ })).toHaveCount(0)
+  await page.goto('/scenario/streaming')
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -1664,7 +1674,7 @@ test('unwinds the phone navigation sheet with Escape', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('closes the phone navigation sheet before entering Scenario studio', async ({ page }) => {
+test('omits Scenario Studio from the phone navigation sheet', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.setViewportSize({ width: 390, height: 844 })
@@ -1672,8 +1682,9 @@ test('closes the phone navigation sheet before entering Scenario studio', async 
 
   await page.getByRole('button', { name: 'Open navigation' }).click()
   const navigation = page.getByRole('dialog', { name: 'Product navigation' })
-  await navigation.getByRole('link', { name: /Scenario studio/ }).click()
-  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await expect(navigation.getByRole('link', { name: /Scenario studio/ })).toHaveCount(0)
+  await navigation.getByRole('link', { name: 'Sessions', exact: true }).click()
+  await expect(page).toHaveURL(/\/sessions$/)
   await expect(navigation).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
