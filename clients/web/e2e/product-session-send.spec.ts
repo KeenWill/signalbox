@@ -926,7 +926,14 @@ for (const active of [false, true]) {
         },
       }),
     )
-    await page.goto('/search?q=check')
+    await page.goto(`/sessions?session=${sessionId}&workspace=true`)
+    await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+    await page.getByRole('row', { name: /43 Turn completed/ }).click()
+    await page.getByRole('link', { name: /Search/ }).click()
+    await page.getByRole('textbox', { name: 'Search text' }).fill('check')
+    await page.getByRole('button', { name: 'Search', exact: true }).click()
+    api.state.historyReads.length = 0
+    api.state.historyAddresses.length = 0
     const result = page.getByRole('link', { name: new RegExp(initialMessage) })
     await result.focus()
     await result.press('Enter')
@@ -934,6 +941,11 @@ for (const active of [false, true]) {
     await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
     expect(api.state.historyReads).toEqual(['around'])
     expect(api.state.historyAddresses).toEqual(['41'])
+    await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+    await expect(page.getByRole('row', { name: /41 Message accepted/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
     await page.getByRole('button', { name: /^Latest/ }).click()
     await expect.poll(() => api.state.historyReads).toEqual(['around', 'latest'])
   })
