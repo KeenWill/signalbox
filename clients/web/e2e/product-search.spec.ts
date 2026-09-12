@@ -144,6 +144,18 @@ test('searches and links each result to its session position', async ({ page }) 
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('makes the full result row clickable', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search?q=release')
+  const link = page.getByRole('link', { name: /durable release evidence/ })
+  const row = page.getByRole('listitem').filter({ has: link })
+  await expect(link).toBeVisible()
+  const rowBox = await row.boundingBox()
+  if (!rowBox) throw new Error('Search result row is not rendered')
+  await page.mouse.click(rowBox.x + 2, rowBox.y + 2)
+  await expect(page).toHaveURL(/\/sessions\?.*around=901/)
+})
+
 test('does not announce query validation before bootstrap limits load', async ({ page }) => {
   // Hold bootstrap on an explicit signal rather than a timer: the pending notice below is a
   // positive gate proving the contract has not been admitted yet, so the alert assertion cannot

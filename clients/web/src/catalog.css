@@ -45,10 +45,21 @@
   }
 }
 
+.search-results ol > li {
+  padding: 0;
+}
+
 .search-result-link {
-  display: block;
+  display: grid;
+  gap: var(--product-space);
+  padding: var(--product-space-large);
   color: inherit;
   text-decoration: none;
+}
+
+.search-result-link > p {
+  font-size: 0.75rem;
+  line-height: 1.55;
 }
 
 .search-result-link:hover {

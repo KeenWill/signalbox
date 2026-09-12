@@ -501,7 +501,11 @@ export function ProductApp({
     catalogReturnSessionId.current = undefined
   }, [])
   const updateSessionSearch = useCallback(
-    (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
+    (nextState: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
+      const next =
+        mode === 'close' || nextState.session !== currentCatalogSession.current
+          ? { ...nextState, around: undefined }
+          : nextState
       if (mode === 'push' && next.workspace && next.session)
         catalogReturnSessionId.current = next.session
       if (mode === 'close') {

@@ -927,11 +927,47 @@ for (const active of [false, true]) {
       }),
     )
     await page.goto('/search?q=check')
-    await page.getByRole('link', { name: new RegExp(initialMessage) }).click()
+    const result = page.getByRole('link', { name: new RegExp(initialMessage) })
+    await result.focus()
+    await result.press('Enter')
+    await expect(page.getByRole('main')).toBeFocused()
     await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
     expect(api.state.historyReads).toEqual(['around'])
     expect(api.state.historyAddresses).toEqual(['41'])
     await page.getByRole('button', { name: /^Latest/ }).click()
     await expect.poll(() => api.state.historyReads).toEqual(['around', 'latest'])
+  })
+}
+
+for (const action of ['switch', 'close'] as const) {
+  test(`clears a matching address when the workspace ${action === 'switch' ? 'switches sessions' : 'closes'}`, async ({
+    page,
+  }) => {
+    await sessionApi(page)
+    const otherId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e'
+    const other = await sessionApi(page, false, otherId)
+    await page.route('**/api/sessions?**', (route) =>
+      route.fulfill({
+        json: {
+          cursor: '0',
+          sort: 'last_activity_descending',
+          summaries: [],
+          continuation: null,
+          total: '0',
+        },
+      }),
+    )
+    await page.goto(`/sessions?session=${sessionId}&workspace=true&around=41`)
+    await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+    const session = page.getByRole('textbox', { name: 'Session ID', exact: true })
+    if (action === 'switch') {
+      await session.fill(otherId)
+      await session.press('Enter')
+      await expect.poll(() => other.state.historyReads).toEqual(['latest'])
+    } else {
+      await session.press('Escape')
+      await expect(page.getByRole('heading', { name: '0 sessions', exact: true })).toBeVisible()
+    }
+    await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
   })
 }
