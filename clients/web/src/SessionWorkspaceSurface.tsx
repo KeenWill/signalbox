@@ -114,16 +114,22 @@ export const pruneExpandedSessionItems = (
 
 const sessionCostLabel = (summary: WebUsageSummary): string => {
   if (summary.truncated) return 'Cost incomplete'
-  let total = 0
+  let total = 0n
+  let scale = 0
   let equivalent = false
   for (const group of summary.groups) {
     if (group.cost.status === 'unavailable') return 'Cost unavailable'
-    total += Number(group.cost.amount_usd)
+    const [whole, fraction = ''] = group.cost.amount_usd.split('.')
+    if (fraction.length > scale) {
+      total *= 10n ** BigInt(fraction.length - scale)
+      scale = fraction.length
+    }
+    total += BigInt(`${whole}${fraction}`) * 10n ** BigInt(scale - fraction.length)
     equivalent ||= group.cost.label === 'metered_equivalent'
   }
-  const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(
-    total,
-  )
+  const divisor = 10n ** BigInt(Math.max(scale - 2, 0))
+  const cents = scale > 2 ? (total + divisor / 2n) / divisor : total * 10n ** BigInt(2 - scale)
+  const dollars = `$${new Intl.NumberFormat('en-US').format(cents / 100n)}.${(cents % 100n).toString().padStart(2, '0')}`
   return equivalent ? `${dollars} equivalent` : dollars
 }
 
@@ -250,7 +256,9 @@ export function SessionWorkspaceSurface({
       displayedSession?.descriptor.observed_through,
     ],
     queryFn: async ({ signal }) => {
-      const source = await HttpSearchUsageSource.connect(window.fetch.bind(window))
+      const source = await HttpSearchUsageSource.connect((input, init) =>
+        window.fetch(input, { ...init, signal }),
+      )
       return source.usageSummary({ sessionId: sessionId ?? '' }, signal)
     },
     enabled: displayedSession !== undefined,
