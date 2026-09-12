@@ -24,6 +24,15 @@ source match count, and matches the final name in a qualified identifier. Source
 presence does not establish runtime database state. The judgment template is
 unchanged.
 
+With `--sibling-full-text-bytes`, each case also supplies `pr` and
+`review_context` with the same `pr` and `head_sha` and explicit `findings` and
+`threads` arrays. Finding entries carry `finding_id`, `author`, `path`, `line`,
+and `text`; thread entries carry `thread_id` and `resolved` alongside the same
+evidence fields. A subject's optional `source_thread_id` excludes its original
+thread. The harness projects these fields before creating the judgment session;
+labels are not projected. The caller supplies the historical snapshot; the
+helper does not fetch or infer comment history.
+
 ## Overview
 
 The evaluation system defines, on top of the [workflows](workflows.md) layer,

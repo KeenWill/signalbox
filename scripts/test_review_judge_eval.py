@@ -87,7 +87,7 @@ class ScratchCheckoutTests(unittest.TestCase):
     def test_citations_are_resolved_before_the_judge_session_is_created(self):
         args = SimpleNamespace(repository=self.repository, workspace=self.workspace,
                                output=self.repository.parent / "results",
-                               template="review-judgment")
+                               template="review-judgment", sibling_full_text_bytes=None)
         case = {"id": "finding", "head_sha": self.head, "base_sha": self.head,
                 "pr_title": "Review source", "pr_scope": "Source change", "context": "",
                 "findings": [{"finding_id": "finding", "finding_text": "`missing_gate()` fails."}]}
@@ -99,6 +99,26 @@ class ScratchCheckoutTests(unittest.TestCase):
         reference = json.loads(source.read_text())["findings"][0]["citation_resolution"]
         self.assertEqual(reference["head_sha"], self.head)
         self.assertEqual(reference["references"][0]["status"], "absent_at_head")
+
+    def test_sibling_context_is_projected_before_session_creation(self):
+        args = SimpleNamespace(repository=self.repository, workspace=self.workspace,
+                               output=self.repository.parent / "results",
+                               template="review-judgment", sibling_full_text_bytes=16_384)
+        peer = {"finding_id": "peer", "author": "reviewer", "path": "source.txt",
+                "line": 1, "text": "Another candidate.", "ruling": "DECLINE"}
+        case = {"id": "finding", "head_sha": self.head, "base_sha": self.head,
+                "pr_title": "Review source", "pr_scope": "Source change", "context": "",
+                "findings": [{"finding_id": "finding", "finding_text": "Candidate."}],
+                "pr": 42,
+                "review_context": {"pr": 42, "head_sha": self.head, "findings": [peer], "threads": []}}
+        trial = Trial(args, case)
+        with patch.object(trial, "mutate", side_effect=RuntimeError("before model")):
+            with self.assertRaisesRegex(RuntimeError, "before model"):
+                trial.run()
+        source = self.workspace / "review-judge-eval" / "results" / trial.key / "input.json"
+        context = json.loads(source.read_text())["sibling_context"]
+        self.assertEqual(context["entries"][0]["finding_id"], "peer")
+        self.assertNotIn("ruling", context["entries"][0])
 
 
 class TrialAdmissionTests(unittest.TestCase):
