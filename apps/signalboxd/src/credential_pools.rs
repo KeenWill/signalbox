@@ -43,7 +43,7 @@ pub(crate) const MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS: u32 = 1_024;
 
 /// Every delivery spelling the grammar recognizes, whether or not this build
 /// supplies a surface for it.
-const DELIVERY_KEYS: [&str; 4] = ["ambient", "file", "codex_home", "oauth"];
+const DELIVERY_KEYS: [&str; 5] = ["ambient", "file", "onepassword", "codex_home", "oauth"];
 
 /// Fields common to every credential profile, before its delivery adds its own.
 const PROFILE_COMMON_FIELDS: [&str; 4] = ["name", "adapter", "billing_kind", "delivery"];
@@ -64,6 +64,15 @@ pub enum CredentialDelivery {
         /// Absolute path the deployment writes the credential value to.
         path: PathBuf,
         /// Process environment key a spawned adapter supplies the value under.
+        env_key: Option<Arc<str>>,
+    },
+    /// A field resolved live by the configured 1Password CLI.
+    Onepassword {
+        /// Non-secret `op://` field reference.
+        item: Arc<str>,
+        /// Absolute path to the deployment's 1Password CLI.
+        executable: PathBuf,
+        /// Adapter delivery key.
         env_key: Option<Arc<str>>,
     },
     /// An operator-provisioned Codex login directory selected by reference.
@@ -135,6 +144,7 @@ impl fmt::Debug for CredentialDelivery {
         match self {
             Self::Ambient => formatter.write_str("Ambient"),
             Self::Oauth(_) => formatter.write_str("Oauth"),
+            Self::Onepassword { .. } => formatter.write_str("Onepassword([REDACTED])"),
             Self::File { env_key, .. } => formatter
                 .debug_struct("File")
                 .field("path", &"[credential file path]")
@@ -159,6 +169,7 @@ impl CredentialDelivery {
             Self::Ambient => "ambient",
             Self::Oauth(_) => "oauth",
             Self::File { .. } => "file",
+            Self::Onepassword { .. } => "onepassword",
             Self::CodexHome { .. } => "codex_home",
         }
     }
@@ -166,7 +177,7 @@ impl CredentialDelivery {
     /// Absolute deployment path this delivery references, where it has one.
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Ambient | Self::Oauth(_) => None,
+            Self::Ambient | Self::Oauth(_) | Self::Onepassword { .. } => None,
             Self::File { path, .. } => Some(path),
             Self::CodexHome { path, .. } => Some(path),
         }
@@ -176,7 +187,7 @@ impl CredentialDelivery {
     pub fn env_key(&self) -> Option<&str> {
         match self {
             Self::Ambient | Self::Oauth(_) => None,
-            Self::File { env_key, .. } => env_key.as_deref(),
+            Self::File { env_key, .. } | Self::Onepassword { env_key, .. } => env_key.as_deref(),
             Self::CodexHome { .. } => None,
         }
     }
@@ -213,6 +224,19 @@ impl CredentialDelivery {
                 let env_key = parse_file_env_key(profile, adapter)?;
                 reject_undelivered(adapter, key)?;
                 Ok(Self::File { path, env_key })
+            }
+            "onepassword" => {
+                let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
+                allowed.extend_from_slice(&["item", "executable", "env_key"]);
+                reject_unknown_fields(profile, &allowed)?;
+                let (item, executable) = parse_onepassword_source(profile)?;
+                let env_key = parse_file_env_key(profile, adapter)?;
+                reject_undelivered(adapter, key)?;
+                Ok(Self::Onepassword {
+                    item,
+                    executable,
+                    env_key,
+                })
             }
             "codex_home" => {
                 let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
@@ -252,6 +276,17 @@ impl CredentialDelivery {
             _ => Err(HubModelConfigurationError::InvalidCredentialDelivery),
         }
     }
+}
+
+fn parse_onepassword_source(
+    profile: &Table,
+) -> Result<(Arc<str>, PathBuf), HubModelConfigurationError> {
+    let item = required_string(profile, "item")?;
+    if !item.starts_with("op://") || item.len() <= "op://".len() || item.contains('\0') {
+        return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+    }
+    let executable = normalize_absolute_path(required_string(profile, "executable")?)?;
+    Ok((Arc::from(item), executable))
 }
 
 fn admit_credential_home(
@@ -301,7 +336,7 @@ fn reject_disagreeing_billing_kind(
     billing_kind: BillingKind,
 ) -> Result<(), HubModelConfigurationError> {
     let admitted = match delivery {
-        "file" => billing_kind == BillingKind::ApiMetered,
+        "file" | "onepassword" => billing_kind == BillingKind::ApiMetered,
         "oauth" => billing_kind == BillingKind::Subscription,
         // `ambient` and `codex_home` admit either, so nothing is checked.
         _ => true,
@@ -811,6 +846,7 @@ fn parse_credential_profiles_with_home_admission(
             CredentialDelivery::File { path, .. } => Some(path),
             CredentialDelivery::CodexHome { path, .. } if admit_credential_homes => Some(path),
             CredentialDelivery::Ambient
+            | CredentialDelivery::Onepassword { .. }
             | CredentialDelivery::Oauth(_)
             | CredentialDelivery::CodexHome { .. } => None,
         };
@@ -1070,6 +1106,13 @@ fn reject_unobserved_capacity_policy(
 pub enum GithubCredentialDelivery {
     /// Token file resolved at each use.
     File(PathBuf),
+    /// Token field resolved live with 1Password CLI.
+    Onepassword {
+        /// Non-secret field reference.
+        item: Arc<str>,
+        /// Absolute CLI path.
+        executable: PathBuf,
+    },
     /// App installation authenticated with a deployment-owned RSA private key.
     GithubApp {
         /// GitHub App identifier.
@@ -1138,6 +1181,17 @@ pub(crate) fn parse_github_credential_profiles(
         }
         validated_credential_catalog_name(name)?;
         let profile = match required_string(table, "delivery")? {
+            "onepassword" => {
+                reject_unknown_fields(
+                    table,
+                    &["name", "adapter", "delivery", "item", "executable"],
+                )?;
+                let (item, executable) = parse_onepassword_source(table)?;
+                GithubCredentialProfile {
+                    delivery: GithubCredentialDelivery::Onepassword { item, executable },
+                    authentication: None,
+                }
+            }
             "file" => {
                 reject_unknown_fields(table, &["name", "adapter", "delivery", "file"])?;
                 GithubCredentialProfile::file(normalize_absolute_path(required_string(

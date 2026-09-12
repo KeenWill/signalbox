@@ -4091,6 +4091,22 @@ fn configuration_rejects_an_unknown_delivery() {
 }
 
 #[test]
+fn configuration_rejects_invalid_onepassword_sources() {
+    for delivery in [
+        "delivery = \"onepassword\"\nitem = \"not-a-reference\"\nexecutable = \"/usr/bin/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://\"\nexecutable = \"/usr/bin/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = \"relative/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"",
+    ] {
+        let source = CONFIGURATION.replace(
+            "delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"",
+            delivery,
+        );
+        assert!(HubModelConfiguration::parse(&source).is_err(), "{delivery}");
+    }
+}
+
+#[test]
 fn configuration_rejects_a_relative_credential_file() {
     let relative_file = CONFIGURATION.replace(
         "file = \"/run/secrets/anthropic-primary\"",

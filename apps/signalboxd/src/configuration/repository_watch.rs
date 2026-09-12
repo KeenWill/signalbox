@@ -127,7 +127,8 @@ impl WatchedRepositoryConfiguration {
     pub fn credential_file(&self) -> Option<&Path> {
         match self.credential.delivery() {
             crate::credential_pools::GithubCredentialDelivery::File(path) => Some(path),
-            crate::credential_pools::GithubCredentialDelivery::GithubApp { .. } => None,
+            crate::credential_pools::GithubCredentialDelivery::GithubApp { .. }
+            | crate::credential_pools::GithubCredentialDelivery::Onepassword { .. } => None,
         }
     }
 

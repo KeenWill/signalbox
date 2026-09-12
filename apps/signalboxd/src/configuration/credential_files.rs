@@ -262,16 +262,63 @@ pub(super) fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
     &file_bytes[..end]
 }
 
-/// Resolves deployment-owned token files and GitHub installation profiles.
-/// Files are reread at use; App profiles share their installation-token cache.
+/// Resolves deployment-owned byte sources and GitHub installation profiles.
+/// Sources are reread at use; App profiles share their installation-token cache.
 #[derive(Clone)]
 pub struct FileCredentialAccess {
     request_timeout: Option<std::time::Duration>,
-    paths: Arc<HashMap<CredentialReference, PathBuf>>,
+    sources: Arc<HashMap<CredentialReference, CredentialSource>>,
     app: Option<(
         CredentialReference,
         Arc<signalbox_github_transport::AppAuthentication>,
     )>,
+}
+
+#[derive(Clone)]
+enum CredentialSource {
+    File(PathBuf),
+    Onepassword { item: Arc<str>, executable: PathBuf },
+}
+
+async fn read_onepassword(
+    item: &str,
+    executable: &Path,
+) -> Result<Vec<u8>, CredentialAccessFailure> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+    let mut child = tokio::process::Command::new(executable)
+        // https://developer.1password.com/docs/cli/reference/commands/read/
+        .args(["read", "--no-newline", "--cache=false", "--"])
+        .arg(item)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| CredentialAccessFailure::Unavailable)?;
+    let mut bytes = Vec::new();
+    child
+        .stdout
+        .take()
+        .ok_or(CredentialAccessFailure::Unavailable)?
+        .take(MAX_CREDENTIAL_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| CredentialAccessFailure::Unavailable)?;
+    if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
+        let _ = child.kill().await;
+        return Err(CredentialAccessFailure::Unavailable);
+    }
+    if !child
+        .wait()
+        .await
+        .map_err(|_| CredentialAccessFailure::Unavailable)?
+        .success()
+        || credential_bytes(&bytes).is_empty()
+    {
+        return Err(CredentialAccessFailure::Unavailable);
+    }
+    Ok(bytes)
 }
 
 impl FileCredentialAccess {
@@ -284,8 +331,21 @@ impl FileCredentialAccess {
             crate::credential_pools::GithubCredentialDelivery::File(path) => {
                 Self::new(path.clone(), reference)
             }
+            crate::credential_pools::GithubCredentialDelivery::Onepassword { item, executable } => {
+                Self {
+                    sources: Arc::new(HashMap::from([(
+                        reference,
+                        CredentialSource::Onepassword {
+                            item: item.clone(),
+                            executable: executable.clone(),
+                        },
+                    )])),
+                    request_timeout: None,
+                    app: None,
+                }
+            }
             crate::credential_pools::GithubCredentialDelivery::GithubApp { .. } => Self {
-                paths: Arc::new(HashMap::new()),
+                sources: Arc::new(HashMap::new()),
                 request_timeout: None,
                 app: profile.authentication().map(|app| (reference, app)),
             },
@@ -304,8 +364,10 @@ impl FileCredentialAccess {
 
     /// Checks each configured file's admission without reading its secret bytes.
     pub fn validate(&self) -> Result<(), CredentialAccessError> {
-        for (reference, path) in self.paths.iter() {
-            validate_credential_file(path, reference.clone())?;
+        for (reference, source) in self.sources.iter() {
+            if let CredentialSource::File(path) = source {
+                validate_credential_file(path, reference.clone())?;
+            }
         }
         Ok(())
     }
@@ -319,7 +381,43 @@ impl FileCredentialAccess {
     /// files. Each resolution selects and rereads only its mapped path.
     pub fn from_files(files: impl IntoIterator<Item = (CredentialReference, PathBuf)>) -> Self {
         Self {
-            paths: Arc::new(files.into_iter().collect()),
+            sources: Arc::new(
+                files
+                    .into_iter()
+                    .map(|(reference, path)| (reference, CredentialSource::File(path)))
+                    .collect(),
+            ),
+            request_timeout: None,
+            app: None,
+        }
+    }
+
+    /// Binds every byte-delivered profile declared for one adapter.
+    pub fn from_configuration(
+        models: &super::HubModelConfiguration,
+        adapter: super::ModelAdapter,
+    ) -> Self {
+        use crate::credential_pools::CredentialDelivery;
+        let sources = models
+            .credential_profiles
+            .values()
+            .filter(|profile| profile.adapter() == adapter)
+            .filter_map(|profile| {
+                let source = match profile.delivery() {
+                    CredentialDelivery::File { path, .. } => CredentialSource::File(path.clone()),
+                    CredentialDelivery::Onepassword {
+                        item, executable, ..
+                    } => CredentialSource::Onepassword {
+                        item: item.clone(),
+                        executable: executable.clone(),
+                    },
+                    _ => return None,
+                };
+                Some((CredentialReference::new(profile.name()), source))
+            })
+            .collect();
+        Self {
+            sources: Arc::new(sources),
             request_timeout: None,
             app: None,
         }
@@ -330,8 +428,8 @@ impl FileCredentialAccess {
         if let Some((reference, _)) = &self.app {
             return Some(reference.clone());
         }
-        (self.paths.len() == 1)
-            .then(|| self.paths.keys().next().cloned())
+        (self.sources.len() == 1)
+            .then(|| self.sources.keys().next().cloned())
             .flatten()
     }
 }
@@ -340,8 +438,8 @@ impl fmt::Debug for FileCredentialAccess {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("FileCredentialAccess")
-            .field("paths", &"[credential file map]")
-            .field("reference_count", &self.paths.len())
+            .field("sources", &"[credential source map]")
+            .field("reference_count", &self.sources.len())
             .finish()
     }
 }
@@ -370,14 +468,21 @@ impl CredentialAccess for FileCredentialAccess {
                 })?;
             return Ok(CredentialValue::new(&header.as_bytes()[b"Bearer ".len()..]));
         }
-        let path = self.paths.get(reference).ok_or_else(|| {
+        let source = self.sources.get(reference).ok_or_else(|| {
             CredentialAccessError::new(reference.clone(), CredentialAccessFailure::Unmapped)
         })?;
-        let path = path.clone();
-        let file_bytes = tokio::task::spawn_blocking(move || read_credential_file(&path))
-            .await
-            .unwrap_or(Err(CredentialAccessFailure::Unreadable))
-            .map_err(|failure| CredentialAccessError::new(reference.clone(), failure))?;
+        let file_bytes = match source {
+            CredentialSource::File(path) => {
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || read_credential_file(&path))
+                    .await
+                    .unwrap_or(Err(CredentialAccessFailure::Unreadable))
+            }
+            CredentialSource::Onepassword { item, executable } => {
+                read_onepassword(item, executable).await
+            }
+        }
+        .map_err(|failure| CredentialAccessError::new(reference.clone(), failure))?;
         Ok(CredentialValue::new(credential_bytes(&file_bytes)))
     }
 }
@@ -391,7 +496,8 @@ impl super::HubModelConfiguration {
         {
             Some(profile) => match profile.delivery() {
                 GithubCredentialDelivery::File(path) => path.as_path(),
-                GithubCredentialDelivery::GithubApp { .. } => return false,
+                GithubCredentialDelivery::GithubApp { .. }
+                | GithubCredentialDelivery::Onepassword { .. } => return false,
             },
             None => fallback,
         };
@@ -413,6 +519,7 @@ impl super::HubModelConfiguration {
                     validate_credential_file(path, CredentialReference::new(profile.name()))?
                 }
                 CredentialDelivery::Ambient
+                | CredentialDelivery::Onepassword { .. }
                 | CredentialDelivery::Oauth(_)
                 | CredentialDelivery::CodexHome { .. } => {}
             }

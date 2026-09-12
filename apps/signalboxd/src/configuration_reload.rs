@@ -747,6 +747,12 @@ fn startup_sections(source: &str) -> Result<toml::Table, ReloadResult> {
         .and_then(toml::Value::as_array_mut)
     {
         for profile in profiles {
+            if profile.get("delivery").and_then(toml::Value::as_str) == Some("onepassword")
+                && let Some(profile) = profile.as_table_mut()
+            {
+                profile.remove("item");
+                profile.remove("executable");
+            }
             if profile.get("delivery").and_then(toml::Value::as_str) == Some("codex_home")
                 && let Some(profile) = profile.as_table_mut()
             {
@@ -1019,6 +1025,78 @@ mod tests {
         reload
             .read_replacement()
             .expect("reload warns and reads the permissive credential");
+    }
+
+    #[tokio::test]
+    async fn onepassword_reload_replaces_the_live_item_reference() {
+        use crate::{FileCredentialAccess, configuration::ModelAdapter};
+        use signalbox_model_runtime::{CredentialAccess, CredentialReference};
+        let (directory, initial) = fixture();
+        let executable = directory.path().join("op");
+        std::fs::write(&executable, "#!/bin/sh\ncase \"$5\" in\nop://fixture/account/first) printf synthetic-first-secret ;;\nop://fixture/account/second) printf synthetic-second-secret ;;\n*) exit 1 ;;\nesac\n").expect("fake CLI");
+        std::fs::set_permissions(
+            &executable,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("executable");
+        let reference = CredentialReference::new("anthropic-overflow");
+        let mut document = initial
+            .catalogs()
+            .models
+            .source()
+            .parse::<toml_edit::DocumentMut>()
+            .expect("catalog");
+        let profile = document["credential_profiles"]
+            .as_array_of_tables_mut()
+            .expect("profiles")
+            .iter_mut()
+            .find(|profile| profile["name"].as_str() == Some(reference.as_str()))
+            .expect("profile");
+        profile["delivery"] = toml_edit::value("onepassword");
+        profile.remove("file");
+        profile["item"] = toml_edit::value("op://fixture/account/first");
+        profile["executable"] = toml_edit::value(executable.to_str().expect("CLI path"));
+        let models =
+            HubModelConfiguration::parse(&document.to_string()).expect("1Password catalog");
+        let reload = ConfigurationReload::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@localhost/unused")
+                .expect("lazy pool"),
+            models,
+            SessionTemplateConfiguration::default(),
+            initial.model_path,
+            initial.template_path,
+            None,
+        )
+        .expect("reload composition");
+        std::fs::write(&reload.model_path, document.to_string()).expect("initial source");
+        let first = reload
+            .read_replacement()
+            .expect("1Password source admitted");
+        assert_eq!(
+            FileCredentialAccess::from_configuration(&first.models, ModelAdapter::Anthropic)
+                .resolve(&reference)
+                .await
+                .expect("first item")
+                .expose_bytes(),
+            b"synthetic-first-secret"
+        );
+        std::fs::write(
+            &reload.model_path,
+            document
+                .to_string()
+                .replace("op://fixture/account/first", "op://fixture/account/second"),
+        )
+        .expect("replacement source");
+        let replacement = reload.read_replacement().expect("item reference reloads");
+        assert_eq!(
+            FileCredentialAccess::from_configuration(&replacement.models, ModelAdapter::Anthropic)
+                .resolve(&reference)
+                .await
+                .expect("replacement item")
+                .expose_bytes(),
+            b"synthetic-second-secret"
+        );
     }
 
     #[tokio::test]
