@@ -10,6 +10,7 @@ export default defineConfig({
   },
   testDir: '../../e2e',
   testMatch: [
+    'shell.spec.ts',
     'session-detail.spec.ts',
     'product-session-send.spec.ts',
     'product-catalog.spec.ts',

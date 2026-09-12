@@ -18,11 +18,11 @@ import type { SessionWindowAnchor } from './session-timeline/model'
 import {
   readTranscriptWindow,
   TRANSCRIPT_RETAINED_WINDOWS,
-  TRANSCRIPT_WINDOW_ITEMS,
 } from './session-timeline/transcript'
 import { readTurnTranscript } from './session-timeline/turn-detail'
 import {
   groupTranscriptTurns,
+  toolContinuationSequence,
   type TranscriptTurn,
   turnSummaryParts,
 } from './session-timeline/turns'
@@ -257,23 +257,26 @@ function TranscriptWindow({
       }),
     [registerUnwind, turns, turnModes, requestedTurn, eventSequence, detail],
   )
-  const emptyScanned = useRef(0)
+  const emptyScanned = useRef({ count: 0, first: '' })
   useEffect(() => {
     if (turns.length > 0) {
-      emptyScanned.current = 0
+      emptyScanned.current = { count: 0, first: '' }
       return
     }
-    if (
-      transcript.isFetching ||
-      transcript.isError ||
-      !transcript.hasPreviousPage ||
-      emptyScanned.current >= SESSION_WINDOW_ITEMS
-    )
-      return
-    emptyScanned.current += TRANSCRIPT_WINDOW_ITEMS
+    if (transcript.isFetching || transcript.isError || !transcript.hasPreviousPage) return
+    const window = pages?.[0]?.window
+    const first = window?.items[0]?.address.event_sequence
+    if (first && first !== emptyScanned.current.first) {
+      emptyScanned.current = {
+        count: emptyScanned.current.count + (window?.items.length ?? 0),
+        first,
+      }
+    }
+    if (emptyScanned.current.count >= SESSION_WINDOW_ITEMS) return
     void transcript.fetchPreviousPage()
   }, [
     turns.length,
+    pages,
     transcript.isFetching,
     transcript.isError,
     transcript.hasPreviousPage,
@@ -503,13 +506,7 @@ function TurnContent({
             limits={limits}
             renderTool={renderTool}
           />
-          {more(
-            turn.events.find(
-              (event) =>
-                event.body.type === 'tool_batch' &&
-                event.body.tools.some((entry) => entry.request_id === tool.request_id),
-            )?.address.event_sequence ?? '',
-          )}
+          {more(toolContinuationSequence(turn, tool))}
         </div>
       )}
       {turn.outcome && <BodyText body={turn.outcome.body} />}

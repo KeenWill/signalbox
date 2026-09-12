@@ -114,3 +114,23 @@ export function turnSummaryParts(turn: TranscriptTurn): TurnSummaryPart[] {
   }
   return parts
 }
+
+export function toolContinuationSequence(
+  turn: TranscriptTurn,
+  tool: WebTimelineToolAttempt,
+): string {
+  const evidence = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
+  const cursor =
+    evidence?.result?.continuation ??
+    evidence?.failure?.continuation ??
+    tool.arguments?.continuation
+  return (
+    cursor?.address.event_sequence ??
+    turn.events.findLast(
+      (event) =>
+        event.body.type === 'tool_batch' &&
+        event.body.tools.some((entry) => entry.request_id === tool.request_id),
+    )?.address.event_sequence ??
+    ''
+  )
+}
