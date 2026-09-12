@@ -801,12 +801,13 @@ credential after send is ordinary outcome evidence, not a preparation failure;
 [`op read`](https://developer.1password.com/docs/cli/reference/commands/read/)
 with no appended newline and caching disabled on each use. The daemon retains no
 secret cache, caps stdout at 64 KiB, discards stderr, and cancels the child when
-resolution is dropped. Source admission validates the reference and absolute
-executable path without contacting the vault. Missing CLI, failed reads,
-unsuccessful exits, empty values, and oversized output are credential
-unavailability, never provider failures. Resolved bytes seed the same
-exact-value redaction as file credentials and never enter configuration
-snapshots.
+resolution is dropped. Source admission requires an `op://` reference with at
+least three non-empty slash-separated segments (vault, item, and field, with an
+optional section) and an absolute executable path without contacting the vault.
+Missing CLI, failed reads, unsuccessful exits, empty values, and oversized
+output are credential unavailability, never provider failures. Resolved bytes
+seed the same exact-value redaction as file credentials and never enter
+configuration snapshots.
 
 A code-host tool resolves its fixed `github-primary` reference only after the
 durable tool attempt is authorized `InFlight` and immediately before its

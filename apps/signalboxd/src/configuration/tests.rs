@@ -4098,7 +4098,6 @@ fn configuration_rejects_invalid_onepassword_sources() {
         "delivery = \"onepassword\"\nitem = \"op://vault\"\nexecutable = \"/usr/bin/op\"",
         "delivery = \"onepassword\"\nitem = \"op://vault/item\"\nexecutable = \"/usr/bin/op\"",
         "delivery = \"onepassword\"\nitem = \"op://vault//field\"\nexecutable = \"/usr/bin/op\"",
-        "delivery = \"onepassword\"\nitem = \"op://vault/item/section/field/extra\"\nexecutable = \"/usr/bin/op\"",
         "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = \"relative/op\"",
         "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"",
     ] {
@@ -4107,6 +4106,37 @@ fn configuration_rejects_invalid_onepassword_sources() {
             delivery,
         );
         assert!(HubModelConfiguration::parse(&source).is_err(), "{delivery}");
+    }
+}
+
+#[test]
+fn onepassword_references_require_nonempty_vault_item_and_field_segments() {
+    for (item, admitted) in [
+        ("op://vault", false),
+        ("op:///", false),
+        ("op://vault/item", false),
+        ("op:///item/field", false),
+        ("op://vault//field", false),
+        ("op://vault/item/", false),
+        ("op://vault/item/section//field", false),
+        ("op://vault/item/field", true),
+        ("op://vault/item/section/field", true),
+        ("op://vault/item/section/field/extra", true),
+    ] {
+        let source = CONFIGURATION.replace(
+            "delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"",
+            &format!("delivery = \"onepassword\"\nitem = {item:?}\nexecutable = \"/usr/bin/op\""),
+        );
+        let result = HubModelConfiguration::parse(&source);
+        if admitted {
+            assert!(result.is_ok(), "{item}");
+        } else {
+            assert_eq!(
+                result.err(),
+                Some(HubModelConfigurationError::InvalidCredentialDelivery),
+                "{item}"
+            );
+        }
     }
 }
 
