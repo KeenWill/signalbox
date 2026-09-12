@@ -5,13 +5,14 @@ import type { TemplateApi } from './api'
 
 export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebTemplateDetail }) {
   const id = useId()
-  const [source, setSource] = useState(detail.definition_toml)
+  const [draft, setDraft] = useState<string | null>(null)
+  const source = draft ?? detail.definition_toml
   const queries = useQueryClient()
   const save = useMutation({
     mutationFn: (definition: string) =>
       api.save(detail.summary.name, { definition_toml: definition }),
     onSuccess: (saved) => {
-      setSource(saved.definition_toml)
+      setDraft(null)
       queries.setQueryData(['template', api, saved.summary.name], saved)
       void queries.invalidateQueries({ queryKey: ['templates', api] })
       void queries.invalidateQueries({ queryKey: ['template', api] })
@@ -38,7 +39,7 @@ export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebT
           aria-invalid={save.isError}
           aria-describedby={save.isError ? `${id}-error` : undefined}
           onChange={(event) => {
-            setSource(event.target.value)
+            setDraft(event.target.value)
             save.reset()
           }}
         />

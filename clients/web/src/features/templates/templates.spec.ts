@@ -137,3 +137,36 @@ test('shows validation inline and adopts a successful saved definition', async (
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
   await page.screenshot({ path: testInfo.outputPath('template-edit-phone.png'), fullPage: true })
 })
+
+test('refreshes untouched source while retaining an edited draft', async ({ page }) => {
+  let current = detailFixture
+  await page.route('**/api/templates/code-review', (route) => route.fulfill({ json: current }))
+  await page.goto(scenario)
+  await page.getByRole('button', { name: /code-review/ }).click()
+  await page.getByText('Edit template', { exact: true }).click()
+  const editor = page.getByRole('textbox', { name: 'Template definition (TOML)' })
+  await expect(editor).toHaveValue(detailFixture.definition_toml)
+  const refreshedPrompt = 'Instructions updated in another browser.'
+  current = {
+    ...detailFixture,
+    system_prompt: refreshedPrompt,
+    definition_toml: detailFixture.definition_toml.replace(
+      detailFixture.system_prompt,
+      refreshedPrompt,
+    ),
+  }
+  await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
+  await expect(editor).toHaveValue(current.definition_toml)
+  const draft = 'Instructions being edited locally.'
+  await editor.fill(draft)
+  const laterPrompt = 'Another external update.'
+  current = {
+    ...current,
+    system_prompt: laterPrompt,
+    definition_toml: current.definition_toml.replace(refreshedPrompt, laterPrompt),
+  }
+  await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
+  await page.getByText('System instructions', { exact: true }).click()
+  await expect(page.getByText(laterPrompt, { exact: true })).toBeVisible()
+  await expect(editor).toHaveValue(draft)
+})
