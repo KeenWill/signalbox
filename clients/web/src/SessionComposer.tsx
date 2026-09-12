@@ -163,10 +163,7 @@ export function SessionComposer({
         }}
       />
       <div className="session-composer-actions">
-        <span
-          className="session-attachment-affordance"
-          title="Attachments are not supported by this message endpoint"
-        >
+        <span className="session-attachment-affordance" title="File attachments are unavailable">
           <button
             type="button"
             disabled
