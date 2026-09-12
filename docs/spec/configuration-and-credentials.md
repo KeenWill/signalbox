@@ -292,10 +292,11 @@ prompt content, or document text.
 `GET /api/templates` lists the loaded templates in name order;
 `GET /api/templates/{name}` returns the selected definition with retained prompt
 contents and its template or shared review-library TOML source. Both use the
-browser API authority gate. `PUT /api/templates/{name}` validates a replacement
-TOML definition, atomically saves the template file, and installs it through
-serial configuration reload before returning its new digest. Unknown request and
-TOML fields are rejected; validation failures leave the file and loaded catalog
+browser API authority gate. `PUT /api/templates/{name}` uses browser mutation
+admission and the JSON request-body limit, validates a replacement TOML
+definition, atomically saves the template file, and installs it through serial
+configuration reload before returning its new digest. Unknown request and TOML
+fields are rejected; validation failures leave the file and loaded catalog
 unchanged. Generated review templates edit their shared library. A reload
 failure after writing reports that the file was saved but reload did not
 complete.
