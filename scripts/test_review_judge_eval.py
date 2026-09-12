@@ -87,7 +87,7 @@ class ScratchCheckoutTests(unittest.TestCase):
     def test_citations_are_resolved_before_the_judge_session_is_created(self):
         args = SimpleNamespace(repository=self.repository, workspace=self.workspace,
                                output=self.repository.parent / "results",
-                               template="review-judgment", agentic=False)
+                               template="review-judgment")
         case = {"id": "finding", "head_sha": self.head, "base_sha": self.head,
                 "pr_title": "Review source", "pr_scope": "Source change", "context": "",
                 "findings": [{"finding_id": "finding", "finding_text": "`missing_gate()` fails."}]}

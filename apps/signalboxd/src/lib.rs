@@ -3448,13 +3448,15 @@ where
             {
                 return Ok(());
             }
-            let agentic_judge = match &workflow_tool_policy {
-                Some(policy) => policy
-                    .is_agentic_review_judge(session)
-                    .await
-                    .map_err(PostgresProviderToolLoopExecutionError::WorkflowPolicy)?,
-                None => false,
-            };
+            let agentic_judge = review_judge_runtime::is_agentic_judge(&model_repository, session)
+                .await
+                .map_err(|error| {
+                    PostgresProviderToolLoopExecutionError::Model(Box::new(
+                        RetainedModelExecutionError::Primary(ModelCallExecutionError::Prepare(
+                            error,
+                        )),
+                    ))
+                })?;
             let workflow_policy = match workflow_tool_policy {
                 Some(policy) => policy
                     .for_session(session)

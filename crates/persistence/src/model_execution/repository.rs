@@ -721,6 +721,11 @@ impl PostgresModelCallRepository {
             .map_err(|_| ModelCallCorruption::Inconsistent("tool request count").into())
     }
 
+    /// Derives current-session reads from this repository's exact database.
+    pub fn session_repository(&self) -> crate::session::SessionRepository {
+        crate::session::SessionRepository::new(self.pool.clone())
+    }
+
     /// Derives tool-loop storage from this repository's exact database and
     /// continuation configuration.
     pub fn tool_loop_repository(&self) -> crate::tool_loop::PostgresToolLoopRepository {

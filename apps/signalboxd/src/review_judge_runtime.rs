@@ -11,6 +11,30 @@ pub(crate) const TOOL_CALL_LIMIT: u64 = 8;
 /// Allows a final response after the read allowance is spent.
 pub(crate) const TOOL_ROUND_LIMIT: usize = TOOL_CALL_LIMIT as usize + 1;
 
+pub(crate) async fn is_agentic_judge(
+    repository: &signalbox_persistence::model_execution::PostgresModelCallRepository,
+    session: signalbox_domain::SessionId,
+) -> Result<bool, signalbox_persistence::model_execution::ModelCallRepositoryError> {
+    use signalbox_persistence::{
+        model_execution::{ModelCallCorruption, ModelCallRepositoryError},
+        session::SessionRepositoryError,
+    };
+    let loaded = repository
+        .session_repository()
+        .load_session(session)
+        .await
+        .map_err(|error| match error {
+            SessionRepositoryError::Database(error) => ModelCallRepositoryError::from(error),
+            SessionRepositoryError::Corruption(error) => {
+                ModelCallCorruption::CurrentSession(error).into()
+            }
+        })?;
+    Ok(loaded
+        .as_ref()
+        .and_then(|session| session.template_provenance())
+        .is_some_and(|template| template.name().as_str() == TEMPLATE_NAME))
+}
+
 pub(crate) async fn tool_allowance(
     repository: &signalbox_persistence::model_execution::PostgresModelCallRepository,
     restricted: bool,

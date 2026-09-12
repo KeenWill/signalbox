@@ -335,16 +335,18 @@ or the configured limit when smaller. Template identity narrows this catalog and
 allowance; it grants no additional authority. Ordinary sessions do not advertise
 the two review-text tools.
 
-`scripts/review_judge_eval.py --agentic` supplies the candidate in full with
-160-character, single-line synopses of the other findings and threads. The
-caller supplies the retained snapshot for the exact PR and head, including which
-threads existed then. The adapter excludes the subject finding and its source
-thread, uploads only context fields, and takes structured output from the last
-committed assistant text in the judged turn. Each result records the session,
-turn, terminal frontier, assistant-entry witness, wall time, and the existing
-per-model-call token-usage records. Usage is summed across the turn; no separate
-token table is needed. This evaluation path does not change publication policy
-or select a live judgment variant.
+`scripts/review_judge_eval.py --template review-judgment-agentic` supplies the
+candidate in full with 160-character, single-line synopses of the other findings
+and threads. Additional case evidence and the prepared patch remain available
+through explicit read paths. The caller supplies the retained snapshot for the
+exact PR and head, including which threads existed then. The adapter excludes
+the subject finding and its source thread, uploads only context fields, and
+takes structured output from the last committed assistant text in the judged
+turn. Each result records the session, turn, terminal frontier, assistant-entry
+witness, wall time, and the existing per-model-call token-usage records. The
+record also sums each token axis across the turn; an unknown component keeps
+that axis unknown. No separate token table is needed. This evaluation path does
+not change publication policy or select a live judgment variant.
 
 ## Planned
 

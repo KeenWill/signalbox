@@ -81,3 +81,12 @@ def terminal_result(transcript, turn_id):
         raise ValueError("terminal assistant result is incomplete")
     text = "".join(item["content_fragment"] for item in chunks)
     return json.loads(text), {key: witness[key] for key in ("source_session_id", "entry_id", "entry_index")}
+
+
+def sum_usage(calls):
+    """Sum reported axes while preserving any unknown component as unknown."""
+    totals = {}
+    for axis in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+        values = [(call.get("usage") or {}).get(axis) for call in calls]
+        totals[axis] = sum(int(value) for value in values) if values and all(value is not None for value in values) else None
+    return totals

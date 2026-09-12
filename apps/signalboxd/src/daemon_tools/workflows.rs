@@ -31,21 +31,6 @@ impl WorkflowToolPolicy {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
-    pub(crate) async fn is_agentic_review_judge(
-        &self,
-        session: SessionId,
-    ) -> Result<bool, WorkflowToolError> {
-        let session = signalbox_persistence::session::SessionRepository::new(self.pool.clone())
-            .load_session(session)
-            .await
-            .map_err(WorkflowToolError::Session)?;
-        Ok(session
-            .and_then(|session| session.template_provenance().cloned())
-            .is_some_and(|template| {
-                template.name().as_str() == crate::review_judge_runtime::TEMPLATE_NAME
-            }))
-    }
-
     pub async fn for_session(
         &self,
         session: SessionId,
@@ -329,8 +314,6 @@ fn bound_result(value: &mut Value, path: &str, extent_path: &str) -> Result<(), 
 /// Sanitized workflow adapter failure retaining infrastructure ambiguity.
 #[derive(Debug, signalbox_derive::OperatorError)]
 pub enum WorkflowToolError {
-    #[error("workflow session lookup failed")]
-    Session(#[source] signalbox_persistence::session::SessionRepositoryError),
     #[error("workflow database access failed")]
     Database(#[source] sqlx::Error),
     #[error("workflow program command failed")]
@@ -357,14 +340,6 @@ impl From<ProtocolError> for WorkflowToolError {
 impl ClassifyOperatorFailure for WorkflowToolError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
-            Self::Session(signalbox_persistence::session::SessionRepositoryError::Database(_)) => {
-                OperatorFailureClass::Infrastructure {
-                    commit_ambiguous: false,
-                }
-            }
-            Self::Session(signalbox_persistence::session::SessionRepositoryError::Corruption(
-                _,
-            )) => OperatorFailureClass::FailClosedCorruption,
             Self::Database(_) | Self::Protocol(ErrorCode::Unavailable) => {
                 OperatorFailureClass::Infrastructure {
                     commit_ambiguous: false,
