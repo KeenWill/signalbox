@@ -1309,6 +1309,12 @@ fn validate_reader(
         return Err(FileMediaRegistryConstructionError::ValidationBounds);
     }
     for view in reader.views() {
+        if matches!(view.bounds(), ReadViewBounds::File { .. })
+            && (reader.media_types().len() != 1
+                || reader.media_types()[0].as_str() != "application/pdf")
+        {
+            return Err(FileMediaRegistryConstructionError::ViewBounds);
+        }
         validate_view(view.access(), view.bounds(), ceilings)?;
         if matches!(view.bounds(), ReadViewBounds::Image { .. }) {
             if view.image_kind().is_none()

@@ -2007,26 +2007,26 @@ fn render_runtime_messages(
                 let media = match content {
                     ModelToolResultContent::Success(ToolResultContent::Media {
                         reference, ..
-                    }) if reference.presented().media_type() == "application/pdf" => {
-                        Some(MessagePart::DocumentReference(
-                            signalbox_model_runtime::DocumentReference {
+                    }) => Some(match reference.kind() {
+                        signalbox_domain::ToolMediaKind::Document => {
+                            MessagePart::DocumentReference(
+                                signalbox_model_runtime::DocumentReference {
+                                    authority: request.into_uuid().to_string(),
+                                    digest: *reference.presented().digest().as_bytes(),
+                                    byte_length: reference.byte_length(),
+                                    media_type: reference.presented().media_type().to_owned(),
+                                },
+                            )
+                        }
+                        signalbox_domain::ToolMediaKind::Image => {
+                            MessagePart::ImageReference(signalbox_model_runtime::ImageReference {
                                 authority: request.into_uuid().to_string(),
                                 digest: *reference.presented().digest().as_bytes(),
                                 byte_length: reference.byte_length(),
                                 media_type: reference.presented().media_type().to_owned(),
-                            },
-                        ))
-                    }
-                    ModelToolResultContent::Success(ToolResultContent::Media {
-                        reference, ..
-                    }) => Some(MessagePart::ImageReference(
-                        signalbox_model_runtime::ImageReference {
-                            authority: request.into_uuid().to_string(),
-                            digest: *reference.presented().digest().as_bytes(),
-                            byte_length: reference.byte_length(),
-                            media_type: reference.presented().media_type().to_owned(),
-                        },
-                    )),
+                            })
+                        }
+                    }),
                     _ => None,
                 };
                 let (content, is_error) = render_tool_result(content);

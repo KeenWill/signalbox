@@ -123,7 +123,13 @@ impl MediaPreparation {
                 .await
                 .map_err(evidence_failure)?
                 .ok_or(MediaPreparationFailure::Corrupt)?;
-            if proof.presented().digest().as_bytes() != &reference.digest
+            if proof.kind()
+                != if document {
+                    signalbox_domain::ToolMediaKind::Document
+                } else {
+                    signalbox_domain::ToolMediaKind::Image
+                }
+                || proof.presented().digest().as_bytes() != &reference.digest
                 || proof.presented().media_type() != reference.media_type
                 || proof.byte_length() != reference.byte_length
             {

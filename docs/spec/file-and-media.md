@@ -77,8 +77,8 @@ Format adapters add no MIME branch to the tool executor, the bridge, or the
 daemon, for the same reason.
 
 Registry construction admits image views with a declared direct or generated
-kind and a finite set of output media types. Audio and general-file views are
-rejected.
+kind and a finite set of output media types, and direct PDF document views.
+Audio and other general-file views are rejected.
 
 An empty registry is valid, so the daemon boots with no adapters.
 
