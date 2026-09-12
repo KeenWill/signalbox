@@ -810,6 +810,23 @@ fn exact_rate_cannot_be_observed_before_it_takes_effect() {
 }
 
 #[test]
+fn old_rate_observation_cannot_follow_the_exact_effective_day() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    let window = &mut rate_set_mut(&mut raw, "oai-gpt6-astra-standard").unwrap()["window"];
+    window["effective_from"] = Value::String(String::from("2026-09-03"));
+    window["first_observed_new_rate"] = Value::String(String::from("2026-09-11"));
+    window["last_observed_old_rate"] = Value::String(String::from("2026-09-10"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not leave an ordered observation boundary")
+    );
+}
+
+#[test]
 fn exact_day_observation_boundary_must_be_ordered() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
     rate_set_mut(&mut raw, "oai-o3-reduced").unwrap()["window"]["last_observed_old_rate"] =

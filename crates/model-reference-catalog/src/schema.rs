@@ -1491,7 +1491,11 @@ fn validate_window(window: &DateWindow, subject: &str) -> Result<(), CatalogErro
         )));
     }
     if let Some(last_old) = &window.last_observed_old_rate
-        && last_old >= &window.first_observed_new_rate
+        && last_old
+            >= window
+                .effective_from
+                .as_ref()
+                .unwrap_or(&window.first_observed_new_rate)
     {
         return Err(CatalogError::new(format!(
             "window {subject} does not leave an ordered observation boundary"
