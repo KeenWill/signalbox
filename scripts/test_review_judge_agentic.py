@@ -53,6 +53,8 @@ class AgenticContextTests(unittest.TestCase):
                     "final_fragment": True, "content_fragment": text}
         transcript = [entry(1, "judged"), chunk(1, "Working."), entry(4, "judged"), chunk(4, '[]}'),
                       entry(3, "judged"), chunk(3, '{"members":'), entry(5, "other"), chunk(5, "Unrelated.")]
+        transcript.append({"type": "transcript_turn", "turn_id": "judged",
+                           "state": {"type": "completed", "terminal_model_call_id": "terminal"}})
         result, witness = terminal_result(transcript, "judged")
         self.assertEqual(result, {"members": []})
         self.assertEqual(witness["model_call_id"], "terminal")
@@ -60,6 +62,19 @@ class AgenticContextTests(unittest.TestCase):
                                               {"entry_id": "4", "entry_index": "4"}])
         transcript[5]["final_fragment"] = False
         with self.assertRaisesRegex(ValueError, "incomplete"):
+            terminal_result(transcript, "judged")
+
+    def test_empty_terminal_call_cannot_admit_an_earlier_verdict(self):
+        transcript = [
+            {"type": "transcript_turn", "turn_id": "judged",
+             "state": {"type": "completed", "terminal_model_call_id": "empty-terminal"}},
+            {"type": "transcript_text_entry", "entry_index": "1", "entry_id": "earlier-result",
+             "source_session_id": "session", "entry": {"type": "assistant", "turn_id": "judged",
+             "model_call_id": "before-tool"}},
+            {"type": "transcript_content", "entry_index": "1", "fragment_index": "0",
+             "final_fragment": True, "content_fragment": '{"members":[]}'},
+        ]
+        with self.assertRaisesRegex(ValueError, "no terminal assistant result"):
             terminal_result(transcript, "judged")
 
 

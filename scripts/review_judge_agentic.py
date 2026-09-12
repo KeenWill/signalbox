@@ -93,15 +93,18 @@ def upload_context(socket_path, encoded, digest):
 
 
 def terminal_result(transcript, turn_id):
-    assistants = [item for item in transcript if item["type"] == "transcript_text_entry"
-                  and item["entry"]["type"] == "assistant" and item["entry"]["turn_id"] == turn_id]
-    if not assistants:
-        raise ValueError("judge has no terminal assistant result")
-    witness = max(assistants, key=lambda item: int(item["entry_index"]))
-    terminal = sorted((item for item in assistants
-                       if item["source_session_id"] == witness["source_session_id"]
-                       and item["entry"]["model_call_id"] == witness["entry"]["model_call_id"]),
+    state = next(item["state"] for item in transcript
+                 if item["type"] == "transcript_turn" and item["turn_id"] == turn_id)
+    if state["type"] != "completed":
+        raise ValueError("judge turn has not completed")
+    model_call_id = state["terminal_model_call_id"]
+    terminal = sorted((item for item in transcript if item["type"] == "transcript_text_entry"
+                       and item["entry"]["type"] == "assistant"
+                       and item["entry"]["turn_id"] == turn_id
+                       and item["entry"]["model_call_id"] == model_call_id),
                       key=lambda item: int(item["entry_index"]))
+    if not terminal:
+        raise ValueError("judge has no terminal assistant result")
     text = []
     for entry in terminal:
         chunks = sorted((item for item in transcript if item["type"] == "transcript_content"
@@ -112,8 +115,8 @@ def terminal_result(transcript, turn_id):
             raise ValueError("terminal assistant result is incomplete")
         text.extend(item["content_fragment"] for item in chunks)
     return json.loads("".join(text)), {
-        "source_session_id": witness["source_session_id"],
-        "model_call_id": witness["entry"]["model_call_id"],
+        "source_session_id": terminal[-1]["source_session_id"],
+        "model_call_id": model_call_id,
         "entries": [{key: entry[key] for key in ("entry_id", "entry_index")} for entry in terminal],
     }
 
