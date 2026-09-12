@@ -1,7 +1,6 @@
 import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, SkipBack, SkipForward } from 'lucide-react'
 import {
-  type FormEvent,
   type KeyboardEvent,
   type RefObject,
   useCallback,
@@ -13,6 +12,7 @@ import {
 import { invokeCommand } from './commands'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
+import './session-header.css'
 import type { SessionTranscriptLimits } from './product'
 import { SessionComposer } from './SessionComposer'
 import { SessionItemDetail } from './SessionItemDetail'
@@ -33,7 +33,6 @@ import {
 } from './state'
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const NATIVE_SESSION_ID_PATTERN = String.raw`\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*`
 const MAX_CACHED_SESSION_WORKSPACES = 4
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
 
@@ -114,8 +113,6 @@ export const pruneExpandedSessionItems = (
 
 export function SessionWorkspaceSurface({
   initialSessionId,
-  focusEntry,
-  onSessionOpen,
   onReturnToCatalog,
   onTimelineIds,
   onTimelineWindowAvailable,
@@ -142,29 +139,17 @@ export function SessionWorkspaceSurface({
   const dispatch = useAppDispatch()
   const queryClient = useQueryClient()
   const app = useAppSelector(selectApp)
-  const entryInput = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    if (!focusEntry) return
-    const frame = requestAnimationFrame(() => {
-      if (document.activeElement === entryInput.current?.closest('main'))
-        entryInput.current?.focus()
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [focusEntry])
-  const [draftId, setDraftId] = useState(initialSessionId ?? '')
-  const [sessionId, setSessionId] = useState<string | null>(initialSessionId ?? null)
+  const sessionId = initialSessionId ?? null
   const [awaitingSessionId, setAwaitingSessionId] = useState<string | null>(
     initialSessionId ?? null,
   )
-  const [openingPosition, setOpeningPosition] = useState<string | undefined>(
+  const [openingPosition] = useState<string | undefined>(
     initialSessionId === undefined ? undefined : app.lastLogicalPositions[initialSessionId],
   )
-  const [refetchRequest, setRefetchRequest] = useState(0)
   const [showEvents, setShowEvents] = useState(false)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
   const manualAnchorRef = useRef<SessionWindowAnchor | null>(null)
-  const handledRefetchRequest = useRef(0)
   const boundaryRequest = useRef(0)
   const session = useQuery({
     queryKey: sessionWorkspaceQueryKey(sessionId),
@@ -323,17 +308,6 @@ export function SessionWorkspaceSurface({
   }, [awaitingSessionId, session.isError, session.isFetching, session.isSuccess, sessionId])
   useEffect(() => {
     if (
-      refetchRequest === handledRefetchRequest.current ||
-      sessionId === null ||
-      timelineCapability !== 'available'
-    ) {
-      return
-    }
-    handledRefetchRequest.current = refetchRequest
-    void refetchSession()
-  }, [refetchRequest, refetchSession, sessionId, timelineCapability])
-  useEffect(() => {
-    if (
       sessionId !== null &&
       app.selectedTimeline !== null &&
       displayedSession?.window.items.some(
@@ -354,39 +328,6 @@ export function SessionWorkspaceSurface({
     }
   }, [app.selectedTimeline])
 
-  const openSession = (candidate: string) => {
-    onSessionOpen(candidate)
-    const reopeningCurrentSession = candidate === sessionId
-    setOpeningPosition(app.lastLogicalPositions[candidate])
-    manualAnchorRef.current = null
-    setExpanded(new Set())
-    if (!reopeningCurrentSession) {
-      setAwaitingSessionId(candidate)
-      dispatch(actions.timelineSelected(null))
-    }
-    setSessionId(candidate)
-    if (reopeningCurrentSession) {
-      boundaryRequest.current += 1
-      setRefetchRequest((current) => current + 1)
-    }
-  }
-  const submitSession = (event: FormEvent) => {
-    event.preventDefault()
-    const candidate = draftId.trim().toLowerCase()
-    invokeCommand('session.open', {
-      dispatch,
-      getState: store.getState,
-      timelineIds,
-      artifactPreviewIds: [],
-      artifactOriginalIds: [],
-      focusTimeline: () => timelineRef.current?.focus(),
-      sessionId:
-        isCanonicalSessionId(candidate) && timelineCapability === 'available'
-          ? candidate
-          : undefined,
-      openSession,
-    })
-  }
   const selected = app.selectedTimeline
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
@@ -450,40 +391,17 @@ export function SessionWorkspaceSurface({
 
   return (
     <div className="surface-body session-workspace-surface">
-      <form className="session-open-form" onSubmit={submitSession}>
-        <label>
-          Session ID
-          <input
-            ref={entryInput}
-            aria-label="Session ID"
-            placeholder="00000000-0000-0000-0000-000000000000"
-            value={draftId}
-            onChange={(event) => setDraftId(event.target.value.trim())}
-            onKeyDown={(event) => {
-              if (event.key !== 'Escape') return
-              event.preventDefault()
-              event.stopPropagation()
-              onReturnToCatalog()
-            }}
-            pattern={NATIVE_SESSION_ID_PATTERN}
-            required
-          />
-        </label>
-        <button
-          type="submit"
-          disabled={!isCanonicalSessionId(draftId.trim()) || timelineCapability !== 'available'}
-        >
-          Open
-        </button>
-      </form>
-
       {sessionId === null || timelineCapability !== 'available' ? (
         <p className="session-entry" role="status">
-          {timelineCapability === 'checking'
-            ? 'Connecting…'
-            : timelineCapability === 'unavailable'
-              ? 'Session timeline unavailable'
-              : 'Session ID required'}
+          {timelineCapability === 'checking' ? (
+            'Connecting…'
+          ) : timelineCapability === 'unavailable' ? (
+            'Session timeline unavailable'
+          ) : (
+            <button type="button" onClick={onReturnToCatalog}>
+              Choose a session
+            </button>
+          )}
         </p>
       ) : session.isError ? (
         <p className="session-load-state" role="alert">
@@ -498,155 +416,171 @@ export function SessionWorkspaceSurface({
           <p className="sr-only" role="status">
             Session {sessionId} loaded.
           </p>
-          <header className="session-workspace-header">
-            <div>
-              <h2 id="session-workspace-heading">{sessionId}</h2>
-              <p>
+          <header className="session-compact-header">
+            <div className="session-header-line">
+              <h2 id="session-workspace-heading">Session</h2>
+              <p className="session-header-state">
                 {displayedSession.descriptor.supervision?.pending
                   ? 'Recovery required'
                   : displayedSession.active
                     ? 'Active'
                     : 'Inactive'}
               </p>
-            </div>
-            <dl className="session-telemetry" hidden={!showEvents}>
-              <div>
-                <dt>Items</dt>
-                <dd>{displayedSession.descriptor.sizes.item_count}</dd>
-              </div>
-              <div>
-                <dt>Active</dt>
-                <dd>{displayedSession.descriptor.work.active_turn_count}</dd>
-              </div>
-              <div>
-                <dt>Queued</dt>
-                <dd>{displayedSession.descriptor.work.queued_turn_count}</dd>
-              </div>
-              <div>
-                <dt>Observed through</dt>
-                <dd>{displayedSession.descriptor.observed_through}</dd>
-              </div>
-            </dl>
-          </header>
-          {displayedSession.descriptor.supervision && (
-            <section className="session-provenance" aria-label="Session supervision">
-              <p>
-                {displayedSession.descriptor.supervision.pending
-                  ? 'Operator reconciliation pending'
-                  : 'Operator reconciliation recorded'}
-              </p>
-              <p>
-                {enumLabel(displayedSession.descriptor.supervision.class)} ·{' '}
-                <code>{displayedSession.descriptor.supervision.cause_code}</code>
-              </p>
-            </section>
-          )}
-          {displayedSession.descriptor.repository_watch && (
-            <section className="session-provenance" aria-label="Repository watch">
-              Repository watch · {displayedSession.descriptor.repository_watch.repository}
-              {displayedSession.descriptor.repository_watch.pull_request !== null &&
-                ` #${displayedSession.descriptor.repository_watch.pull_request}`}
-              {' · Rule '}
-              {displayedSession.descriptor.repository_watch.rule_id}
-              {' v'}
-              {displayedSession.descriptor.repository_watch.rule_revision}
-              {' · '}
-              {enumLabel(displayedSession.descriptor.repository_watch.event_kind)}
-              <details>
-                <summary>Dispatch details</summary>
-                <p>
-                  Dispatch {displayedSession.descriptor.repository_watch.dispatch_id}
-                  {' · Action '}
-                  {displayedSession.descriptor.repository_watch.action_ordinal}
-                </p>
-                <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>
-              </details>
-            </section>
-          )}
-          <div className="session-window-controls" role="toolbar" aria-label="Timeline">
-            <button
-              type="button"
-              onClick={(event) => invokeBoundaryCommand('selection.first', event.currentTarget)}
-            >
-              <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
-            </button>
-            <button
-              type="button"
-              onClick={(event) => invokeBoundaryCommand('selection.last', event.currentTarget)}
-            >
-              <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
-            </button>
-            <button
-              type="button"
-              disabled={!displayedSession.window.continuation_before}
-              onClick={() => {
-                const address = displayedSession.window.continuation_before?.event_sequence
-                if (address) {
-                  manualAnchorRef.current = { kind: 'before', eventSequence: address }
-                  void refetchSession()
-                }
-              }}
-            >
-              Previous
-            </button>
-            <button
-              type="button"
-              disabled={!displayedSession.window.continuation_after}
-              onClick={() => {
-                const address = displayedSession.window.continuation_after?.event_sequence
-                if (address) {
-                  manualAnchorRef.current = { kind: 'after', eventSequence: address }
-                  void refetchSession()
-                }
-              }}
-            >
-              Next
-            </button>
-            <span hidden={!showEvents}>
-              {displayedSession.window.items.length} events ·{' '}
-              {displayedSession.window.projected_structured_bytes} B
-            </span>
-          </div>
-          <p className="session-live-status" role="status">
-            {followFailed ? (
-              <>
-                Live updates unavailable.{' '}
+              <div
+                className="session-header-actions"
+                role="toolbar"
+                aria-label="Timeline shortcuts"
+              >
                 <button
                   type="button"
-                  onClick={() => dispatch(actions.sessionFollowReconnectRequested())}
+                  title="First (gg)"
+                  aria-label="First"
+                  onClick={(event) => invokeBoundaryCommand('selection.first', event.currentTarget)}
                 >
-                  Reconnect live updates
+                  <SkipBack aria-hidden="true" />
                 </button>
-              </>
-            ) : synchronization.sessionId === sessionId && synchronization.phase === 'resyncing' ? (
-              'Reconnecting…'
-            ) : live ? (
-              'Live'
-            ) : (
-              'Connecting…'
-            )}
-          </p>
-          {live?.active?.state.kind === 'awaiting_credential_availability' && (
-            <p role="status" className="availability-tag">
-              Waiting for credentials · {enumLabel(live.active.state.cause)}
-            </p>
-          )}
-          {(live?.reconciliation || live?.runner) && (
-            <div className="session-live-facts">
-              {live.reconciliation && (
-                <span className="availability-tag">
-                  Recovery needed · {enumLabel(live.reconciliation.kind)}
-                </span>
-              )}
-              {live.runner && (
-                <span className="availability-tag">
-                  Runner: {enumLabel(live.runner.state)}
-                  {live.runner.state === 'pinned' &&
-                    `, ${enumLabel(live.runner.connection_health)}`}
-                </span>
-              )}
+                <button
+                  type="button"
+                  title="Latest (G)"
+                  aria-label="Latest"
+                  onClick={(event) => invokeBoundaryCommand('selection.last', event.currentTarget)}
+                >
+                  <SkipForward aria-hidden="true" />
+                </button>
+              </div>
             </div>
-          )}
+            <div className="session-header-line session-header-secondary">
+              <span role="status">
+                {followFailed
+                  ? 'Live updates unavailable.'
+                  : synchronization.phase === 'resyncing'
+                    ? 'Reconnecting…'
+                    : live
+                      ? 'Live'
+                      : 'Connecting…'}
+              </span>
+              <details className="session-header-details">
+                <summary>Session details</summary>
+                <div className="session-header-detail-content">
+                  <p>Session {sessionId}</p>
+                  <dl className="session-telemetry">
+                    <div>
+                      <dt>Items</dt>
+                      <dd>{displayedSession.descriptor.sizes.item_count}</dd>
+                    </div>
+                    <div>
+                      <dt>Active</dt>
+                      <dd>{displayedSession.descriptor.work.active_turn_count}</dd>
+                    </div>
+                    <div>
+                      <dt>Queued</dt>
+                      <dd>{displayedSession.descriptor.work.queued_turn_count}</dd>
+                    </div>
+                    <div>
+                      <dt>Up to date as of</dt>
+                      <dd>{displayedSession.descriptor.observed_through}</dd>
+                    </div>
+                  </dl>
+                  {displayedSession.descriptor.supervision && (
+                    <section className="session-provenance" aria-label="Session supervision">
+                      <p>
+                        {displayedSession.descriptor.supervision.pending
+                          ? 'Recovery required'
+                          : 'Recovery recorded'}
+                      </p>
+                      <p>
+                        {enumLabel(displayedSession.descriptor.supervision.class)} ·{' '}
+                        <code>{displayedSession.descriptor.supervision.cause_code}</code>
+                      </p>
+                    </section>
+                  )}
+                  {displayedSession.descriptor.repository_watch && (
+                    <section className="session-provenance" aria-label="Repository watch">
+                      Repository watch · {displayedSession.descriptor.repository_watch.repository}
+                      {displayedSession.descriptor.repository_watch.pull_request !== null &&
+                        ` #${displayedSession.descriptor.repository_watch.pull_request}`}
+                      {' · Rule '}
+                      {displayedSession.descriptor.repository_watch.rule_id}
+                      {' v'}
+                      {displayedSession.descriptor.repository_watch.rule_revision}
+                      {' · '}
+                      {enumLabel(displayedSession.descriptor.repository_watch.event_kind)}
+                      <details>
+                        <summary>Trigger details</summary>
+                        <p>
+                          Trigger {displayedSession.descriptor.repository_watch.dispatch_id}
+                          {' · Action '}
+                          {displayedSession.descriptor.repository_watch.action_ordinal}
+                        </p>
+                        <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>
+                      </details>
+                    </section>
+                  )}
+                  <div className="session-window-controls" role="toolbar" aria-label="Timeline">
+                    <button
+                      type="button"
+                      disabled={!displayedSession.window.continuation_before}
+                      onClick={() => {
+                        const address = displayedSession.window.continuation_before?.event_sequence
+                        if (address) {
+                          manualAnchorRef.current = { kind: 'before', eventSequence: address }
+                          void refetchSession()
+                        }
+                      }}
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!displayedSession.window.continuation_after}
+                      onClick={() => {
+                        const address = displayedSession.window.continuation_after?.event_sequence
+                        if (address) {
+                          manualAnchorRef.current = { kind: 'after', eventSequence: address }
+                          void refetchSession()
+                        }
+                      }}
+                    >
+                      Next
+                    </button>
+                    <span hidden={!showEvents}>
+                      {displayedSession.window.items.length} events ·{' '}
+                      {displayedSession.window.projected_structured_bytes} B
+                    </span>
+                  </div>
+                  {followFailed && (
+                    <button
+                      type="button"
+                      onClick={() => dispatch(actions.sessionFollowReconnectRequested())}
+                    >
+                      Reconnect live updates
+                    </button>
+                  )}
+                  {live?.active?.state.kind === 'awaiting_credential_availability' && (
+                    <p role="status" className="availability-tag">
+                      Waiting for credentials · {enumLabel(live.active.state.cause)}
+                    </p>
+                  )}
+                  {(live?.reconciliation || live?.runner) && (
+                    <div className="session-live-facts">
+                      {live.reconciliation && (
+                        <span className="availability-tag">
+                          Recovery needed · {enumLabel(live.reconciliation.kind)}
+                        </span>
+                      )}
+                      {live.runner && (
+                        <span className="availability-tag">
+                          Runner: {enumLabel(live.runner.state)}
+                          {live.runner.state === 'pinned' &&
+                            `, ${enumLabel(live.runner.connection_health)}`}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </details>
+            </div>
+          </header>
           <section
             ref={showEvents ? undefined : timelineRef}
             tabIndex={showEvents ? -1 : 0}
@@ -785,7 +719,7 @@ export function SessionWorkspaceSurface({
           stateUnavailable={followFailed && live === null}
           supervision={displayedSession?.descriptor.supervision ?? null}
           onAccepted={refetchSession}
-          onEscape={() => entryInput.current?.focus()}
+          onEscape={() => timelineRef.current?.focus()}
         />
       )}
     </div>
