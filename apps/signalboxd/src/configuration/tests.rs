@@ -129,6 +129,8 @@ version = 1
 [numeric_bounds]
 max_git_object_bytes = "none"
 max_image_presentation_bytes = "none"
+max_raster_dimension = "none"
+max_document_presentation_bytes = "none"
 max_image_request_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
@@ -4120,6 +4122,56 @@ fn configuration_rejects_an_unknown_delivery() {
 }
 
 #[test]
+fn configuration_rejects_invalid_onepassword_sources() {
+    for delivery in [
+        "delivery = \"onepassword\"\nitem = \"not-a-reference\"\nexecutable = \"/usr/bin/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://\"\nexecutable = \"/usr/bin/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://vault\"\nexecutable = \"/usr/bin/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://vault/item\"\nexecutable = \"/usr/bin/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://vault//field\"\nexecutable = \"/usr/bin/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = \"relative/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"",
+    ] {
+        let source = CONFIGURATION.replace(
+            "delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"",
+            delivery,
+        );
+        assert!(HubModelConfiguration::parse(&source).is_err(), "{delivery}");
+    }
+}
+
+#[test]
+fn onepassword_references_require_nonempty_vault_item_and_field_segments() {
+    for (item, admitted) in [
+        ("op://vault", false),
+        ("op:///", false),
+        ("op://vault/item", false),
+        ("op:///item/field", false),
+        ("op://vault//field", false),
+        ("op://vault/item/", false),
+        ("op://vault/item/section//field", false),
+        ("op://vault/item/field", true),
+        ("op://vault/item/section/field", true),
+        ("op://vault/item/section/field/extra", false),
+    ] {
+        let source = CONFIGURATION.replace(
+            "delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"",
+            &format!("delivery = \"onepassword\"\nitem = {item:?}\nexecutable = \"/usr/bin/op\""),
+        );
+        let result = HubModelConfiguration::parse(&source);
+        if admitted {
+            assert!(result.is_ok(), "{item}");
+        } else {
+            assert_eq!(
+                result.err(),
+                Some(HubModelConfigurationError::InvalidCredentialDelivery),
+                "{item}"
+            );
+        }
+    }
+}
+
+#[test]
 fn configuration_rejects_invalid_external_credential_sources() {
     for delivery in [
         "delivery = \"environment\"\nvariable = \"\"",
@@ -4237,6 +4289,50 @@ fn configuration_rejects_duplicate_normalized_file_paths_for_one_adapter() {
         HubModelConfiguration::parse(&duplicate_path).err(),
         Some(HubModelConfigurationError::InvalidCredentialDelivery)
     );
+}
+
+#[test]
+fn configuration_rejects_duplicate_onepassword_sources_for_one_adapter() {
+    let duplicate_source = CONFIGURATION
+        .replace(
+            "delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"",
+            "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = \"/usr/bin/op\"",
+        )
+        .replace(
+            "delivery = \"file\"\nfile = \"/run/secrets/anthropic-overflow\"",
+            "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = \"/usr/bin/op\"",
+        );
+
+    HubModelConfiguration::parse(&duplicate_source.replacen(
+        "op://fixture/account/token",
+        "op://fixture/another-account/token",
+        1,
+    ))
+    .expect("distinct vault items");
+
+    for source in [
+        duplicate_source.clone(),
+        duplicate_source.replacen(
+            "op://fixture/account/token",
+            "op://fixture/account/other-field",
+            1,
+        ),
+        duplicate_source.replacen(
+            "op://fixture/account/token",
+            "op://fixture/account/section/field",
+            1,
+        ),
+        duplicate_source.replacen(
+            "executable = \"/usr/bin/op\"",
+            "executable = \"/usr/bin/op-wrapper\"",
+            1,
+        ),
+    ] {
+        assert_eq!(
+            HubModelConfiguration::parse(&source).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
 }
 
 #[test]
@@ -6743,4 +6839,111 @@ fn file_image_configuration_lowers_adapter_capabilities_and_none_retains_them() 
         }
     }
     assert!(images > 0);
+}
+
+#[test]
+fn github_onepassword_profiles_preserve_polling_source_isolation() {
+    let configured = format!(
+        "{}\n[[credential_profiles]]\nname = \"github-primary\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/github/tools\"\nexecutable = \"/unused/op\"\n[[credential_profiles]]\nname = \"watch-vault\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/watcher/polling\"\nexecutable = \"/unused/wrapper\"\n",
+        configuration_with_repository_watch().replace(
+            &format!("credential_file = {WATCH_CREDENTIAL_FILE:?}"),
+            "credential_profile = \"watch-vault\""
+        )
+    );
+    let distinct = HubModelConfiguration::parse(&configured).expect("distinct vault items");
+    assert!(!distinct.github_tool_credential_conflicts(Path::new("/unused/fallback")));
+    for shared in [
+        configured.replace("op://fixture/watcher/polling", "op://fixture/github/tools"),
+        configured.replace(
+            "op://fixture/watcher/polling",
+            "op://fixture/github/polling",
+        ),
+        configured.replace(
+            "op://fixture/watcher/polling",
+            "op://fixture/github/section/polling",
+        ),
+        configured.replace(
+            "credential_profile = \"watch-vault\"",
+            "credential_profile = \"github-primary\"",
+        ),
+    ] {
+        let shared = HubModelConfiguration::parse(&shared).expect("profiles parse");
+        assert!(shared.github_tool_credential_conflicts(Path::new("/unused/fallback")));
+    }
+}
+
+#[test]
+fn repository_watch_rejects_shared_onepassword_items_across_repositories() {
+    let configured = format!(
+        "{}\n[[credential_profiles]]\nname = \"watch-vault-first\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/first/credential\"\nexecutable = \"/unused/op\"\n[[credential_profiles]]\nname = \"watch-vault-second\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/second/credential\"\nexecutable = \"/unused/wrapper\"\n",
+        configuration_with_repository_watch()
+            .replace(
+                &format!("credential_file = {WATCH_CREDENTIAL_FILE:?}"),
+                "credential_profile = \"watch-vault-first\""
+            )
+            .replace(
+                &format!("credential_file = {SECOND_WATCH_CREDENTIAL_FILE:?}"),
+                "credential_profile = \"watch-vault-second\""
+            )
+    );
+    HubModelConfiguration::parse(&configured).expect("distinct items admitted");
+    for shared in [
+        configured.replace(
+            "op://fixture/second/credential",
+            "op://fixture/first/credential",
+        ),
+        configured.replace(
+            "op://fixture/second/credential",
+            "op://fixture/first/other-field",
+        ),
+        configured.replace(
+            "op://fixture/second/credential",
+            "op://fixture/first/section/field",
+        ),
+        configured.replace(
+            "credential_profile = \"watch-vault-second\"",
+            "credential_profile = \"watch-vault-first\"",
+        ),
+    ] {
+        assert_eq!(
+            HubModelConfiguration::parse(&shared).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialItem)
+        );
+    }
+}
+
+#[test]
+fn file_document_configuration_applies_only_to_claude_and_lowers_its_byte_bound() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let configuration = format!(
+        "{}{CLAUDE_MODEL_ENTRY}",
+        configuration_with_claude_paths(&executable, &executable, root.path())
+    );
+    let bounded = HubModelConfiguration::parse(&configuration.replace(
+        "max_document_presentation_bytes = \"none\"",
+        "max_document_presentation_bytes = 1234",
+    ))
+    .unwrap();
+    let mut documents = 0;
+    for definition in bounded.runtime_model_capability_catalog().iter() {
+        if let Some(document) = definition.capabilities().document_presentation() {
+            documents += 1;
+            assert_eq!(document.maximum_document_bytes(), 1234);
+            assert!(document.admits("application/pdf", 1234));
+            assert!(!document.admits("application/pdf", 1235));
+        }
+    }
+    assert!(documents > 0);
+    let codex = HubModelConfiguration::parse(&configuration_with_api_metered_codex_model(
+        &executable,
+        root.path(),
+    ))
+    .unwrap();
+    assert!(
+        codex
+            .runtime_model_capability_catalog()
+            .iter()
+            .all(|definition| definition.capabilities().document_presentation().is_none())
+    );
 }

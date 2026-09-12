@@ -1,4 +1,4 @@
-//! Durable content-silent evidence for image results.
+//! Durable content-silent evidence for media results.
 
 use std::num::NonZeroU64;
 
@@ -122,15 +122,41 @@ impl MediaValidationIdentity {
     }
 }
 
-/// An image reference retaining independent source and presented evidence.
+/// The closed presentation kind retained with durable media evidence.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ToolMediaKind {
+    /// An encoded image.
+    Image,
+    /// A native PDF document.
+    Document,
+}
+
+/// A media reference retaining independent source and presented evidence.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ToolMediaReference {
+    kind: ToolMediaKind,
     presented: Box<MediaValidationIdentity>,
     source: Box<MediaValidationIdentity>,
     byte_length: NonZeroU64,
 }
 
 impl ToolMediaReference {
+    /// Admits a validated PDF within the compiled presentation ceiling.
+    pub fn direct_document(
+        identity: MediaValidationIdentity,
+        byte_length: NonZeroU64,
+    ) -> Option<Self> {
+        if identity.media_type() != "application/pdf" {
+            return None;
+        }
+        let mut reference = Self::image(identity.clone(), identity, byte_length)?;
+        reference.kind = ToolMediaKind::Document;
+        Some(reference)
+    }
+    /// Returns the retained presentation kind independently of MIME spelling.
+    pub const fn kind(&self) -> ToolMediaKind {
+        self.kind
+    }
     /// Admits a direct image within the compiled presentation ceiling.
     pub fn direct_image(
         identity: MediaValidationIdentity,
@@ -146,6 +172,7 @@ impl ToolMediaReference {
     ) -> Option<Self> {
         // docs/spec/file-and-media.md: the hard presented-image ceiling is eight MiB.
         (byte_length.get() <= 8 * 1024 * 1024).then_some(Self {
+            kind: ToolMediaKind::Image,
             presented: Box::new(presented),
             source: Box::new(source),
             byte_length,
@@ -159,7 +186,7 @@ impl ToolMediaReference {
     pub const fn source(&self) -> &MediaValidationIdentity {
         &self.source
     }
-    /// Returns the exact encoded image byte length.
+    /// Returns the exact encoded media byte length.
     pub const fn byte_length(&self) -> NonZeroU64 {
         self.byte_length
     }

@@ -367,12 +367,24 @@ where
                     .ok()
             })
             .and_then(|(target, _)| self.capabilities.resolve(target))
+            .cloned();
+        let image_target = target
+            .as_ref()
             .and_then(|capability| capability.image_presentation())
             .cloned();
-        operation.image_presentation = target.clone();
+        let document_target = target
+            .as_ref()
+            .and_then(|capability| capability.document_presentation())
+            .cloned();
+        operation.image_presentation = image_target.clone();
+        operation.document_presentation = document_target.clone();
         if let Some(media) = &self.media {
             match cancellation
-                .run_until_cancelled(media.prepare(&mut operation, target.as_ref()))
+                .run_until_cancelled(media.prepare(
+                    &mut operation,
+                    image_target.as_ref(),
+                    document_target.as_ref(),
+                ))
                 .await
             {
                 None => {
@@ -388,7 +400,7 @@ where
                         MediaPreparationFailure::Unsupported => {
                             PreparationFailure::UnsupportedOperation {
                                 detail: String::from(
-                                    "image presentation exceeds target bounds or is unsupported",
+                                    "media presentation exceeds target bounds or is unsupported",
                                 ),
                             }
                         }
