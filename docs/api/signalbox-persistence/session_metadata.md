@@ -73,6 +73,7 @@ pub struct SessionMetadataRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl session_metadata::SessionMetadataRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
+    pub const fn for_title_update(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn handle(
         &self,
         command: signalbox_domain::ReplaceSessionMetadata,

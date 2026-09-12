@@ -50,7 +50,7 @@ pub(super) async fn replace_title(
     let Some(pool) = state.pool else {
         return title_unconfirmed();
     };
-    let repository = SessionMetadataRepository::new(pool);
+    let repository = SessionMetadataRepository::for_title_update(pool);
     let command = DurableCommandId::from_uuid(command);
     match repository.load_command(command).await {
         Ok(Some(recorded)) => {
@@ -99,7 +99,7 @@ pub(super) async fn replace_title(
         .await
     {
         Ok(ReplaceSessionMetadataOutcome::Recorded(result)) => title_result(&result),
-        Ok(ReplaceSessionMetadataOutcome::ConflictingReuse { .. }) => title_unconfirmed(),
+        Ok(ReplaceSessionMetadataOutcome::ConflictingReuse { .. }) => web_input_conflict(),
         Err(_) => title_unconfirmed(),
     }
 }
@@ -197,9 +197,10 @@ mod tests {
             true,
         )
         .expect("metadata");
+        let initial_command = DurableCommandId::from_uuid(Uuid::now_v7());
         repository
             .handle(ReplaceSessionMetadata::new(
-                DurableCommandId::from_uuid(Uuid::now_v7()),
+                initial_command,
                 session,
                 initial,
             ))
@@ -213,6 +214,15 @@ mod tests {
             None,
             None,
             None,
+        );
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(session, initial_command, "Initial"))
+                .await
+                .expect("full replacement collision")
+                .status(),
+            StatusCode::CONFLICT
         );
         let command = DurableCommandId::from_uuid(Uuid::now_v7());
         assert_eq!(
@@ -236,6 +246,14 @@ mod tests {
             [("source", "fixture")]
         );
         assert!(renamed.content().archived());
+        assert!(matches!(
+            repository.load_command(command).await,
+            Err(SessionMetadataRepositoryError::DifferentCommandKind { .. })
+        ));
+        assert!(matches!(
+            repository.handle(ReplaceSessionMetadata::new(command, session, renamed.content().clone())).await.expect("full replacement collision"),
+            signalbox_persistence::session_metadata::ReplaceSessionMetadataHandlingOutcome::ConflictingReuse { .. }
+        ));
         let later = SessionMetadataContent::try_new(Some("Later".into()), vec![], vec![], false)
             .expect("later metadata");
         repository
@@ -272,6 +290,78 @@ mod tests {
                 .status(),
             StatusCode::CONFLICT
         );
+        let title_repository = SessionMetadataRepository::for_title_update(pool.clone());
+        let resampled =
+            SessionMetadataContent::try_new(Some("Renamed".into()), vec![], vec![], false)
+                .expect("resampled preserved fields");
+        assert!(matches!(
+            title_repository.handle(ReplaceSessionMetadata::new(command, session, resampled)).await.expect("transaction replay"),
+            signalbox_persistence::session_metadata::ReplaceSessionMetadataHandlingOutcome::Recorded(_)
+        ));
+        assert_eq!(
+            repository
+                .load_session_metadata(session)
+                .await
+                .expect("read")
+                .expect("metadata")
+                .content(),
+            &later
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn title_requests_reject_full_metadata_command_identity() {
+        let (_container, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(8)
+                .await
+                .expect("PostgreSQL fixture");
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let command = DurableCommandId::from_uuid(Uuid::now_v7());
+        let full = SessionMetadataContent::try_new(
+            Some("Same title".into()),
+            vec!["full".into()],
+            vec![("source".into(), "protocol".into())],
+            true,
+        )
+        .expect("full replacement");
+        let repository = SessionMetadataRepository::new(pool.clone());
+        let title_repository = SessionMetadataRepository::for_title_update(pool.clone());
+        assert!(
+            title_repository
+                .load_command(command)
+                .await
+                .expect("unseen title request")
+                .is_none()
+        );
+        repository
+            .handle(ReplaceSessionMetadata::new(command, session, full))
+            .await
+            .expect("record full replacement");
+        let router =
+            super::super::production_router(None, Some(pool.clone()), None, None, None, None, None);
+        assert_eq!(
+            router
+                .oneshot(request(session, command, "Same title"))
+                .await
+                .expect("response")
+                .status(),
+            StatusCode::CONFLICT
+        );
+        // Exercise the transaction's collision path after an earlier unseen-command read.
+        let title =
+            SessionMetadataContent::try_new(Some("Same title".into()), vec![], vec![], false)
+                .expect("title intent");
+        let request =
+            ReplaceSessionMetadataRequest::try_new(command, session, title).expect("request");
+        assert!(matches!(
+            ReplaceSessionMetadataService::new(title_repository)
+                .execute(request)
+                .await
+                .expect("raced full replacement"),
+            ReplaceSessionMetadataOutcome::ConflictingReuse { .. }
+        ));
         pool.close().await;
     }
 }
