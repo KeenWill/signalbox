@@ -437,11 +437,13 @@ function TurnContent({
             {detail === 'condensed' &&
               part.tools.map((entry) => (
                 <div className="session-tool-slot" key={entry.request_id}>
-                  {renderTool ? (
-                    renderTool(entry, 'condensed')
-                  ) : (
-                    <ToolSummary tool={entry} turn={turn} sessionId={sessionId} limits={limits} />
-                  )}
+                  <ToolSummary
+                    tool={entry}
+                    turn={turn}
+                    sessionId={sessionId}
+                    limits={limits}
+                    renderTool={renderTool}
+                  />
                 </div>
               ))}
           </section>
@@ -449,11 +451,13 @@ function TurnContent({
       )}
       {detail === 'results' && tool && (
         <div className="session-tool-slot">
-          {renderTool ? (
-            renderTool(tool, 'condensed')
-          ) : (
-            <ToolSummary tool={tool} turn={turn} sessionId={sessionId} limits={limits} />
-          )}
+          <ToolSummary
+            tool={tool}
+            turn={turn}
+            sessionId={sessionId}
+            limits={limits}
+            renderTool={renderTool}
+          />
           {more(
             turn.events.find(
               (event) =>
@@ -473,11 +477,13 @@ function ToolSummary({
   turn,
   sessionId,
   limits,
+  renderTool,
 }: {
   tool: WebTimelineToolAttempt
   turn: TranscriptTurn
   sessionId: string
   limits: SessionTranscriptLimits
+  renderTool?: SessionTranscriptTextProps['renderTool']
 }) {
   const evidence = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
   const event = turn.events.findLast(
@@ -527,14 +533,20 @@ function ToolSummary({
   const loaded = returned?.type === 'physical_attempt' ? returned : null
   return (
     <section aria-label={`${tool.tool_name} details`}>
-      <strong>{tool.tool_name}</strong>
-      <small>Argument and output summaries</small>
-      {tool.arguments && <p className="session-tool-summary">{tool.arguments.text}</p>}
-      {(evidence?.result ?? loaded?.result) && (
-        <p className="session-tool-summary">{(evidence?.result ?? loaded?.result)?.text}</p>
-      )}
-      {(evidence?.failure ?? loaded?.failure) && (
-        <p className="session-tool-summary">{(evidence?.failure ?? loaded?.failure)?.text}</p>
+      {renderTool ? (
+        renderTool({ ...tool, evidence: loaded ?? tool.evidence }, 'condensed')
+      ) : (
+        <>
+          <strong>{tool.tool_name}</strong>
+          <small>Argument and output summaries</small>
+          {tool.arguments && <p className="session-tool-summary">{tool.arguments.text}</p>}
+          {(evidence?.result ?? loaded?.result) && (
+            <p className="session-tool-summary">{(evidence?.result ?? loaded?.result)?.text}</p>
+          )}
+          {(evidence?.failure ?? loaded?.failure) && (
+            <p className="session-tool-summary">{(evidence?.failure ?? loaded?.failure)?.text}</p>
+          )}
+        </>
       )}
       {needsOutput && output.isPending && <small role="status">Loading output…</small>}
       {needsOutput && output.isError && <small role="alert">Output could not be loaded.</small>}

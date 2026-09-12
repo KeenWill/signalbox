@@ -31,6 +31,18 @@ function Scenario() {
             limits={webContractBootstrapFixture.limits}
             eventSequence={params.get('around') ?? undefined}
             turnId={params.get('turn') ?? undefined}
+            renderTool={
+              params.has('renderer')
+                ? (tool, detail) => (
+                    <section aria-label="Injected tool renderer" data-detail={detail}>
+                      <p>{tool.arguments?.text}</p>
+                      {tool.evidence.type === 'physical_attempt' && (
+                        <p>{tool.evidence.result?.text}</p>
+                      )}
+                    </section>
+                  )
+                : undefined
+            }
           />
           {params.has('live') && (
             <button type="button" onClick={() => setObserved((value) => value + 1)}>

@@ -150,3 +150,17 @@ test('keeps turn summaries and level controls usable at phone width', async ({
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
   await page.screenshot({ path: testInfo.outputPath('turn-tools-phone.png') })
 })
+
+test('supplies loaded arguments and output to the tool renderer slot', async ({ page }) => {
+  await turnApi(page)
+  await page.goto('/src/session-timeline/transcript-scenario.html?renderer=true')
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+  const renderer = page.getByRole('region', { name: 'Injected tool renderer' })
+  await expect(renderer).toContainText('release status')
+  await expect(renderer).toContainText('passed')
+  await expect(renderer).toHaveAttribute('data-detail', 'condensed')
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  await expect(renderer).toHaveAttribute('data-detail', 'full')
+  await page.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await expect(renderer).toContainText('passed')
+})
