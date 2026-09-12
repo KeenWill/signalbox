@@ -174,6 +174,11 @@ recovery is registered as part of the reader's validation.
 
 ## Image presentation
 
+The PDF reader's `page_image` view renders one page inside its sandboxed worker.
+`page` is one-based; optional positive `scale` defaults to 1 and is reduced to
+fit the raster dimension and pixel bounds. The derived PNG retains its PDF
+source identity and follows generated-image validation and publication.
+
 The SVG reader's `raster` view renders a PNG inside its sandboxed worker, with
 an embedded fallback font. It preserves the SVG source identity and presents the
 independently validated image reader identity through generated-image
