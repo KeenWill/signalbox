@@ -1,17 +1,16 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { type Dispatch, type FormEvent, type RefObject, type SetStateAction, useMemo } from 'react'
+import { type Dispatch, type RefObject, type SetStateAction, useMemo } from 'react'
 import type { CommandContext } from './commands'
 import { ArtifactRenderer, selectImageView } from './features/artifacts/ArtifactRenderer'
 import { selectBoundedOriginalView } from './features/artifacts/artifactScenario'
 import type { ArtifactItem } from './features/artifacts/artifactTypes'
+import { useArtifactDescriptor } from './features/artifacts/descriptorService'
 import type { WebBlobDescriptor } from './generated/web-contract.mjs'
 import {
   type BlobDescriptorInput,
   ProductInputError,
   ProductRequestError,
   ProductTransportError,
-  productTransport,
 } from './product'
 
 export interface ArtifactRequest extends BlobDescriptorInput {
@@ -38,8 +37,6 @@ export const emptyArtifactInspectorState: ArtifactInspectorState = {
   request: null,
 }
 
-const descriptorQueryPrefix = ['production', 'blob-descriptor'] as const
-
 // Resolution identities are allocated from a module-scoped counter rather than counted within the
 // inspector: the inspector's state unmounts with its route (an operator detour through Scenario
 // studio), while the original-load projection is mounted above the router and outlives it. A
@@ -54,6 +51,15 @@ export const nextResolutionSequence = (): number => {
   return lastResolutionSequence
 }
 
+export const attachmentTypeLabel = (mediaType?: string | null): string => {
+  if (mediaType?.startsWith('image/')) return 'Image'
+  if (mediaType?.startsWith('audio/')) return 'Audio'
+  if (mediaType?.startsWith('video/')) return 'Video'
+  if (mediaType === 'application/pdf') return 'PDF'
+  if (mediaType?.startsWith('text/')) return 'Text file'
+  return 'File'
+}
+
 // Project an operator-resolved descriptor into the typed artifact the shared renderer registry
 // consumes. The identity carries the resolution sequence so a re-resolve mounts a fresh renderer
 // with fresh original-load state instead of inheriting the previous resolution's settled state.
@@ -63,7 +69,8 @@ export const inspectedArtifact = (
 ): ArtifactItem => {
   const identity = {
     id: artifactResolutionId({ digest: descriptor.digest, sequence }),
-    displayName: descriptor.display_filename[0] ?? descriptor.digest,
+    displayName:
+      descriptor.display_filename[0] ?? attachmentTypeLabel(descriptor.declared_media_type),
   }
   return selectImageView(descriptor) !== undefined ||
     selectBoundedOriginalView(descriptor) !== undefined
@@ -83,10 +90,8 @@ const errorMessage = (error: Error): string => {
 export function ArtifactInspector({
   available,
   commandContext,
-  digestInputRef,
   onClose,
   state,
-  onStateChange,
 }: {
   available: boolean
   commandContext: CommandContext
@@ -95,19 +100,8 @@ export function ArtifactInspector({
   state: ArtifactInspectorState
   onStateChange: Dispatch<SetStateAction<ArtifactInspectorState>>
 }) {
-  const queryClient = useQueryClient()
-  const { digest, mediaType, displayFilename, request } = state
-  const descriptor = useQuery({
-    queryKey: request
-      ? [...descriptorQueryPrefix, request.sequence, request.digest]
-      : [...descriptorQueryPrefix, 'idle'],
-    queryFn: ({ signal }) => {
-      if (!request) throw new Error('Artifact descriptor query started without an identity')
-      return productTransport.readBlobDescriptor(request, signal)
-    },
-    enabled: request !== null && available,
-    staleTime: Number.POSITIVE_INFINITY,
-  })
+  const { request } = state
+  const descriptor = useArtifactDescriptor(available ? request : null)
 
   const resolved = descriptor.data
   const sequence = request?.sequence ?? 0
@@ -132,80 +126,26 @@ export function ArtifactInspector({
     [artifact, commandContext],
   )
 
-  const resolveDescriptor = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    queryClient.removeQueries({ queryKey: descriptorQueryPrefix })
-    onStateChange({
-      ...state,
-      request: {
-        digest,
-        mediaType,
-        displayFilename: displayFilename || undefined,
-        sequence: nextResolutionSequence(),
-      },
-    })
-  }
-
   return (
     <div className="artifact-inspector">
       <header>
         <div>
-          <h2>Artifact inspector</h2>
+          <h2>Attachment details</h2>
         </div>
         <button
           className="icon-button"
           type="button"
-          aria-label="Close artifact inspector"
+          aria-label="Close attachment details"
           onClick={onClose}
         >
           <X />
         </button>
       </header>
-      {!available ? (
-        <div className="artifact-capability" role="status">
-          Blob lookup unavailable
-        </div>
-      ) : (
-        <form onSubmit={resolveDescriptor}>
-          <label>
-            Digest
-            <input
-              ref={digestInputRef}
-              name="digest"
-              value={digest}
-              onChange={(event) => onStateChange({ ...state, digest: event.target.value })}
-              placeholder="sha256:…"
-              pattern="sha256:[0-9a-f]{64}"
-              autoComplete="off"
-              required
-            />
-          </label>
-          <label>
-            Declared media type
-            <input
-              name="media-type"
-              value={mediaType}
-              onChange={(event) => onStateChange({ ...state, mediaType: event.target.value })}
-              placeholder="image/png"
-              autoComplete="off"
-              required
-            />
-          </label>
-          <label>
-            Display filename <span>optional</span>
-            <input
-              name="display-filename"
-              value={displayFilename}
-              onChange={(event) => onStateChange({ ...state, displayFilename: event.target.value })}
-              placeholder="example.png"
-              autoComplete="off"
-            />
-          </label>
-          <button type="submit" disabled={descriptor.isFetching}>
-            {descriptor.isFetching ? 'Looking up…' : 'Look up'}
-          </button>
-        </form>
+      {!available && <p role="status">Attachments unavailable</p>}
+      {available && request === null && (
+        <p>Select an attachment in a conversation to view its details.</p>
       )}
+      {request !== null && descriptor.isPending && <p role="status">Loading attachment…</p>}
       {descriptor.isError && (
         <div className="artifact-request-error" role="alert">
           <strong>Artifact unavailable</strong>
@@ -235,7 +175,10 @@ export function ArtifactInspector({
                         document.activeElement === opener ||
                         (!opener.isConnected && document.activeElement === document.body)
                       )
-                        digestInputRef?.current?.focus()
+                        opener
+                          .closest('.artifact-inspector')
+                          ?.querySelector<HTMLButtonElement>('button')
+                          ?.focus()
                     })
                   }
                 })

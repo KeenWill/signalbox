@@ -1,0 +1,66 @@
+import { readFileSync } from 'node:fs'
+import { expect, test } from '@playwright/test'
+import { fallbackDescriptor, imageDescriptor } from './artifactScenario'
+
+const withoutFilename = (descriptor: typeof imageDescriptor) => ({
+  ...descriptor,
+  display_filename: [],
+  available_views: descriptor.available_views.map((view) => ({
+    ...view,
+    content_url: view.content_url.replace(/&display_filename=[^&]*/u, ''),
+  })),
+})
+const imageAttachment = withoutFilename(imageDescriptor)
+const fileAttachment = withoutFilename(fallbackDescriptor)
+
+const preview = readFileSync(new URL('../../../e2e/fixtures/preview.png', import.meta.url))
+
+test('renders inline images and opens attachment details by keyboard', async ({
+  page,
+}, testInfo) => {
+  const errors: string[] = []
+  const originals: string[] = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  page.on('request', (request) => {
+    if (request.url().includes('/download')) originals.push(request.url())
+  })
+  await page.route('**/api/blobs/**/descriptor?*', (route) => {
+    const descriptor = decodeURIComponent(route.request().url()).includes(imageDescriptor.digest)
+      ? imageAttachment
+      : fileAttachment
+    return route.fulfill({ json: descriptor })
+  })
+  await page.route('**/api/blobs/**/content/image-png', (route) =>
+    route.fulfill({ body: preview, contentType: 'image/png' }),
+  )
+  await page.goto('/src/features/artifacts/scenario.html')
+  await expect(page.getByRole('img', { name: 'Preview of Image' })).toBeVisible()
+  const file = page.getByRole('button', {
+    name: 'File · application/octet-stream · 4,096 bytes',
+    exact: true,
+  })
+  await expect(file).toBeVisible()
+  await file.focus()
+  await page.keyboard.press('Enter')
+  const pane = page.getByRole('dialog', { name: 'Attachment details' })
+  await expect(pane).toBeVisible()
+  await expect(pane.getByRole('textbox')).toHaveCount(0)
+  await expect(pane.getByRole('link', { name: 'Download' })).toHaveAttribute(
+    'href',
+    fileAttachment.available_views[0]?.content_url ?? '',
+  )
+  await page.keyboard.press('Escape')
+  await expect(pane).not.toBeVisible()
+  await expect(file).toBeFocused()
+  await page.screenshot({ path: testInfo.outputPath('inline-attachments.png'), fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await file.click()
+  await expect(pane).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({
+    path: testInfo.outputPath('attachment-details-phone.png'),
+    fullPage: true,
+  })
+  expect(originals).toEqual([])
+  expect(errors).toEqual([])
+})
