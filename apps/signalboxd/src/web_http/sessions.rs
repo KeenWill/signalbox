@@ -10,8 +10,8 @@ use signalbox_application::{
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, UuidV7SessionIdGenerator,
 };
 use signalbox_domain::{
-    DurableCommandId, SessionId, SessionOwnership, SessionPlacement, SessionTemplateName,
-    StartGate, UserContent,
+    CreateSession, DurableCommandId, SessionCreationCause, SessionCreationProvenance, SessionId,
+    SessionTemplateName, TranscriptAncestry, UserContent,
 };
 use signalbox_persistence::create_session::{
     CreateSessionRepository, CreateSessionRepositoryError,
@@ -72,15 +72,22 @@ pub(super) async fn create_session(
     let session = match repository.load(command_id).await {
         Ok(Some(recorded)) => {
             let command = recorded.command();
-            if command
+            let Some(template) = command
                 .template_provenance()
-                .map(|provenance| provenance.name())
-                != Some(&name)
-                || command.placement() != &SessionPlacement::pathless()
-                || command.start_gate() != StartGate::Open
-                || command.ownership() != SessionOwnership::Unmonitored
-                || command.finish_condition().is_some()
-            {
+                .filter(|template| template.name() == &name)
+            else {
+                return web_input_conflict();
+            };
+            let expected = CreateSession::new_from_template(
+                command_id,
+                SessionCreationProvenance::new(
+                    SessionCreationCause::Interactive,
+                    TranscriptAncestry::None,
+                ),
+                template.clone(),
+                command.initial_configuration_defaults().clone(),
+            );
+            if command != &expected {
                 return web_input_conflict();
             }
             recorded.applied_result().session()
@@ -175,6 +182,8 @@ mod tests {
     };
     use tower::ServiceExt as _;
 
+    const TEMPLATES: &str = "version = 1\n[[templates]]\nname = \"chat\"\nversion = 1\nalias = \"30000000-0000-4000-8000-000000000001\"\ndangerous_tool_auto_approval = false\nsystem_prompt = \"Follow the fixture instructions\"\n";
+
     struct EmptySweep;
     impl EligibilitySweep for EmptySweep {
         type Error = std::convert::Infallible;
@@ -228,7 +237,7 @@ mod tests {
             signalbox_persistence::test_support::postgres::migrated_postgres(64)
                 .await
                 .expect("PostgreSQL fixture");
-        let templates = "version = 1\n[[templates]]\nname = \"chat\"\nversion = 1\nalias = \"30000000-0000-4000-8000-000000000001\"\ndangerous_tool_auto_approval = false\nsystem_prompt = \"Follow the fixture instructions\"\n";
+        let templates = TEMPLATES;
         let command = Uuid::now_v7();
         let input = Uuid::now_v7();
         let response = router(pool.clone(), templates)
@@ -271,6 +280,46 @@ mod tests {
             .await
             .expect("input count");
         assert_eq!(accepted, 1);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn creation_replay_rejects_a_different_creation_cause() {
+        use signalbox_domain::{ModuleDispatch, RepoWatchDispatchId, SessionOwnership, StartGate};
+        let (_container, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(8)
+                .await
+                .expect("PostgreSQL fixture");
+        let models =
+            crate::HubModelConfiguration::parse(crate::configuration::tests::CONFIGURATION)
+                .expect("models");
+        let templates = crate::SessionTemplateConfiguration::parse_snapshot(TEMPLATES, &models)
+            .expect("templates");
+        let template = templates
+            .resolve(&SessionTemplateName::try_new("chat".into()).expect("name"))
+            .expect("template");
+        let command = Uuid::now_v7();
+        let creation = CreateSession::new_from_template(
+            DurableCommandId::from_uuid(command),
+            SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
+                dispatch: RepoWatchDispatchId::from_uuid(Uuid::now_v7()),
+            }),
+            template.provenance().clone(),
+            template.defaults().clone(),
+        )
+        .with_lifecycle(StartGate::Open, SessionOwnership::Unmonitored, None)
+        .prepare(SessionId::from_uuid(Uuid::now_v7()))
+        .expect("module creation");
+        CreateSessionRepository::new(pool.clone(), models.session_credential_pin())
+            .handle(creation)
+            .await
+            .expect("retained creation");
+        let response = router(pool.clone(), "version = 1\n").oneshot(
+            Request::post("/api/sessions").header("host", "localhost").header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"command_id": command.to_string(), "template_name": "chat"}).to_string())).expect("creation request")
+        ).await.expect("response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
         pool.close().await;
     }
 
