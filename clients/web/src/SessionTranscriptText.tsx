@@ -12,7 +12,7 @@ import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { conversationEntryKey, hasConversationContent } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
-import { readTranscriptWindow, TRANSCRIPT_RETAINED_WINDOWS } from './session-timeline/transcript'
+import { TRANSCRIPT_RETAINED_WINDOWS, TranscriptWindowReader } from './session-timeline/transcript'
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
 import type { DetailMode } from './state'
 import { VirtualTranscript } from './Transcript'
@@ -113,12 +113,13 @@ function TranscriptWindow({
   limits,
   eventSequence,
 }: SessionTranscriptTextProps) {
+  const reader = useMemo(() => new TranscriptWindowReader(sessionId), [sessionId])
   const transcript = useInfiniteQuery({
     queryKey: ['production', 'scrolling-transcript', sessionId, eventSequence, limits],
     initialPageParam: (eventSequence
       ? { kind: 'around', eventSequence }
       : { kind: 'latest' }) as SessionWindowAnchor,
-    queryFn: ({ pageParam, signal }) => readTranscriptWindow(sessionId, pageParam, limits, signal),
+    queryFn: ({ pageParam, signal }) => reader.read(pageParam, limits, signal),
     getPreviousPageParam: (page): SessionWindowAnchor | undefined =>
       page.window.continuation_before
         ? {
@@ -238,7 +239,16 @@ function TranscriptWindow({
       <VirtualTranscript
         ids={ids}
         initialEnd={!eventSequence}
-        followEnd={!eventSequence}
+        followEnd={
+          !eventSequence &&
+          Boolean(
+            pages
+              ?.at(-1)
+              ?.details.some(
+                (page) => page.continuation || page.items.some((item) => visible.includes(item)),
+              ),
+          )
+        }
         selectedId={eventSequence}
         onEdge={(direction) => {
           if (transcript.isFetching || transcript.isError) return
