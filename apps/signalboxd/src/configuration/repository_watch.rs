@@ -424,6 +424,7 @@ pub(super) fn parse_repository_watch_configuration(
     let mut repositories = Vec::with_capacity(repository_tables.len());
     let mut repository_set = HashSet::with_capacity(repository_tables.len());
     let mut credential_file_references: Vec<PathBuf> = Vec::with_capacity(repository_tables.len());
+    let mut credential_variables = HashSet::with_capacity(repository_tables.len());
     let mut webhook_hook_ids = HashSet::with_capacity(repository_tables.len());
     let mut webhook_repository_count = 0_usize;
     for repository in repository_tables {
@@ -511,6 +512,12 @@ pub(super) fn parse_repository_watch_configuration(
                     .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
             })
             .transpose()?;
+        if let crate::credential_pools::GithubCredentialDelivery::Environment(variable) =
+            credential.delivery()
+            && !credential_variables.insert(variable.clone())
+        {
+            return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialVariable);
+        }
         if let crate::credential_pools::GithubCredentialDelivery::File(credential_file)
         | crate::credential_pools::GithubCredentialDelivery::KubernetesSecret(
             credential_file,

@@ -536,7 +536,8 @@ log, an error, or a durable record. Provider output follows the
 [runtime substrate](runtime-substrate.md). A credential for one repository never
 authorizes a request to another. That isolation comes from how a credential is
 provisioned or from the repository entry a runner selects; the daemon's
-code-host tools use one fixed credential reference.
+code-host tools use one fixed credential reference. Watched repositories cannot
+share a credential environment variable, including through different profiles.
 
 Errors, logs, and diagnostic evidence contain classes, counts, and canonical
 identifiers. They never contain source bytes, host or credential paths, raw or

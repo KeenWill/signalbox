@@ -1932,6 +1932,35 @@ fn repository_watch_rejects_duplicate_canonical_signal_reviewers() {
 }
 
 #[test]
+fn repository_watch_rejects_shared_environment_sources_across_repositories() {
+    let distinct = format!(
+        "{}\n[[credential_profiles]]\nname = \"watch-first\"\nadapter = \"github\"\ndelivery = \"environment\"\nvariable = \"WATCH_FIRST_TOKEN\"\n[[credential_profiles]]\nname = \"watch-second\"\nadapter = \"github\"\ndelivery = \"environment\"\nvariable = \"WATCH_SECOND_TOKEN\"\n",
+        configuration_with_repository_watch()
+            .replace(
+                &format!("credential_file = {WATCH_CREDENTIAL_FILE:?}"),
+                "credential_profile = \"watch-first\""
+            )
+            .replace(
+                &format!("credential_file = {SECOND_WATCH_CREDENTIAL_FILE:?}"),
+                "credential_profile = \"watch-second\""
+            )
+    );
+    HubModelConfiguration::parse(&distinct).expect("distinct environment sources admitted");
+    for shared in [
+        distinct.replace("WATCH_SECOND_TOKEN", "WATCH_FIRST_TOKEN"),
+        distinct.replace(
+            "credential_profile = \"watch-second\"",
+            "credential_profile = \"watch-first\"",
+        ),
+    ] {
+        assert_eq!(
+            HubModelConfiguration::parse(&shared).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialVariable)
+        );
+    }
+}
+
+#[test]
 fn repository_watch_rejects_a_shared_credential_file_reference() {
     let configured = configuration_with_repository_watch()
         .replace(SECOND_WATCH_CREDENTIAL_FILE, WATCH_CREDENTIAL_FILE);
