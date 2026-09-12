@@ -3,6 +3,7 @@ import type {
   WebSessionTimelineDescriptor,
   WebSessionTimelineDetail,
 } from '../src/generated/web-contract.mjs'
+import { BROWSER_PREFERENCES_KEY, createDefaultBrowserPreferences } from '../src/preferences'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { expect, type Page, test } from './fontTest'
 
@@ -937,7 +938,7 @@ for (const active of [false, true]) {
     const result = page.getByRole('link', { name: new RegExp(initialMessage) })
     await result.focus()
     await result.press('Enter')
-    await expect(page.getByRole('main')).toBeFocused()
+    await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeFocused()
     await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
     expect(api.state.historyReads).toEqual(['around'])
     expect(api.state.historyAddresses).toEqual(['41'])
@@ -948,6 +949,7 @@ for (const active of [false, true]) {
     )
     await page.getByRole('button', { name: /^Latest/ }).click()
     await expect.poll(() => api.state.historyReads).toEqual(['around', 'latest'])
+    await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
   })
 }
 
@@ -992,3 +994,28 @@ for (const action of ['switch', 'close', 'reopen'] as const) {
     await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
   })
 }
+
+test('keeps an explicit non-result event visible and focused in Results mode', async ({ page }) => {
+  const api = await sessionApi(page, true)
+  api.grow()
+  await page.addInitScript(
+    ({ key, preferences }) => {
+      localStorage.setItem(key, JSON.stringify(preferences))
+    },
+    {
+      key: BROWSER_PREFERENCES_KEY,
+      preferences: { ...createDefaultBrowserPreferences(), detail: 'results' },
+    },
+  )
+  await page.goto(`/sessions?session=${sessionId}&workspace=true&around=44`)
+  const timeline = page.getByRole('grid', { name: 'Session timeline' })
+  const match = timeline.getByRole('row').filter({ hasText: '44' })
+  await expect(match).toBeVisible()
+  await expect(match).toHaveAttribute('aria-selected', 'true')
+  await expect(timeline).toBeFocused()
+  await page.getByRole('button', { name: /^Latest/ }).click()
+  await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
+  await expect(match).toHaveCount(0)
+  await page.reload()
+  await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
+})

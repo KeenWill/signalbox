@@ -807,7 +807,7 @@ export function ProductApp({
       bootstrap.isSuccess &&
       (sessionState.workspace || sessionState.session) ? (
       <SessionWorkspaceSurface
-        key={`${sessionState.session ?? 'unselected'}:${sessionState.around ?? ''}`}
+        key={sessionState.session ?? 'unselected'}
         onSessionOpen={(session) =>
           updateSessionSearch(
             { ...sessionState, session, workspace: true, around: undefined },
@@ -818,6 +818,9 @@ export function ProductApp({
         onReturnToCatalog={() => context.unwindSurface?.()}
         initialSessionId={sessionState.session}
         initialAround={sessionState.around}
+        onAroundConsumed={() =>
+          updateSessionSearch({ ...sessionState, around: undefined }, 'replace')
+        }
         onTimelineIds={updateTimelineIds}
         onTimelineWindowAvailable={setTimelineWindowAvailable}
         onWindowRequestConsumed={consumeWindowRequest}
