@@ -11,7 +11,9 @@ import {
   ProductTransportError,
   productTransport,
   readSessionRates,
+  readSessionTranscript,
 } from './product'
+import { HttpSessionTimelineSource } from './session-timeline/model'
 import { actions, useAppDispatch, useAppSelector } from './state'
 import './catalog.css'
 
@@ -27,12 +29,39 @@ const activityTime = (unixMicroseconds: string) => {
   }).format(new Date(value))
 }
 
-const SessionTitle = ({ summary }: { summary: SessionSummary }) => (
-  <>
-    {summary.title_summary ?? 'Untitled session'}
-    {summary.title_truncated && <span className="catalog-title-truncated">Truncated</span>}
-  </>
-)
+async function readAutomaticTitle(sessionId: string, signal: AbortSignal) {
+  const bootstrap = await productTransport.readBootstrap(signal)
+  const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal)
+  const descriptor = await source.readDescriptor(sessionId, signal)
+  const pullRequest = descriptor.repository_watch?.pull_request
+  const prefix = pullRequest ? `PR #${pullRequest}` : ''
+  const page = await readSessionTranscript(
+    sessionId,
+    descriptor.first_address.event_sequence,
+    descriptor.latest_address.event_sequence,
+    null,
+    bootstrap.limits,
+    signal,
+  )
+  const message = page.items.find((item) => item.body.type === 'user_input')?.body
+  const text = message?.type === 'user_input' ? message.text.text.trim().split('\n', 1)[0] : ''
+  return [prefix, text].filter(Boolean).join(': ') || null
+}
+
+const SessionTitle = ({ summary }: { summary: SessionSummary }) => {
+  const automatic = useQuery({
+    queryKey: ['production', 'automatic-session-title', summary.session_id],
+    queryFn: ({ signal }) => readAutomaticTitle(summary.session_id, signal),
+    enabled: !summary.title_summary?.trim(),
+    gcTime: 0,
+  })
+  return (
+    <>
+      {summary.title_summary?.trim() || automatic.data || `Session ${summary.session_id}`}
+      {summary.title_truncated && <span className="catalog-title-truncated">Truncated</span>}
+    </>
+  )
+}
 
 export function SessionCatalogSurface({
   returnSessionId,
