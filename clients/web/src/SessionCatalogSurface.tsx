@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import type { WebSessionCatalogSnapshot } from './generated/web-contract.mjs'
@@ -53,6 +54,7 @@ export function SessionCatalogSurface({
   onTimelineIds: (ids: readonly string[]) => void
   onStateChange: (state: ProductSessionState, mode?: 'push' | 'close' | 'replace') => void
 }) {
+  const navigate = useNavigate()
   const dispatch = useAppDispatch()
   const keyboardSelection = useAppSelector((root) => root.app.selectedTimeline)
   const sessionButtons = useRef(new Map<string, HTMLButtonElement>())
@@ -75,7 +77,6 @@ export function SessionCatalogSurface({
     queryFn: ({ signal }) =>
       productTransport.readSessions(
         {
-          search: state.q,
           sort: state.sort ?? 'activity',
           includeArchived: state.archived ?? false,
           afterSession: state.afterSession,
@@ -152,6 +153,10 @@ export function SessionCatalogSurface({
       return
     }
     setSearchError(null)
+    if (q.trim()) {
+      void navigate({ to: '/$surface', params: { surface: 'search' }, search: { q: q.trim() } })
+      return
+    }
     const sort = form.get('sort') === 'identity' ? 'identity' : undefined
     const archived = form.get('archived') === 'on' ? true : undefined
     if (q === (state.q ?? '') && sort === state.sort && archived === state.archived) return
@@ -183,13 +188,13 @@ export function SessionCatalogSurface({
         key={JSON.stringify([state.q ?? null, state.sort ?? null, state.archived ?? null])}
       >
         <label className="catalog-search">
-          <span>Search titles</span>
+          <span>Search conversations</span>
           <span>
             <Search aria-hidden="true" />
             <input
               name="q"
               defaultValue={state.q}
-              placeholder="Search titles"
+              placeholder="Messages, tool arguments and results"
               onKeyDown={(event) => {
                 if (event.key !== 'Escape') return
                 event.currentTarget.closest('main')?.focus()
@@ -300,9 +305,6 @@ export function SessionCatalogSurface({
               </div>
               <div className="catalog-header-actions">
                 <span>{sessions.data.summaries.length} on this page</span>
-                <button type="button" onClick={() => onStateChange({ ...state, workspace: true })}>
-                  Open by ID
-                </button>
               </div>
             </header>
             {listed.length === 0 ? (
@@ -368,7 +370,9 @@ export function SessionCatalogSurface({
                           `${summary.active_turn_count} active · ${summary.queued_turn_count} queued`
                         )}
                       </span>
-                      <time>{activityTime(summary.last_activity.unix_microseconds)}</time>
+                      <time title="Last activity">
+                        {activityTime(summary.last_activity.unix_microseconds)}
+                      </time>
                       <ArrowRight aria-hidden="true" />
                     </button>
                   </li>
