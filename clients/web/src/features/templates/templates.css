@@ -148,3 +148,28 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.template-editor form {
+  display: grid;
+  gap: 8px;
+  padding-block: 8px;
+}
+
+.template-editor textarea {
+  width: 100%;
+  min-height: 320px;
+  resize: vertical;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-family: monospace;
+}
+
+.template-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}

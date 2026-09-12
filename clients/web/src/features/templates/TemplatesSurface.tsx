@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'react'
 import type { WebTemplateSummary } from '../../generated/web-contract.mjs'
 import { HttpTemplateApi, type TemplateApi } from './api'
 import { grantLabel, operationLabel, postureLabels } from './presentation'
+import { TemplateEditor } from './TemplateEditor'
 import './templates.css'
 
 const httpApi = new HttpTemplateApi()
@@ -106,6 +107,7 @@ export function TemplatesSurface({
               </div>
             </div>
             <Grants template={detail.data.summary} />
+            <TemplateEditor key={detail.data.summary.name} api={api} detail={detail.data} />
             <details>
               <summary>System instructions</summary>
               <pre className="template-prompt">{detail.data.system_prompt}</pre>

@@ -49,4 +49,17 @@ describe('template API', () => {
     )
     await expect(api.list()).rejects.toThrow('Templates are unavailable')
   })
+  it('puts the exact definition and rejects a save receipt for another template', async () => {
+    const request = { definition_toml: detailFixture.definition_toml }
+    const api = new HttpTemplateApi(async (input, init) => {
+      expect(input).toBe('/api/templates/code-review')
+      expect(init?.method).toBe('PUT')
+      expect(init?.body).toBe(JSON.stringify(request))
+      return Response.json({
+        ...detailFixture,
+        summary: { ...templateFixture, name: 'another-template' },
+      })
+    })
+    await expect(api.save(templateFixture.name, request)).rejects.toThrow('does not match')
+  })
 })

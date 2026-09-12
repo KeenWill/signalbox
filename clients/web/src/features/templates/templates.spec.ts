@@ -80,3 +80,60 @@ test('Tab reveals rows beyond the initial virtual range', async ({ page }) => {
     page.getByRole('button', { name: new RegExp(`^template-${targetIndex} `) }),
   ).toBeFocused()
 })
+
+test('shows validation inline and adopts a successful saved definition', async ({
+  page,
+}, testInfo) => {
+  const updatedPrompt = 'Review correctness and report the evidence.'
+  const updated = {
+    ...detailFixture,
+    summary: { ...templateFixture, digest: '2'.repeat(64) },
+    system_prompt: updatedPrompt,
+    definition_toml: detailFixture.definition_toml.replace(
+      detailFixture.system_prompt,
+      updatedPrompt,
+    ),
+  }
+  let current = detailFixture
+  await page.route('**/api/templates/code-review', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON()
+      if (body.definition_toml === 'invalid definition') {
+        await route.fulfill({
+          status: 422,
+          json: {
+            error: {
+              kind: 'application',
+              code: 'invalid_template_edit',
+              message: 'Template definition is not valid TOML',
+            },
+          },
+        })
+        return
+      }
+      expect(body).toEqual({ definition_toml: updated.definition_toml })
+      current = updated
+    }
+    await route.fulfill({ json: current })
+  })
+  await page.goto(scenario)
+  await page.getByRole('button', { name: /code-review/ }).click()
+  await page.getByText('Edit template', { exact: true }).click()
+  const editor = page.getByRole('textbox', { name: 'Template definition (TOML)' })
+  await editor.fill('invalid definition')
+  await page.getByRole('button', { name: 'Save template' }).click()
+  await expect(page.getByRole('alert')).toHaveText('Template definition is not valid TOML')
+  await expect(editor).toHaveValue('invalid definition')
+  await page.screenshot({ path: testInfo.outputPath('template-edit-error.png'), fullPage: true })
+  await editor.fill(updated.definition_toml)
+  await page.getByRole('button', { name: 'Save template' }).click()
+  await expect(page.getByRole('status')).toHaveText('Template saved.')
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await page.getByText('Definition and digest', { exact: true }).click()
+  await expect(page.getByText(updated.summary.digest, { exact: true })).toBeVisible()
+  await page.getByText('System instructions', { exact: true }).click()
+  await expect(page.getByText(updatedPrompt, { exact: true })).toBeVisible()
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await page.screenshot({ path: testInfo.outputPath('template-edit-phone.png'), fullPage: true })
+})

@@ -4,11 +4,13 @@ import {
   decodeWebTemplateList,
   type WebTemplateDetail,
   type WebTemplateList,
+  type WebTemplateSaveRequest,
 } from '../../generated/web-contract.mjs'
 
 export interface TemplateApi {
   list(signal?: AbortSignal): Promise<WebTemplateList>
   detail(name: string, signal?: AbortSignal): Promise<WebTemplateDetail>
+  save(name: string, request: WebTemplateSaveRequest): Promise<WebTemplateDetail>
 }
 
 export class HttpTemplateApi implements TemplateApi {
@@ -33,6 +35,19 @@ export class HttpTemplateApi implements TemplateApi {
     const detail = decodeWebTemplateDetail(
       await this.read(`/api/templates/${encodeURIComponent(name)}`, signal),
     )
+    if (detail.summary.name !== name) throw new Error('The returned template does not match.')
+    return detail
+  }
+  async save(name: string, request: WebTemplateSaveRequest): Promise<WebTemplateDetail> {
+    const response = await this.request(`/api/templates/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    })
+    const value: unknown = await response.json()
+    if (!response.ok) throw new Error(decodeWebApiErrorResponse(value).error.message)
+    const detail = decodeWebTemplateDetail(value)
     if (detail.summary.name !== name) throw new Error('The returned template does not match.')
     return detail
   }
