@@ -9,6 +9,38 @@ const render = (tool: ReturnType<typeof toolExample>) =>
   renderToStaticMarkup(createElement(ToolCall, { tool }))
 
 describe('tool presentation', () => {
+  it.each([
+    ['preauthorization_rejected', 'Authorization rejected'],
+    ['invalid_arguments', 'Invalid arguments'],
+    ['unknown_tool', 'Unknown tool'],
+    ['execution_failed', 'Execution failed'],
+  ] as const)('shows %s without a projected failure excerpt', (cause, label) => {
+    const tool = toolExample('read_file', { path: 'file.txt' }, null)
+    if (tool.evidence.type !== 'physical_attempt') throw new Error('Physical fixture required')
+    const markup = render({
+      ...tool,
+      evidence: {
+        ...tool.evidence,
+        state: 'known_failed',
+        cause,
+        failure_present: true,
+        failure: null,
+        result_present: false,
+        result: null,
+      },
+    })
+    expect(markup).toContain('Failed')
+    expect(markup).toContain(label)
+  })
+
+  it.each([204, 302, 404, 503])('shows HTTP %s for an empty fetch response', (status) => {
+    const markup = render(
+      toolExample('web_fetch', { url: 'https://example.com/' }, { status, body: '' }),
+    )
+    expect(markup).toContain(`HTTP ${status}`)
+    expect(markup).toContain('aria-expanded="false"')
+  })
+
   it('shows direct execution output and its exit code', () => {
     const markup = render(
       toolExample(

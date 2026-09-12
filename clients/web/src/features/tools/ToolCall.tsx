@@ -196,6 +196,7 @@ function Web({ arguments: args, result, resultExcerpt }: RendererProps) {
   return (
     <>
       <Link url={result.url ?? args.url} />
+      {typeof result.status === 'number' && <strong>HTTP {result.status}</strong>}
       {textField(args.query) && <strong>{textField(args.query)}</strong>}
       <TextPreview text={textField(result.body ?? result.summary)} label="Summary" />
       {Array.isArray(result.results) && (
@@ -285,6 +286,7 @@ export function ToolCall({ tool }: ToolCallProps) {
       <header>
         <strong>{fieldLabel(tool.tool_name)}</strong>
         <span>{evidence ? enumLabel(evidence.state) : 'Requested'}</span>
+        {evidence?.cause && <span>{enumLabel(evidence.cause)}</span>}
         <button type="button" aria-expanded={raw} onClick={() => setRaw(!raw)}>
           Raw
         </button>
