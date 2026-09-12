@@ -188,80 +188,125 @@ test('opens the next excerpt directly and closes its expanded text', async ({ pa
   await expect(continuation).toHaveCount(0)
 })
 
-test('follows live growth after loading earlier history and returning to the end', async ({
-  page,
-}) => {
-  const problems: string[] = []
-  page.on('pageerror', (error) => problems.push(error.message))
-  page.on('console', (message) => {
-    if (message.type() === 'error') problems.push(message.text())
-  })
-  let latest = 100000
-  let release = () => {}
-  const growth = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  const anchors: string[] = []
-  await page.route('**/api/**', async (route) => {
-    const url = new URL(route.request().url())
-    if (url.pathname === `/api/sessions/${transcriptSessionId}/follow`) {
-      await growth
-      return route.fulfill({
-        contentType: 'application/x-ndjson',
-        body:
-          [
-            {
-              kind: 'snapshot',
-              snapshot: {
-                session_id: transcriptSessionId,
-                observed_through: '100000',
-                active: null,
-                queued_turn_count: '0',
-                queued_turn_ids: [],
-                reconciliation: null,
-                runner: null,
+for (const hiddenTail of [false, true]) {
+  test(`follows live growth after ${hiddenTail ? 'automatically scanning a hidden tail' : 'loading earlier history and returning to the end'}`, async ({
+    page,
+  }) => {
+    const problems: string[] = []
+    page.on('pageerror', (error) => problems.push(error.message))
+    page.on('console', (message) => {
+      if (message.type() === 'error') problems.push(message.text())
+    })
+    let latest = 100000
+    let release = () => {}
+    const growth = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const anchors: string[] = []
+    await page.route('**/api/**', async (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname === `/api/sessions/${transcriptSessionId}/follow`) {
+        await growth
+        return route.fulfill({
+          contentType: 'application/x-ndjson',
+          body:
+            [
+              {
+                kind: 'snapshot',
+                snapshot: {
+                  session_id: transcriptSessionId,
+                  observed_through: '100000',
+                  active: null,
+                  queued_turn_count: '0',
+                  queued_turn_ids: [],
+                  reconciliation: null,
+                  runner: null,
+                },
               },
-            },
-            {
-              kind: 'durable',
-              cursor: '100001',
-              address: { event_sequence: '100001' },
-              event_kind: 'input_accepted',
-            },
-          ]
-            .map((event) => JSON.stringify(event))
-            .join('\n') + '\n',
+              {
+                kind: 'durable',
+                cursor: '100001',
+                address: { event_sequence: '100001' },
+                event_kind: 'input_accepted',
+              },
+            ]
+              .map((event) => JSON.stringify(event))
+              .join('\n') + '\n',
+        })
+      }
+      if (url.pathname.endsWith('/follow'))
+        return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+      if (url.pathname === '/api/attention')
+        return route.fulfill({
+          json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+        })
+      if (url.pathname.endsWith('/timeline')) anchors.push(url.searchParams.get('anchor') ?? '')
+      const payload = transcriptFixture(url, latest)
+      const hidden = (sequence: string) =>
+        hiddenTail && Number(sequence) > 99968 && Number(sequence) <= 100000
+      if (url.pathname.endsWith('/timeline')) {
+        const window =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineWindow
+        return route.fulfill({
+          json: {
+            ...window,
+            items: window.items.map((item) =>
+              hidden(item.address.event_sequence) ? { ...item, kind: 'turn_completed' } : item,
+            ),
+          },
+        })
+      }
+      if (
+        url.pathname.endsWith('/timeline-detail') &&
+        hidden(url.searchParams.get('first') ?? '0')
+      ) {
+        const detail =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineDetailPage
+        return route.fulfill({
+          json: {
+            ...detail,
+            projected_body_bytes: 128,
+            items: detail.items.map((item) => ({
+              ...item,
+              kind: 'turn_completed',
+              projected_body_bytes: 128,
+              body: {
+                type: 'turn_lifecycle',
+                turn_id: transcriptSessionId,
+                lifecycle: 'terminalized',
+                cause_code: 'completed',
+              },
+            })),
+          },
+        })
+      }
+      return route.fulfill({ json: payload })
+    })
+    await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    if (hiddenTail) {
+      await expect(transcript.getByText('Message 99968', { exact: true })).toBeVisible()
+    } else {
+      await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
+      await transcript.evaluate((element) => {
+        element.scrollTop = 0
       })
+      await transcript.hover()
+      await page.mouse.wheel(0, -900)
+      await expect.poll(() => anchors).toContain('before')
+      await expect.poll(() => transcript.getAttribute('data-total-loaded')).toBe('16')
+      await transcript.evaluate((element) => {
+        element.scrollTop = element.scrollHeight
+      })
+      await page.mouse.wheel(0, 900)
+      await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
     }
-    if (url.pathname.endsWith('/follow'))
-      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
-    if (url.pathname === '/api/attention')
-      return route.fulfill({
-        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
-      })
-    if (url.pathname.endsWith('/timeline')) anchors.push(url.searchParams.get('anchor') ?? '')
-    return route.fulfill({ json: transcriptFixture(url, latest) })
+    latest = 100001
+    release()
+    await expect(transcript.getByText('Message 100001', { exact: true })).toBeVisible()
+    expect(problems).toEqual([])
   })
-  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
-  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
-  await transcript.evaluate((element) => {
-    element.scrollTop = 0
-  })
-  await transcript.hover()
-  await page.mouse.wheel(0, -900)
-  await expect.poll(() => anchors).toContain('before')
-  await expect.poll(() => transcript.getAttribute('data-total-loaded')).toBe('16')
-  await transcript.evaluate((element) => {
-    element.scrollTop = element.scrollHeight
-  })
-  await page.mouse.wheel(0, 900)
-  await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
-  latest = 100001
-  release()
-  await expect(transcript.getByText('Message 100001', { exact: true })).toBeVisible()
-  expect(problems).toEqual([])
-})
+}
 
 test('keeps an empty detail continuation available without retrying it automatically', async ({
   page,
@@ -299,4 +344,31 @@ test('keeps an empty detail continuation available without retrying it automatic
   await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
   await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
   expect(cursors).toEqual([null, '100000'])
+})
+
+test('follows workspace navigation and restores its saved transcript anchor', async ({ page }) => {
+  await page.route('**/api/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    return route.fulfill({ json: transcriptFixture(url) })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: /^First/ }).click()
+  await expect(transcript.getByText('Message 1', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Next', exact: true }).click()
+  await expect(transcript.getByText('Message 81', { exact: true })).toBeVisible()
+  await page.evaluate((sessionId) => {
+    const preferences = JSON.parse(localStorage.getItem('signalbox.web.preferences.v1') ?? '{}')
+    preferences.lastLogicalPositions = { ...preferences.lastLogicalPositions, [sessionId]: '500' }
+    localStorage.setItem('signalbox.web.preferences.v1', JSON.stringify(preferences))
+  }, transcriptSessionId)
+  await page.reload()
+  await expect(transcript.getByText('Message 500', { exact: true })).toBeVisible()
 })

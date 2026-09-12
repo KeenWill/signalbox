@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
 import type { CommandContext } from './commands'
@@ -93,6 +93,7 @@ export interface SessionTranscriptTextProps {
   observed: string
   limits: SessionTranscriptLimits
   eventSequence?: string
+  anchor?: SessionWindowAnchor
   turnId?: string
   context?: CommandContext
   renderTool?: (tool: WebTimelineToolAttempt, detail: DetailMode) => ReactNode
@@ -101,7 +102,7 @@ export interface SessionTranscriptTextProps {
 export function SessionTranscriptText(props: SessionTranscriptTextProps) {
   return (
     <TranscriptWindow
-      key={`${props.sessionId}:${props.eventSequence ?? ''}:${props.turnId ?? ''}`}
+      key={`${props.sessionId}:${props.eventSequence ?? ''}:${props.turnId ?? ''}:${JSON.stringify(props.anchor ?? null)}`}
       {...props}
     />
   )
@@ -112,13 +113,22 @@ function TranscriptWindow({
   observed,
   limits,
   eventSequence,
+  anchor,
 }: SessionTranscriptTextProps) {
   const reader = useMemo(() => new TranscriptWindowReader(sessionId), [sessionId])
+  const initialAnchor = useMemo<SessionWindowAnchor>(
+    () => (eventSequence ? { kind: 'around', eventSequence } : (anchor ?? { kind: 'latest' })),
+    [eventSequence, anchor],
+  )
+  const queryKey = useMemo(
+    () => ['production', 'scrolling-transcript', sessionId, initialAnchor, limits],
+    [sessionId, initialAnchor, limits],
+  )
+  const queries = useQueryClient()
+  const readerAtEnd = useRef(initialAnchor.kind === 'latest')
   const transcript = useInfiniteQuery({
-    queryKey: ['production', 'scrolling-transcript', sessionId, eventSequence, limits],
-    initialPageParam: (eventSequence
-      ? { kind: 'around', eventSequence }
-      : { kind: 'latest' }) as SessionWindowAnchor,
+    queryKey,
+    initialPageParam: initialAnchor,
     queryFn: ({ pageParam, signal }) => reader.read(pageParam, limits, signal),
     getPreviousPageParam: (page): SessionWindowAnchor | undefined =>
       page.window.continuation_before
@@ -144,9 +154,18 @@ function TranscriptWindow({
   useEffect(() => {
     if (previousObservation.current !== observed) {
       previousObservation.current = observed
+      if (readerAtEnd.current && initialAnchor.kind === 'latest')
+        queries.setQueryData<typeof transcript.data>(queryKey, (data) =>
+          data
+            ? {
+                ...data,
+                pageParams: [initialAnchor, ...data.pageParams.slice(1)],
+              }
+            : data,
+        )
       void transcript.refetch()
     }
-  }, [observed, transcript.refetch])
+  }, [observed, transcript.refetch, queries, queryKey, initialAnchor])
   const pages = transcript.data?.pages
   const entries = useMemo(
     () => pages?.flatMap((page) => page.details.flatMap((detail) => detail.items)) ?? [],
@@ -238,9 +257,12 @@ function TranscriptWindow({
       )}
       <VirtualTranscript
         ids={ids}
-        initialEnd={!eventSequence}
+        initialEnd={initialAnchor.kind === 'latest'}
+        onEndChange={(atEnd) => {
+          readerAtEnd.current = atEnd
+        }}
         followEnd={
-          !eventSequence &&
+          initialAnchor.kind === 'latest' &&
           Boolean(
             pages
               ?.at(-1)
@@ -249,7 +271,10 @@ function TranscriptWindow({
               ),
           )
         }
-        selectedId={eventSequence}
+        selectedId={
+          eventSequence ??
+          (initialAnchor.kind === 'around' ? initialAnchor.eventSequence : undefined)
+        }
         onEdge={(direction) => {
           if (transcript.isFetching || transcript.isError) return
           if (direction === 'before' && transcript.hasPreviousPage)
