@@ -377,9 +377,10 @@ test('reads tool arguments and output in conversation order with events hidden',
   await expect(references.getByRole('listitem')).toHaveCount(2)
   await expect(references).toContainText('image/jpeg · 4 B')
   await expect(references).toContainText('image/png · 4 B')
-  await expect(conversation.getByRole('region', { name: 'Arguments', exact: true })).toContainText(
-    'release status --json',
-  )
+  await conversation.getByRole('button', { name: 'exec_command', exact: true }).click()
+  await expect(
+    conversation.getByRole('region', { name: 'exec_command details', exact: true }),
+  ).toContainText('release status --json')
   await conversation.getByRole('button', { name: 'Read more', exact: true }).click()
   await expect(conversation.getByRole('region', { name: 'Output', exact: true })).toContainText(
     'passed',
@@ -397,7 +398,7 @@ test('reads tool arguments and output in conversation order with events hidden',
           entries.map((entry) => entry.getAttribute('data-event-sequence')),
         ),
     )
-    .toEqual(['1', '2', '4'])
+    .toEqual(['1', '4'])
   await conversation.focus()
   await expect(conversation).toBeFocused()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
@@ -464,7 +465,7 @@ test('shows retired goal turns in conversation order with events hidden', async 
           entries.map((entry) => entry.getAttribute('data-event-sequence')),
         ),
     )
-    .toEqual(['1', '2', '4', '5'])
+    .toEqual(['1'])
   await page.screenshot({ path: test.info().outputPath('retired-outcome.png') })
 })
 
@@ -486,6 +487,7 @@ test('labels partial tool payloads and the final continued chunk', async ({ page
   await openDetails(page, false, false, undefined, undefined, true)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
+  await conversation.getByRole('button', { name: 'exec_command', exact: true }).click()
   await conversation.getByRole('button', { name: 'Read more', exact: true }).click()
   const tool = conversation.getByRole('region', { name: 'More message text', exact: true })
   const output = tool.getByRole('region', { name: 'Output', exact: true })

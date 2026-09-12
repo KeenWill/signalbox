@@ -34,6 +34,9 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
     group.events.push(item)
     if (
       item.body.type === 'reconciliation' ||
+      (item.body.type === 'event_fact' &&
+        (item.body.kind === 'goal_turn_retired' ||
+          item.body.kind === 'automatic_reconciliation_exhausted')) ||
       (item.body.type === 'turn_lifecycle' &&
         item.body.lifecycle === 'terminalized' &&
         item.body.cause_code !== 'completed')

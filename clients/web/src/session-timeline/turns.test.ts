@@ -34,7 +34,7 @@ it('does not call a tool-producing response the final assistant result', () => {
   expect(turn?.tools).toHaveLength(1)
 })
 
-it('does not assign session-level lifecycle noise to a neighboring turn', () => {
+it('keeps an unowned retired outcome visible without assigning it to a neighboring turn', () => {
   const turns = groupTranscriptTurns([
     ...detailItems,
     {
@@ -45,7 +45,13 @@ it('does not assign session-level lifecycle noise to a neighboring turn', () => 
     },
   ])
   expect(turns).toHaveLength(2)
-  expect(turns[1]).toMatchObject({ turnId: null, messages: [], result: undefined, tools: [] })
+  expect(turns[1]).toMatchObject({
+    turnId: null,
+    messages: [],
+    result: undefined,
+    tools: [],
+    outcome: { kind: 'goal_turn_retired' },
+  })
 })
 
 it('requires a completed turn before presenting a completed model response as final', () => {
