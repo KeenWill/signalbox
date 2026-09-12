@@ -1,5 +1,5 @@
 import { expect, test } from './fontTest'
-import { openSession, sessionApi } from './session-fixture'
+import { openSession, sessionApi, sessionId, turnId } from './session-fixture'
 
 for (const viewport of [
   { name: 'desktop', width: 1440, height: 1000 },
@@ -27,3 +27,31 @@ for (const viewport of [
     await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   })
 }
+
+test('Escape closes trigger details before session details', async ({ page }) => {
+  await sessionApi(page, false, sessionId, {
+    dispatch_id: turnId,
+    action_ordinal: '1',
+    repository: 'signalbox/example',
+    pull_request: '81',
+    rule_id: 'review-response',
+    rule_revision: '3',
+    event_id: sessionId,
+    event_kind: 'review_submitted',
+  })
+  await openSession(page)
+  const sessionDetails = page.getByText('Session details', { exact: true })
+  const triggerDetails = page.getByText('Trigger details', { exact: true })
+  await sessionDetails.click()
+  await triggerDetails.click()
+  const trigger = page.getByText(`Trigger ${turnId} · Action 1`, { exact: true })
+  await expect(trigger).toBeVisible()
+  await triggerDetails.press('Escape')
+  await expect(trigger).toBeHidden()
+  await expect(triggerDetails).toBeFocused()
+  await expect(page.getByText('Up to date as of', { exact: true })).toBeVisible()
+  await triggerDetails.press('Escape')
+  await expect(page.getByText('Up to date as of', { exact: true })).toBeHidden()
+  await expect(sessionDetails).toBeFocused()
+  await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
+})

@@ -463,10 +463,13 @@ export function SessionWorkspaceSurface({
                 className="session-header-details"
                 onKeyDown={(event) => {
                   if (event.key !== 'Escape' || !event.currentTarget.open) return
+                  const details =
+                    event.target instanceof Element ? event.target.closest('details[open]') : null
+                  if (!(details instanceof HTMLDetailsElement)) return
                   event.preventDefault()
                   event.stopPropagation()
-                  event.currentTarget.open = false
-                  event.currentTarget.querySelector('summary')?.focus()
+                  details.open = false
+                  details.querySelector('summary')?.focus()
                 }}
               >
                 <summary>Session details</summary>
