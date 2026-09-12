@@ -2398,6 +2398,71 @@ pub(crate) async fn load_terminal_result_attempts(
     .await
 }
 
+/// Loads the yielded foreground wait closed by the terminal tool-result suffix.
+pub(crate) async fn load_cancelled_foreground_wait(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    terminal_frontier: signalbox_domain::ContextFrontierId,
+) -> Result<EndedToolAttempt, ToolLoopRepositoryError> {
+    let (boundary, count) =
+        load_tool_round_result_window(connection, session, turn, terminal_frontier, Decimal::ONE)
+            .await?
+            .ok_or(ToolLoopCorruption::Missing(
+                "cancelled foreground wait window",
+            ))?;
+    let rows = sqlx::query(
+        "SELECT attempt.*
+           FROM resolve_context_frontier_members($1, $2) AS member
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+           JOIN session_delegation_wait AS wait
+             ON wait.awaiting_tool_request_id = entry.tool_result_request_id
+            AND wait.parent_session_id = $1 AND wait.parent_turn_id = $5
+            AND wait.wait_mode = 'foreground'
+           JOIN tool_attempt AS attempt
+             ON attempt.request_id = wait.awaiting_tool_request_id
+            AND attempt.session_id = wait.parent_session_id
+            AND attempt.turn_id = wait.parent_turn_id
+            AND attempt.wait_spawning_request_id = wait.spawning_tool_request_id
+            AND attempt.wait_child_session_id = wait.child_session_id
+           JOIN turn_attempt AS issuing ON issuing.turn_attempt_id = attempt.issuing_turn_attempt_id
+            AND issuing.session_id = $1 AND issuing.turn_id = $5
+            AND issuing.state_kind = 'ended'
+            AND issuing.end_variant = 'without_stop'
+            AND issuing.end_disposition = 'yielded_to_durable_wait'
+          WHERE member.member_position > $3 AND member.member_position <= $3 + $4
+            AND entry.payload_kind IN ('tool_closed_by_turn_end', 'delegation_result')
+            AND attempt.state_kind = 'terminal'
+            AND attempt.terminal_disposition_kind = 'awaiting_child'
+            AND NOT EXISTS (
+                SELECT 1 FROM turn_attempt AS continuation
+                 WHERE continuation.continued_from_attempt_id = issuing.turn_attempt_id
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(terminal_frontier.into_uuid())
+    .bind(boundary)
+    .bind(count)
+    .bind(turn_id_to_uuid(turn))
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut rows = rows.into_iter();
+    let row = rows
+        .next()
+        .ok_or(ToolLoopCorruption::Missing("cancelled foreground wait"))?;
+    if rows.next().is_some() {
+        return Err(ToolLoopCorruption::Inconsistent("multiple cancelled foreground waits").into());
+    }
+    match decode_attempt(row)? {
+        ReconstitutedToolAttempt::Ended(attempt) => Ok(attempt),
+        ReconstitutedToolAttempt::Current(_) => {
+            Err(ToolLoopCorruption::Inconsistent("cancelled foreground wait state").into())
+        }
+    }
+}
+
 async fn load_window_result_attempts(
     connection: &mut PgConnection,
     session: SessionId,

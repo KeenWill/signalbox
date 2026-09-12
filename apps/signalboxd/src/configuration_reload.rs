@@ -208,7 +208,7 @@ impl ConfigurationReload {
         signalbox_module_repo_watch_v2::StoreError,
     > {
         match &self.watch {
-            Some(watch) => watch.session_origin(session).await,
+            Some(watch) => watch.session_origin(session, &self.pool).await,
             None => Ok(None),
         }
     }

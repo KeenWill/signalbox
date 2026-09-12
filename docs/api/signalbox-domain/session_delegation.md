@@ -266,6 +266,7 @@ impl SessionDelegationReconstitutionInput {
     pub const fn child(&self) -> SessionId;
     pub const fn child_turn(&self) -> TurnId;
     pub fn events(&self) -> &[DelegationEvent];
+    pub fn with_reconciliation_required_child(self) -> Self;
     pub fn reconstitute(
         self,
     ) -> result::Result<SessionDelegation, SessionDelegationReconstitutionError>;

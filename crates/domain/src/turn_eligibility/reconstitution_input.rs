@@ -212,10 +212,11 @@ impl TerminalAttemptEndReconstitutionInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CancelledTurnExecutionReconstitutionInput {
     pub(super) owning_turn: TurnId,
-    pub(super) ended_attempt: TurnAttemptId,
-    pub(super) attempt_end: TerminalAttemptEndReconstitutionInput,
+    pub(super) ended_attempt: Option<TurnAttemptId>,
+    pub(super) attempt_end: Option<TerminalAttemptEndReconstitutionInput>,
     pub(super) ended_call: Option<crate::ModelCallId>,
     pub(super) interrupt: AppliedInterruptCommandResult,
+    pub(super) foreground_wait: Option<crate::EndedToolAttempt>,
     pub(super) terminal_tool_attempts: Vec<crate::EndedToolAttempt>,
     terminal_tool_denials: Vec<ToolApprovalResolution>,
 }
@@ -232,10 +233,29 @@ impl CancelledTurnExecutionReconstitutionInput {
     ) -> Self {
         Self {
             owning_turn,
-            ended_attempt,
-            attempt_end,
+            ended_attempt: Some(ended_attempt),
+            attempt_end: Some(attempt_end),
             ended_call,
             interrupt,
+            foreground_wait: None,
+            terminal_tool_attempts: Vec::new(),
+            terminal_tool_denials: Vec::new(),
+        }
+    }
+
+    /// Supplies the foreground child wait closed after its physical attempt had yielded.
+    pub const fn foreground_child_wait(
+        owning_turn: TurnId,
+        wait: crate::EndedToolAttempt,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self {
+        Self {
+            owning_turn,
+            ended_attempt: None,
+            attempt_end: None,
+            ended_call: None,
+            interrupt,
+            foreground_wait: Some(wait),
             terminal_tool_attempts: Vec::new(),
             terminal_tool_denials: Vec::new(),
         }
