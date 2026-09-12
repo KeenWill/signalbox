@@ -100,7 +100,7 @@ pub(super) struct SessionWorkspaceExecutors<
     pub(super) binding_pool: Option<sqlx::PgPool>,
     roots: SessionWorkspaceRoots,
     pub(super) repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
-    pub(super) ambient_credentials: Option<crate::configuration_reload::ConfigurationReload>,
+    pub(super) ambient_credentials: Option<(crate::configuration_reload::ConfigurationReload, sqlx::PgPool)>,
     git_identity: GitIdentity,
     exec_runner: ExecRunner,
     cargo_registry_cache: Option<PathBuf>,
@@ -602,17 +602,36 @@ where
             }
 
             SANDBOXED_EXEC_NAME => {
-                let arguments = serde_json::from_str::<signalbox_tools_exec::SandboxedExecArguments>(invocation.request().arguments().as_str())
-                    .map_err(|_| DaemonToolExecutorError::unknown_tool())?;
+                let arguments = signalbox_tools_exec::SandboxedExecArguments::decode(
+                    invocation.request().arguments(),
+                    self.sandboxed_exec_timeout_bound,
+                )
+                .map_err(|_| DaemonToolExecutorError::unknown_tool())?;
                 if arguments.credential_purpose.is_some() {
-                    let (Some(catalogs), Some(pool)) = (&self.ambient_credentials, &self.binding_pool) else {
+                    let Some((catalogs, pool)) = &self.ambient_credentials
+                    else {
                         return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
-                            detail: signalbox_domain::ToolExecutionErrorDetail::try_new("ambient credential unavailable".to_owned()).ok(),
+                            detail: signalbox_domain::ToolExecutionErrorDetail::try_new(
+                                "ambient credential unavailable".to_owned(),
+                            )
+                            .ok(),
                         }));
                     };
-                    Ok(super::ambient_credentials::execute(catalogs, pool, &executors.sandboxed_exec, invocation, &self.sandbox, arguments).await)
+                    Ok(super::ambient_credentials::execute(
+                        catalogs,
+                        pool,
+                        &mut executors.sandboxed_exec,
+                        invocation,
+                        &self.sandbox,
+                        arguments,
+                    )
+                    .await)
                 } else {
-                    executors.sandboxed_exec.execute(invocation).await.map_err(|error| DaemonToolExecutorError::from_error(&error))
+                    executors
+                        .sandboxed_exec
+                        .execute(invocation)
+                        .await
+                        .map_err(|error| DaemonToolExecutorError::from_error(&error))
                 }
             }
             UNSANDBOXED_EXEC_NAME => executors

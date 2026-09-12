@@ -5,8 +5,8 @@
 //! [`SessionWorkspaceRoots`]. See `docs/spec/tool-loop.md` and
 //! `docs/spec/git-authority-threat-model.md`.
 
-mod catalog;
 mod ambient_credentials;
+mod catalog;
 mod composed_identity;
 mod executor;
 mod families;

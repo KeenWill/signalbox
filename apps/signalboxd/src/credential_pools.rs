@@ -94,19 +94,30 @@ impl fmt::Debug for AmbientCredentialSource {
     }
 }
 
-pub(crate) fn parse_ambient_task_profiles(item: Option<&Item>) -> Result<HashMap<Arc<str>, CredentialDelivery>, HubModelConfigurationError> {
+pub(crate) fn parse_ambient_task_profiles(
+    item: Option<&Item>,
+) -> Result<HashMap<Arc<str>, CredentialDelivery>, HubModelConfigurationError> {
     let mut profiles = HashMap::new();
-    for profile in item.and_then(Item::as_array_of_tables).into_iter().flatten() {
+    for profile in item
+        .and_then(Item::as_array_of_tables)
+        .into_iter()
+        .flatten()
+    {
         if profile.get("adapter").and_then(Item::as_str) != Some("sandboxed_exec") {
             continue;
         }
-        reject_unknown_fields(profile, &["name", "adapter", "delivery", "file", "variable"])?;
+        reject_unknown_fields(
+            profile,
+            &["name", "adapter", "delivery", "file", "variable"],
+        )?;
         if required_string(profile, "delivery")? != "ambient" {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
         let name = validated_credential_catalog_name(required_string(profile, "name")?)?;
         let source = match (profile.get("file"), profile.get("variable")) {
-            (Some(_), None) => AmbientCredentialSource::File(normalize_absolute_path(required_string(profile, "file")?)?),
+            (Some(_), None) => AmbientCredentialSource::File(normalize_absolute_path(
+                required_string(profile, "file")?,
+            )?),
             (None, Some(_)) => {
                 let variable = required_string(profile, "variable")?;
                 if variable.is_empty() || variable.contains(['=', '\0']) {
@@ -816,7 +827,10 @@ fn parse_credential_profiles_with_home_admission(
     let mut ambient_adapters = HashSet::new();
     let mut file_paths = HashSet::new();
     for profile in tables {
-        if matches!(profile.get("adapter").and_then(Item::as_str), Some("github" | "sandboxed_exec")) {
+        if matches!(
+            profile.get("adapter").and_then(Item::as_str),
+            Some("github" | "sandboxed_exec")
+        ) {
             continue;
         }
         let name = validated_credential_catalog_name(required_string(profile, "name")?)?;

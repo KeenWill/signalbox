@@ -456,23 +456,52 @@ fn ambient_environment(variable: &str) -> Result<Vec<u8>, CredentialAccessFailur
     Ok(bytes.to_vec())
 }
 
-fn validate_ambient_source(source: &crate::credential_pools::AmbientCredentialSource, reference: CredentialReference) -> Result<(), CredentialAccessError> {
+fn validate_ambient_source(
+    source: &crate::credential_pools::AmbientCredentialSource,
+    reference: CredentialReference,
+) -> Result<(), CredentialAccessError> {
     match source {
-        crate::credential_pools::AmbientCredentialSource::File(path) => validate_credential_file(path, reference),
-        crate::credential_pools::AmbientCredentialSource::Environment(variable) => ambient_environment(variable).map(|_| ()).map_err(|failure| CredentialAccessError::new(reference, failure)),
+        crate::credential_pools::AmbientCredentialSource::File(path) => {
+            validate_credential_file(path, reference)
+        }
+        crate::credential_pools::AmbientCredentialSource::Environment(variable) => {
+            ambient_environment(variable)
+                .map(|_| ())
+                .map_err(|failure| CredentialAccessError::new(reference, failure))
+        }
     }
 }
 
 impl super::HubModelConfiguration {
-    pub(crate) async fn resolve_ambient_task_credential(&self, purpose: &str) -> Result<(crate::credential_pools::AmbientCredentialSource, CredentialValue), CredentialAccessError> {
+    pub(crate) async fn resolve_ambient_task_credential(
+        &self,
+        purpose: &str,
+    ) -> Result<
+        (
+            crate::credential_pools::AmbientCredentialSource,
+            CredentialValue,
+        ),
+        CredentialAccessError,
+    > {
         use crate::credential_pools::{AmbientCredentialSource, CredentialDelivery};
         let reference = CredentialReference::new(purpose);
-        let Some(CredentialDelivery::AmbientTask(source)) = self.ambient_task_profiles.get(purpose) else {
-            return Err(CredentialAccessError::new(reference, CredentialAccessFailure::Unmapped));
+        let Some(CredentialDelivery::AmbientTask(source)) = self.ambient_task_profiles.get(purpose)
+        else {
+            return Err(CredentialAccessError::new(
+                reference,
+                CredentialAccessFailure::Unmapped,
+            ));
         };
         let value = match source {
-            AmbientCredentialSource::File(path) => FileCredentialAccess::new(path.clone(), reference.clone()).resolve(&reference).await?,
-            AmbientCredentialSource::Environment(variable) => CredentialValue::new(ambient_environment(variable).map_err(|failure| CredentialAccessError::new(reference, failure))?),
+            AmbientCredentialSource::File(path) => {
+                FileCredentialAccess::new(path.clone(), reference.clone())
+                    .resolve(&reference)
+                    .await?
+            }
+            AmbientCredentialSource::Environment(variable) => CredentialValue::new(
+                ambient_environment(variable)
+                    .map_err(|failure| CredentialAccessError::new(reference, failure))?,
+            ),
         };
         Ok((source.clone(), value))
     }

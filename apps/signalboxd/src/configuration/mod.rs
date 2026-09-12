@@ -217,7 +217,9 @@ impl HubModelConfiguration {
         let github_credential_profiles = crate::credential_pools::parse_github_credential_profiles(
             document.get("credential_profiles"),
         )?;
-        let ambient_task_profiles = crate::credential_pools::parse_ambient_task_profiles(document.get("credential_profiles"))?;
+        let ambient_task_profiles = crate::credential_pools::parse_ambient_task_profiles(
+            document.get("credential_profiles"),
+        )?;
         let repository_watch = document
             .get("repository_watch")
             .map(|item| {

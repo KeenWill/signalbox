@@ -121,9 +121,13 @@ where
     }
 
     /// Supplies the live credential catalog for judged sandboxed tasks.
-    pub fn with_ambient_credentials(mut self, catalogs: crate::configuration_reload::ConfigurationReload) -> Self {
+    pub fn with_ambient_credentials(
+        mut self,
+        catalogs: crate::configuration_reload::ConfigurationReload,
+        pool: sqlx::PgPool,
+    ) -> Self {
         if let Some(workspaces) = self.workspace_bound.as_mut() {
-            workspaces.ambient_credentials = Some(catalogs);
+            workspaces.ambient_credentials = Some((catalogs, pool));
         }
         self
     }

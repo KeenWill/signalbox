@@ -2528,7 +2528,7 @@ async fn run_hub_incarnation(
         None => configuration_reload,
     };
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
-    tool_executor = tool_executor.with_ambient_credentials(configuration_reload.clone());
+    tool_executor = tool_executor.with_ambient_credentials(configuration_reload.clone(), pool.clone());
     let approval_judge_repository_watch = repository_watch_runtime.clone();
     let workflow_repository_watch = repository_watch_runtime.clone();
     let eval_runtime_factory = runtime_factory.clone();

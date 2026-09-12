@@ -1,16 +1,21 @@
 use std::io::Write;
 
-use signalbox_application::{CorrelatedToolExecutorEvidence, ToolExecutionInvocation, ToolExecutorEvidence};
+use signalbox_application::{
+    CorrelatedToolExecutorEvidence, ToolExecutionInvocation, ToolExecutorEvidence,
+};
 use signalbox_domain::ToolExecutionErrorDetail;
 use signalbox_model_runtime::redact_credential_text;
-use signalbox_tools_exec::{ExecExecutor, ProcessRunner, SandboxConfiguration, SandboxReadOnlyMount, SandboxedCommandRunner, SandboxedExecArguments};
+use signalbox_tools_exec::{
+    ExecExecutor, ProcessRunner, SandboxConfiguration, SandboxReadOnlyMount,
+    SandboxedCommandRunner, SandboxedExecArguments,
+};
 
 use crate::{configuration_reload::ConfigurationReload, credential_pools::AmbientCredentialSource};
 
 pub(super) async fn execute<Runner: ProcessRunner>(
     catalogs: &ConfigurationReload,
     pool: &sqlx::PgPool,
-    executor: &ExecExecutor<SandboxedCommandRunner<Runner>>,
+    executor: &mut ExecExecutor<SandboxedCommandRunner<Runner>>,
     invocation: ToolExecutionInvocation,
     base: &SandboxConfiguration,
     arguments: SandboxedExecArguments,
@@ -21,9 +26,15 @@ pub(super) async fn execute<Runner: ProcessRunner>(
     let approved = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM tool_approval_decision
           WHERE request_id = $1 AND decision_kind = 'approve' AND decision_source = 'delegate')",
-    ).bind(invocation.request().id().into_uuid()).fetch_one(pool).await;
+    )
+    .bind(invocation.request().id().into_uuid())
+    .fetch_one(pool)
+    .await;
     if !matches!(approved, Ok(true)) {
-        return failed(invocation, "ambient credential requires approval of this request by the judge");
+        return failed(
+            invocation,
+            "ambient credential requires approval of this request by the judge",
+        );
     }
     let models = catalogs.catalogs().models;
     let (source, credential) = match models.resolve_ambient_task_credential(&purpose).await {
@@ -41,19 +52,28 @@ pub(super) async fn execute<Runner: ProcessRunner>(
                 return failed(invocation, "ambient credential unavailable");
             }
             sandbox.read_only_mounts.push(SandboxReadOnlyMount {
-                source: file.path().to_owned(), destination,
+                source: file.path().to_owned(),
+                destination,
             });
             Some(file)
         }
         AmbientCredentialSource::Environment(variable) => {
             use std::os::unix::ffi::OsStringExt;
-            sandbox.environment.insert(variable.as_ref().into(), std::ffi::OsString::from_vec(credential.expose_bytes().to_vec()));
+            sandbox.environment.insert(
+                variable.as_ref().into(),
+                std::ffi::OsString::from_vec(credential.expose_bytes().to_vec()),
+            );
             None
         }
     };
-    match executor.run_with_configuration(arguments.command, sandbox).await {
+    match executor
+        .run_with_configuration(arguments.command, sandbox)
+        .await
+    {
         Ok(result) => match serde_json::to_string(&result) {
-            Ok(result) => invocation.bind(ToolExecutorEvidence::CompletedText(redact_credential_text(result, &credential))),
+            Ok(result) => invocation.bind(ToolExecutorEvidence::CompletedText(
+                redact_credential_text(result, &credential),
+            )),
             Err(_) => failed(invocation, "ambient task result unavailable"),
         },
         Err(_) => failed(invocation, "ambient task arguments invalid"),

@@ -5,6 +5,8 @@
 )]
 
 mod support;
+#[path = "offline_tool_loop/ambient_credentials.rs"]
+mod ambient_credentials;
 #[path = "offline_tool_loop/workflows.rs"]
 mod workflow_tools;
 
