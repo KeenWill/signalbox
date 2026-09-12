@@ -37,6 +37,8 @@ impl MediaValidationIdentity {
 pub enum MediaPresentationKind {
     /// An immutable encoded image.
     Image,
+    /// An immutable PDF document.
+    Document,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,7 +54,7 @@ pub struct FileMediaReference {
     source: MediaValidationIdentity,
     byte_length: NonZeroU64,
     kind: MediaPresentationKind,
-    dimensions: ImageDimensions,
+    dimensions: Option<ImageDimensions>,
     derived_views: Vec<crate::ReadViewName>,
 }
 
@@ -69,13 +71,29 @@ impl FileMediaReference {
             source: identity,
             byte_length: validated.source().byte_length(),
             kind: MediaPresentationKind::Image,
-            dimensions,
+            dimensions: Some(dimensions),
             derived_views: validated
                 .views()
                 .iter()
                 .filter(|view| view.image_kind() == Some(crate::ImageViewKind::Generated))
                 .map(|view| view.name().clone())
                 .collect(),
+        }
+    }
+    pub(crate) fn direct_document(validated: &ValidatedFile) -> Self {
+        let identity = MediaValidationIdentity {
+            digest: validated.source().digest(),
+            media_type: validated.detected_media_type().clone(),
+            reader: validated.reader().clone(),
+            evidence: validated.validation(),
+        };
+        Self {
+            presented: identity.clone(),
+            source: identity,
+            byte_length: validated.source().byte_length(),
+            kind: MediaPresentationKind::Document,
+            dimensions: None,
+            derived_views: Vec::new(),
         }
     }
     pub(crate) fn derived_image(
@@ -93,8 +111,11 @@ impl FileMediaReference {
         reference
     }
     /// Describes an image that cannot fit the selected target's presentation bounds.
-    pub fn large_image_description(&self) -> serde_json::Value {
-        serde_json::json!({ "status": "large_image", "width":self.dimensions.width, "height":self.dimensions.height, "byte_length":self.byte_length.get(), "available_views": self.derived_views.iter().map(crate::ReadViewName::as_str).collect::<Vec<_>>() })
+    pub fn large_image_description(&self) -> Option<serde_json::Value> {
+        let dimensions = self.dimensions?;
+        Some(
+            serde_json::json!({ "status": "large_image", "width":dimensions.width, "height":dimensions.height, "byte_length":self.byte_length.get(), "available_views": self.derived_views.iter().map(crate::ReadViewName::as_str).collect::<Vec<_>>() }),
+        )
     }
     /// Borrows the identity validated for presentation.
     pub const fn presented(&self) -> &MediaValidationIdentity {
