@@ -809,7 +809,10 @@ export function ProductApp({
       <SessionWorkspaceSurface
         key={`${sessionState.session ?? 'unselected'}:${sessionState.around ?? ''}`}
         onSessionOpen={(session) =>
-          updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')
+          updateSessionSearch(
+            { ...sessionState, session, workspace: true, around: undefined },
+            'replace',
+          )
         }
         focusEntry={sessionState.session === undefined}
         onReturnToCatalog={() => context.unwindSurface?.()}

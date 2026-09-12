@@ -951,11 +951,15 @@ for (const active of [false, true]) {
   })
 }
 
-for (const action of ['switch', 'close'] as const) {
-  test(`clears a matching address when the workspace ${action === 'switch' ? 'switches sessions' : 'closes'}`, async ({
-    page,
-  }) => {
-    await sessionApi(page)
+for (const action of ['switch', 'close', 'reopen'] as const) {
+  const outcome =
+    action === 'switch'
+      ? 'switches sessions'
+      : action === 'close'
+        ? 'closes'
+        : 'reopens the current session'
+  test(`clears a matching address when the workspace ${outcome}`, async ({ page }) => {
+    const api = await sessionApi(page)
     const otherId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e'
     const other = await sessionApi(page, false, otherId)
     await page.route('**/api/sessions?**', (route) =>
@@ -976,9 +980,13 @@ for (const action of ['switch', 'close'] as const) {
       await session.fill(otherId)
       await session.press('Enter')
       await expect.poll(() => other.state.historyReads).toEqual(['latest'])
-    } else {
+    } else if (action === 'close') {
       await session.press('Escape')
       await expect(page.getByRole('heading', { name: '0 sessions', exact: true })).toBeVisible()
+    } else {
+      api.state.active = true
+      await session.press('Enter')
+      await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
     }
     await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
   })
