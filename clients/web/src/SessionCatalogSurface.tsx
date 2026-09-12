@@ -13,6 +13,7 @@ import {
   readSessionRates,
 } from './product'
 import { actions, useAppDispatch, useAppSelector } from './state'
+import './catalog.css'
 
 type SessionSummary = WebSessionCatalogSnapshot['summaries'][number]
 

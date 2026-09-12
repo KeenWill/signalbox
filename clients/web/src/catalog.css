@@ -54,3 +54,10 @@
 .search-result-link:hover {
   background: var(--surface-3);
 }
+
+@media (max-width: 760px) {
+  .catalog-list li > button > time {
+    display: block;
+    grid-column: 1 / 3;
+  }
+}
