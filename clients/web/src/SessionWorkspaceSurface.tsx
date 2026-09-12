@@ -148,6 +148,7 @@ export function SessionWorkspaceSurface({
   )
   const [showEvents, setShowEvents] = useState(false)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
+  const workspaceRef = useRef<HTMLDivElement>(null)
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
   const manualAnchorRef = useRef<SessionWindowAnchor | null>(null)
   const boundaryRequest = useRef(0)
@@ -390,7 +391,7 @@ export function SessionWorkspaceSurface({
   }, [session.error])
 
   return (
-    <div className="surface-body session-workspace-surface">
+    <div ref={workspaceRef} tabIndex={-1} className="surface-body session-workspace-surface">
       {sessionId === null || timelineCapability !== 'available' ? (
         <p className="session-entry" role="status">
           {timelineCapability === 'checking' ? (
@@ -731,7 +732,7 @@ export function SessionWorkspaceSurface({
           stateUnavailable={followFailed && live === null}
           supervision={displayedSession?.descriptor.supervision ?? null}
           onAccepted={refetchSession}
-          onEscape={() => timelineRef.current?.focus()}
+          onEscape={() => (timelineRef.current ?? workspaceRef.current)?.focus()}
         />
       )}
     </div>
