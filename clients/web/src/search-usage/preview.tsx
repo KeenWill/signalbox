@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createRoot } from 'react-dom/client'
 import '../app.css'
+import { AttentionCost } from './AttentionCost'
 import { SearchUsageScenarioSource } from './scenario'
 import {
   CostChip,
@@ -16,6 +17,29 @@ function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string 
   const session = useSessionCost(sessionId)
   return (
     <>
+      <section aria-label="Attention row" className="attention-list" style={{ maxWidth: 520 }}>
+        <ol>
+          <li className="attention-cost-row">
+            <button
+              type="button"
+              aria-label="Example session"
+              onClick={() =>
+                window.location.assign(`/sessions?session=${sessionId}&workspace=true`)
+              }
+            >
+              <span className="attention-rail" aria-hidden="true" />
+              <span className="attention-identity">
+                <strong>Example session</strong>
+                <code>{sessionId}</code>
+              </span>
+              <span className="attention-obligation">Needs approval</span>
+              <time>Today, 12:30</time>
+              <span aria-hidden="true">→</span>
+            </button>
+            <AttentionCost sessionId={sessionId} />
+          </li>
+        </ol>
+      </section>
       <button type="button" onClick={() => void session.refetch()}>
         Refresh costs
       </button>

@@ -50,7 +50,26 @@ test('loads session and turn chips through the HTTP usage client', async ({ page
   await expect(
     page.getByRole('region', { name: 'Recent turn costs' }).getByRole('link').first(),
   ).toContainText('partial')
+  const attention = page.getByRole('region', { name: 'Attention row' })
+  await expect(attention.getByRole('link', { name: /unpriced/ })).toHaveAttribute(
+    'href',
+    `/usage?session=${SEARCH_USAGE_SCENARIO_SESSION_ID}`,
+  )
+  await expect(attention.getByRole('button', { name: 'Example session' })).toBeEnabled()
   await page.screenshot({ path: testInfo.outputPath('cost-chips.png') })
+  for (const width of [761, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    const sessionBox = await attention
+      .getByRole('button', { name: 'Example session' })
+      .boundingBox()
+    const costBox = await attention.getByRole('link', { name: /unpriced/ }).boundingBox()
+    if (!sessionBox || !costBox) throw new Error('Both Attention destinations must be visible')
+    expect(costBox.y).toBeGreaterThanOrEqual(sessionBox.y + sessionBox.height)
+    expect(await attention.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+      true,
+    )
+    await attention.screenshot({ path: testInfo.outputPath(`attention-cost-${width}.png`) })
+  }
   expect(requests.filter((url) => url.pathname === '/api/bootstrap')).toHaveLength(1)
   expect(
     requests
