@@ -52,7 +52,7 @@ pub(crate) fn text(
             "Use change_request_thread_inventory to inspect the current head and fix every unresolved review thread with the smallest correct change. Validate the fix and report the addressed thread ids. Check mergeability and use change_request_checks_status for gating checks, then finish with a short summary."
         }
         "renovate-merge-forward" => {
-            "Merge the target pull request's base branch forward into its head branch, resolve conflicts and integration errors caused by combining the branches, and validate the result. For each conflict hunk, report which side was retained or how both sides were combined. Verify that the pull request's intended change survives the merge. Check mergeability and use change_request_checks_status for gating checks and report the exact changes made."
+            "Read current mergeability first. If no merge-forward is needed, finish without a pull request comment. Otherwise merge the target pull request's base branch forward into its head branch, resolve conflicts and integration errors caused by combining the branches, and validate the result. For each conflict hunk, report which side was retained or how both sides were combined. Verify that the pull request's intended change survives the merge. Check mergeability and use change_request_checks_status for gating checks and report the exact changes made."
         }
         _ => {
             "Follow the session template's instruction for this pull request. Use change_request_thread_inventory and change_request_checks_status to inspect its current state."
