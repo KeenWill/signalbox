@@ -12,11 +12,7 @@ import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { conversationEntryKey, hasConversationContent } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
-import {
-  readTranscriptWindow,
-  TRANSCRIPT_RETAINED_WINDOWS,
-  TRANSCRIPT_WINDOW_ITEMS,
-} from './session-timeline/transcript'
+import { readTranscriptWindow, TRANSCRIPT_RETAINED_WINDOWS } from './session-timeline/transcript'
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
 import type { DetailMode } from './state'
 import { VirtualTranscript } from './Transcript'
@@ -154,23 +150,26 @@ function TranscriptWindow({
     [entries],
   )
   const ids = useMemo(() => visible.map(conversationEntryKey), [visible])
-  const emptyScanned = useRef(0)
+  const emptyScanned = useRef({ count: 0, first: '' })
   useEffect(() => {
     if (visible.length > 0) {
-      emptyScanned.current = 0
+      emptyScanned.current = { count: 0, first: '' }
       return
     }
-    if (
-      transcript.isFetching ||
-      transcript.isError ||
-      !transcript.hasPreviousPage ||
-      emptyScanned.current >= SESSION_WINDOW_ITEMS
-    )
-      return
-    emptyScanned.current += TRANSCRIPT_WINDOW_ITEMS
+    if (transcript.isFetching || transcript.isError || !transcript.hasPreviousPage) return
+    const window = pages?.[0]?.window
+    const first = window?.items[0]?.address.event_sequence
+    if (first && first !== emptyScanned.current.first) {
+      emptyScanned.current = {
+        count: emptyScanned.current.count + (window?.items.length ?? 0),
+        first,
+      }
+    }
+    if (emptyScanned.current.count >= SESSION_WINDOW_ITEMS) return
     void transcript.fetchPreviousPage()
   }, [
     visible.length,
+    pages,
     transcript.isFetching,
     transcript.isError,
     transcript.hasPreviousPage,
