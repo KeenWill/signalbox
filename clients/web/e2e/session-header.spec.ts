@@ -55,3 +55,32 @@ test('Escape closes trigger details before session details', async ({ page }) =>
   await expect(sessionDetails).toBeFocused()
   await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
 })
+
+for (const load of ['pending', 'failed'] as const) {
+  test(`composer Escape leaves editing while the session is ${load}`, async ({ page }) => {
+    await sessionApi(page)
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await page.route(`**/api/sessions/${sessionId}`, async (route) => {
+      if (load === 'pending') await held
+      await route.fulfill({ status: 503, body: 'temporarily unavailable' })
+    })
+    await page.goto(`/sessions?workspace=true&session=${sessionId}`)
+    const message = page.getByRole('textbox', { name: 'Message', exact: true })
+    await expect(
+      page.getByText(load === 'pending' ? 'Loading session…' : 'Session failed to load.', {
+        exact: true,
+      }),
+    ).toBeVisible()
+    await message.fill('Keep this draft')
+    await message.press('Escape')
+    await expect(message).not.toBeFocused()
+    await expect(message).toHaveValue('Keep this draft')
+    await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(sessionId)
+    await page.keyboard.press('Escape')
+    await expect(page).toHaveURL(/\/sessions$/)
+    release()
+  })
+}
