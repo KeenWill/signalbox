@@ -7,7 +7,8 @@ use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
 use signalbox_domain::{
     ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId, DirectModelSelection,
     DurableCommandId, ModelCallId, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId, TurnId,
+    SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId, ToolRequestId,
+    TurnId,
 };
 use sqlx::{PgPool, Row, types::Uuid};
 
@@ -1277,6 +1278,7 @@ struct ProjectedFrontierMember {
     position: u64,
     reference: SemanticTranscriptEntryRef,
     payload_kind: String,
+    tool_result_request: Option<ToolRequestId>,
     summary_range: Option<(SemanticTranscriptEntryRef, SemanticTranscriptEntryRef)>,
 }
 
@@ -1307,7 +1309,7 @@ async fn load_projected_frontier_members(
 ) -> Result<Vec<ProjectedFrontierMember>, ContextCompactionRepositoryError> {
     let rows = sqlx::query(
         "SELECT member.member_position, member.source_session_id,
-                member.semantic_entry_id, entry.payload_kind,
+                member.semantic_entry_id, entry.payload_kind, entry.tool_result_request_id,
                 entry.context_summary_first_source_session_id,
                 entry.context_summary_first_entry_id,
                 entry.context_summary_through_source_session_id,
@@ -1364,6 +1366,9 @@ async fn load_projected_frontier_members(
                 SemanticTranscriptEntryId::from_uuid(row.try_get("semantic_entry_id")?),
             ),
             payload_kind,
+            tool_result_request: row
+                .try_get::<Option<Uuid>, _>("tool_result_request_id")?
+                .map(ToolRequestId::from_uuid),
             summary_range,
         });
     }
@@ -1428,12 +1433,16 @@ fn project_frontier_members(
 fn range_closes_tool_exchanges(members: &[ProjectedFrontierMember]) -> bool {
     let mut open_requests = 0usize;
     for member in members {
-        match member.payload_kind.as_str() {
-            "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
-            "tool_execution_result"
-            | "tool_denied"
-            | "tool_inadmissible"
-            | "tool_closed_by_turn_end" => {
+        match (member.payload_kind.as_str(), member.tool_result_request) {
+            ("assistant_tool_use", _) => open_requests = open_requests.saturating_add(1),
+            (
+                "tool_execution_result"
+                | "tool_denied"
+                | "tool_inadmissible"
+                | "tool_closed_by_turn_end",
+                _,
+            )
+            | ("delegation_result", Some(_)) => {
                 let Some(remaining) = open_requests.checked_sub(1) else {
                     return false;
                 };
@@ -1451,12 +1460,16 @@ fn preview_members(
     let mut open_requests = 0_usize;
     let mut preview = Vec::with_capacity(members.len());
     for member in members {
-        match member.payload_kind.as_str() {
-            "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
-            "tool_execution_result"
-            | "tool_denied"
-            | "tool_inadmissible"
-            | "tool_closed_by_turn_end" => {
+        match (member.payload_kind.as_str(), member.tool_result_request) {
+            ("assistant_tool_use", _) => open_requests = open_requests.saturating_add(1),
+            (
+                "tool_execution_result"
+                | "tool_denied"
+                | "tool_inadmissible"
+                | "tool_closed_by_turn_end",
+                _,
+            )
+            | ("delegation_result", Some(_)) => {
                 open_requests = open_requests.checked_sub(1).ok_or(
                     ContextCompactionCorruption::Inconsistent("context compaction tool exchange"),
                 )?;
@@ -1476,12 +1489,16 @@ fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
     let mut latest = None;
     let mut open_requests = 0usize;
     for (index, member) in members.iter().enumerate() {
-        match member.payload_kind.as_str() {
-            "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
-            "tool_execution_result"
-            | "tool_denied"
-            | "tool_inadmissible"
-            | "tool_closed_by_turn_end" => {
+        match (member.payload_kind.as_str(), member.tool_result_request) {
+            ("assistant_tool_use", _) => open_requests = open_requests.saturating_add(1),
+            (
+                "tool_execution_result"
+                | "tool_denied"
+                | "tool_inadmissible"
+                | "tool_closed_by_turn_end",
+                _,
+            )
+            | ("delegation_result", Some(_)) => {
                 open_requests = open_requests.checked_sub(1)?;
             }
             _ => {}
@@ -1627,7 +1644,9 @@ mod tests {
         ProjectedFrontierMember, Uuid, latest_safe_boundary, preview_members,
         project_frontier_members, range_closes_tool_exchanges,
     };
-    use signalbox_domain::{SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId};
+    use signalbox_domain::{
+        SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolRequestId,
+    };
 
     fn entry(value: u128) -> SemanticTranscriptEntryRef {
         SemanticTranscriptEntryRef::from_source(
@@ -1641,6 +1660,7 @@ mod tests {
             position,
             reference,
             payload_kind: String::from("origin_accepted_input"),
+            tool_result_request: None,
             summary_range: None,
         }
     }
@@ -1655,6 +1675,7 @@ mod tests {
             position,
             reference,
             payload_kind: String::from("context_summary"),
+            tool_result_request: None,
             summary_range: Some((first, through)),
         }
     }
@@ -1713,12 +1734,14 @@ mod tests {
                 position: 1,
                 reference: entry(0x7041),
                 payload_kind: "assistant_tool_use".to_owned(),
+                tool_result_request: None,
                 summary_range: None,
             },
             ProjectedFrontierMember {
                 position: 2,
                 reference: entry(0x7042),
                 payload_kind: "tool_inadmissible".to_owned(),
+                tool_result_request: None,
                 summary_range: None,
             },
             ordinary(3, entry(0x7043)),
@@ -1726,6 +1749,7 @@ mod tests {
                 position: 4,
                 reference: entry(0x7044),
                 payload_kind: "assistant_tool_use".to_owned(),
+                tool_result_request: None,
                 summary_range: None,
             },
         ];
@@ -1744,30 +1768,112 @@ mod tests {
     }
 
     #[test]
+    fn delegation_result_closes_compaction_exchange_before_the_next_request() {
+        let visible = vec![
+            ProjectedFrontierMember {
+                position: 1,
+                reference: entry(0x7041),
+                payload_kind: "assistant_tool_use".to_owned(),
+                tool_result_request: None,
+                summary_range: None,
+            },
+            ProjectedFrontierMember {
+                position: 2,
+                reference: entry(0x7042),
+                payload_kind: "delegation_result".to_owned(),
+                tool_result_request: Some(ToolRequestId::from_uuid(Uuid::from_u128(0x7042))),
+                summary_range: None,
+            },
+            ordinary(3, entry(0x7043)),
+            ProjectedFrontierMember {
+                position: 4,
+                reference: entry(0x7044),
+                payload_kind: "assistant_tool_use".to_owned(),
+                tool_result_request: None,
+                summary_range: None,
+            },
+        ];
+        assert!(range_closes_tool_exchanges(&visible[..3]));
+        assert!(!range_closes_tool_exchanges(&visible));
+        assert_eq!(latest_safe_boundary(&visible), Some(2));
+        let preview =
+            preview_members(&visible).expect("the delivered child result closes its request");
+        assert_eq!(
+            preview
+                .iter()
+                .map(|member| member.is_safe_boundary())
+                .collect::<Vec<_>>(),
+            [false, true, true, false]
+        );
+    }
+
+    #[test]
+    fn background_child_result_preserves_compaction_exchange_balance() {
+        let background = ProjectedFrontierMember {
+            position: 1,
+            reference: entry(0x7051),
+            payload_kind: "delegation_result".to_owned(),
+            tool_result_request: None,
+            summary_range: None,
+        };
+        let visible = vec![background.clone(), ordinary(2, entry(0x7052))];
+        assert!(range_closes_tool_exchanges(&visible));
+        assert_eq!(latest_safe_boundary(&visible), Some(1));
+        assert!(
+            preview_members(&visible)
+                .expect("inbox results do not underflow tool exchanges")
+                .iter()
+                .all(|member| member.is_safe_boundary())
+        );
+        let open = vec![
+            ProjectedFrontierMember {
+                position: 1,
+                reference: entry(0x7053),
+                payload_kind: "assistant_tool_use".to_owned(),
+                tool_result_request: None,
+                summary_range: None,
+            },
+            background,
+        ];
+        assert!(!range_closes_tool_exchanges(&open));
+        assert_eq!(latest_safe_boundary(&open), None);
+        assert!(
+            preview_members(&open)
+                .expect("the background delivery leaves the request open")
+                .iter()
+                .all(|member| !member.is_safe_boundary())
+        );
+    }
+
+    #[test]
     fn automatic_preview_marks_only_closed_tool_exchange_boundaries_safe() {
         let visible = vec![
             ProjectedFrontierMember {
                 position: 1,
                 reference: entry(0x7031),
                 payload_kind: "assistant_tool_use".to_owned(),
+                tool_result_request: None,
                 summary_range: None,
             },
             ProjectedFrontierMember {
                 position: 2,
                 reference: entry(0x7032),
                 payload_kind: "assistant_tool_use".to_owned(),
+                tool_result_request: None,
                 summary_range: None,
             },
             ProjectedFrontierMember {
                 position: 3,
                 reference: entry(0x7033),
                 payload_kind: "tool_execution_result".to_owned(),
+                tool_result_request: None,
                 summary_range: None,
             },
             ProjectedFrontierMember {
                 position: 4,
                 reference: entry(0x7034),
                 payload_kind: "tool_execution_result".to_owned(),
+                tool_result_request: None,
                 summary_range: None,
             },
             ordinary(5, entry(0x7035)),

@@ -79,6 +79,8 @@ another compaction call. A failed provider compaction closes the queued turn
 without preparing an ordinary call.
 
 A zero tool-result admission budget also requires a compaction checkpoint.
+Foreground child results close their tool exchanges when choosing and validating
+compaction boundaries; background deliveries do not close a tool exchange.
 
 A tool-result continuation exceeding reserved headroom commits its results and a
 compaction checkpoint while retaining the active turn. The daemon summarizes the
