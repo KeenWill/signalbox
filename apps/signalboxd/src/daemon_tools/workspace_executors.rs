@@ -635,7 +635,14 @@ where
             executors
                 .resolve_workspace_instruction_root(session)
                 .await
-                .map_err(|_| WorkspaceInstructionRootResolutionError)
+                .map_err(|failure| {
+                    tracing::warn!(
+                        session_id = %session.as_uuid(),
+                        ?failure,
+                        "workspace instruction root resolution failed"
+                    );
+                    WorkspaceInstructionRootResolutionError
+                })
         })
     }
 }

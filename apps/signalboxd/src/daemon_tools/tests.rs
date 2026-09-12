@@ -5792,10 +5792,22 @@ async fn instruction_discovery_refuses_a_lost_derived_binding() {
         .await
         .expect("the derived root binds");
     fs::remove_dir_all(&derived).expect("the bound derived root is removed");
+    let output = tempfile::NamedTempFile::new().expect("capture workspace resolution failure");
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(output.reopen().expect("capture writer"))
+        .finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
     let after_removal = resolver.resolve(first).await;
+    let diagnostic = fs::read_to_string(output.path()).expect("read captured diagnostic");
 
     assert_eq!(initially_bound, derived);
     assert_eq!(after_removal, Err(WorkspaceInstructionRootResolutionError));
+    assert!(diagnostic.contains("workspace instruction root resolution failed"));
+    assert!(diagnostic.contains("failure=UnresolvableRoot"));
+    assert!(diagnostic.contains(&first.into_uuid().to_string()));
+    assert!(!diagnostic.contains(&parent.path().display().to_string()));
 }
 
 /// Instruction discovery revalidates the pathname against the pinned tool
@@ -6588,12 +6600,26 @@ fn a_directory_another_session_bound_is_refused() {
         },
     )]);
 
+    let output = tempfile::NamedTempFile::new().expect("capture shared binding failure");
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(output.reopen().expect("capture writer"))
+        .finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
+
     assert!(another_session_bound(
         &bindings,
         second,
         FIXTURE_BOUND_IDENTITY,
         |_| true
     ));
+    let diagnostic = fs::read_to_string(output.path()).expect("read captured diagnostic");
+    assert!(diagnostic.contains("workspace directory shares a recorded session binding"));
+    assert!(diagnostic.contains(&format!("session_id={}", second.into_uuid())));
+    assert!(diagnostic.contains(&format!("bound_session_id={}", first.into_uuid())));
+    assert!(diagnostic.contains(&format!("proposed={FIXTURE_BOUND_IDENTITY:?}")));
+    assert!(diagnostic.contains(&format!("bound_identity={FIXTURE_BOUND_IDENTITY:?}")));
 }
 
 /// The recorded identity represents inode reuse after a deleted checkout's

@@ -51,7 +51,8 @@ scans before activation, and the activation transaction records the manifest
 with the activation. Discovery snapshots, registered bundles, and manifests live
 in the tables that `crates/persistence/migrations/202609010007_workspaces.sql`
 creates; `apps/signalboxd/src/workspace_instruction_runtime.rs` runs discovery
-on both paths.
+on both paths. A failed workspace-root resolution logs the session identity and
+closed binding failure category without workspace paths.
 
 ## Design decisions
 

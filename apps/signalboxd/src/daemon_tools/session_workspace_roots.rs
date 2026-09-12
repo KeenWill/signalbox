@@ -401,11 +401,23 @@ pub(super) fn another_session_bound(
     still_reachable: impl Fn(SessionId) -> bool,
 ) -> bool {
     bindings.iter().any(|(bound, binding)| {
-        *bound != session
-            && binding
-                .derived_identity()
-                .is_some_and(|bound_identity| bound_identity.shares_a_directory_with(&composed))
-            && still_reachable(*bound)
+        let Some(bound_identity) = binding.derived_identity() else {
+            return false;
+        };
+        if *bound == session
+            || !bound_identity.shares_a_directory_with(&composed)
+            || !still_reachable(*bound)
+        {
+            return false;
+        }
+        tracing::warn!(
+            session_id = %session.into_uuid(),
+            bound_session_id = %bound.into_uuid(),
+            proposed = ?composed,
+            bound_identity = ?bound_identity,
+            "workspace directory shares a recorded session binding"
+        );
+        true
     })
 }
 
