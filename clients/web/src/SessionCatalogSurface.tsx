@@ -1,10 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import type { WebSessionCatalogSnapshot } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import {
-  admittedSessionSearch,
   ProductRequestError,
   type ProductSessionState,
   ProductTransportError,
@@ -12,6 +12,7 @@ import {
   readSessionRates,
 } from './product'
 import { actions, useAppDispatch, useAppSelector } from './state'
+import './catalog.css'
 
 type SessionSummary = WebSessionCatalogSnapshot['summaries'][number]
 
@@ -53,6 +54,14 @@ export function SessionCatalogSurface({
   onTimelineIds: (ids: readonly string[]) => void
   onStateChange: (state: ProductSessionState, mode?: 'push' | 'close' | 'replace') => void
 }) {
+  const navigate = useNavigate()
+  const bootstrap = useQuery({
+    queryKey: ['production', 'bootstrap'],
+    queryFn: ({ signal }) => productTransport.readBootstrap(signal),
+    staleTime: Number.POSITIVE_INFINITY,
+  })
+  const searchAvailable = bootstrap.data?.capabilities.bounded_lexical_search === true
+
   const dispatch = useAppDispatch()
   const keyboardSelection = useAppSelector((root) => root.app.selectedTimeline)
   const sessionButtons = useRef(new Map<string, HTMLButtonElement>())
@@ -75,7 +84,6 @@ export function SessionCatalogSurface({
     queryFn: ({ signal }) =>
       productTransport.readSessions(
         {
-          search: state.q,
           sort: state.sort ?? 'activity',
           includeArchived: state.archived ?? false,
           afterSession: state.afterSession,
@@ -146,12 +154,20 @@ export function SessionCatalogSurface({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
-    const q = String(form.get('q') ?? '')
-    if (q.length > 0 && admittedSessionSearch(q) === undefined) {
-      setSearchError('Search must fit 1,024 UTF-8 bytes and contain no null characters.')
+    const q = String(form.get('q') ?? '').trim()
+    const queryLimit = bootstrap.data?.limits.max_search_query_bytes ?? 0
+    if (
+      q &&
+      (!searchAvailable || new TextEncoder().encode(q).length > queryLimit || q.includes('\0'))
+    ) {
+      setSearchError('Check your search. Try a shorter phrase.')
       return
     }
     setSearchError(null)
+    if (q.trim()) {
+      void navigate({ to: '/$surface', params: { surface: 'search' }, search: { q: q.trim() } })
+      return
+    }
     const sort = form.get('sort') === 'identity' ? 'identity' : undefined
     const archived = form.get('archived') === 'on' ? true : undefined
     if (q === (state.q ?? '') && sort === state.sort && archived === state.archived) return
@@ -182,21 +198,23 @@ export function SessionCatalogSurface({
         onSubmit={submit}
         key={JSON.stringify([state.q ?? null, state.sort ?? null, state.archived ?? null])}
       >
-        <label className="catalog-search">
-          <span>Search titles</span>
-          <span>
-            <Search aria-hidden="true" />
-            <input
-              name="q"
-              defaultValue={state.q}
-              placeholder="Search titles"
-              onKeyDown={(event) => {
-                if (event.key !== 'Escape') return
-                event.currentTarget.closest('main')?.focus()
-              }}
-            />
-          </span>
-        </label>
+        {searchAvailable && (
+          <label className="catalog-search">
+            <span>Search conversations</span>
+            <span>
+              <Search aria-hidden="true" />
+              <input
+                name="q"
+                defaultValue={state.q}
+                placeholder="Messages, tool arguments and results"
+                onKeyDown={(event) => {
+                  if (event.key !== 'Escape') return
+                  event.currentTarget.closest('main')?.focus()
+                }}
+              />
+            </span>
+          </label>
+        )}
         <label>
           <span>Order</span>
           <select name="sort" defaultValue={state.sort ?? 'activity'}>
@@ -300,9 +318,6 @@ export function SessionCatalogSurface({
               </div>
               <div className="catalog-header-actions">
                 <span>{sessions.data.summaries.length} on this page</span>
-                <button type="button" onClick={() => onStateChange({ ...state, workspace: true })}>
-                  Open by ID
-                </button>
               </div>
             </header>
             {listed.length === 0 ? (
@@ -368,7 +383,9 @@ export function SessionCatalogSurface({
                           `${summary.active_turn_count} active · ${summary.queued_turn_count} queued`
                         )}
                       </span>
-                      <time>{activityTime(summary.last_activity.unix_microseconds)}</time>
+                      <time title="Last activity">
+                        {activityTime(summary.last_activity.unix_microseconds)}
+                      </time>
                       <ArrowRight aria-hidden="true" />
                     </button>
                   </li>
