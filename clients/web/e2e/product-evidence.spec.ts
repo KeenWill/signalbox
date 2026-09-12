@@ -61,6 +61,26 @@ const watchBrowser = (page: Page) => {
 
 const useDeterministicSession = (page: Page) =>
   page.route('**/api/sessions/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/timeline-detail'))
+      return route.fulfill({
+        json: {
+          session_id: sessionEvidenceFixture.id,
+          items: [],
+          projected_body_bytes: 0,
+          continuation: null,
+        },
+      })
+    if (url.pathname.endsWith('/timeline') && url.searchParams.get('anchor') === 'before')
+      return route.fulfill({
+        json: {
+          session_id: sessionEvidenceFixture.id,
+          items: [],
+          projected_structured_bytes: 0,
+          continuation_before: null,
+          continuation_after: null,
+        },
+      })
     if (new URL(route.request().url()).pathname.endsWith('/timeline')) {
       return route.fulfill({
         json: {

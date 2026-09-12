@@ -193,6 +193,7 @@ function TranscriptWindow({
       <VirtualTranscript
         ids={ids}
         initialEnd={!eventSequence}
+        followEnd={!eventSequence}
         selectedId={eventSequence}
         onEdge={(direction) => {
           if (transcript.isFetching || transcript.isError) return
