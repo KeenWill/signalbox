@@ -1,18 +1,23 @@
-import { useInfiniteQuery } from '@tanstack/react-query'
-import { type ReactNode, useEffect, useMemo, useRef } from 'react'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
 import type { CommandContext } from './commands'
 import type {
   WebSessionTimelineDetailBody,
+  WebSessionTimelineDetailPage,
   WebTimelineTextExcerpt,
   WebTimelineToolAttempt,
 } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
-import type { SessionTranscriptLimits } from './product'
-import { SessionItemDetail } from './SessionItemDetail'
+import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { conversationEntryKey, hasConversationContent } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
-import { readTranscriptWindow, TRANSCRIPT_RETAINED_WINDOWS } from './session-timeline/transcript'
+import {
+  readTranscriptWindow,
+  TRANSCRIPT_RETAINED_WINDOWS,
+  TRANSCRIPT_WINDOW_ITEMS,
+} from './session-timeline/transcript'
+import { SESSION_WINDOW_ITEMS } from './session-workspace'
 import type { DetailMode } from './state'
 import { VirtualTranscript } from './Transcript'
 
@@ -149,6 +154,28 @@ function TranscriptWindow({
     [entries],
   )
   const ids = useMemo(() => visible.map(conversationEntryKey), [visible])
+  const emptyScanned = useRef(0)
+  useEffect(() => {
+    if (visible.length > 0) {
+      emptyScanned.current = 0
+      return
+    }
+    if (
+      transcript.isFetching ||
+      transcript.isError ||
+      !transcript.hasPreviousPage ||
+      emptyScanned.current >= SESSION_WINDOW_ITEMS
+    )
+      return
+    emptyScanned.current += TRANSCRIPT_WINDOW_ITEMS
+    void transcript.fetchPreviousPage()
+  }, [
+    visible.length,
+    transcript.isFetching,
+    transcript.isError,
+    transcript.hasPreviousPage,
+    transcript.fetchPreviousPage,
+  ])
   return (
     <section className="session-transcript-text" aria-label="Transcript text">
       {transcript.isPending && <p role="status">Loading transcript…</p>}
@@ -159,6 +186,9 @@ function TranscriptWindow({
             Retry transcript
           </button>
         </p>
+      )}
+      {!transcript.isPending && !transcript.isFetching && visible.length === 0 && (
+        <p>No messages in this part of the conversation. Scroll up to keep looking.</p>
       )}
       <VirtualTranscript
         ids={ids}
@@ -173,9 +203,9 @@ function TranscriptWindow({
         renderRow={(index, measure, style) => {
           const item = visible[index]
           if (!item) return null
-          const continuation = pages
+          const detailPage = pages
             ?.flatMap((page) => page.details)
-            .find((page) => page.items.includes(item))?.continuation
+            .find((page) => page.items.at(-1) === item)
           return (
             <div
               key={conversationEntryKey(item)}
@@ -186,16 +216,8 @@ function TranscriptWindow({
               data-event-sequence={item.address.event_sequence}
             >
               <BodyText body={item.body} />
-              {continuation && (
-                <details>
-                  <summary>Read more</summary>
-                  <SessionItemDetail
-                    sessionId={sessionId}
-                    item={{ ...item, projected_structured_bytes: 0 }}
-                    limits={limits}
-                    onComplete={() => {}}
-                  />
-                </details>
+              {detailPage?.continuation && (
+                <ContinuedEvent sessionId={sessionId} page={detailPage} limits={limits} />
               )}
             </div>
           )
@@ -204,6 +226,83 @@ function TranscriptWindow({
       {transcript.isFetching && !transcript.isPending && (
         <small role="status">Loading messages…</small>
       )}
+    </section>
+  )
+}
+
+function ContinuedEvent({
+  sessionId,
+  page,
+  limits,
+}: {
+  sessionId: string
+  page: WebSessionTimelineDetailPage
+  limits: SessionTranscriptLimits
+}) {
+  const [open, setOpen] = useState(false)
+  const [cursor, setCursor] = useState(page.continuation ?? null)
+  const previous = useRef(page)
+  const sequence = page.items.at(-1)?.address.event_sequence ?? ''
+  const detail = useQuery({
+    queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
+    enabled: open,
+    queryFn: ({ signal }) =>
+      readSessionTranscript(
+        sessionId,
+        sequence,
+        sequence,
+        cursor,
+        limits,
+        signal,
+        previous.current,
+      ),
+    gcTime: 0,
+  })
+  if (!open)
+    return (
+      <button type="button" onClick={() => setOpen(true)}>
+        Read more
+      </button>
+    )
+  return (
+    <section aria-label="More message text">
+      {detail.isPending && <p role="status">Loading details…</p>}
+      {detail.isError && (
+        <p role="alert">
+          Details could not be loaded.{' '}
+          <button type="button" onClick={() => void detail.refetch()}>
+            Retry details
+          </button>
+        </p>
+      )}
+      {detail.data?.items.map((item) => (
+        <div key={conversationEntryKey(item)}>
+          <BodyText body={item.body} />
+        </div>
+      ))}
+      {detail.data?.continuation && (
+        <button
+          type="button"
+          onClick={() => {
+            if (detail.data) {
+              previous.current = detail.data
+              setCursor(detail.data.continuation ?? null)
+            }
+          }}
+        >
+          Continue reading
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(false)
+          setCursor(page.continuation ?? null)
+          previous.current = page
+        }}
+      >
+        Close details
+      </button>
     </section>
   )
 }
