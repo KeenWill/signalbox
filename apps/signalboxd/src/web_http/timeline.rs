@@ -267,7 +267,15 @@ pub(super) async fn session_timeline_item_detail(
         .await
     {
         Ok(Some(page)) => match detail_page_dto(page) {
-            Ok(page) => Json(page).into_response(),
+            Ok(mut page) => {
+                if populate_tool_media(&mut page, state.pool.as_ref())
+                    .await
+                    .is_err()
+                {
+                    return session_projection_unavailable();
+                }
+                Json(page).into_response()
+            }
             Err(error) => error.into_response(),
         },
         Ok(None) => timeline_detail_not_found(),
@@ -310,7 +318,15 @@ pub(super) async fn session_timeline_turn_detail(
         .await
     {
         Ok(Some(page)) => match detail_page_dto(page) {
-            Ok(page) => Json(page).into_response(),
+            Ok(mut page) => {
+                if populate_tool_media(&mut page, state.pool.as_ref())
+                    .await
+                    .is_err()
+                {
+                    return session_projection_unavailable();
+                }
+                Json(page).into_response()
+            }
             Err(error) => error.into_response(),
         },
         Ok(None) => timeline_detail_not_found(),
@@ -361,7 +377,15 @@ pub(super) async fn session_timeline_region_detail(
         .await
     {
         Ok(Some(page)) => match detail_page_dto(page) {
-            Ok(page) => Json(page).into_response(),
+            Ok(mut page) => {
+                if populate_tool_media(&mut page, state.pool.as_ref())
+                    .await
+                    .is_err()
+                {
+                    return session_projection_unavailable();
+                }
+                Json(page).into_response()
+            }
             Err(error) => error.into_response(),
         },
         Ok(None) => timeline_detail_not_found(),
@@ -594,6 +618,51 @@ fn window_dto(
         projected_structured_bytes: window.projected_structured_bytes,
         continuation_before,
         continuation_after,
+    })
+}
+
+async fn populate_tool_media(
+    page: &mut WebSessionTimelineDetailPage,
+    pool: Option<&sqlx::PgPool>,
+) -> Result<(), ()> {
+    for item in &mut page.items {
+        let WebSessionTimelineDetailBody::ToolBatch { tools, .. } = &mut item.body else {
+            continue;
+        };
+        for tool in tools {
+            let WebTimelineToolAttemptEvidence::PhysicalAttempt {
+                state: WebTimelineToolState::Completed,
+                result_media_reference,
+                ..
+            } = &mut tool.evidence
+            else {
+                continue;
+            };
+            let repository = signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(
+                pool.ok_or(())?.clone(),
+            );
+            let request = signalbox_domain::ToolRequestId::from_uuid(
+                tool.request_id.as_str().parse().map_err(|_| ())?,
+            );
+            *result_media_reference = repository
+                .load_media_reference(request)
+                .await
+                .map_err(|_| ())?
+                .map(tool_media_reference_dto)
+                .transpose()?;
+        }
+    }
+    Ok(())
+}
+
+fn tool_media_reference_dto(
+    reference: signalbox_domain::ToolMediaReference,
+) -> Result<signalbox_web_contract::WebTimelineToolMediaReference, ()> {
+    Ok(signalbox_web_contract::WebTimelineToolMediaReference {
+        digest: WebBlobId::from_canonical(reference.presented().digest().to_string()).ok_or(())?,
+        media_type: reference.presented().media_type().to_owned(),
+        presentation_kind: signalbox_web_contract::WebTimelineMediaPresentationKind::Image,
+        length_bytes: signalbox_web_contract::WebPositiveU64::from_nonzero(reference.byte_length()),
     })
 }
 
@@ -1455,6 +1524,7 @@ fn tool_attempt_dto(
         (None, None, None, None) => WebTimelineToolAttemptEvidence::RequestOnly {},
         (Some(attempt_id), Some(effect_posture), Some(state), cause) => {
             WebTimelineToolAttemptEvidence::PhysicalAttempt {
+                result_media_reference: None,
                 attempt_id: web_uuid(attempt_id.into_uuid()),
                 result: attempt.result.map(text_excerpt_dto),
                 failure: attempt.failure.map(text_excerpt_dto),
@@ -1786,6 +1856,98 @@ mod tests {
     use super::*;
     use signalbox_domain::{ToolAttemptId, ToolName, ToolRequestId};
     use uuid::Uuid;
+
+    #[test]
+    fn tool_media_uses_presented_identity_and_exact_length() {
+        use signalbox_domain::{
+            BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
+        };
+        let identity = |seed, media: &str| {
+            MediaValidationIdentity::try_new(
+                BlobDigest::from_bytes([seed; 32]),
+                media.into(),
+                "fixture".into(),
+                "reader".into(),
+                "v1".into(),
+                MediaValidationEvidence::StrongSignature,
+            )
+            .expect("validated identity")
+        };
+        let presented = identity(1, "image/png");
+        let source = identity(2, "image/jpeg");
+        let reference = ToolMediaReference::image(
+            presented.clone(),
+            source,
+            std::num::NonZeroU64::new(64).expect("positive length"),
+        )
+        .expect("image reference");
+        let dto = tool_media_reference_dto(reference).expect("media DTO");
+        let json = serde_json::to_value(dto).expect("serialized reference");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "digest": presented.digest().to_string(), "media_type": "image/png", "presentation_kind": "image", "length_bytes": "64"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn earlier_attempt_snapshots_do_not_load_later_media() {
+        for state in [
+            TimelineToolState::Prepared,
+            TimelineToolState::InFlight,
+            TimelineToolState::Completed,
+        ] {
+            let completed = matches!(state, TimelineToolState::Completed);
+            let tool = tool_attempt_dto(TimelineToolAttempt {
+                request_id: ToolRequestId::from_uuid(Uuid::now_v7()),
+                attempt_id: Some(ToolAttemptId::from_uuid(Uuid::now_v7())),
+                tool_name: ToolName::try_new("file_read".into()).expect("tool name"),
+                arguments: None,
+                result: None,
+                failure: None,
+                has_result: completed,
+                has_failure: false,
+                approval_posture: TimelineToolApprovalPosture::Auto,
+                approval_judge_escalated: false,
+                effect_posture: Some(TimelineToolEffectPosture::EffectFree),
+                sandbox_posture: None,
+                state: Some(state),
+                cause_code: None,
+            })
+            .expect("attempt DTO");
+            let session = web_uuid(Uuid::now_v7());
+            let mut page = WebSessionTimelineDetailPage {
+                session_id: session.clone(),
+                items: vec![WebSessionTimelineDetail {
+                    address: WebTimelineAddress {
+                        event_sequence:
+                            signalbox_web_contract::WebTimelineEventSequence::from_nonzero(
+                                std::num::NonZeroU64::new(1).expect("event sequence"),
+                            ),
+                    },
+                    kind: WebSessionTimelineEventKind::ToolBatchTransition,
+                    body: WebSessionTimelineDetailBody::ToolBatch {
+                        turn_id: session.clone(),
+                        producing_model_call_id: session.clone(),
+                        state: WebTimelineToolBatchState::ResultsProjected {
+                            frontier_id: session,
+                        },
+                        projected_member_index: Some(0),
+                        tools: vec![tool],
+                        goal_events: vec![],
+                    },
+                    projected_body_bytes: signalbox_application::timeline_detail_envelope_bytes(),
+                }],
+                projected_body_bytes: signalbox_application::timeline_detail_envelope_bytes(),
+                continuation: None,
+            };
+            assert_eq!(
+                populate_tool_media(&mut page, None).await.is_err(),
+                completed
+            );
+        }
+    }
 
     #[test]
     fn detail_preserves_creation_cause_and_originating_identity() {

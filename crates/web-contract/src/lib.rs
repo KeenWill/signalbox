@@ -1231,6 +1231,25 @@ pub enum WebTimelineToolFailureCause {
     CrashLost,
 }
 
+/// Presentation supported by retained tool-result media evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineMediaPresentationKind {
+    Image,
+}
+
+/// Immutable presented bytes, fetched through the existing blob content route.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineToolMediaReference {
+    pub digest: WebBlobId,
+    /// Canonical media types use the domain media identity's 255-byte bound.
+    #[schemars(length(max = 255))]
+    pub media_type: String,
+    pub presentation_kind: WebTimelineMediaPresentationKind,
+    pub length_bytes: WebPositiveU64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 #[allow(
@@ -1241,6 +1260,8 @@ pub enum WebTimelineToolAttemptEvidence {
     RequestOnly {},
     PhysicalAttempt {
         attempt_id: WebSessionId,
+        /// Present only for completed media results in the frozen transition.
+        result_media_reference: Option<WebTimelineToolMediaReference>,
         result: Option<WebTimelineTextExcerpt>,
         failure: Option<WebTimelineTextExcerpt>,
         /// Whether the frozen transition snapshot recorded a result payload,
@@ -3722,8 +3743,8 @@ function assertTimelineDetailPage(value) {{
               );
             }}
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               !physical.result_present
             ) {{
               fail(
@@ -3748,8 +3769,8 @@ function assertTimelineDetailPage(value) {{
               );
             }}
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               physical.state !== "completed"
             ) {{
               fail(

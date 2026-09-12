@@ -926,6 +926,27 @@ pub enum WebTimelineToolFailureCause {
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebTimelineMediaPresentationKind
+
+```rust
+pub enum WebTimelineMediaPresentationKind {
+    Image,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineToolMediaReference
+
+```rust
+pub struct WebTimelineToolMediaReference {
+    pub digest: WebBlobId,
+    pub media_type: string::String,
+    pub presentation_kind: WebTimelineMediaPresentationKind,
+    pub length_bytes: WebPositiveU64,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebTimelineToolAttemptEvidence
 
 ```rust
@@ -933,6 +954,7 @@ pub enum WebTimelineToolAttemptEvidence {
     RequestOnly {},
     PhysicalAttempt {
         attempt_id: WebSessionId,
+        result_media_reference: option::Option<WebTimelineToolMediaReference>,
         result: option::Option<WebTimelineTextExcerpt>,
         failure: option::Option<WebTimelineTextExcerpt>,
         result_present: bool,
@@ -1968,19 +1990,6 @@ pub struct WebUsageTokenCoverage {
 pub enum WebUsageCostLabel {
     Real,
     MeteredEquivalent,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageCostUnavailableReason
-
-```rust
-pub enum WebUsageCostUnavailableReason {
-    NoTokenEvidence,
-    UnknownInputSemantics,
-    IncompleteCacheAxes,
-    InvalidCacheBreakdown,
-    ConfigurationUnavailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

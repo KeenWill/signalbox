@@ -2,6 +2,19 @@
 
 # root: types-2
 
+## WebUsageCostUnavailableReason
+
+```rust
+pub enum WebUsageCostUnavailableReason {
+    NoTokenEvidence,
+    UnknownInputSemantics,
+    IncompleteCacheAxes,
+    InvalidCacheBreakdown,
+    ConfigurationUnavailable,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebDollarAmount
 
 ```rust

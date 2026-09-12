@@ -5704,6 +5704,13 @@ const schemas = {
         ],
         "type": "string"
       },
+      "WebTimelineMediaPresentationKind": {
+        "description": "Presentation supported by retained tool-result media evidence.",
+        "enum": [
+          "image"
+        ],
+        "type": "string"
+      },
       "WebTimelineModelCallDisposition": {
         "description": "Closed terminal model-call disposition.",
         "enum": [
@@ -6562,6 +6569,17 @@ const schemas = {
                   }
                 ]
               },
+              "result_media_reference": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineToolMediaReference"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Present only for completed media results in the frozen transition."
+              },
               "result_present": {
                 "description": "Whether the frozen transition snapshot recorded a result payload,\nindependent of which single field this page projected.",
                 "type": "boolean"
@@ -6694,6 +6712,33 @@ const schemas = {
             "type": "string"
           }
         ]
+      },
+      "WebTimelineToolMediaReference": {
+        "additionalProperties": false,
+        "description": "Immutable presented bytes, fetched through the existing blob content route.",
+        "properties": {
+          "digest": {
+            "$ref": "#/$defs/WebBlobId"
+          },
+          "length_bytes": {
+            "$ref": "#/$defs/WebPositiveU64"
+          },
+          "media_type": {
+            "description": "Canonical media types use the domain media identity's 255-byte bound.",
+            "maxLength": 255,
+            "type": "string"
+          },
+          "presentation_kind": {
+            "$ref": "#/$defs/WebTimelineMediaPresentationKind"
+          }
+        },
+        "required": [
+          "digest",
+          "media_type",
+          "presentation_kind",
+          "length_bytes"
+        ],
+        "type": "object"
       },
       "WebTimelineToolSandboxPosture": {
         "enum": [
@@ -8071,8 +8116,8 @@ function assertTimelineDetailPage(value) {
               );
             }
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               !physical.result_present
             ) {
               fail(
@@ -8097,8 +8142,8 @@ function assertTimelineDetailPage(value) {
               );
             }
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               physical.state !== "completed"
             ) {
               fail(

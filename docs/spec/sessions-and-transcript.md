@@ -131,6 +131,11 @@ with a visible reason, while retries remain available. A bounded rates read
 reports lifecycle state, turn outcome counts, the latest failed turn and its
 provider cause, and goal disposition for up to 32 listed sessions.
 
+Completed tool-attempt detail includes its retained presented-media digest,
+media type, presentation kind, and byte length when the result is media. Blob
+bytes use the existing content route; earlier transition snapshots carry no
+later result reference.
+
 ## Design decisions
 
 Cause and ancestry are recorded as independent facts, because deriving one from

@@ -665,6 +665,8 @@ export type WebTimelineImportedEvidence = {
 
 export type WebTimelineImportedRelationship = "resume" | "fork";
 
+export type WebTimelineMediaPresentationKind = "image";
+
 export type WebTimelineModelCallDisposition = "completed" | "known_failed" | "refused" | "cancelled" | "ambiguous";
 
 export type WebTimelineModelCallState = {
@@ -833,6 +835,7 @@ export type WebTimelineToolAttemptEvidence = {
   readonly failure?: WebTimelineTextExcerpt | null;
   readonly failure_present: boolean;
   readonly result?: WebTimelineTextExcerpt | null;
+  readonly result_media_reference?: WebTimelineToolMediaReference | null;
   readonly result_present: boolean;
   readonly sandbox_posture?: WebTimelineToolSandboxPosture | null;
   readonly state: WebTimelineToolState;
@@ -856,6 +859,13 @@ export type WebTimelineToolBatchState = {
 export type WebTimelineToolEffectPosture = "effect_free" | "external_effect";
 
 export type WebTimelineToolFailureCause = "preauthorization_rejected" | "unknown_tool" | "invalid_arguments" | "execution_failed" | "result_too_large" | "crash_lost" | "result_contains_null";
+
+export type WebTimelineToolMediaReference = {
+  readonly digest: WebBlobId;
+  readonly length_bytes: WebPositiveU64;
+  readonly media_type: string;
+  readonly presentation_kind: WebTimelineMediaPresentationKind;
+};
 
 export type WebTimelineToolSandboxPosture = "unsandboxed" | "sandboxed";
 
