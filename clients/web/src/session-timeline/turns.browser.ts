@@ -118,16 +118,35 @@ test('persists levels, reads turn detail, and keeps a linked event visible', asy
       exact: false,
     }),
   ).toHaveCount(0)
-  await page.goto(`/sessions?workspace=true&session=${detailSessionId}&around=3`)
+  await page.goto(`/src/session-timeline/transcript-scenario.html?around=3`)
   const linked = transcript.locator('[data-event-sequence="3"]')
   await expect(linked).toBeInViewport()
   await expect(linked).toBeFocused()
   await page.screenshot({ path: testInfo.outputPath('linked-turn-detail.png') })
-  await page.goto(`/sessions?workspace=true&session=${detailSessionId}&turn=${detailTurnId}`)
+  await page.goto(`/src/session-timeline/transcript-scenario.html?turn=${detailTurnId}`)
   await expect
     .poll(() => turnReads.some((url) => !new URL(url).searchParams.has('cursor_address')))
     .toBe(true)
   await expect(
     transcript.getByText('Inspect the release status and retain the result.'),
   ).toBeVisible()
+})
+
+test('keeps turn summaries and level controls usable at phone width', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await turnApi(page)
+  await page.goto('/src/session-timeline/transcript-scenario.html')
+  await page.getByRole('radio', { name: 'Summary', exact: true }).check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(
+    transcript.getByText('The release checks passed. Publishing remains unapproved.'),
+  ).toBeInViewport()
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+  await expect(transcript.getByRole('region', { name: 'exec_command details' })).toContainText(
+    'passed',
+  )
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await page.screenshot({ path: testInfo.outputPath('turn-tools-phone.png') })
 })

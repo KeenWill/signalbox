@@ -226,6 +226,7 @@ export function VirtualTranscript({
   const selected = selectedId ? ids.indexOf(selectedId) : -1
   const anchor = useRef<{ id: string; offset: number } | null>(null)
   const initialized = useRef(false)
+  const touchStart = useRef<number | null>(null)
   const virtualizer = useVirtualizer({
     count: ids.length,
     getScrollElement: () => parent.current,
@@ -292,7 +293,20 @@ export function VirtualTranscript({
       aria-activedescendant={
         role === 'listbox' && selected >= 0 ? (selectedId ?? undefined) : undefined
       }
-      onKeyDown={onKeyDown}
+      onKeyDown={(event) => {
+        onKeyDown?.(event)
+        if (event.target !== event.currentTarget || event.defaultPrevented) return
+        if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) edge('before')
+        if (['ArrowDown', 'PageDown', 'End'].includes(event.key)) edge('after')
+      }}
+      onTouchStart={(event) => {
+        touchStart.current = event.touches[0]?.clientY ?? null
+      }}
+      onTouchMove={(event) => {
+        const position = event.touches[0]?.clientY
+        if (position !== undefined && touchStart.current !== null)
+          edge(position > touchStart.current ? 'before' : 'after')
+      }}
       onScroll={() => edge()}
       onWheel={(event) => edge(event.deltaY < 0 ? 'before' : 'after')}
       data-mounted-rows={rows.length}
