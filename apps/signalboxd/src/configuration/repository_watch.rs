@@ -126,8 +126,12 @@ impl WatchedRepositoryConfiguration {
     /// Returns the deployment-owned credential-file reference.
     pub fn credential_file(&self) -> Option<&Path> {
         match self.credential.delivery() {
-            crate::credential_pools::GithubCredentialDelivery::File(path) => Some(path),
+            crate::credential_pools::GithubCredentialDelivery::File(path)
+            | crate::credential_pools::GithubCredentialDelivery::KubernetesSecret(path) => {
+                Some(path)
+            }
             crate::credential_pools::GithubCredentialDelivery::GithubApp { .. }
+            | crate::credential_pools::GithubCredentialDelivery::Environment(_)
             | crate::credential_pools::GithubCredentialDelivery::Onepassword { .. } => None,
         }
     }
@@ -422,6 +426,7 @@ pub(super) fn parse_repository_watch_configuration(
     let mut repository_set = HashSet::with_capacity(repository_tables.len());
     let mut credential_file_references: Vec<PathBuf> = Vec::with_capacity(repository_tables.len());
     let mut credential_items = HashSet::with_capacity(repository_tables.len());
+    let mut credential_variables = HashSet::with_capacity(repository_tables.len());
     let mut webhook_hook_ids = HashSet::with_capacity(repository_tables.len());
     let mut webhook_repository_count = 0_usize;
     for repository in repository_tables {
@@ -515,8 +520,16 @@ pub(super) fn parse_repository_watch_configuration(
         {
             return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialItem);
         }
-        if let crate::credential_pools::GithubCredentialDelivery::File(credential_file) =
+        if let crate::credential_pools::GithubCredentialDelivery::Environment(variable) =
             credential.delivery()
+            && !credential_variables.insert(variable.clone())
+        {
+            return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialVariable);
+        }
+        if let crate::credential_pools::GithubCredentialDelivery::File(credential_file)
+        | crate::credential_pools::GithubCredentialDelivery::KubernetesSecret(
+            credential_file,
+        ) = credential.delivery()
         {
             let resolved_credential_file = resolved_credential_file_reference(credential_file)?;
             if credential_file_references.iter().any(|existing| {

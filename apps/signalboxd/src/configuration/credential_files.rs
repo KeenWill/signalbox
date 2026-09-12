@@ -278,6 +278,7 @@ pub struct FileCredentialAccess {
 enum CredentialSource {
     File(PathBuf),
     Onepassword { item: Arc<str>, executable: PathBuf },
+    Environment(Arc<str>),
 }
 
 /// Bounds a local vault CLI read, including capture and exit, to thirty seconds.
@@ -328,6 +329,25 @@ async fn read_onepassword(
     .unwrap_or(Err(CredentialAccessFailure::Unavailable))
 }
 
+fn read_environment(variable: &str) -> Result<Vec<u8>, CredentialAccessFailure> {
+    let value = std::env::var_os(variable).ok_or(CredentialAccessFailure::Unavailable)?;
+    let bytes = value.as_encoded_bytes();
+    if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
+        return Err(CredentialAccessFailure::TooLarge);
+    }
+    Ok(bytes.to_vec())
+}
+
+impl CredentialSource {
+    fn validate(&self) -> Result<(), CredentialAccessFailure> {
+        match self {
+            Self::File(path) => open_credential_file(path).map(|_| ()),
+            Self::Environment(variable) => read_environment(variable).map(|_| ()),
+            Self::Onepassword { .. } => Ok(()),
+        }
+    }
+}
+
 impl FileCredentialAccess {
     /// Binds one GitHub profile without reading credentials.
     pub fn from_github(
@@ -335,7 +355,8 @@ impl FileCredentialAccess {
         reference: CredentialReference,
     ) -> Self {
         match profile.delivery() {
-            crate::credential_pools::GithubCredentialDelivery::File(path) => {
+            crate::credential_pools::GithubCredentialDelivery::File(path)
+            | crate::credential_pools::GithubCredentialDelivery::KubernetesSecret(path) => {
                 Self::new(path.clone(), reference)
             }
             crate::credential_pools::GithubCredentialDelivery::Onepassword { item, executable } => {
@@ -351,6 +372,14 @@ impl FileCredentialAccess {
                     app: None,
                 }
             }
+            crate::credential_pools::GithubCredentialDelivery::Environment(variable) => Self {
+                sources: Arc::new(HashMap::from([(
+                    reference,
+                    CredentialSource::Environment(variable.clone()),
+                )])),
+                request_timeout: None,
+                app: None,
+            },
             crate::credential_pools::GithubCredentialDelivery::GithubApp { .. } => Self {
                 sources: Arc::new(HashMap::new()),
                 request_timeout: None,
@@ -369,12 +398,12 @@ impl FileCredentialAccess {
         self
     }
 
-    /// Checks each configured file's admission without reading its secret bytes.
+    /// Checks each source's admission; file checks read metadata only.
     pub fn validate(&self) -> Result<(), CredentialAccessError> {
         for (reference, source) in self.sources.iter() {
-            if let CredentialSource::File(path) = source {
-                validate_credential_file(path, reference.clone())?;
-            }
+            source
+                .validate()
+                .map_err(|failure| CredentialAccessError::new(reference.clone(), failure))?;
         }
         Ok(())
     }
@@ -411,7 +440,13 @@ impl FileCredentialAccess {
             .filter(|profile| profile.adapter() == adapter)
             .filter_map(|profile| {
                 let source = match profile.delivery() {
-                    CredentialDelivery::File { path, .. } => CredentialSource::File(path.clone()),
+                    CredentialDelivery::File { path, .. }
+                    | CredentialDelivery::KubernetesSecret { path, .. } => {
+                        CredentialSource::File(path.clone())
+                    }
+                    CredentialDelivery::Environment { variable, .. } => {
+                        CredentialSource::Environment(variable.clone())
+                    }
                     CredentialDelivery::Onepassword {
                         item, executable, ..
                     } => CredentialSource::Onepassword {
@@ -485,6 +520,7 @@ impl CredentialAccess for FileCredentialAccess {
                     .await
                     .unwrap_or(Err(CredentialAccessFailure::Unreadable))
             }
+            CredentialSource::Environment(variable) => read_environment(variable),
             CredentialSource::Onepassword { item, executable } => {
                 read_onepassword(item, executable).await
             }
@@ -502,7 +538,15 @@ impl super::HubModelConfiguration {
             .github_credential_profile(signalbox_tools_code_host::CODE_HOST_CREDENTIAL_REFERENCE)
         {
             Some(profile) => match profile.delivery() {
-                GithubCredentialDelivery::File(path) => path.as_path(),
+                GithubCredentialDelivery::File(path)
+                | GithubCredentialDelivery::KubernetesSecret(path) => path.as_path(),
+                GithubCredentialDelivery::Environment(variable) => {
+                    return self.repository_watch().is_some_and(|watch| {
+                        watch.repositories().iter().any(|repository| {
+                            matches!(repository.credential().delivery(), GithubCredentialDelivery::Environment(polling) if polling == variable)
+                        })
+                    });
+                }
                 GithubCredentialDelivery::GithubApp { .. } => return false,
                 GithubCredentialDelivery::Onepassword { item, .. } => {
                     return self.repository_watch().is_some_and(|watch| {
@@ -523,18 +567,39 @@ impl super::HubModelConfiguration {
         })
     }
 
-    /// Admits model-provider, token, and webhook files; App keys are admitted at use.
+    /// Admits credential sources and webhook files; App keys are admitted at use.
     pub fn validate_credential_files(&self) -> Result<(), CredentialAccessError> {
         for profile in self.credential_profiles.values() {
             use crate::credential_pools::CredentialDelivery;
             match profile.delivery() {
-                CredentialDelivery::File { path, .. } => {
+                CredentialDelivery::File { path, .. }
+                | CredentialDelivery::KubernetesSecret { path, .. } => {
                     validate_credential_file(path, CredentialReference::new(profile.name()))?
+                }
+                CredentialDelivery::Environment { variable, .. } => {
+                    CredentialSource::Environment(variable.clone())
+                        .validate()
+                        .map_err(|failure| {
+                            CredentialAccessError::new(
+                                CredentialReference::new(profile.name()),
+                                failure,
+                            )
+                        })?
                 }
                 CredentialDelivery::Ambient
                 | CredentialDelivery::Onepassword { .. }
                 | CredentialDelivery::Oauth(_)
                 | CredentialDelivery::CodexHome { .. } => {}
+            }
+        }
+        for (name, profile) in &self.github_credential_profiles {
+            if matches!(
+                profile.delivery(),
+                crate::credential_pools::GithubCredentialDelivery::Environment(_)
+                    | crate::credential_pools::GithubCredentialDelivery::KubernetesSecret(_)
+            ) {
+                FileCredentialAccess::from_github(profile, CredentialReference::new(name))
+                    .validate()?;
             }
         }
         if let Some(watch) = self.repository_watch() {

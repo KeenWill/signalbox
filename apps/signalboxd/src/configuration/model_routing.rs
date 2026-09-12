@@ -89,8 +89,16 @@ impl ModelAdapter {
     /// not this predicate, is what decides.
     pub(crate) fn admits_delivery(self, delivery: &str) -> bool {
         match self {
-            Self::Anthropic | Self::OpenAi => matches!(delivery, "file" | "onepassword"),
-            Self::ClaudeCli => matches!(delivery, "ambient" | "file" | "onepassword"),
+            Self::Anthropic | Self::OpenAi => {
+                matches!(
+                    delivery,
+                    "file" | "onepassword" | "environment" | "kubernetes_secret"
+                )
+            }
+            Self::ClaudeCli => matches!(
+                delivery,
+                "ambient" | "file" | "onepassword" | "environment" | "kubernetes_secret"
+            ),
             Self::CodexCli => matches!(delivery, "ambient" | "file" | "codex_home" | "oauth"),
         }
     }
@@ -102,8 +110,16 @@ impl ModelAdapter {
     /// capacity-dependent pool keys.
     pub(crate) fn delivers(self, delivery: &str) -> bool {
         match self {
-            Self::Anthropic | Self::OpenAi => matches!(delivery, "file" | "onepassword"),
-            Self::ClaudeCli => matches!(delivery, "ambient" | "file" | "onepassword"),
+            Self::Anthropic | Self::OpenAi => {
+                matches!(
+                    delivery,
+                    "file" | "onepassword" | "environment" | "kubernetes_secret"
+                )
+            }
+            Self::ClaudeCli => matches!(
+                delivery,
+                "ambient" | "file" | "onepassword" | "environment" | "kubernetes_secret"
+            ),
             Self::CodexCli => matches!(delivery, "ambient" | "codex_home"),
         }
     }
