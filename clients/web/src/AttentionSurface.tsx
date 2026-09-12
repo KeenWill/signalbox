@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import { ArrowRight, Radio, RefreshCw, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { type AttentionSyncPhase, attentionSnapshotsMatch, synchronizeAttention } from './attention'
@@ -6,6 +7,7 @@ import type { WebAttentionSnapshot } from './generated/web-contract.mjs'
 import { enumLabel, productLabels } from './labels'
 import { ProductRequestError, productTransport } from './product'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
+import './catalog.css'
 
 type AttentionSummary = WebAttentionSnapshot['summaries'][number]
 
@@ -240,10 +242,11 @@ export function AttentionSurface({
               <ol>
                 {attention.data.summaries.map((summary) => (
                   <li key={summary.session_id} className={`attention-${summary.state}`}>
-                    <button
-                      type="button"
-                      aria-pressed={selectedId === summary.session_id}
-                      onClick={(event) => open(summary, event.currentTarget)}
+                    <Link
+                      className="attention-session-link"
+                      to="/$surface"
+                      params={{ surface: 'sessions' }}
+                      search={{ session: summary.session_id, workspace: true }}
                     >
                       <span className="attention-rail" aria-hidden="true" />
                       <span className="attention-identity">
@@ -255,6 +258,15 @@ export function AttentionSurface({
                       </span>
                       <time>{activityTime(summary.last_activity.unix_milliseconds)}</time>
                       <ArrowRight aria-hidden="true" />
+                    </Link>
+                    <button
+                      className="attention-preview"
+                      type="button"
+                      aria-label={`${productLabels.preview} ${enumLabel(summary.state)} ${summary.session_id}`}
+                      aria-pressed={selectedId === summary.session_id}
+                      onClick={(event) => open(summary, event.currentTarget)}
+                    >
+                      {productLabels.preview}
                     </button>
                   </li>
                 ))}
@@ -289,6 +301,13 @@ export function AttentionSurface({
                   <X aria-hidden="true" />
                 </button>
               </header>
+              <Link
+                to="/$surface"
+                params={{ surface: 'sessions' }}
+                search={{ session: selected.session_id, workspace: true }}
+              >
+                {productLabels.openSession} <ArrowRight aria-hidden="true" />
+              </Link>
               <dl>
                 <div>
                   <dt>Session</dt>
