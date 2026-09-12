@@ -2092,7 +2092,7 @@ for (const catalogState of [
   { q: 'review', sort: 'identity', archived: 'true', afterSession: sessionWorkspaceFixture.id },
   { q: 'review', archived: 'true', afterSession: sessionWorkspaceFixture.id, afterActivity: '42' },
 ]) {
-  test(`opening a session by id preserves catalog state for ${catalogState.sort ?? 'activity'} order`, async ({
+  test(`opening and reopening a session by id preserves catalog state for ${catalogState.sort ?? 'activity'} order`, async ({
     page,
   }) => {
     await useDeterministicBootstrap(page)
@@ -2110,18 +2110,22 @@ for (const catalogState of [
     )
     const search = new URLSearchParams(Object.entries(catalogState))
     await page.goto(`/sessions?${search}`)
-    await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
-    await page.getByRole('button', { name: /^Open session by id/ }).click()
-    await page
-      .getByRole('dialog', { name: 'Open session by id' })
-      .getByLabel('Session ID')
-      .fill(sessionWorkspaceFixture.id)
-    await page.keyboard.press('Enter')
-    search.set('session', sessionWorkspaceFixture.id)
-    search.set('workspace', 'true')
-    await expect
-      .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
-      .toEqual(Object.fromEntries(search))
+    for (const step of ['Open from catalog', 'Reopen the current session']) {
+      await test.step(step, async () => {
+        await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+        await page.getByRole('button', { name: /^Open session by id/ }).click()
+        await page
+          .getByRole('dialog', { name: 'Open session by id' })
+          .getByLabel('Session ID')
+          .fill(sessionWorkspaceFixture.id)
+        await page.keyboard.press('Enter')
+        search.set('session', sessionWorkspaceFixture.id)
+        search.set('workspace', 'true')
+        await expect
+          .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
+          .toEqual(Object.fromEntries(search))
+      })
+    }
     await page.keyboard.press('Escape')
     await expect
       .poll(() => Object.fromEntries(new URL(page.url()).searchParams))

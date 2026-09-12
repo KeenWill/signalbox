@@ -771,7 +771,7 @@ export function ProductApp({
         if (surface === 'sessions') {
           updateSessionSearch(
             { ...sessionState, session: sessionId, workspace: true },
-            sessionState.workspace && sessionState.session === undefined ? 'replace' : 'push',
+            sessionState.workspace || sessionState.session !== undefined ? 'replace' : 'push',
           )
           return
         }
