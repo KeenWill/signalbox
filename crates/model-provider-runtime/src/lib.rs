@@ -1583,8 +1583,8 @@ where
     }
 }
 
-/// Retains facts already redacted by the adapter, without request bodies,
-/// response content, credentials, or any effect on classification.
+/// Retains typed boundary facts without adapter-authored text or any effect on
+/// classification.
 fn ambiguity_evidence(
     evidence: &TerminalEvidence,
     observations: &[Observation<ModelCallId>],
@@ -1594,26 +1594,20 @@ fn ambiguity_evidence(
     let TerminalEvidence::BoundaryLoss(loss) = evidence else {
         return None;
     };
-    let (point, detail) = match &loss.cause {
-        LossCause::TimedOut(facts) => ("timeout", facts.detail.as_str()),
-        LossCause::TransportFailed(facts) => ("transport_failure", facts.detail.as_str()),
-        LossCause::ResponseBodyLost(facts) => ("response_body_lost", facts.detail.as_str()),
-        LossCause::ResponseUnintelligible { detail } => {
-            ("response_unintelligible", detail.as_str())
-        }
-        LossCause::ResponseEnvelopeRejected { stage, detail } => (stage.as_str(), detail.as_str()),
-        LossCause::StreamProtocolViolation { detail } => {
-            ("stream_protocol_violation", detail.as_str())
-        }
+    let point = match &loss.cause {
+        LossCause::TimedOut(_) => "timeout",
+        LossCause::TransportFailed(_) => "transport_failure",
+        LossCause::ResponseBodyLost(_) => "response_body_lost",
+        LossCause::ResponseUnintelligible { .. } => "response_unintelligible",
+        LossCause::ResponseEnvelopeRejected { stage, .. } => stage.as_str(),
+        LossCause::StreamProtocolViolation { .. } => "stream_protocol_violation",
         LossCause::StreamEndedWithoutTerminalMarker { interruption } => match interruption {
-            StreamInterruption::EndOfStream => ("stream_eof", ""),
-            StreamInterruption::TransportFailure(facts) => {
-                ("stream_transport_failure", facts.detail.as_str())
-            }
-            StreamInterruption::TimedOut(facts) => ("stream_timeout", facts.detail.as_str()),
+            StreamInterruption::EndOfStream => "stream_eof",
+            StreamInterruption::TransportFailure(_) => "stream_transport_failure",
+            StreamInterruption::TimedOut(_) => "stream_timeout",
         },
-        LossCause::CancellationRequested => ("cancellation_after_send", ""),
-        LossCause::UnexpectedHttpStatus => ("unexpected_http_status", ""),
+        LossCause::CancellationRequested => "cancellation_after_send",
+        LossCause::UnexpectedHttpStatus => "unexpected_http_status",
     };
     let send_commenced = observations
         .iter()
@@ -1638,17 +1632,14 @@ fn ambiguity_evidence(
         signalbox_model_runtime::FinishReason::Refusal => "refusal",
         signalbox_model_runtime::FinishReason::Unrecognized { .. } => "unrecognized",
     });
-    // Detail comes last so truncation cannot remove the classification facts.
     Some(signalbox_domain::ModelCallAmbiguityEvidence::new(&format!(
-        "classification_point=runtime_terminal_report\ncause={}\nloss_point={point}\nelapsed_ms={}\nsend_commenced={send_commenced}\nexchange_established={exchange_established}\nhttp_status={:?}\nresponse_content_observed={}\nobserved_content_bytes={content_bytes}\ntool_calls={:?}\nfinish_reported={:?}\ndetail_original_bytes={}\ndetail={:?}",
+        "classification_point=runtime_terminal_report\ncause={}\nloss_point={point}\nelapsed_ms={}\nsend_commenced={send_commenced}\nexchange_established={exchange_established}\nhttp_status={:?}\nresponse_content_observed={}\nobserved_content_bytes={content_bytes}\ntool_calls={:?}\nfinish_reported={:?}",
         BoundaryLossCode::of(&loss.cause).as_str(),
         elapsed.as_millis(),
         loss.exchange.http_status,
         loss.response_content_observed,
         loss.tool_calls,
         finish,
-        detail.len(),
-        &detail[..detail.floor_char_boundary(detail.len().min(4096))],
     )))
 }
 
@@ -3741,13 +3732,42 @@ mod tests {
                 .expect("boundary loss supplies evidence");
         assert_eq!(
             evidence.summary(),
-            "classification_point=runtime_terminal_report\ncause=boundary_loss_stream_incomplete\nloss_point=stream_timeout\nelapsed_ms=2000\nsend_commenced=true\nexchange_established=true\nhttp_status=Some(200)\nresponse_content_observed=true\nobserved_content_bytes=6\ntool_calls=NoneOpened\nfinish_reported=None\ndetail_original_bytes=13\ndetail=\"read deadline\""
+            "classification_point=runtime_terminal_report\ncause=boundary_loss_stream_incomplete\nloss_point=stream_timeout\nelapsed_ms=2000\nsend_commenced=true\nexchange_established=true\nhttp_status=Some(200)\nresponse_content_observed=true\nobserved_content_bytes=6\ntool_calls=NoneOpened\nfinish_reported=None"
         );
         assert_eq!(
             classify_terminal(loss, &observations, &configured("model-exact"))
                 .unwrap()
                 .observation,
             ModelCallTerminalObservation::Ambiguous
+        );
+    }
+
+    #[test]
+    fn ambiguous_model_call_evidence_omits_buffered_response_contents() {
+        let loss = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: true,
+            cause: LossCause::ResponseUnintelligible {
+                detail: r#"unrecognized output item type WireOutputItem { content: Some("private answer"), arguments: Some("private tool arguments"), encrypted_content: Some("private ciphertext") }"#.into(),
+            },
+            exchange: ExchangeFacts {
+                http_status: Some(200),
+                ..ExchangeFacts::default()
+            },
+            reported_model: None,
+            finish_reported: None,
+            tool_calls: ToolCallsAtLoss::Unobserved,
+            usage: TokenUsage::unreported(),
+        });
+        let no_streamed_observations = [];
+        let evidence = super::ambiguity_evidence(
+            &loss,
+            &no_streamed_observations,
+            std::time::Duration::from_secs(1),
+        )
+        .expect("unintelligible responses retain typed loss facts");
+        assert_eq!(
+            evidence.summary(),
+            "classification_point=runtime_terminal_report\ncause=boundary_loss_response_unintelligible\nloss_point=response_unintelligible\nelapsed_ms=1000\nsend_commenced=false\nexchange_established=false\nhttp_status=Some(200)\nresponse_content_observed=true\nobserved_content_bytes=0\ntool_calls=Unobserved\nfinish_reported=None"
         );
     }
 

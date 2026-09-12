@@ -4777,7 +4777,7 @@ async fn ambiguous_model_call_diagnostic_evidence_survives_terminal_commit()
     let seed = 0x6e70;
     let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
     let diagnostic = signalbox_domain::ModelCallAmbiguityEvidence::new(
-        "classification_point=runtime_terminal_report\nloss_point=stream_timeout\ndetail=read deadline",
+        "classification_point=runtime_terminal_report\nloss_point=stream_timeout",
     );
     let observation = authorized
         .observation_correlation()
