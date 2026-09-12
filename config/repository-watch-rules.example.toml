@@ -1,14 +1,16 @@
 # Agent pull requests enter repository watch without a label.
 [[repository_watch.rules]]
 id = "renovate-merge-forward"
-version = 6
+version = 7
 singleton_per = "pull_request"
 cooldown_seconds = 600
 [repository_watch.rules.matcher]
-event_kinds = ["pull_request_opened", "mergeable_state_changed"]
+event_kinds = ["mergeable_state_changed"]
 repo = "KeenWill/signalbox"
 head_branch_regex = "^agent/.+$"
 draft = false
+[repository_watch.rules.matcher.mergeable_state]
+any_of = ["conflicting"]
 [repository_watch.rules.matcher.labels]
 none_of = ["no-auto"]
 [[repository_watch.rules.actions]]

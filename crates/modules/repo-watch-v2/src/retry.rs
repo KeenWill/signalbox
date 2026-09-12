@@ -554,6 +554,55 @@ mod tests {
     }
 
     #[test]
+    fn a_conflict_only_matcher_does_not_retry_checks_or_threads_on_a_mergeable_head() {
+        use signalbox_session_ownership::{
+            GitHubObjectId, RepoWatchCheckCompletionGeneration, RepoWatchCheckSuiteObservation,
+        };
+        let (original, event) = origin(RepoWatchEventKindV1::MergeableStateChanged {
+            current: MergeableState::Conflicting,
+        });
+        let rule = RepoWatchRule::try_new(
+            original.id().clone(),
+            original.version(),
+            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+                event_kinds: vec![event.kind().name()],
+                mergeable_state: vec![MergeableState::Conflicting],
+                ..Default::default()
+            }),
+            original.actions().to_vec(),
+            original.singleton_per(),
+            original.cooldown(),
+        )
+        .expect("conflict-only rule");
+        let mut current = input();
+        current.completed_check_suites = vec![RepoWatchCheckSuiteObservation::new(
+            GitHubObjectId::new(NonZeroU64::MIN),
+            RepoWatchCheckCompletionGeneration::try_new("unchanged-failure".to_owned())
+                .expect("generation"),
+            ChecksOutcome::Failure,
+        )];
+        current.threads = vec![RepoWatchThreadObservation::open(
+            ReviewThreadId::try_new("remaining-review".to_owned()).expect("thread"),
+            Some(thread_author()),
+        )];
+        for source in [MatchSource::ProviderEvent, MatchSource::Activation] {
+            for (state, eligible) in [
+                (MergeableState::Conflicting, true),
+                (MergeableState::Mergeable, false),
+                (MergeableState::Unknown, false),
+            ] {
+                current.mergeable_state = state;
+                let observed = RepoWatchPullRequestState::try_new(current.clone()).expect("pull");
+                assert_eq!(
+                    reevaluation_event(&rule, &event, &[observed], source).is_some(),
+                    eligible,
+                    "{state:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_conflict_keeps_a_passed_checks_dispatch_eligible() {
         let (rule, event) = origin(RepoWatchEventKindV1::ChecksCompleted {
             outcome: ChecksOutcome::Failure,
