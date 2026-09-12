@@ -138,9 +138,17 @@ test('shows validation inline and adopts a successful saved definition', async (
   await page.screenshot({ path: testInfo.outputPath('template-edit-phone.png'), fullPage: true })
 })
 
-test('refreshes untouched source while retaining an edited draft', async ({ page }) => {
+test('requires reconciling a refreshed definition before saving an edited draft', async ({
+  page,
+}, testInfo) => {
   let current = detailFixture
-  await page.route('**/api/templates/code-review', (route) => route.fulfill({ json: current }))
+  const saves: string[] = []
+  await page.route('**/api/templates/code-review', (route) => {
+    if (route.request().method() === 'PUT') {
+      saves.push(route.request().postDataJSON().definition_toml)
+    }
+    return route.fulfill({ json: current })
+  })
   await page.goto(scenario)
   await page.getByRole('button', { name: /code-review/ }).click()
   await page.getByText('Edit template', { exact: true }).click()
@@ -149,6 +157,7 @@ test('refreshes untouched source while retaining an edited draft', async ({ page
   const refreshedPrompt = 'Instructions updated in another browser.'
   current = {
     ...detailFixture,
+    summary: { ...detailFixture.summary, digest: '2'.repeat(64) },
     system_prompt: refreshedPrompt,
     definition_toml: detailFixture.definition_toml.replace(
       detailFixture.system_prompt,
@@ -169,4 +178,26 @@ test('refreshes untouched source while retaining an edited draft', async ({ page
   await page.getByText('System instructions', { exact: true }).click()
   await expect(page.getByText(laterPrompt, { exact: true })).toBeVisible()
   await expect(editor).toHaveValue(draft)
+  const save = page.getByRole('button', { name: 'Save template', exact: true })
+  await expect(save).toBeDisabled()
+  await expect(page.getByRole('alert')).toContainText(
+    'This template changed while you were editing.',
+  )
+  await editor.fill(`${draft} More local edits.`)
+  await expect(save).toBeDisabled()
+  await save.evaluate((button: HTMLButtonElement) => button.form?.requestSubmit())
+  expect(saves).toEqual([])
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await page.screenshot({
+    path: testInfo.outputPath('template-edit-conflict-phone.png'),
+    fullPage: true,
+  })
+  await page.getByRole('button', { name: 'Discard edits and use latest' }).click()
+  await expect(editor).toHaveValue(current.definition_toml)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(save).toBeEnabled()
+  await save.click()
+  await expect(page.getByRole('status')).toHaveText('Template saved.')
+  expect(saves).toEqual([current.definition_toml])
 })

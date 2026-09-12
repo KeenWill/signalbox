@@ -5,8 +5,9 @@ import type { TemplateApi } from './api'
 
 export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebTemplateDetail }) {
   const id = useId()
-  const [draft, setDraft] = useState<string | null>(null)
-  const source = draft ?? detail.definition_toml
+  const [draft, setDraft] = useState<{ source: string; original: string } | null>(null)
+  const source = draft?.source ?? detail.definition_toml
+  const conflict = draft !== null && draft.original !== detail.definition_toml
   const queries = useQueryClient()
   const save = useMutation({
     mutationFn: (definition: string) =>
@@ -27,6 +28,7 @@ export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebT
       <form
         onSubmit={(event) => {
           event.preventDefault()
+          if (conflict) return
           save.mutate(source)
         }}
       >
@@ -37,21 +39,44 @@ export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebT
           spellCheck={false}
           disabled={save.isPending}
           aria-invalid={save.isError}
-          aria-describedby={save.isError ? `${id}-error` : undefined}
+          aria-describedby={conflict ? `${id}-conflict` : save.isError ? `${id}-error` : undefined}
           onChange={(event) => {
-            setDraft(event.target.value)
+            const source = event.target.value
+            setDraft((previous) => ({
+              source,
+              original: previous?.original ?? detail.definition_toml,
+            }))
             save.reset()
           }}
         />
+        {conflict && (
+          <p id={`${id}-conflict`} role="alert">
+            This template changed while you were editing. Copy any edits you want to keep, then use
+            the latest definition before saving.
+          </p>
+        )}
         {save.error && (
           <p id={`${id}-error`} role="alert">
             {save.error.message}
           </p>
         )}
         <div className="template-editor-actions">
-          <button type="submit" className="button primary" disabled={save.isPending}>
+          <button type="submit" className="button primary" disabled={save.isPending || conflict}>
             {save.isPending ? 'Saving…' : 'Save template'}
           </button>
+          {conflict && (
+            <button
+              type="button"
+              className="button"
+              disabled={save.isPending}
+              onClick={() => {
+                setDraft(null)
+                save.reset()
+              }}
+            >
+              Discard edits and use latest
+            </button>
+          )}
           {save.isSuccess && <p role="status">Template saved.</p>}
         </div>
       </form>
