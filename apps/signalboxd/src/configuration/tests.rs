@@ -4091,6 +4091,23 @@ fn configuration_rejects_an_unknown_delivery() {
 }
 
 #[test]
+fn configuration_rejects_invalid_external_credential_sources() {
+    for delivery in [
+        "delivery = \"environment\"\nvariable = \"\"",
+        "delivery = \"environment\"\nvariable = \"KEY=value\"",
+        "delivery = \"environment\"\nvariable = \"KEY\"\nfile = \"/run/secret\"",
+        "delivery = \"kubernetes_secret\"\nfile = \"relative/secret\"",
+        "delivery = \"kubernetes_secret\"",
+    ] {
+        let source = CONFIGURATION.replace(
+            "delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"",
+            delivery,
+        );
+        assert!(HubModelConfiguration::parse(&source).is_err(), "{delivery}");
+    }
+}
+
+#[test]
 fn configuration_rejects_a_relative_credential_file() {
     let relative_file = CONFIGURATION.replace(
         "file = \"/run/secrets/anthropic-primary\"",

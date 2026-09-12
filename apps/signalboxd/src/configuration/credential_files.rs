@@ -262,16 +262,46 @@ pub(super) fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
     &file_bytes[..end]
 }
 
-/// Resolves deployment-owned token files and GitHub installation profiles.
-/// Files are reread at use; App profiles share their installation-token cache.
+/// Resolves deployment-owned byte sources and GitHub installation profiles.
+/// Sources are reread at use; App profiles share their installation-token cache.
 #[derive(Clone)]
 pub struct FileCredentialAccess {
     request_timeout: Option<std::time::Duration>,
-    paths: Arc<HashMap<CredentialReference, PathBuf>>,
+    sources: Arc<HashMap<CredentialReference, CredentialSource>>,
     app: Option<(
         CredentialReference,
         Arc<signalbox_github_transport::AppAuthentication>,
     )>,
+}
+
+#[derive(Clone)]
+enum CredentialSource {
+    File(PathBuf),
+    Environment(Arc<str>),
+}
+
+impl CredentialSource {
+    fn read(&self) -> Result<Vec<u8>, CredentialAccessFailure> {
+        match self {
+            Self::File(path) => read_credential_file(path),
+            Self::Environment(variable) => {
+                let value = std::env::var_os(variable.as_ref())
+                    .ok_or(CredentialAccessFailure::Unavailable)?;
+                let bytes = value.as_encoded_bytes();
+                if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
+                    return Err(CredentialAccessFailure::TooLarge);
+                }
+                Ok(bytes.to_vec())
+            }
+        }
+    }
+
+    fn validate(&self) -> Result<(), CredentialAccessFailure> {
+        match self {
+            Self::File(path) => open_credential_file(path).map(|_| ()),
+            Self::Environment(_) => self.read().map(|_| ()),
+        }
+    }
 }
 
 impl FileCredentialAccess {
@@ -281,11 +311,20 @@ impl FileCredentialAccess {
         reference: CredentialReference,
     ) -> Self {
         match profile.delivery() {
-            crate::credential_pools::GithubCredentialDelivery::File(path) => {
+            crate::credential_pools::GithubCredentialDelivery::File(path)
+            | crate::credential_pools::GithubCredentialDelivery::KubernetesSecret(path) => {
                 Self::new(path.clone(), reference)
             }
+            crate::credential_pools::GithubCredentialDelivery::Environment(variable) => Self {
+                sources: Arc::new(HashMap::from([(
+                    reference,
+                    CredentialSource::Environment(variable.clone()),
+                )])),
+                request_timeout: None,
+                app: None,
+            },
             crate::credential_pools::GithubCredentialDelivery::GithubApp { .. } => Self {
-                paths: Arc::new(HashMap::new()),
+                sources: Arc::new(HashMap::new()),
                 request_timeout: None,
                 app: profile.authentication().map(|app| (reference, app)),
             },
@@ -302,10 +341,12 @@ impl FileCredentialAccess {
         self
     }
 
-    /// Checks each configured file's admission without reading its secret bytes.
+    /// Checks each source's admission; file checks read metadata only.
     pub fn validate(&self) -> Result<(), CredentialAccessError> {
-        for (reference, path) in self.paths.iter() {
-            validate_credential_file(path, reference.clone())?;
+        for (reference, source) in self.sources.iter() {
+            source
+                .validate()
+                .map_err(|failure| CredentialAccessError::new(reference.clone(), failure))?;
         }
         Ok(())
     }
@@ -319,7 +360,43 @@ impl FileCredentialAccess {
     /// files. Each resolution selects and rereads only its mapped path.
     pub fn from_files(files: impl IntoIterator<Item = (CredentialReference, PathBuf)>) -> Self {
         Self {
-            paths: Arc::new(files.into_iter().collect()),
+            sources: Arc::new(
+                files
+                    .into_iter()
+                    .map(|(reference, path)| (reference, CredentialSource::File(path)))
+                    .collect(),
+            ),
+            request_timeout: None,
+            app: None,
+        }
+    }
+
+    /// Binds every byte-delivered profile declared for one adapter.
+    pub fn from_configuration(
+        models: &super::HubModelConfiguration,
+        adapter: super::ModelAdapter,
+    ) -> Self {
+        use crate::credential_pools::CredentialDelivery;
+        let sources = models
+            .credential_profiles
+            .values()
+            .filter(|profile| profile.adapter() == adapter)
+            .filter_map(|profile| {
+                let source = match profile.delivery() {
+                    CredentialDelivery::File { path, .. }
+                    | CredentialDelivery::KubernetesSecret { path, .. } => {
+                        CredentialSource::File(path.clone())
+                    }
+                    CredentialDelivery::Environment { variable, .. } => {
+                        CredentialSource::Environment(variable.clone())
+                    }
+                    _ => return None,
+                };
+                Some((CredentialReference::new(profile.name()), source))
+            })
+            .collect();
+        Self {
+            sources: Arc::new(sources),
             request_timeout: None,
             app: None,
         }
@@ -330,8 +407,8 @@ impl FileCredentialAccess {
         if let Some((reference, _)) = &self.app {
             return Some(reference.clone());
         }
-        (self.paths.len() == 1)
-            .then(|| self.paths.keys().next().cloned())
+        (self.sources.len() == 1)
+            .then(|| self.sources.keys().next().cloned())
             .flatten()
     }
 }
@@ -340,8 +417,8 @@ impl fmt::Debug for FileCredentialAccess {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("FileCredentialAccess")
-            .field("paths", &"[credential file map]")
-            .field("reference_count", &self.paths.len())
+            .field("sources", &"[credential source map]")
+            .field("reference_count", &self.sources.len())
             .finish()
     }
 }
@@ -370,11 +447,11 @@ impl CredentialAccess for FileCredentialAccess {
                 })?;
             return Ok(CredentialValue::new(&header.as_bytes()[b"Bearer ".len()..]));
         }
-        let path = self.paths.get(reference).ok_or_else(|| {
+        let source = self.sources.get(reference).ok_or_else(|| {
             CredentialAccessError::new(reference.clone(), CredentialAccessFailure::Unmapped)
         })?;
-        let path = path.clone();
-        let file_bytes = tokio::task::spawn_blocking(move || read_credential_file(&path))
+        let source = source.clone();
+        let file_bytes = tokio::task::spawn_blocking(move || source.read())
             .await
             .unwrap_or(Err(CredentialAccessFailure::Unreadable))
             .map_err(|failure| CredentialAccessError::new(reference.clone(), failure))?;
@@ -390,8 +467,10 @@ impl super::HubModelConfiguration {
             .github_credential_profile(signalbox_tools_code_host::CODE_HOST_CREDENTIAL_REFERENCE)
         {
             Some(profile) => match profile.delivery() {
-                GithubCredentialDelivery::File(path) => path.as_path(),
-                GithubCredentialDelivery::GithubApp { .. } => return false,
+                GithubCredentialDelivery::File(path)
+                | GithubCredentialDelivery::KubernetesSecret(path) => path.as_path(),
+                GithubCredentialDelivery::GithubApp { .. }
+                | GithubCredentialDelivery::Environment(_) => return false,
             },
             None => fallback,
         };
@@ -404,17 +483,38 @@ impl super::HubModelConfiguration {
         })
     }
 
-    /// Admits model-provider, token, and webhook files; App keys are admitted at use.
+    /// Admits credential sources and webhook files; App keys are admitted at use.
     pub fn validate_credential_files(&self) -> Result<(), CredentialAccessError> {
         for profile in self.credential_profiles.values() {
             use crate::credential_pools::CredentialDelivery;
             match profile.delivery() {
-                CredentialDelivery::File { path, .. } => {
+                CredentialDelivery::File { path, .. }
+                | CredentialDelivery::KubernetesSecret { path, .. } => {
                     validate_credential_file(path, CredentialReference::new(profile.name()))?
+                }
+                CredentialDelivery::Environment { variable, .. } => {
+                    CredentialSource::Environment(variable.clone())
+                        .validate()
+                        .map_err(|failure| {
+                            CredentialAccessError::new(
+                                CredentialReference::new(profile.name()),
+                                failure,
+                            )
+                        })?
                 }
                 CredentialDelivery::Ambient
                 | CredentialDelivery::Oauth(_)
                 | CredentialDelivery::CodexHome { .. } => {}
+            }
+        }
+        for (name, profile) in &self.github_credential_profiles {
+            if matches!(
+                profile.delivery(),
+                crate::credential_pools::GithubCredentialDelivery::Environment(_)
+                    | crate::credential_pools::GithubCredentialDelivery::KubernetesSecret(_)
+            ) {
+                FileCredentialAccess::from_github(profile, CredentialReference::new(name))
+                    .validate()?;
             }
         }
         if let Some(watch) = self.repository_watch() {

@@ -27,19 +27,19 @@ asynchronous runtime starts, the daemon replaces itself with the libpq and
 certificate-store variables removed; it retains their names only for startup
 warnings. The explicit password prevents SQLx from reading a password file.
 Whatever TLS mode the URL states, the production connection verifies the server
-certificate and hostname in full. Model-provider credential paths come from
-`file` profiles in the catalog; `ANTHROPIC_API_KEY_FILE` and
-`OPENAI_API_KEY_FILE` are not read. An absent `SIGNALBOX_WEB_BIND` binds a
-loopback default, and an explicit socket may use any IP address; the daemon logs
-a warning before admitting an explicit non-loopback bind. The daemon's browser
-listener serves the `/api` routes on that bind and, when
-`SIGNALBOX_WEB_ASSET_ROOT` names a production web build, the static files under
-that root; an empty root fails configuration and an absent one answers every
-other path 404. The DTOs and schemas under `crates/web-contract` are the
-authority for that surface, and the checked-in JavaScript decoders and
-TypeScript declarations are generated from them. `RUST_LOG` admits one log level
-and nothing else; an empty or whitespace value selects the INFO default
-silently, as absence does, and any other value warns and falls back to it.
+certificate and hostname in full. Model-provider credential sources come from
+profiles in the catalog; `ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are
+not read. An absent `SIGNALBOX_WEB_BIND` binds a loopback default, and an
+explicit socket may use any IP address; the daemon logs a warning before
+admitting an explicit non-loopback bind. The daemon's browser listener serves
+the `/api` routes on that bind and, when `SIGNALBOX_WEB_ASSET_ROOT` names a
+production web build, the static files under that root; an empty root fails
+configuration and an absent one answers every other path 404. The DTOs and
+schemas under `crates/web-contract` are the authority for that surface, and the
+checked-in JavaScript decoders and TypeScript declarations are generated from
+them. `RUST_LOG` admits one log level and nothing else; an empty or whitespace
+value selects the INFO default silently, as absence does, and any other value
+warns and falls back to it.
 
 `SIGNALBOX_OTLP_ENDPOINT`, a base URL to whose path `http/protobuf` export
 appends `/v1/traces`, enables span export; its absence disables OTLP and makes
@@ -195,20 +195,22 @@ name; the two integration constants are `brave-search-primary` and
 `github-primary`, and `codex-subscription-primary` and
 `claude-subscription-primary` are the defaults a CLI runtime uses when its
 mapping names nothing else. A profile's delivery states how its secret reaches
-the provider. `file` is the delivery for every credential with an external
-source of truth, such as a provider API key or a long-lived token a provider's
-tooling mints; a direct-HTTP adapter forms its header from the file value and
-rejects `env_key` because it uses no child environment. Each
+the provider. `file` reads an external credential file, `environment` reads the
+process variable named by `variable`, and `kubernetes_secret` reads the mounted
+Secret projection named by `file`. These deliveries serve Anthropic, OpenAI,
+Claude CLI, and GitHub profiles; a direct-HTTP adapter forms its header from the
+resolved value and rejects `env_key` because it uses no child environment. Each
 `FileCredentialAccess` instance binds one consumer-scoped map of references to
-deployment paths, and a model adapter receives the complete file-profile catalog
-declared for it. `ambient` leaves login resolution to a CLI. `codex_home` names
-the Codex login directory; a configured home is an existing readable directory.
-An empty home makes that pool member unavailable. Delivery links the selected
-profile's `auth.json` into a private per-operation `CODEX_HOME` with an empty
-`config.toml`.
+sources, and a model adapter receives the complete byte-delivered profile
+catalog declared for it. `ambient` leaves login resolution to a CLI.
+`codex_home` names the Codex login directory; a configured home is an existing
+readable directory. An empty home makes that pool member unavailable. Delivery
+links the selected profile's `auth.json` into a private per-operation
+`CODEX_HOME` with an empty `config.toml`.
 
 GitHub integration profiles declare `adapter = "github"` without model billing
-or pool membership. `delivery = "file"` requires `file`;
+or pool membership. `delivery = "file"` and `delivery = "kubernetes_secret"`
+require `file`; `delivery = "environment"` requires `variable`;
 `delivery = "github_app"` requires positive `app_id` and `installation_id`
 integers and an absolute `private_key_file`. Validation names a missing or
 invalid App field. The `code_host` and `github` mappings use `github-primary`; a
@@ -571,6 +573,13 @@ contents. The credential of a currently routed S3 blob store is read after the
 recovery scan and before socket admission, as [blob storage](blob-storage.md)
 requires.
 
+Environment sources are checked at startup, reload, and use for presence and the
+same 64 KiB ceiling. Mounted Kubernetes Secrets use the file admission rules,
+including final-target checks through projection symlinks. Both sources are read
+at each use, trim trailing line termination, and seed the same exact-value
+redaction as file credentials. Source values never enter configuration
+snapshots.
+
 Unauthenticated session, search, usage, attention, and blob reads require an IP
 or `localhost` `Host` authority; another authority receives a 403
 `unadmitted_host_rejected` before data is read. No process-protocol frame is a
@@ -629,8 +638,9 @@ its text. An unknown or invalid field is rejected without its name, so
 opaque to code: no build-provided constant is compared against it. Catalogs are
 read at startup. `reload_configuration` validates the complete replacement and
 atomically replaces the model and alias catalog, session-template catalog, and
-repository-watch configuration, and existing Codex-home profile paths. Other
-profile fields, pool policies, and other sections are startup-only. A
+repository-watch configuration, existing Codex-home profile paths, and the
+source delivery, file path, or variable of existing byte-delivered profiles.
+Other profile fields, pool policies, and other sections are startup-only. A
 replacement whose startup-only sections differ leaves the running configuration
 in place. Reload never rewrites evidence already recorded. File watching and
 polling are external callers of the verb.
@@ -648,8 +658,8 @@ to its scheme, host, and effective port before duplicates are rejected. The
 GitHub egress policy admits exactly `https://api.github.com:443` for
 authenticated requests, and model arguments cannot widen either admission rule.
 
-Admission is not delivery: the daemon supplies a surface only for `anthropic`
-and `openai` `file`, `claude_cli` `ambient` and `file`, and `codex_cli`
+Admission is not delivery: the daemon supplies `anthropic`, `openai`, and
+`claude_cli` byte-source deliveries, `claude_cli` `ambient`, and `codex_cli`
 `ambient`, `codex_home`, and `oauth`. The `codex_cli` spelling of `file` is
 validated and then rejected as `UndeliveredCredentialDelivery`.
 
@@ -690,11 +700,11 @@ to compose or bind a derived root closes that tool request as a known failure
 whose sanitized detail names the closed reason, and it never falls back to
 another root.
 
-The secret reaches the provider through the profile's delivery, never through a
-process environment variable of the daemon. Two families of one adapter may
-prefer different profiles wherever the adapter resolves from an adapter-scoped
-catalog, which the direct HTTP adapters and `claude_cli` do; a profile declared
-for another adapter is unmapped in every case.
+The secret reaches the provider through the profile's selected source. Two
+families of one adapter may prefer different profiles wherever the adapter
+resolves from an adapter-scoped catalog, which the direct HTTP adapters and
+`claude_cli` do; a profile declared for another adapter is unmapped in every
+case.
 
 Every two members of one pool that a successor may substitute between denote
 authorizations the provider meters, throttles, and rejects independently. The

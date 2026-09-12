@@ -126,8 +126,12 @@ impl WatchedRepositoryConfiguration {
     /// Returns the deployment-owned credential-file reference.
     pub fn credential_file(&self) -> Option<&Path> {
         match self.credential.delivery() {
-            crate::credential_pools::GithubCredentialDelivery::File(path) => Some(path),
-            crate::credential_pools::GithubCredentialDelivery::GithubApp { .. } => None,
+            crate::credential_pools::GithubCredentialDelivery::File(path)
+            | crate::credential_pools::GithubCredentialDelivery::KubernetesSecret(path) => {
+                Some(path)
+            }
+            crate::credential_pools::GithubCredentialDelivery::GithubApp { .. }
+            | crate::credential_pools::GithubCredentialDelivery::Environment(_) => None,
         }
     }
 
@@ -507,8 +511,10 @@ pub(super) fn parse_repository_watch_configuration(
                     .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
             })
             .transpose()?;
-        if let crate::credential_pools::GithubCredentialDelivery::File(credential_file) =
-            credential.delivery()
+        if let crate::credential_pools::GithubCredentialDelivery::File(credential_file)
+        | crate::credential_pools::GithubCredentialDelivery::KubernetesSecret(
+            credential_file,
+        ) = credential.delivery()
         {
             let resolved_credential_file = resolved_credential_file_reference(credential_file)?;
             if credential_file_references.iter().any(|existing| {

@@ -1270,13 +1270,8 @@ impl HubModelConfiguration {
                 );
                 runtime_configuration.exchange_timeout = model_exchange_timeout;
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
-                let credentials = FileCredentialAccess::from_files(
-                    self.file_credential_profiles(ModelAdapter::ClaudeCli).map(
-                        |(reference, path)| {
-                            (CredentialReference::new(reference), path.to_path_buf())
-                        },
-                    ),
-                );
+                let credentials =
+                    FileCredentialAccess::from_configuration(self, ModelAdapter::ClaudeCli);
                 let ambient_reference = self
                     .credential_profiles
                     .values()
