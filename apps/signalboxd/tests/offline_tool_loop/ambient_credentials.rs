@@ -79,9 +79,13 @@ impl ProcessRunner for AmbientRunner {
                 completeness: CaptureCompleteness::Complete,
             },
             stderr: ProcessOutput {
-                // Fixture for the launcher dispatch wire marker.
-                bytes: [b"signalbox-exec:dispatched\n".as_slice(), secret.as_slice()].concat(),
-                completeness: CaptureCompleteness::Complete,
+                // Fixture for dispatch followed by a capture ending inside the credential.
+                bytes: [
+                    b"signalbox-exec:dispatched\n".as_slice(),
+                    &secret[..secret.len().saturating_sub(1)],
+                ]
+                .concat(),
+                completeness: CaptureCompleteness::Truncated,
             },
         }
     }

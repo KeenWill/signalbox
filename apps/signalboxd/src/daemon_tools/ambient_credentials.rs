@@ -135,6 +135,28 @@ mod tests {
     }
 
     #[test]
+    fn credential_crossing_the_capture_ceiling_is_redacted_before_json_serialization() {
+        const CAPTURE_CEILING: usize = 64 * 1024;
+        const SECRET: &str = "synthetic-\"credential\"";
+        let credential = CredentialValue::new(SECRET.as_bytes().to_vec());
+        for retained_secret_bytes in 1..SECRET.len() {
+            let padding = "x".repeat(CAPTURE_CEILING - retained_secret_bytes);
+            let mut capture = OutputCapture {
+                text: format!("{padding}{}", &SECRET[..retained_secret_bytes]),
+                completeness: CaptureCompleteness::Truncated,
+                encoding: OutputEncoding::Utf8,
+            };
+            assert_eq!(capture.text.len(), CAPTURE_CEILING);
+
+            redact_truncated_credential_prefix(&mut capture, &credential);
+
+            let encoded = serde_json::to_string(&capture).expect("capture JSON");
+            let decoded: serde_json::Value = serde_json::from_str(&encoded).expect("valid JSON");
+            assert_eq!(decoded["text"], format!("{padding}[redacted]"));
+        }
+    }
+
+    #[test]
     fn truncated_lossy_capture_is_redacted_fail_closed() {
         let credential = CredentialValue::new("secret-☃suffix".as_bytes().to_vec());
         let mut capture = OutputCapture {

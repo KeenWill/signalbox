@@ -175,7 +175,9 @@ cleared supervisor and bubblewrap environment, never through command-line
 arguments. Ambient credential values must be valid UTF-8; load, reload, and use
 reject invalid encoding with `InvalidUtf8`. Its expanded path or environment set
 ends with the task, and the file snapshot is removed. Captured output passes
-through credential redaction before becoming tool evidence.
+through credential redaction before becoming tool evidence. Truncated captures
+redact a trailing credential prefix before JSON serialization; a truncated
+capture with lossy UTF-8 is fully redacted.
 
 Loss of sandbox supervision retains a supervision failure even when the dispatch
 capture is lost; an unconfirmed dispatch does not prove that the command never
