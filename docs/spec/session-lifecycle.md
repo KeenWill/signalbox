@@ -223,6 +223,9 @@ injection_settled receipt, and pending injections never block terminalization. A
 turn awaiting a tool approval refuses interrupt delivery; next-safe-point and
 after-current-turn delivery stay legal.
 
+Stopping a foreground child wait closes the current wait; completed waits from
+earlier model calls in the same turn do not prevent closure.
+
 On session closure, remaining queued turns retire with cause session_closed and
 an open goal generation closes as session_closed; a user-stopped generation
 admits only the stopped outcome, and an achieved generation admits only an
