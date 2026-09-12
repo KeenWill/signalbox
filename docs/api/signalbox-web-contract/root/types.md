@@ -654,6 +654,8 @@ pub struct WebSessionSupervision {
 
 ```rust
 pub struct WebSessionTimelineDescriptor {
+    pub title_summary: option::Option<string::String>,
+    pub last_activity: option::Option<WebSessionCatalogActivity>,
     pub supervision: option::Option<WebSessionSupervision>,
     pub workspace_root_kind: option::Option<WebSessionWorkspaceRootKind>,
     pub repository_watch: option::Option<WebRepositoryWatchProvenance>,

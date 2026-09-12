@@ -173,6 +173,24 @@ pub(super) async fn session_descriptor(
                     None => None,
                 };
                 descriptor.repository_watch = origin.map(repository_watch_origin_dto);
+                let (Some(attention), Some(budget)) =
+                    (state.attention, state.snapshot_reader_budget)
+                else {
+                    return session_projection_unavailable();
+                };
+                let Ok(_permit) = budget.acquire().await else {
+                    return session_projection_unavailable();
+                };
+                let summary = match attention.summary(session).await {
+                    Ok(Some(summary)) => summary,
+                    _ => return session_projection_unavailable(),
+                };
+                let summary = match super::session_catalog::session_catalog_summary_dto(summary) {
+                    Ok(summary) => summary,
+                    Err(()) => return session_projection_unavailable(),
+                };
+                descriptor.title_summary = summary.title_summary;
+                descriptor.last_activity = Some(summary.last_activity);
                 Json(descriptor).into_response()
             }
             Err(error) => error.into_response(),
@@ -549,6 +567,8 @@ fn descriptor_dto(
         }),
         workspace_root_kind: descriptor.workspace_root_kind.map(workspace_root_kind_dto),
         repository_watch: None,
+        title_summary: None,
+        last_activity: None,
         session_id: WebSessionId::from_uuid_bytes(*descriptor.session.into_uuid().as_bytes()),
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),

@@ -958,6 +958,12 @@ pub struct WebSessionSupervision {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDescriptor {
+    /// Current human title projected by the session catalog.
+    #[serde(default)]
+    #[schemars(schema_with = "nullable_title_summary_schema")]
+    pub title_summary: Option<String>,
+    /// Current catalog activity, including its timestamp and category.
+    pub last_activity: Option<WebSessionCatalogActivity>,
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub supervision: Option<WebSessionSupervision>,

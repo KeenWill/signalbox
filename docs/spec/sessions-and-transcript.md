@@ -138,6 +138,10 @@ with its own command ID; creation commits before input submission. A 201
 response returns the session ID and current catalog summary after both requested
 commands succeed. Retries retain both identities and payloads.
 
+The web timeline descriptor includes the current catalog title summary and last
+activity category and timestamp, including for archived sessions. These header
+facts are read separately from the timeline bounds.
+
 ## Design decisions
 
 Cause and ancestry are recorded as independent facts, because deriving one from
