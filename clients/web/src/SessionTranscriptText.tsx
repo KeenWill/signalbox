@@ -1,20 +1,23 @@
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
 import type { CommandContext } from './commands'
 import type {
   WebSessionTimelineDetailBody,
+  WebSessionTimelineDetailPage,
   WebTimelineTextExcerpt,
   WebTimelineToolAttempt,
 } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
-import type { SessionTranscriptLimits } from './product'
+import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { conversationEntryKey } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
 import { readTranscriptWindow, TRANSCRIPT_RETAINED_WINDOWS } from './session-timeline/transcript'
 import { groupTranscriptTurns, type TranscriptTurn } from './session-timeline/turns'
 import type { DetailMode } from './state'
 import { VirtualTranscript } from './Transcript'
+import { SESSION_WINDOW_ITEMS } from './session-workspace'
+import { TRANSCRIPT_WINDOW_ITEMS } from './session-timeline/transcript'
 
 function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextExcerpt }) {
   let content = excerpt.text
@@ -153,6 +156,28 @@ function TranscriptWindow({
     [entries],
   )
   const ids = useMemo(() => turns.map((turn) => turn.id), [turns])
+  const emptyScanned = useRef(0)
+  useEffect(() => {
+    if (turns.length > 0) {
+      emptyScanned.current = 0
+      return
+    }
+    if (
+      transcript.isFetching ||
+      transcript.isError ||
+      !transcript.hasPreviousPage ||
+      emptyScanned.current >= SESSION_WINDOW_ITEMS
+    )
+      return
+    emptyScanned.current += TRANSCRIPT_WINDOW_ITEMS
+    void transcript.fetchPreviousPage()
+  }, [
+    turns.length,
+    transcript.isFetching,
+    transcript.isError,
+    transcript.hasPreviousPage,
+    transcript.fetchPreviousPage,
+  ])
   return (
     <section className="session-transcript-text" aria-label="Transcript text">
       {transcript.isPending && <p role="status">Loading transcript…</p>}
@@ -164,6 +189,7 @@ function TranscriptWindow({
           </button>
         </p>
       )}
+      {!transcript.isPending && !transcript.isFetching && turns.length === 0 && <p>No messages in this part of the conversation. Scroll up to keep looking.</p>}
       <VirtualTranscript
         ids={ids}
         initialEnd={!eventSequence}
@@ -190,7 +216,7 @@ function TranscriptWindow({
               className="session-message-entry session-turn"
               data-turn-id={turn.turnId}
             >
-              <TurnSummary turn={turn} renderTool={renderTool} />
+              <TurnSummary turn={turn} renderTool={renderTool} detailPages={pages?.flatMap((page) => page.details) ?? []} sessionId={sessionId} limits={limits} />
             </div>
           )
         }}
@@ -205,17 +231,28 @@ function TranscriptWindow({
 function TurnSummary({
   turn,
   renderTool,
+  detailPages,
+  sessionId,
+  limits,
 }: {
   turn: TranscriptTurn
   renderTool?: SessionTranscriptTextProps['renderTool']
+  detailPages: readonly WebSessionTimelineDetailPage[]
+  sessionId: string
+  limits: SessionTranscriptLimits
 }) {
   const [openTool, setOpenTool] = useState<string | null>(null)
   const tool = turn.tools.find((entry) => entry.request_id === openTool)
+  const more = (sequence: string) => {
+    const page = detailPages.find((page) => page.items.at(-1)?.address.event_sequence === sequence)
+    return page?.continuation ? <ContinuedEvent sessionId={sessionId} page={page} limits={limits} /> : null
+  }
   return (
     <>
       {turn.messages.map((item) => (
         <div key={conversationEntryKey(item)} data-event-sequence={item.address.event_sequence}>
           <BodyText body={item.body} />
+          {more(item.address.event_sequence)}
         </div>
       ))}
       {turn.tools.length > 0 && (
@@ -235,11 +272,13 @@ function TurnSummary({
       {tool && (
         <div className="session-tool-slot">
           {renderTool ? renderTool(tool, 'condensed') : <ToolSummary tool={tool} />}
+          {more(turn.events.find((event) => event.body.type === 'tool_batch' && event.body.tools.some((entry) => entry.request_id === tool.request_id))?.address.event_sequence ?? '')}
         </div>
       )}
       {turn.result && (
         <div data-event-sequence={turn.result.address.event_sequence}>
           <BodyText body={turn.result.body} />
+          {more(turn.result.address.event_sequence)}
         </div>
       )}
     </>
@@ -254,6 +293,83 @@ function ToolSummary({ tool }: { tool: WebTimelineToolAttempt }) {
       {tool.arguments && <p className="session-tool-summary">{tool.arguments.text}</p>}
       {evidence?.result && <p className="session-tool-summary">{evidence.result.text}</p>}
       {evidence?.failure && <p className="session-tool-summary">{evidence.failure.text}</p>}
+    </section>
+  )
+}
+
+function ContinuedEvent({
+  sessionId,
+  page,
+  limits,
+}: {
+  sessionId: string
+  page: WebSessionTimelineDetailPage
+  limits: SessionTranscriptLimits
+}) {
+  const [open, setOpen] = useState(false)
+  const [cursor, setCursor] = useState(page.continuation ?? null)
+  const previous = useRef(page)
+  const sequence = page.items.at(-1)?.address.event_sequence ?? ''
+  const detail = useQuery({
+    queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
+    enabled: open,
+    queryFn: ({ signal }) =>
+      readSessionTranscript(
+        sessionId,
+        sequence,
+        sequence,
+        cursor,
+        limits,
+        signal,
+        previous.current,
+      ),
+    gcTime: 0,
+  })
+  if (!open)
+    return (
+      <button type="button" onClick={() => setOpen(true)}>
+        Read more
+      </button>
+    )
+  return (
+    <section aria-label="More message text">
+      {detail.isPending && <p role="status">Loading details…</p>}
+      {detail.isError && (
+        <p role="alert">
+          Details could not be loaded.{' '}
+          <button type="button" onClick={() => void detail.refetch()}>
+            Retry details
+          </button>
+        </p>
+      )}
+      {detail.data?.items.map((item) => (
+        <div key={conversationEntryKey(item)}>
+          <BodyText body={item.body} />
+        </div>
+      ))}
+      {detail.data?.continuation && (
+        <button
+          type="button"
+          onClick={() => {
+            if (detail.data) {
+              previous.current = detail.data
+              setCursor(detail.data.continuation ?? null)
+            }
+          }}
+        >
+          Continue reading
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(false)
+          setCursor(page.continuation ?? null)
+          previous.current = page
+        }}
+      >
+        Close details
+      </button>
     </section>
   )
 }
