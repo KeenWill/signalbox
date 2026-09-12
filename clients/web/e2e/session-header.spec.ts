@@ -1,5 +1,5 @@
 import { expect, test } from './fontTest'
-import { openSession, sessionApi } from './session-fixture'
+import { openSession, sessionApi, sessionId, turnId } from './session-fixture'
 
 for (const viewport of [
   { name: 'desktop', width: 1440, height: 1000 },
@@ -25,5 +25,62 @@ for (const viewport of [
     await expect(page.getByText('Up to date as of', { exact: true })).toBeHidden()
     await expect(page.getByText('Session details', { exact: true })).toBeFocused()
     await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
+  })
+}
+
+test('Escape closes trigger details before session details', async ({ page }) => {
+  await sessionApi(page, false, sessionId, {
+    dispatch_id: turnId,
+    action_ordinal: '1',
+    repository: 'signalbox/example',
+    pull_request: '81',
+    rule_id: 'review-response',
+    rule_revision: '3',
+    event_id: sessionId,
+    event_kind: 'review_submitted',
+  })
+  await openSession(page)
+  const sessionDetails = page.getByText('Session details', { exact: true })
+  const triggerDetails = page.getByText('Trigger details', { exact: true })
+  await sessionDetails.click()
+  await triggerDetails.click()
+  const trigger = page.getByText(`Trigger ${turnId} · Action 1`, { exact: true })
+  await expect(trigger).toBeVisible()
+  await triggerDetails.press('Escape')
+  await expect(trigger).toBeHidden()
+  await expect(triggerDetails).toBeFocused()
+  await expect(page.getByText('Up to date as of', { exact: true })).toBeVisible()
+  await triggerDetails.press('Escape')
+  await expect(page.getByText('Up to date as of', { exact: true })).toBeHidden()
+  await expect(sessionDetails).toBeFocused()
+  await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
+})
+
+for (const load of ['pending', 'failed'] as const) {
+  test(`composer Escape leaves editing while the session is ${load}`, async ({ page }) => {
+    await sessionApi(page)
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await page.route(`**/api/sessions/${sessionId}`, async (route) => {
+      if (load === 'pending') await held
+      await route.fulfill({ status: 503, body: 'temporarily unavailable' })
+    })
+    await page.goto(`/sessions?workspace=true&session=${sessionId}`)
+    const message = page.getByRole('textbox', { name: 'Message', exact: true })
+    await expect(
+      page.getByText(load === 'pending' ? 'Loading session…' : 'Session failed to load.', {
+        exact: true,
+      }),
+    ).toBeVisible()
+    await message.fill('Keep this draft')
+    await message.press('Escape')
+    await expect(message).not.toBeFocused()
+    await expect(message).toHaveValue('Keep this draft')
+    await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(sessionId)
+    await page.keyboard.press('Escape')
+    await expect(page).toHaveURL(/\/sessions$/)
+    release()
   })
 }

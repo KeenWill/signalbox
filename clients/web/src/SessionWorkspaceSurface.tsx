@@ -170,6 +170,7 @@ export function SessionWorkspaceSurface({
   )
   const [showEvents, setShowEvents] = useState(false)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
+  const workspaceRef = useRef<HTMLDivElement>(null)
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
   const manualAnchorRef = useRef<SessionWindowAnchor | null>(null)
   const boundaryRequest = useRef(0)
@@ -429,7 +430,7 @@ export function SessionWorkspaceSurface({
   }, [session.error])
 
   return (
-    <div className="surface-body session-workspace-surface">
+    <div ref={workspaceRef} tabIndex={-1} className="surface-body session-workspace-surface">
       {sessionId === null || timelineCapability !== 'available' ? (
         <p className="session-entry" role="status">
           {timelineCapability === 'checking' ? (
@@ -528,10 +529,13 @@ export function SessionWorkspaceSurface({
                 className="session-header-details"
                 onKeyDown={(event) => {
                   if (event.key !== 'Escape' || !event.currentTarget.open) return
+                  const details =
+                    event.target instanceof Element ? event.target.closest('details[open]') : null
+                  if (!(details instanceof HTMLDetailsElement)) return
                   event.preventDefault()
                   event.stopPropagation()
-                  event.currentTarget.open = false
-                  event.currentTarget.querySelector('summary')?.focus()
+                  details.open = false
+                  details.querySelector('summary')?.focus()
                 }}
               >
                 <summary>Session details</summary>
@@ -793,7 +797,7 @@ export function SessionWorkspaceSurface({
           stateUnavailable={followFailed && live === null}
           supervision={displayedSession?.descriptor.supervision ?? null}
           onAccepted={refetchSession}
-          onEscape={() => timelineRef.current?.focus()}
+          onEscape={() => (timelineRef.current ?? workspaceRef.current)?.focus()}
         />
       )}
     </div>
