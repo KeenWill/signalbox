@@ -128,6 +128,12 @@ pub(crate) async fn run_case(
     let tracker = OperationTracker::default();
     let runtime = EvalOpenAiRuntime::new(forced_tool, tracker.clone())?;
     let provider = RuntimeModelCallProvider::new(runtime, database.runtime_models.clone(), None);
+    let mut judge_config = OpenAiConfig::new(None);
+    judge_config.exchange_timeout = Some(EXCHANGE_TIMEOUT);
+    let judge = Arc::new(RuntimeApprovalJudgeModel::new(
+        OpenAiRuntime::new(judge_config, EnvironmentCredential)?,
+        database.runtime_models.clone(),
+    ));
     let execution = PostgresProviderModelExecution::new(
         PostgresModelCallRepository::new(
             database.pool.clone(),
@@ -148,7 +154,8 @@ pub(crate) async fn run_case(
         database.pool.clone(),
         None,
         Vec::new(),
-    ));
+    ))
+    .with_approval_judge(judge, None, database.configuration.clone(), None);
     timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
@@ -173,7 +180,14 @@ pub(crate) async fn run_case(
             .map_err(|_| io::Error::other("the daemon tool eval resume exceeded its timeout"))??;
         approval_continuations += 1;
     }
-    let snapshot = CaseSnapshot::read(&database.pool, session, turn, approval_cap).await?;
+    let session_calls = tracker
+        .state
+        .lock()
+        .expect("operation-tracker lock is available")
+        .model_calls
+        .clone();
+    let snapshot =
+        CaseSnapshot::read(&database.pool, session, turn, approval_cap, &session_calls).await?;
     let expected_arguments = forced_case
         .map(|case| normalized_arguments_text(case.expected_arguments))
         .transpose()?;
@@ -1203,6 +1217,7 @@ pub(crate) struct OperationTracker {
 
 #[derive(Default)]
 pub(crate) struct OperationTrackerState {
+    pub(crate) model_calls: BTreeSet<ModelCallId>,
     pub(crate) seen_tool_call_ids: BTreeSet<String>,
     pub(crate) tool_results: Vec<TrackedToolResult>,
     pub(crate) result_round_trips: usize,
@@ -1222,6 +1237,11 @@ pub(crate) struct TrackedToolResult {
 
 impl OperationTracker {
     pub(crate) fn observe(&self, operation: &ModelOperation<ModelCallId>) {
+        self.state
+            .lock()
+            .expect("operation-tracker lock is available")
+            .model_calls
+            .insert(operation.correlation);
         let tool_results = operation.messages.iter().flat_map(|message| {
             message.parts.iter().filter_map(|part| match part {
                 MessagePart::ToolResult(result) => Uuid::parse_str(result.tool_call_id.as_str())
@@ -1488,6 +1508,7 @@ pub(crate) struct EvalDatabase {
     pub(crate) targets: ModelTargetCatalog,
     pub(crate) credential_families: ModelCredentialFamilyCatalog,
     pub(crate) runtime_models: RuntimeModelCatalog,
+    pub(crate) configuration: signalboxd::HubModelConfiguration,
 }
 
 impl EvalDatabase {
@@ -1502,23 +1523,52 @@ impl EvalDatabase {
         let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
             Uuid::from_u128(ARBITRARY_EVAL_PROVIDER_ID),
         ));
-        let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
-            selection, target,
-        )])
-        .map_err(|_| io::Error::other("the eval model target is duplicated"))?;
+        // The judge uses this catalog for model limits; EnvironmentCredential
+        // supplies both runtimes, so the profile's file path is unused.
+        let configuration = support::parse_model_configuration(&format!(
+            r#"
+version = 1
+
+[[credential_profiles]]
+name = "{EXPECTED_OPENAI_CREDENTIAL_REFERENCE}"
+adapter = "openai"
+billing_kind = "api_metered"
+delivery = "file"
+file = "/unused-by-environment-credential"
+
+[[credential_pools]]
+name = "openai-eval"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "{EXPECTED_OPENAI_CREDENTIAL_REFERENCE}", priority = 1 }}]
+
+[[adapter_mappings]]
+model_family = "{OPENAI_MODEL_FAMILY}"
+adapter = "openai"
+credential_pool = "openai-eval"
+
+[compaction]
+prompt = "Preserve the evaluation task."
+
+[[models]]
+selection_id = "{}"
+target_id = "{}"
+model_family = "{OPENAI_MODEL_FAMILY}"
+provider_model = "{model}"
+max_output_tokens = {MAX_OUTPUT_TOKENS}
+context_window_tokens = {CONTEXT_WINDOW_TOKENS}
+"#,
+            Uuid::from_u128(ARBITRARY_EVAL_SELECTION_ID),
+            Uuid::from_u128(ARBITRARY_EVAL_PROVIDER_ID),
+        ))?;
+        let targets = configuration.target_catalog();
         let credential_families = ModelCredentialFamilyCatalog::try_new([(
             target,
             Arc::<str>::from(OPENAI_MODEL_FAMILY),
             None,
         )])
         .map_err(|_| io::Error::other("the eval credential family is duplicated"))?;
-        let runtime_models =
-            RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
-                target,
-                String::from(model),
-                MAX_OUTPUT_TOKENS,
-                CONTEXT_WINDOW_TOKENS,
-            )?])?;
+        let runtime_models = configuration.runtime_model_catalog();
         Ok(Self {
             _container: container,
             pool,
@@ -1526,6 +1576,7 @@ impl EvalDatabase {
             targets,
             credential_families,
             runtime_models,
+            configuration,
         })
     }
 
@@ -1675,6 +1726,7 @@ impl CaseSnapshot {
         session: SessionId,
         turn: TurnId,
         approval_cap: ExecApprovalCap,
+        session_calls: &BTreeSet<ModelCallId>,
     ) -> EvalResult<Self> {
         let transcript = ProcessReadRepository::new(pool.clone())
             .read_transcript(session)
@@ -1774,7 +1826,9 @@ impl CaseSnapshot {
             transcript
                 .model_call_usage()
                 .iter()
-                .filter(|usage| usage.turn() == turn)
+                // Judge usage is also in the transcript, but does not consume
+                // the session model's tool-exchange budget.
+                .filter(|usage| usage.turn() == turn && session_calls.contains(&usage.call()))
                 .count(),
         )
         .map_err(|_| io::Error::other("the eval model-call count fits in i64"))?;

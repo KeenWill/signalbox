@@ -6,6 +6,8 @@
 //! unforced misses are written to the requested Markdown summary and never make
 //! this test fail. Harness, persistence, or tool-executor defects still fail the
 //! test so the report cannot silently claim that an evaluation ran.
+//! Delegated tool requests use the daemon's approval judge with the same live
+//! model and credential provider as the evaluated session.
 
 #![allow(
     clippy::expect_used,
@@ -46,7 +48,7 @@ use signalbox_application::{
 use signalbox_domain::{
     ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult,
     DeliveryRequest, DirectModelSelection, DurableCommandId, ModelCallId, ModelSelectionOverride,
-    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments,
     PerInputConfigurationChoices, ProviderModelIdentity, ResolvedProviderTarget, RunnerGeneration,
     RunnerId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
@@ -54,7 +56,7 @@ use signalbox_domain::{
     TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
-    RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
+    RuntimeModelCallProvider, RuntimeModelCatalog, approval_judge::RuntimeApprovalJudgeModel,
 };
 use signalbox_model_runtime::{
     CancellationSignal, CredentialAccess, CredentialAccessError, CredentialAccessFailure,
@@ -113,6 +115,8 @@ use tokio::{sync::Mutex, time::timeout};
 mod family;
 mod fixtures;
 mod report;
+#[path = "../support/mod.rs"]
+mod support;
 
 use family::cargo::*;
 use family::exec::*;
