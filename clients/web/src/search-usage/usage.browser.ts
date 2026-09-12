@@ -50,6 +50,15 @@ test('loads session and turn chips through the HTTP usage client', async ({ page
   await expect(
     page.getByRole('region', { name: 'Recent turn costs' }).getByRole('link').first(),
   ).toContainText('incomplete')
+  const attention = page.getByRole('region', { name: 'Attention row' })
+  await expect(attention.getByRole('link', { name: /unpriced/ })).toHaveAttribute(
+    'href',
+    `/usage?session=${SEARCH_USAGE_SCENARIO_SESSION_ID}`,
+  )
+  await expect(attention.getByRole('link', { name: 'Example session' })).toHaveAttribute(
+    'href',
+    `/sessions?session=${SEARCH_USAGE_SCENARIO_SESSION_ID}&workspace=true`,
+  )
   await page.screenshot({ path: testInfo.outputPath('cost-chips.png') })
   expect(requests.filter((url) => url.pathname === '/api/bootstrap')).toHaveLength(1)
   expect(

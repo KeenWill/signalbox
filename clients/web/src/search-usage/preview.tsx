@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createRoot } from 'react-dom/client'
 import '../app.css'
+import { AttentionCost } from './AttentionCost'
 import { SearchUsageScenarioSource } from './scenario'
 import { CostChip, SessionCostChip, TurnCostChip, useTurnCosts } from './session-cost'
 import { UsageContent, UsageSurface } from './UsageSurface'
@@ -9,6 +10,10 @@ function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string 
   const turns = useTurnCosts(sessionId)
   return (
     <>
+      <section aria-label="Attention row" className="attention-cost-row">
+        <a href={`/sessions?session=${sessionId}&workspace=true`}>Example session</a>
+        <AttentionCost sessionId={sessionId} />
+      </section>
       <section aria-label="Session cost">
         <SessionCostChip sessionId={sessionId} />
       </section>

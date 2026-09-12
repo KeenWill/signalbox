@@ -66,3 +66,26 @@
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+.attention-cost-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(7rem, 12rem);
+  align-items: center;
+}
+.attention-cost {
+  display: grid;
+  min-width: 0;
+  padding: 6px 10px;
+}
+.attention-cost-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+@media (max-width: 760px) {
+  .attention-cost-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .attention-cost {
+    justify-self: end;
+    max-width: 100%;
+  }
+}
