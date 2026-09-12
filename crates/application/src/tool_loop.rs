@@ -196,11 +196,14 @@ impl ToolDefinition {
 
     /// Whether this request declares authority requiring the approval judge.
     pub fn requires_approval_judge(&self, arguments: &NormalizedToolArguments) -> bool {
-        self.judge_required_argument.as_ref().is_some_and(|argument| {
-            serde_json::from_str::<serde_json::Value>(arguments.as_str()).ok()
-                .and_then(|value| value.get(argument).cloned())
-                .is_some_and(|value| !value.is_null())
-        })
+        self.judge_required_argument
+            .as_ref()
+            .is_some_and(|argument| {
+                serde_json::from_str::<serde_json::Value>(arguments.as_str())
+                    .ok()
+                    .and_then(|value| value.get(argument).cloned())
+                    .is_some_and(|value| !value.is_null())
+            })
     }
 
     /// Returns the crash-relevant effect class.

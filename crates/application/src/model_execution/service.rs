@@ -1052,7 +1052,9 @@ where
                     let definition = advertised_tools
                         .iter()
                         .find(|definition| definition.name() == proposal.name());
-                    if definition.is_some_and(|definition| definition.requires_approval_judge(proposal.arguments())) {
+                    if definition.is_some_and(|definition| {
+                        definition.requires_approval_judge(proposal.arguments())
+                    }) {
                         return Some(InitialToolApproval::Delegated);
                     }
                     let base = initial_tool_approval(posture, definition);
