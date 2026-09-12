@@ -4,9 +4,9 @@
     reason = "the standalone integration tests use assertion panics and explicit fixture expectations"
 )]
 
-mod support;
 #[path = "offline_tool_loop/ambient_credentials.rs"]
 mod ambient_credentials;
+mod support;
 #[path = "offline_tool_loop/workflows.rs"]
 mod workflow_tools;
 
@@ -176,7 +176,12 @@ fn approval_judge_model_configuration() -> HubModelConfiguration {
 }
 
 fn approval_judge_model_configuration_with_timeout(timeout: &str) -> HubModelConfiguration {
-    support::parse_model_configuration(&format!(
+    support::parse_model_configuration(&approval_judge_model_configuration_source(timeout))
+        .expect("the approval judge fixture model configuration is valid")
+}
+
+fn approval_judge_model_configuration_source(timeout: &str) -> String {
+    format!(
         r#"
 version = 1
 
@@ -215,8 +220,7 @@ approval_wait_timeout = "{timeout}"
 "#,
         Uuid::from_u128(FIXTURE_ID_SEED + 1),
         Uuid::from_u128(FIXTURE_ID_SEED + 4),
-    ))
-    .expect("the approval judge fixture model configuration is valid")
+    )
 }
 
 #[derive(Clone, Debug)]

@@ -4945,6 +4945,77 @@ mod tests {
     }
 
     #[test]
+    fn sandboxed_credential_requests_preserve_command_validation_and_timeout_defaults()
+    -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let (catalog, _) = SandboxedExecTool::try_new(
+            FakeRunner::returning(BwrapAvailability::Available, successful_process(b"")),
+            &root,
+            Some(Duration::from_secs(2)),
+        )?
+        .into_parts();
+        let name = ToolName::try_new(SANDBOXED_EXEC_NAME.to_owned()).expect("sandboxed name");
+        let raw = NormalizedToolArguments::try_from_provider_text(
+            r#"{"program":"fixture","credential_purpose":"fixture-authority"}"#.to_owned(),
+        )
+        .expect("JSON arguments");
+        catalog
+            .validate_arguments(&name, &raw)
+            .expect("ambient request is admitted");
+        assert_eq!(
+            SandboxedExecArguments::decode(&raw, Some(Duration::from_secs(2)))?
+                .command
+                .timeout_seconds,
+            2
+        );
+        assert!(
+            catalog
+                .definition(&name)
+                .expect("definition")
+                .requires_approval_judge(&raw)
+        );
+        for raw in [
+            r#"{"program":"fixture","credential_purpose":""}"#,
+            r#"{"program":"fixture","credential_purpose":3}"#,
+            r#"{"program":"fixture","credential_purpose":"fixture-authority","unrecognized":true}"#,
+            r#"{"program":"fixture","credential_purpose":"fixture-authority","timeout_seconds":3}"#,
+        ] {
+            let arguments = NormalizedToolArguments::try_from_provider_text(raw.to_owned())
+                .expect("JSON arguments");
+            assert!(catalog.validate_arguments(&name, &arguments).is_err());
+        }
+        let absent = NormalizedToolArguments::try_from_provider_text(
+            r#"{"program":"fixture","credential_purpose":null}"#.to_owned(),
+        )
+        .expect("JSON arguments");
+        assert!(
+            SandboxedExecArguments::decode(&absent, None)?
+                .credential_purpose
+                .is_none()
+        );
+        assert!(
+            !catalog
+                .definition(&name)
+                .expect("definition")
+                .requires_approval_judge(&absent)
+        );
+        let (unsandboxed, _) = UnsandboxedExecTool::try_new(
+            FakeRunner::returning(BwrapAvailability::Available, successful_process(b"")),
+            root,
+        )?
+        .into_parts();
+        assert!(
+            unsandboxed
+                .validate_arguments(
+                    &ToolName::try_new(UNSANDBOXED_EXEC_NAME.to_owned()).expect("unsandboxed name"),
+                    &raw
+                )
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn subsecond_timeout_bound_is_rejected() -> Result<(), Box<dyn Error>> {
         let root = std::env::current_dir()?;
         let result = SandboxedExecTool::try_new(

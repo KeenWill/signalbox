@@ -1009,6 +1009,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ambient_task_sources_load_reload_and_disappear() {
+        const VARIABLE: &str = "SIGNALBOX_AMBIENT_RELOAD_FIXTURE";
+        const REPLACEMENT_VARIABLE: &str = "SIGNALBOX_AMBIENT_RELOAD_REPLACEMENT";
+        if std::env::var(VARIABLE).as_deref() != Ok("synthetic-task-first") {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "configuration_reload::tests::ambient_task_sources_load_reload_and_disappear",
+                    "--nocapture",
+                ])
+                .env(VARIABLE, "synthetic-task-first")
+                .env(REPLACEMENT_VARIABLE, "synthetic-task-second")
+                .output()
+                .expect("isolated fixture");
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let (directory, reload) = fixture();
+        let first_file = directory.path().join("task-first");
+        let second_file = directory.path().join("task-second");
+        std::fs::write(&first_file, "synthetic-task-first").expect("first source");
+        std::fs::write(&second_file, "synthetic-task-second").expect("second source");
+        let base = reload.catalogs().models.source().to_owned();
+        for (source, expected) in [
+            (
+                format!("file = {:?}", first_file),
+                b"synthetic-task-first".as_slice(),
+            ),
+            (
+                format!("file = {:?}", second_file),
+                b"synthetic-task-second".as_slice(),
+            ),
+            (
+                format!("variable = {VARIABLE:?}"),
+                b"synthetic-task-first".as_slice(),
+            ),
+            (
+                format!("variable = {REPLACEMENT_VARIABLE:?}"),
+                b"synthetic-task-second".as_slice(),
+            ),
+        ] {
+            let configured = format!(
+                "{base}\n[[credential_profiles]]\nname = \"task-fixture\"\nadapter = \"sandboxed_exec\"\ndelivery = \"ambient\"\n{source}\n"
+            );
+            std::fs::write(&reload.model_path, configured).expect("replacement");
+            let replacement = reload.read_replacement().expect("source reloads");
+            let (_, value) = replacement
+                .models
+                .resolve_ambient_task_credential("task-fixture")
+                .await
+                .expect("current source resolves");
+            assert_eq!(value.expose_bytes(), expected);
+            assert!(
+                !format!("{value:?}")
+                    .contains(std::str::from_utf8(expected).expect("synthetic UTF-8"))
+            );
+            *reload.current.write().expect("catalog lock") = replacement;
+        }
+        std::fs::write(&reload.model_path, &base).expect("remove purpose");
+        let removed = reload.read_replacement().expect("purpose removal reloads");
+        assert_eq!(
+            removed
+                .models
+                .resolve_ambient_task_credential("task-fixture")
+                .await
+                .expect_err("removed purpose unavailable")
+                .failure,
+            signalbox_model_runtime::CredentialAccessFailure::Unmapped
+        );
+    }
+
+    #[tokio::test]
     async fn reload_accepts_a_model_credential_with_permissive_mode() {
         let (directory, reload) = fixture();
         reload

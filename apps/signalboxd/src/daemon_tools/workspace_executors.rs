@@ -100,7 +100,10 @@ pub(super) struct SessionWorkspaceExecutors<
     pub(super) binding_pool: Option<sqlx::PgPool>,
     roots: SessionWorkspaceRoots,
     pub(super) repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
-    pub(super) ambient_credentials: Option<(crate::configuration_reload::ConfigurationReload, sqlx::PgPool)>,
+    pub(super) ambient_credentials: Option<(
+        crate::configuration_reload::ConfigurationReload,
+        sqlx::PgPool,
+    )>,
     git_identity: GitIdentity,
     exec_runner: ExecRunner,
     cargo_registry_cache: Option<PathBuf>,
@@ -608,8 +611,7 @@ where
                 )
                 .map_err(|_| DaemonToolExecutorError::unknown_tool())?;
                 if arguments.credential_purpose.is_some() {
-                    let Some((catalogs, pool)) = &self.ambient_credentials
-                    else {
+                    let Some((catalogs, pool)) = &self.ambient_credentials else {
                         return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                             detail: signalbox_domain::ToolExecutionErrorDetail::try_new(
                                 "ambient credential unavailable".to_owned(),

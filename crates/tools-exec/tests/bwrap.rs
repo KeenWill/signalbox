@@ -466,6 +466,7 @@ async fn configured_host_runtime_validates_inside_real_bwrap()
         read_only_mounts: Vec::new(),
         rustup_home: Some(rustup_home),
         rustup_toolchain: Some(toolchain_name.to_owned()),
+        environment: Default::default(),
     };
     let process_runner = TokioProcessRunner::try_new(test_bin_path!("signalbox-exec-supervisor"))?;
     let runner = SandboxedCommandRunner::try_new_with_process_namespace(
