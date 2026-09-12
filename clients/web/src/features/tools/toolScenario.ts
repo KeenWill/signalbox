@@ -68,7 +68,7 @@ export const toolExamples = [
   toolExample(
     'github_pull_request_metadata',
     { repository: 'example/project', number: 12 },
-    { title: 'Render tool calls', html_url: 'https://github.com/example/project/pull/12' },
+    { title: 'Render tool calls', url: 'https://github.com/example/project/pull/12' },
   ),
   toolExample('custom_tool', { greeting: 'Hello' }, { answer: 'World' }),
 ]

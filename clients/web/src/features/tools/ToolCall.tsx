@@ -224,7 +224,7 @@ function Git({ arguments: args, result, resultExcerpt }: RendererProps) {
           .filter(Boolean)
           .join(' · ')}
       </strong>
-      {typeof result.html_url === 'string' && <Link url={result.html_url} title={result.title} />}
+      {typeof result.url === 'string' && <Link url={result.url} title={result.title} />}
       {typeof result.patch === 'string' ? (
         <TextPreview text={result.patch} label="Diff" diff />
       ) : (

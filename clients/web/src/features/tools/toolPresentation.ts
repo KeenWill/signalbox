@@ -27,7 +27,11 @@ export const excerptFields = (excerpt?: WebTimelineTextExcerpt | null): Fields =
   }
 }
 
-export const previewText = (text: string) => boundArtifactText(text, text.length, 'preview')
+export const previewText = (text: string) => {
+  let characters = 0
+  for (const _character of text) characters += 1
+  return boundArtifactText(text, characters, 'preview')
+}
 
 export const webLink = (value: unknown): string | undefined => {
   if (typeof value !== 'string') return undefined

@@ -54,6 +54,23 @@ describe('tool presentation', () => {
     expect(markup).toContain('Showing part of the text')
   })
 
+  it('links the normalized GitHub result destination', () => {
+    const markup = render(
+      toolExample(
+        'github_pull_request_metadata',
+        { repository: 'example/project', number: 12 },
+        { title: 'A pull request', url: 'https://github.com/example/project/pull/12' },
+      ),
+    )
+    expect(markup).toContain('href="https://github.com/example/project/pull/12"')
+  })
+
+  it('does not label complete non-BMP output as truncated', () => {
+    const markup = render(toolExample('read_file', { path: 'emoji.txt' }, { content: '😀' }))
+    expect(markup).toContain('😀')
+    expect(markup).not.toContain('Showing part')
+  })
+
   it('does not turn executable URLs into links', () => {
     expect(webLink('javascript:alert(1)')).toBeUndefined()
   })
