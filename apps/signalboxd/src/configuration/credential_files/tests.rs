@@ -102,6 +102,43 @@ async fn onepassword_failures_are_sanitized_credential_unavailability() {
     );
 }
 
+#[tokio::test]
+async fn onepassword_deadline_bounds_capture_and_child_exit() {
+    use std::time::Duration;
+    const FIXTURE_START_TIMEOUT: Duration = Duration::from_secs(5);
+    const FIXTURE_START_POLL: Duration = Duration::from_millis(10);
+    for stdout_setup in ["", "exec 1>&-"] {
+        let (directory, _, _) = onepassword_fixture();
+        let executable = directory.path().join("op");
+        let started = directory.path().join("started");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n{stdout_setup}\n: > {:?}\nwhile :; do :; done\n",
+                started
+            ),
+        )
+        .expect("never-exiting CLI");
+        let task = tokio::spawn(async move {
+            read_onepassword("op://fixture/account/token", &executable).await
+        });
+        tokio::time::timeout(FIXTURE_START_TIMEOUT, async {
+            while !started.exists() {
+                tokio::time::sleep(FIXTURE_START_POLL).await;
+            }
+        })
+        .await
+        .expect("CLI started before advancing its deadline");
+        tokio::time::pause();
+        tokio::time::advance(ONEPASSWORD_READ_TIMEOUT).await;
+        assert_eq!(
+            task.await.expect("credential read task"),
+            Err(CredentialAccessFailure::Unavailable)
+        );
+        tokio::time::resume();
+    }
+}
+
 /// A private file with arbitrary nonempty synthetic credential bytes.
 fn fixture() -> (
     tempfile::NamedTempFile,

@@ -280,45 +280,52 @@ enum CredentialSource {
     Onepassword { item: Arc<str>, executable: PathBuf },
 }
 
+/// Bounds a local vault CLI read, including capture and exit, to thirty seconds.
+const ONEPASSWORD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn read_onepassword(
     item: &str,
     executable: &Path,
 ) -> Result<Vec<u8>, CredentialAccessFailure> {
     use std::process::Stdio;
     use tokio::io::AsyncReadExt;
-    let mut child = tokio::process::Command::new(executable)
-        // https://developer.1password.com/docs/cli/reference/commands/read/
-        .args(["read", "--no-newline", "--cache=false", "--"])
-        .arg(item)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|_| CredentialAccessFailure::Unavailable)?;
-    let mut bytes = Vec::new();
-    child
-        .stdout
-        .take()
-        .ok_or(CredentialAccessFailure::Unavailable)?
-        .take(MAX_CREDENTIAL_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| CredentialAccessFailure::Unavailable)?;
-    if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
-        let _ = child.kill().await;
-        return Err(CredentialAccessFailure::Unavailable);
-    }
-    if !child
-        .wait()
-        .await
-        .map_err(|_| CredentialAccessFailure::Unavailable)?
-        .success()
-        || credential_bytes(&bytes).is_empty()
-    {
-        return Err(CredentialAccessFailure::Unavailable);
-    }
-    Ok(bytes)
+    tokio::time::timeout(ONEPASSWORD_READ_TIMEOUT, async {
+        let mut child = tokio::process::Command::new(executable)
+            // https://developer.1password.com/docs/cli/reference/commands/read/
+            .args(["read", "--no-newline", "--cache=false", "--"])
+            .arg(item)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| CredentialAccessFailure::Unavailable)?;
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()
+            .ok_or(CredentialAccessFailure::Unavailable)?
+            .take(MAX_CREDENTIAL_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| CredentialAccessFailure::Unavailable)?;
+        if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
+            let _ = child.kill().await;
+            return Err(CredentialAccessFailure::Unavailable);
+        }
+        if !child
+            .wait()
+            .await
+            .map_err(|_| CredentialAccessFailure::Unavailable)?
+            .success()
+            || credential_bytes(&bytes).is_empty()
+        {
+            return Err(CredentialAccessFailure::Unavailable);
+        }
+        Ok(bytes)
+    })
+    .await
+    .unwrap_or(Err(CredentialAccessFailure::Unavailable))
 }
 
 impl FileCredentialAccess {
@@ -500,7 +507,7 @@ impl super::HubModelConfiguration {
                 GithubCredentialDelivery::Onepassword { item, .. } => {
                     return self.repository_watch().is_some_and(|watch| {
                         watch.repositories().iter().any(|repository| {
-                            matches!(repository.credential().delivery(), GithubCredentialDelivery::Onepassword { item: polling, .. } if polling == item)
+                            matches!(repository.credential().delivery(), GithubCredentialDelivery::Onepassword { item: polling, .. } if crate::credential_pools::onepassword_item_identity(polling) == crate::credential_pools::onepassword_item_identity(item))
                         })
                     });
                 }

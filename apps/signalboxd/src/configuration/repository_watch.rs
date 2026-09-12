@@ -511,7 +511,7 @@ pub(super) fn parse_repository_watch_configuration(
             .transpose()?;
         if let crate::credential_pools::GithubCredentialDelivery::Onepassword { item, .. } =
             credential.delivery()
-            && !credential_items.insert(item.clone())
+            && !credential_items.insert(crate::credential_pools::onepassword_item_identity(item))
         {
             return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialItem);
         }

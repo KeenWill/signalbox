@@ -293,6 +293,11 @@ fn parse_onepassword_source(
     Ok((Arc::from(item), executable))
 }
 
+/// Identity of an admitted reference, excluding its section and field.
+pub(crate) fn onepassword_item_identity(reference: &str) -> String {
+    reference.split('/').take(4).collect::<Vec<_>>().join("/")
+}
+
 fn admit_credential_home(
     profile: &Arc<str>,
     path: &Path,
@@ -861,7 +866,7 @@ fn parse_credential_profiles_with_home_admission(
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
         if let CredentialDelivery::Onepassword { item, .. } = &delivery
-            && !onepassword_sources.insert((adapter, Arc::clone(item)))
+            && !onepassword_sources.insert((adapter, onepassword_item_identity(item)))
         {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
