@@ -210,6 +210,7 @@ test('applies saved visual preferences before the first rendered frame', async (
     localStorage.setItem(
       'signalbox.web.preferences.v1',
       JSON.stringify({
+        navigationCollapsed: false,
         layout: 'workbench',
         density: 'comfortable',
         detail: 'condensed',
@@ -1459,6 +1460,7 @@ test('stacks Imports from the available product pane width', async ({ page }) =>
     localStorage.setItem(
       'signalbox.web.preferences.v1',
       JSON.stringify({
+        navigationCollapsed: false,
         layout: 'workbench',
         density: 'compact',
         detail: 'condensed',
@@ -2024,4 +2026,41 @@ test('the wordmark returns home with keyboard activation', async ({ page }, test
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('wordmark-home.png') })
+})
+
+test('the sidebar rail remembers collapse and keeps keyboard navigation', async ({
+  page,
+}, testInfo) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/settings')
+  const collapse = page.getByRole('button', { name: 'Collapse sidebar', exact: true })
+  await collapse.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('button', { name: 'Expand sidebar', exact: true })).toBeFocused()
+  await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '56px')
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Expand sidebar', exact: true })).toBeVisible()
+  const attention = page.getByRole('link', { name: 'Attention', exact: true })
+  await attention.focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/\/attention$/)
+  await page.screenshot({ path: testInfo.outputPath('sidebar-rail.png') })
+  await page.getByRole('button', { name: 'Expand sidebar', exact: true }).click()
+  await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '218px')
+})
+
+test('offers the sidebar command only when the desktop sidebar is visible', async ({ page }) => {
+  await page.goto('/settings')
+  const palette = page.getByRole('button', { name: 'Open command palette', exact: true })
+  await palette.click()
+  await expect(page.getByRole('button', { name: /Toggle sidebar/ })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByRole('radio', { name: 'Focus', exact: true }).check()
+  await palette.click()
+  await expect(page.getByRole('button', { name: /Toggle sidebar/ })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await page.getByRole('radio', { name: 'Workbench', exact: true }).check()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await palette.click()
+  await expect(page.getByRole('button', { name: /Toggle sidebar/ })).toHaveCount(0)
 })

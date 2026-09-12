@@ -153,6 +153,10 @@ const appSlice = createSlice({
       if (action.payload.confirmed) delete state.pendingSessionInputs[action.payload.sessionId]
       else pending.phase = 'unconfirmed'
     },
+    navigationToggled(state) {
+      state.navigationCollapsed = !state.navigationCollapsed
+      state.activitySequence += 1
+    },
     layoutSet(state, action: { payload: LayoutMode }) {
       state.layout = action.payload
       state.activitySequence += 1
@@ -190,6 +194,7 @@ const appSlice = createSlice({
       )
       if (
         serializeBrowserPreferences({
+          navigationCollapsed: state.navigationCollapsed,
           layout: state.layout,
           density: state.density,
           detail: state.detail,
@@ -264,6 +269,7 @@ const traceMiddleware: Middleware = () => (next) => (action) => {
 }
 
 const preferenceActionTypes = new Set<string>([
+  appSlice.actions.navigationToggled.type,
   appSlice.actions.layoutSet.type,
   appSlice.actions.densitySet.type,
   appSlice.actions.detailSet.type,
@@ -282,6 +288,7 @@ const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
   ) {
     const app = (api.getState() as { app: AppState }).app
     saveBrowserPreferences({
+      navigationCollapsed: app.navigationCollapsed,
       layout: app.layout,
       density: app.density,
       detail: app.detail,

@@ -3,12 +3,22 @@ import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from '@tanstack/react-router'
 import {
+  Activity,
   AlertTriangle,
+  Bell,
+  ChartNoAxesCombined,
   Command,
+  Download,
   FileSearch,
+  GitPullRequest,
+  Home,
   Menu,
+  MessagesSquare,
   Moon,
   PanelLeftClose,
+  PanelLeftOpen,
+  Search,
+  Settings,
   Sun,
   X,
 } from 'lucide-react'
@@ -90,52 +100,81 @@ const productNavigationCommandIds: Record<ProductRouteId, ProductCommandId> = {
   settings: 'navigate.settings',
 }
 
+const productNavigationIcons = {
+  attention: Bell,
+  sessions: MessagesSquare,
+  search: Search,
+  runners: Activity,
+  reviews: GitPullRequest,
+  imports: Download,
+  usage: ChartNoAxesCombined,
+  settings: Settings,
+}
+
 export function ProductNavigation({
   active,
   context,
   onActivate,
+  collapsed,
 }: {
+  collapsed?: boolean
   active: ProductRouteId
   context: ProductCommandContext
   onActivate?: () => void
 }) {
   const scenarioDisabled = !productCommandAvailable('navigate.scenario', context)
   return (
-    <div className="product-navigation">
-      <Link
-        className="brand product-brand"
-        to="/$surface"
-        params={{ surface: 'attention' }}
-        aria-label="Signalbox home"
-        aria-disabled={context.navigationLocked || undefined}
-        tabIndex={context.navigationLocked ? -1 : undefined}
-        onClick={(event) => {
-          if (context.navigationLocked) {
+    <div className={`product-navigation ${collapsed ? 'navigation-collapsed' : ''}`}>
+      <div className="product-brand-row">
+        <Link
+          className="brand product-brand"
+          to="/$surface"
+          params={{ surface: 'attention' }}
+          aria-label="Signalbox home"
+          aria-disabled={context.navigationLocked || undefined}
+          tabIndex={context.navigationLocked ? -1 : undefined}
+          onClick={(event) => {
+            if (context.navigationLocked) {
+              event.preventDefault()
+              return
+            }
+            if (
+              event.button !== 0 ||
+              event.metaKey ||
+              event.ctrlKey ||
+              event.shiftKey ||
+              event.altKey
+            ) {
+              return
+            }
             event.preventDefault()
-            return
-          }
-          if (
-            event.button !== 0 ||
-            event.metaKey ||
-            event.ctrlKey ||
-            event.shiftKey ||
-            event.altKey
-          ) {
-            return
-          }
-          event.preventDefault()
-          onActivate?.()
-          invokeProductCommand('navigate.attention', context)
-        }}
-      >
-        <strong>Signalbox</strong>
-      </Link>
+            onActivate?.()
+            invokeProductCommand('navigate.attention', context)
+          }}
+        >
+          {collapsed ? <Home aria-hidden="true" /> : <strong>Signalbox</strong>}
+        </Link>
+        {collapsed !== undefined && (
+          <button
+            type="button"
+            className="icon-button sidebar-toggle"
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-expanded={!collapsed}
+            onClick={() => invokeProductCommand('navigation.toggle', context)}
+          >
+            {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+          </button>
+        )}
+      </div>
       <nav aria-label="Product">
         {productRoutes.map((route) => {
           const disabled = !productCommandAvailable(productNavigationCommandIds[route.id], context)
+          const Icon = productNavigationIcons[route.id]
           return (
             <Link
               key={route.id}
+              aria-label={route.label}
+              title={collapsed ? route.label : undefined}
               to="/$surface"
               params={{ surface: route.id }}
               className={active === route.id ? 'product-link active' : 'product-link'}
@@ -161,7 +200,8 @@ export function ProductNavigation({
                 invokeProductCommand(productNavigationCommandIds[route.id], context)
               }}
             >
-              <span>{route.label}</span>
+              <Icon aria-hidden="true" />
+              {!collapsed && <span>{route.label}</span>}
             </Link>
           )
         })}
@@ -451,14 +491,14 @@ function ProductToolbar({
 // hidden aside and focus a Digest input nobody can see.
 const INSPECTOR_SHEET_MEDIA = '(max-width: 1260px)'
 
-function useNarrowInspector(): boolean {
-  const [narrow, setNarrow] = useState(() => window.matchMedia(INSPECTOR_SHEET_MEDIA).matches)
+function useMediaQuery(media: string): boolean {
+  const [narrow, setNarrow] = useState(() => window.matchMedia(media).matches)
   useEffect(() => {
-    const query = window.matchMedia(INSPECTOR_SHEET_MEDIA)
+    const query = window.matchMedia(media)
     const update = () => setNarrow(query.matches)
     query.addEventListener('change', update)
     return () => query.removeEventListener('change', update)
-  }, [])
+  }, [media])
   return narrow
 }
 
@@ -512,7 +552,8 @@ export function ProductApp({
       dispatch(actions.artifactOriginalReleased(artifactResolutionId(artifactRequest)))
     }
   }, [artifactRequest, dispatch])
-  const narrowInspector = useNarrowInspector()
+  const narrowInspector = useMediaQuery(INSPECTOR_SHEET_MEDIA)
+  const narrowNavigation = useMediaQuery('(max-width: 760px)')
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
   const [windowRequest, setWindowRequest] = useState<{
@@ -640,6 +681,7 @@ export function ProductApp({
           ? (anchor) =>
               setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
           : undefined,
+      sidebarAvailable: !narrowNavigation && app.layout === 'workbench',
       navigationLocked: navigationDisabled,
       navigate: (path) => {
         if (path === '/scenario/streaming') {
@@ -663,6 +705,8 @@ export function ProductApp({
       },
     }
   }, [
+    app.layout,
+    narrowNavigation,
     artifactAvailable,
     bootstrap.data,
     bootstrap.isSuccess,
@@ -923,7 +967,9 @@ export function ProductApp({
     )
 
   const shellStyle = {
-    '--product-navigation-width': `${app.paneSizes.navigation}px`,
+    '--product-navigation-width': app.navigationCollapsed
+      ? '56px'
+      : `${app.paneSizes.navigation}px`,
     '--product-inspector-width': `${app.paneSizes.inspector}px`,
   } as CSSProperties
 
@@ -933,7 +979,7 @@ export function ProductApp({
       style={shellStyle}
     >
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} context={context} />
+        <ProductNavigation active={surface} context={context} collapsed={app.navigationCollapsed} />
       </aside>
       <main className={`product-main product-main-${surface}`} ref={mainRef} tabIndex={-1}>
         <header className="product-header">

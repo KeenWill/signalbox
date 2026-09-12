@@ -1,13 +1,24 @@
 import type { HotkeySequence } from '@tanstack/react-hotkeys'
 import type { CommandBinding, CommandContext, CommandId } from './commands'
 import { commandRegistry, invokeCommand } from './commands'
+import { actions } from './state'
 
 export interface ProductCommandContext extends CommandContext {
   navigate: (path: string) => void
   openNavigation: () => void
+  sidebarAvailable?: boolean
 }
 
 const productNavigationCommands = [
+  {
+    id: 'navigation.toggle',
+    title: 'Toggle sidebar',
+    description: 'Collapse or expand the sidebar.',
+    category: 'Surface',
+    bindings: [],
+    available: (context: ProductCommandContext) => context.sidebarAvailable === true,
+    run: (context: ProductCommandContext) => context.dispatch(actions.navigationToggled()),
+  },
   {
     id: 'navigation.open',
     title: 'Open product navigation',
