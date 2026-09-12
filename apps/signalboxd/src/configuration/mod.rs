@@ -591,12 +591,27 @@ impl HubModelConfiguration {
                                 .unwrap_or(usize::MAX),
                         )
                     });
+                let document = matches!(adapter, Some(ModelAdapter::ClaudeCli)).then(|| {
+                    signalbox_model_runtime_claude_cli::document_presentation_capability()
+                        .limited_by(
+                            numeric_bounds
+                                .integer("max_document_presentation_bytes")
+                                .flatten()
+                                .unwrap_or(u64::MAX),
+                            numeric_bounds
+                                .integer("max_image_request_bytes")
+                                .flatten()
+                                .and_then(|bound| usize::try_from(bound).ok())
+                                .unwrap_or(usize::MAX),
+                        )
+                });
                 signalbox_model_runtime::ModelCapabilityDefinition::new(
                     definition.target().clone(),
                     definition
                         .capabilities()
                         .clone()
-                        .with_image_presentation(image),
+                        .with_image_presentation(image)
+                        .with_document_presentation(document),
                 )
             }),
         )

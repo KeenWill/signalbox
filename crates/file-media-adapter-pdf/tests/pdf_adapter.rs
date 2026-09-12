@@ -137,7 +137,72 @@ async fn generated_pdf_validates_and_exposes_declared_views() -> Result<(), Box<
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Validated);
-    assert_eq!(validated_view_count(&inspection)?, 3);
+    assert_eq!(validated_view_count(&inspection)?, 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn document_view_retains_validated_pdf_identity_and_rejects_options()
+-> Result<(), Box<dyn Error>> {
+    let source = PdfFixture::ordinary()?.into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "document",
+        serde_json::json!({}),
+    )
+    .await?;
+    let FileReadResult::Reference(reference) = result else {
+        return Err("expected document reference".into());
+    };
+    assert_eq!(
+        reference.kind(),
+        signalbox_file_media_runtime::MediaPresentationKind::Document
+    );
+    assert_eq!(reference.presented(), reference.source());
+    assert_eq!(reference.presented().digest(), source.file_use()?.digest());
+    assert_eq!(
+        reference.presented().media_type().as_str(),
+        "application/pdf"
+    );
+    assert_eq!(reference.byte_length(), source.byte_length());
+    assert!(matches!(
+        read(
+            &DirectProcessor::new(),
+            &source,
+            "document",
+            serde_json::json!({"page":1})
+        )
+        .await,
+        Err(FileMediaFailure::InvalidViewArguments)
+    ));
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.presented_file_bytes = source.byte_length().get() - 1;
+    let bounded = FileMediaRegistry::try_new(
+        vec![declaration()?],
+        ceilings,
+        ProcessorIsolation::Available,
+    )?;
+    assert!(matches!(
+        bounded
+            .read(
+                &DirectProcessor::new(),
+                FileReadRequest {
+                    inspection: InspectionRequest {
+                        source: source.file_use()?,
+                        visible_part: None
+                    },
+                    view: ReadViewName::try_new("document")?,
+                    input: FileReadInput::Initial {
+                        options: serde_json::json!({})
+                    },
+                },
+                &source,
+                &NeverCancelled
+            )
+            .await,
+        Err(FileMediaFailure::OutputUnitTooLarge)
+    ));
     Ok(())
 }
 
@@ -531,6 +596,15 @@ async fn page_image_uses_the_isolated_binary_channel() -> Result<(), Box<dyn Err
     let decoded = image::load_from_memory(output.bytes())?.into_rgba8();
     assert_eq!(decoded.dimensions(), (16, 8));
     assert!(decoded.pixels().all(|pixel| pixel.0 == [0, 0, 255, 255]));
+    let result = read(&processor, &source, "document", serde_json::json!({})).await?;
+    let FileReadResult::Reference(document) = result else {
+        return Err("expected isolated document reference".into());
+    };
+    assert_eq!(
+        document.kind(),
+        signalbox_file_media_runtime::MediaPresentationKind::Document
+    );
+    assert_eq!(document.presented().digest(), source.digest());
     Ok(())
 }
 

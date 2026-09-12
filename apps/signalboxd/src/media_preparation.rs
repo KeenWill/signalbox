@@ -1,4 +1,4 @@
-//! Authentication and bounded materialization of rendered durable image results.
+//! Authentication and bounded materialization of rendered durable media results.
 
 use crate::{
     BlobStoreRegistry,
@@ -7,7 +7,8 @@ use crate::{
 use signalbox_application::{ClassifyOperatorFailure as _, OperatorFailureClass};
 use signalbox_domain::{BlobDigest, ToolRequestId};
 use signalbox_model_runtime::{
-    ImageInput, ImagePresentationCapability, MessagePart, ModelOperation,
+    DocumentInput, DocumentPresentationCapability, ImageInput, ImagePresentationCapability,
+    MessagePart, ModelOperation,
 };
 use signalbox_persistence::{
     blob::{BlobCatalogRepository, BlobCatalogRepositoryError},
@@ -32,6 +33,13 @@ pub(crate) enum MediaPreparationFailure {
     Corrupt,
 }
 
+struct PendingReference {
+    authority: String,
+    digest: [u8; 32],
+    byte_length: NonZeroU64,
+    media_type: String,
+}
+
 impl MediaPreparation {
     pub(crate) fn new(pool: PgPool, stores: Option<Arc<BlobStoreRegistry>>) -> Self {
         Self {
@@ -44,21 +52,49 @@ impl MediaPreparation {
         &self,
         operation: &mut ModelOperation<C>,
         target: Option<&ImagePresentationCapability>,
+        document_target: Option<&DocumentPresentationCapability>,
     ) -> Result<(), MediaPreparationFailure> {
         let mut references = Vec::new();
         let mut aggregate_bytes = 0_u64;
         for (message_index, message) in operation.messages.iter().enumerate() {
             for (part_index, part) in message.parts.iter().enumerate() {
-                let MessagePart::ImageReference(reference) = part else {
-                    continue;
+                let (reference, document, admitted) = match part {
+                    MessagePart::ImageReference(reference) => (
+                        PendingReference {
+                            authority: reference.authority.clone(),
+                            digest: reference.digest,
+                            byte_length: reference.byte_length,
+                            media_type: reference.media_type.clone(),
+                        },
+                        false,
+                        target.is_some_and(|target| {
+                            target.admits(&reference.media_type, reference.byte_length.get())
+                        }),
+                    ),
+                    MessagePart::DocumentReference(reference) => (
+                        PendingReference {
+                            authority: reference.authority.clone(),
+                            digest: reference.digest,
+                            byte_length: reference.byte_length,
+                            media_type: reference.media_type.clone(),
+                        },
+                        true,
+                        document_target.is_some_and(|target| {
+                            target.admits(&reference.media_type, reference.byte_length.get())
+                        }),
+                    ),
+                    _ => continue,
                 };
-                let target = target.ok_or(MediaPreparationFailure::Unsupported)?;
                 aggregate_bytes = aggregate_bytes
                     .checked_add(reference.byte_length.get())
                     .ok_or(MediaPreparationFailure::Unsupported)?;
-                if !target.admits(&reference.media_type, reference.byte_length.get())
+                if !admitted
                     || reference.byte_length.get()
-                        > signalbox_file_media_runtime::MAX_PRESENTED_IMAGE_BYTES
+                        > if document {
+                            signalbox_file_media_runtime::MAX_PRESENTED_FILE_BYTES
+                        } else {
+                            signalbox_file_media_runtime::MAX_PRESENTED_IMAGE_BYTES
+                        }
                     || aggregate_bytes
                         > signalbox_file_media_runtime::MAX_AGGREGATE_MEDIA_BYTES_PER_CALL
                     || references.len()
@@ -66,7 +102,7 @@ impl MediaPreparation {
                 {
                     return Err(MediaPreparationFailure::Unsupported);
                 }
-                references.push((message_index, part_index, reference.clone()));
+                references.push((message_index, part_index, reference, document));
             }
         }
         if references.is_empty() {
@@ -77,7 +113,7 @@ impl MediaPreparation {
             .as_ref()
             .ok_or(MediaPreparationFailure::Unavailable)?;
         let mut authenticated = Vec::with_capacity(references.len());
-        for (message, part, reference) in references {
+        for (message, part, reference, document) in references {
             let request = uuid::Uuid::parse_str(&reference.authority)
                 .map(ToolRequestId::from_uuid)
                 .map_err(|_| MediaPreparationFailure::Corrupt)?;
@@ -102,7 +138,7 @@ impl MediaPreparation {
             if entry.expected().byte_length() != reference.byte_length.get() {
                 return Err(MediaPreparationFailure::Corrupt);
             }
-            authenticated.push((message, part, reference, entry));
+            authenticated.push((message, part, reference, document, entry));
         }
         // Every authority query has completed before store I/O begins.
         let _permit = stores
@@ -110,7 +146,7 @@ impl MediaPreparation {
             .acquire_owned()
             .await
             .map_err(|_| MediaPreparationFailure::Unavailable)?;
-        for (message, part, reference, entry) in authenticated {
+        for (message, part, reference, document, entry) in authenticated {
             let mut bytes = Vec::with_capacity(reference.byte_length.get() as usize);
             while (bytes.len() as u64) < reference.byte_length.get() {
                 let length = NonZeroU64::new(
@@ -123,10 +159,17 @@ impl MediaPreparation {
                     .map_err(source_failure)?;
                 bytes.extend_from_slice(&section);
             }
-            operation.messages[message].parts[part] = MessagePart::Image(ImageInput {
-                media_type: reference.media_type,
-                bytes: bytes.into(),
-            });
+            operation.messages[message].parts[part] = if document {
+                MessagePart::Document(DocumentInput {
+                    media_type: reference.media_type,
+                    bytes: bytes.into(),
+                })
+            } else {
+                MessagePart::Image(ImageInput {
+                    media_type: reference.media_type,
+                    bytes: bytes.into(),
+                })
+            };
         }
         Ok(())
     }
@@ -185,11 +228,48 @@ mod tests {
         );
         let target = signalbox_model_runtime_codex_cli::image_presentation_capability();
         assert!(matches!(
-            preparation.prepare(&mut operation, Some(&target)).await,
+            preparation
+                .prepare(&mut operation, Some(&target), None)
+                .await,
             Err(MediaPreparationFailure::Unsupported)
         ));
         assert!(matches!(
-            preparation.prepare(&mut operation, None).await,
+            preparation.prepare(&mut operation, None, None).await,
+            Err(MediaPreparationFailure::Unsupported)
+        ));
+    }
+    #[tokio::test]
+    async fn file_document_bounds_reject_before_authority_or_source_access() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://invalid/fixture")
+            .unwrap();
+        pool.close().await;
+        let preparation = MediaPreparation::new(pool, None);
+        let mut operation = ModelOperation::new(
+            (),
+            CredentialReference::new("fixture"),
+            RequestedTarget::new("fixture"),
+            ResolvedTarget::new("fixture"),
+            vec![ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![MessagePart::DocumentReference(DocumentReference {
+                    authority: "invalid".into(),
+                    digest: [0; 32],
+                    byte_length: NonZeroU64::new(9 * 1024 * 1024).unwrap(),
+                    media_type: "application/pdf".into(),
+                })],
+            }],
+            ModelSettings::new(64),
+        );
+        let target = signalbox_model_runtime_claude_cli::document_presentation_capability();
+        assert!(matches!(
+            preparation
+                .prepare(&mut operation, None, Some(&target))
+                .await,
+            Err(MediaPreparationFailure::Unsupported)
+        ));
+        assert!(matches!(
+            preparation.prepare(&mut operation, None, None).await,
             Err(MediaPreparationFailure::Unsupported)
         ));
     }

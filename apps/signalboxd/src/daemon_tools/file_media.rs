@@ -289,7 +289,7 @@ impl FileUseResolver for DaemonFileUseResolver {
                 .await
                 .map_err(catalog_resolution_error)?
                 .ok_or(FileUseResolutionError::BlobMissing)?;
-            let image_target = if let Some(models) = &self.models {
+            let presentation_target = if let Some(models) = &self.models {
                 let target = self
                     .visibility
                     .file_use_target(self.request.as_ref().ok_or_else(invalid)?)
@@ -300,13 +300,14 @@ impl FileUseResolver for DaemonFileUseResolver {
                         )
                     })?;
                 let model = models.resolve(target).ok_or_else(invalid)?;
-                self.capabilities
-                    .resolve(&signalbox_model_runtime::ResolvedTarget::new(
-                        model.provider_model().to_owned(),
-                    ))
-                    .ok_or_else(invalid)?
-                    .image_presentation()
-                    .cloned()
+                Some(
+                    self.capabilities
+                        .resolve(&signalbox_model_runtime::ResolvedTarget::new(
+                            model.provider_model().to_owned(),
+                        ))
+                        .ok_or_else(invalid)?
+                        .clone(),
+                )
             } else {
                 None
             };
@@ -345,7 +346,18 @@ impl FileUseResolver for DaemonFileUseResolver {
                 },
                 selector,
             )
-            .with_image_target(image_target))
+            .with_image_target(
+                presentation_target
+                    .as_ref()
+                    .and_then(|target| target.image_presentation())
+                    .cloned(),
+            )
+            .with_document_target(
+                presentation_target
+                    .as_ref()
+                    .and_then(|target| target.document_presentation())
+                    .cloned(),
+            ))
         })
     }
 }

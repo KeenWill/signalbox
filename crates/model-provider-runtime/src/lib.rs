@@ -2004,7 +2004,19 @@ fn render_runtime_messages(
             ModelConversationMessage::ToolResult {
                 request, content, ..
             } => {
-                let image = match content {
+                let media = match content {
+                    ModelToolResultContent::Success(ToolResultContent::Media {
+                        reference, ..
+                    }) if reference.presented().media_type() == "application/pdf" => {
+                        Some(MessagePart::DocumentReference(
+                            signalbox_model_runtime::DocumentReference {
+                                authority: request.into_uuid().to_string(),
+                                digest: *reference.presented().digest().as_bytes(),
+                                byte_length: reference.byte_length(),
+                                media_type: reference.presented().media_type().to_owned(),
+                            },
+                        ))
+                    }
                     ModelToolResultContent::Success(ToolResultContent::Media {
                         reference, ..
                     }) => Some(MessagePart::ImageReference(
@@ -2028,7 +2040,13 @@ fn render_runtime_messages(
                         let position = message
                             .parts
                             .iter()
-                            .position(|part| matches!(part, MessagePart::ImageReference(_)))
+                            .position(|part| {
+                                matches!(
+                                    part,
+                                    MessagePart::ImageReference(_)
+                                        | MessagePart::DocumentReference(_)
+                                )
+                            })
                             .unwrap_or(message.parts.len());
                         message.parts.insert(position, part);
                     } else {
@@ -2043,10 +2061,10 @@ fn render_runtime_messages(
                         parts: vec![part],
                     });
                 }
-                if let Some(image) = image
+                if let Some(media) = media
                     && let Some(message) = rendered.last_mut()
                 {
-                    message.parts.push(image);
+                    message.parts.push(media);
                 }
                 assistant_call = None;
                 collecting_tool_results = true;
@@ -3042,6 +3060,55 @@ mod tests {
         assert!(matches!(rendered[0].parts[1], MessagePart::ToolResult(_)));
         let MessagePart::ImageReference(image) = &rendered[0].parts[2] else {
             panic!("one authenticated image reference")
+        };
+        assert_eq!(image.authority, request.into_uuid().to_string());
+        assert_eq!(rendered[0].parts.len(), 3);
+    }
+
+    #[test]
+    fn typed_pdf_results_issue_document_authority_after_all_tool_results() {
+        use signalbox_domain::{
+            BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
+            ToolResultContent, ToolResultText,
+        };
+        use signalbox_model_runtime::MessagePart;
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(133));
+        let identity = MediaValidationIdentity::try_new(
+            BlobDigest::from_bytes([1; 32]),
+            "application/pdf".into(),
+            "fixture".into(),
+            "png".into(),
+            "v1".into(),
+            MediaValidationEvidence::StrongSignature,
+        )
+        .unwrap();
+        let reference =
+            ToolMediaReference::direct_document(identity, std::num::NonZeroU64::new(64).unwrap())
+                .unwrap();
+        let messages = [
+            ModelConversationMessage::ToolResult {
+                source: source(134),
+                request,
+                content: ModelToolResultContent::Success(ToolResultContent::Media {
+                    text: ToolResultText::try_new("image".into()).unwrap(),
+                    reference,
+                }),
+            },
+            ModelConversationMessage::ToolResult {
+                source: source(135),
+                request: ToolRequestId::from_uuid(Uuid::from_u128(136)),
+                content: ModelToolResultContent::Success(ToolResultContent::Text(
+                    ToolResultText::try_new(r#"{"output":"image","digest":"pretend"}"#.into())
+                        .unwrap(),
+                )),
+            },
+        ];
+        let rendered = render_runtime_messages(&messages);
+        assert_eq!(rendered.len(), 1);
+        assert!(matches!(rendered[0].parts[0], MessagePart::ToolResult(_)));
+        assert!(matches!(rendered[0].parts[1], MessagePart::ToolResult(_)));
+        let MessagePart::DocumentReference(image) = &rendered[0].parts[2] else {
+            panic!("one authenticated document reference")
         };
         assert_eq!(image.authority, request.into_uuid().to_string());
         assert_eq!(rendered[0].parts.len(), 3);

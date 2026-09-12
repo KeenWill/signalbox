@@ -168,11 +168,16 @@ recovery is registered as part of the reader's validation.
 
 ## Planned
 
-- Audio and general-file views, whose derived bytes publish and register before
+- Derived audio and general-file views, whose bytes publish and register before
   the read's result commits and leave no dangling result on failure. See the
   [design](../design/file-and-media.md).
 
-## Image presentation
+## Rich media presentation
+
+The PDF reader's `document` view returns a direct validated PDF reference for
+native document presentation on Claude Code CLI. Codex CLI and the HTTP adapters
+do not present documents. `numeric_bounds.max_document_presentation_bytes`
+lowers Claude's document byte bound under the complete request bound.
 
 The PDF reader's `page_image` view renders one page inside its sandboxed worker.
 `page` is one-based; optional positive `scale` defaults to 1 and is reduced to
@@ -209,18 +214,18 @@ unreferenced blob may remain after publication. Direct reads publish and
 register nothing.
 
 Codex CLI presents image parts through `turn/start` RPC inputs; Claude Code CLI
-uses base64 image blocks in stream-JSON input. Adapters encode authenticated
-bytes without format detection. Their capability records bound accepted types,
-one image and the complete encoded request. Daemon
+restores base64 image and PDF document blocks in native JSONL history. Adapters
+encode authenticated bytes without format detection. Their capability records
+bound accepted types, one media part and the complete encoded request. Daemon
 `max_image_presentation_bytes` and `max_image_request_bytes` lower these limits;
-`"none"` leaves the adapter limits. The process admits at most 16 image
+`"none"` leaves the adapter limits. The process admits at most 16 media
 references, eight MiB each and 32 MiB in aggregate. Encoding and request framing
 count against the request bound.
 
 Preparation authenticates each rendered reference against its terminal tool
 attempt and catalog length before source I/O. It materializes only admitted
-bounded images and runs no reader. Unsupported presentations fail before send
-authorization. Database unavailability retains infrastructure failure, absent
-replicas retain missing-blob failure, and inconsistent authority or blob-store
-integrity remains fail-closed corruption. Ordinary JSON cannot issue image
-authority.
+bounded images or documents and runs no reader. Unsupported presentations fail
+before send authorization. Database unavailability retains infrastructure
+failure, absent replicas retain missing-blob failure, and inconsistent authority
+or blob-store integrity remains fail-closed corruption. Ordinary JSON cannot
+issue media authority.

@@ -1244,7 +1244,9 @@ impl OperationTracker {
                 | MessagePart::ProviderCompaction { .. }
                 | MessagePart::ProviderReasoning { .. }
                 | MessagePart::ImageReference(_)
-                | MessagePart::Image(_) => None,
+                | MessagePart::Image(_)
+                | MessagePart::DocumentReference(_)
+                | MessagePart::Document(_) => None,
             })
         });
         self.record_new_results(tool_results);

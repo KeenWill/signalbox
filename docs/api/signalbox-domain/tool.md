@@ -305,6 +305,10 @@ impl MediaValidationIdentity {
 pub struct ToolMediaReference {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl ToolMediaReference {
+    pub fn direct_document(
+        identity: MediaValidationIdentity,
+        byte_length: nonzero::NonZeroU64,
+    ) -> option::Option<Self>;
     pub fn direct_image(
         identity: MediaValidationIdentity,
         byte_length: nonzero::NonZeroU64,

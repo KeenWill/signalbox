@@ -29,6 +29,7 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
     ("max_image_presentation_bytes", NumericBoundKind::Integer),
     ("max_raster_dimension", NumericBoundKind::Integer),
     ("max_image_request_bytes", NumericBoundKind::Integer),
+    ("max_document_presentation_bytes", NumericBoundKind::Integer),
     ("client_frame_deadline", NumericBoundKind::Duration),
     ("client_write_progress_deadline", NumericBoundKind::Duration),
     (
