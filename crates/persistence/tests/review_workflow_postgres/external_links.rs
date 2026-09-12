@@ -136,7 +136,10 @@ async fn attachment_load_waits_for_finding_transition() -> Result<(), Box<dyn Er
         finding_ref,
         ReviewEventOrdinal::one(),
         evidence[1].clone(),
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                .expect("judge confidence"),
+        },
     );
     let accepted = open
         .apply(accepted_event.clone())
@@ -491,7 +494,10 @@ async fn schema_authenticates_posted_external_review_content() -> Result<(), Box
                 posted_finding,
                 ReviewEventOrdinal::one(),
                 evidence[1].clone(),
-                ReviewFindingEventKind::Accepted,
+                ReviewFindingEventKind::Accepted {
+                    confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                        .expect("judge confidence"),
+                },
             ),
         )
         .await
@@ -1568,7 +1574,10 @@ async fn linked_block_serializes_with_non_posting_attachment() -> Result<(), Box
                 finding_ref,
                 ReviewEventOrdinal::one(),
                 evidence[1].clone(),
-                ReviewFindingEventKind::Accepted,
+                ReviewFindingEventKind::Accepted {
+                    confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                        .expect("judge confidence"),
+                },
             ),
         )
         .await?;
@@ -2018,7 +2027,10 @@ async fn blocked_publication_reconciles_with_attachment_pass() -> Result<(), Box
                 finding_ref,
                 ReviewEventOrdinal::one(),
                 judge_evidence,
-                ReviewFindingEventKind::Accepted,
+                ReviewFindingEventKind::Accepted {
+                    confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                        .expect("judge confidence"),
+                },
             ),
         )
         .await?;

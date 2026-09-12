@@ -3,6 +3,64 @@
 use super::support::*;
 use crate::*;
 
+#[test]
+fn categorical_judgments_reject_incompatible_class_and_confidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let judgment = ReviewJudgmentResult {
+        bar_category: String::from("none"),
+        decline_class: Some(String::from("hypothetical-hardening")),
+        confidence: CanonicalU64::new(4),
+        reason: String::from("The candidate requests an unneeded guard."),
+    };
+    let frame_for = |judgment| {
+        ClientFrame::try_new(
+            request(1).expect("request identity"),
+            ClientRequest::RecordReviewJudgmentPlan {
+                command_id: command(2).expect("command identity"),
+                attempt_id: uuid(3),
+                analysis_pass_id: uuid(4),
+                members: vec![ReviewJudgmentPlanMember {
+                    finding_id: uuid(5),
+                    disposition: ReviewJudgmentDisposition::Rejected {
+                        reason: String::from("The candidate requests an unneeded guard."),
+                    },
+                    judgment,
+                }],
+            },
+        )
+    };
+    let admitted = frame_for(judgment.clone())?;
+    assert_eq!(
+        decode_client_line(&encode_client_line(&admitted)?)?,
+        admitted
+    );
+    for invalid in [
+        ReviewJudgmentResult {
+            confidence: CanonicalU64::new(0),
+            ..judgment.clone()
+        },
+        ReviewJudgmentResult {
+            confidence: CanonicalU64::new(6),
+            ..judgment.clone()
+        },
+        ReviewJudgmentResult {
+            decline_class: None,
+            ..judgment.clone()
+        },
+        ReviewJudgmentResult {
+            bar_category: String::from("own-behavior-defect"),
+            ..judgment.clone()
+        },
+        ReviewJudgmentResult {
+            decline_class: Some(String::from("invented-class")),
+            ..judgment.clone()
+        },
+    ] {
+        assert!(frame_for(invalid).is_err());
+    }
+    Ok(())
+}
+
 /// review target registration has one exact closed shape.
 #[test]
 fn review_target_exchange_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
@@ -174,6 +232,12 @@ fn review_orchestration_stage_requests_round_trip() -> Result<(), Box<dyn std::e
             members: vec![ReviewJudgmentPlanMember {
                 finding_id: uuid(7),
                 disposition: ReviewJudgmentDisposition::Accepted {},
+                judgment: crate::ReviewJudgmentResult {
+                    bar_category: String::from("own-behavior-defect"),
+                    decline_class: None,
+                    confidence: CanonicalU64::new(5),
+                    reason: String::from("The fixture supplies concrete evidence."),
+                },
             }],
         },
     )?;
@@ -371,6 +435,12 @@ fn review_orchestration_refuses_oversized_judgment_inventory()
                 ReviewJudgmentPlanMember {
                     finding_id: uuid(5),
                     disposition: ReviewJudgmentDisposition::Accepted {},
+                    judgment: crate::ReviewJudgmentResult {
+                        bar_category: String::from("own-behavior-defect"),
+                        decline_class: None,
+                        confidence: CanonicalU64::new(5),
+                        reason: String::from("The fixture supplies concrete evidence.")
+                    },
                 };
                 1_025
             ],

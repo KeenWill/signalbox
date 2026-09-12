@@ -1150,6 +1150,9 @@ struct RecordReviewFindingEventArguments {
     /// Finding-machine event kind; the accompanying options must match the selected kind.
     #[arg(long, value_enum)]
     event: ReviewFindingEventArgument,
+    /// Independent judge confidence from one through five for an accepted event.
+    #[arg(long, value_parser = review_judge_confidence)]
+    judge_confidence: Option<CanonicalU64>,
     /// Explanation accompanying a rejected or blocked-with-reason event.
     #[arg(long)]
     reason: Option<String>,
@@ -2418,6 +2421,14 @@ pub(crate) fn parse(
                 }
             }
             ReviewSubcommand::RecordFindingEvent(arguments) => {
+                if (arguments.event == ReviewFindingEventArgument::Accepted)
+                    != arguments.judge_confidence.is_some()
+                {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "--judge-confidence is required exactly for accepted events",
+                    )));
+                }
                 let event = match (
                     arguments.event,
                     arguments.reason,
@@ -2425,7 +2436,13 @@ pub(crate) fn parse(
                     arguments.external_link_id,
                 ) {
                     (ReviewFindingEventArgument::Accepted, None, None, None) => {
-                        ReviewFindingEvent::Accepted {}
+                        let Some(confidence) = arguments.judge_confidence else {
+                            return Err(UsageError(Cli::command().error(
+                                ErrorKind::MissingRequiredArgument,
+                                "--judge-confidence is required",
+                            )));
+                        };
+                        ReviewFindingEvent::Accepted { confidence }
                     }
                     (ReviewFindingEventArgument::Rejected, Some(reason), None, None) => {
                         ReviewFindingEvent::Rejected { reason }
@@ -2825,6 +2842,15 @@ fn review_line_number(value: &str) -> Result<CanonicalU64, String> {
         return Err("review line number exceeds the unsigned 32-bit range".to_owned());
     }
     Ok(parsed)
+}
+
+fn review_judge_confidence(value: &str) -> Result<CanonicalU64, String> {
+    let value = positive_canonical_u64(value)?;
+    if (1..=5).contains(&value.value()) {
+        Ok(value)
+    } else {
+        Err("judge confidence must be from one through five".to_owned())
+    }
 }
 
 fn review_confidence(value: &str) -> Result<CanonicalU64, String> {

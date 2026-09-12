@@ -101,14 +101,34 @@ pub(crate) fn validate_review_judgment_disposition(
     Ok(())
 }
 
+pub(crate) fn validate_review_judgment_result(
+    value: &crate::ReviewJudgmentResult,
+) -> Result<(), FrameValidationError> {
+    let valid = match (value.bar_category.as_str(), value.decline_class.as_deref()) {
+        ("none", Some(class)) => signalbox_domain::ReviewDeclineClass::from_key(class).is_some(),
+        (category, None) => signalbox_domain::ReviewBarCategory::from_key(category).is_some(),
+        _ => false,
+    };
+    if !valid || !(1..=5).contains(&value.confidence.value()) {
+        return Err(FrameValidationError::ReviewShape);
+    }
+    validate_review_text(&value.reason)
+}
+
 pub(crate) fn validate_review_finding_event(
     event: &ReviewFindingEvent,
 ) -> Result<(), FrameValidationError> {
     match event {
         ReviewFindingEvent::Rejected { reason }
         | ReviewFindingEvent::BlockedWithReason { reason, .. } => validate_review_text(reason),
-        ReviewFindingEvent::Accepted {}
-        | ReviewFindingEvent::Duplicate { .. }
+        ReviewFindingEvent::Accepted { confidence } => {
+            if (1..=5).contains(&confidence.value()) {
+                Ok(())
+            } else {
+                Err(FrameValidationError::ReviewShape)
+            }
+        }
+        ReviewFindingEvent::Duplicate { .. }
         | ReviewFindingEvent::Superseded { .. }
         | ReviewFindingEvent::Stale {}
         | ReviewFindingEvent::Fixed {} => Ok(()),

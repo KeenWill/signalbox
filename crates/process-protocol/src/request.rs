@@ -1169,6 +1169,7 @@ impl ClientRequest {
             let mut findings = HashSet::new();
             for member in members {
                 validate_review_judgment_disposition(&member.disposition)?;
+                crate::shared_validation::validate_review_judgment_result(&member.judgment)?;
                 if !findings.insert(member.finding_id) {
                     return Err(FrameValidationError::ReviewShape);
                 }

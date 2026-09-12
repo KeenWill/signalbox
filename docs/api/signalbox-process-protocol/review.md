@@ -203,7 +203,9 @@ pub struct ReviewFindingSnapshot {
 
 ```rust
 pub enum ReviewFindingEvent {
-    Accepted {},
+    Accepted {
+        confidence: CanonicalU64,
+    },
     Rejected {
         reason: string::String,
     },
@@ -288,6 +290,19 @@ pub enum ReviewJudgmentDisposition {
 pub struct ReviewJudgmentPlanMember {
     pub finding_id: CanonicalUuid,
     pub disposition: ReviewJudgmentDisposition,
+    pub judgment: ReviewJudgmentResult,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## ReviewJudgmentResult
+
+```rust
+pub struct ReviewJudgmentResult {
+    pub bar_category: string::String,
+    pub decline_class: option::Option<string::String>,
+    pub confidence: CanonicalU64,
+    pub reason: string::String,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
