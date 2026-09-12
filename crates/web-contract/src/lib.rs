@@ -2719,6 +2719,8 @@ pub struct WebSessionCatalogActivity {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionCatalogSummary {
+    /// Retained origin of a repository-watch create action.
+    pub repository_watch: Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required, schema_with = "nullable_title_summary_schema")]
@@ -2887,11 +2889,19 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
         &mut session_catalog_schema,
         "/$defs/WebSessionCatalogSummary/properties/current_turn_id",
     )?;
+    make_pointer_nullable(
+        &mut session_catalog_schema,
+        "/$defs/WebRepositoryWatchProvenance/properties/pull_request",
+    )?;
     let mut create_session_response_schema =
         canonical_schema(schemars::schema_for!(WebCreateSessionResponse).to_value());
     make_pointer_nullable(
         &mut create_session_response_schema,
         "/$defs/WebSessionCatalogSummary/properties/current_turn_id",
+    )?;
+    make_pointer_nullable(
+        &mut create_session_response_schema,
+        "/$defs/WebRepositoryWatchProvenance/properties/pull_request",
     )?;
 
     let mut live_snapshot_schema =
@@ -5356,6 +5366,10 @@ fn typescript_object(
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebRepositoryWatchProvenance {
+    /// Head branch in the dispatched pull-request context.
+    pub head_branch: Option<String>,
+    /// Base branch in the dispatched pull-request context.
+    pub base_branch: Option<String>,
     /// Exact retained dispatch.
     pub dispatch_id: WebLiveResourceId,
     /// Position in the dispatch's action batch.

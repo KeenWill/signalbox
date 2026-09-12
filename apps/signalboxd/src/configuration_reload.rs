@@ -200,6 +200,22 @@ impl ConfigurationReload {
         }
     }
 
+    pub(crate) async fn repository_watch_origins(
+        &self,
+        sessions: &[signalbox_domain::SessionId],
+    ) -> Result<
+        std::collections::BTreeMap<
+            signalbox_domain::SessionId,
+            signalbox_module_repo_watch_v2::RetainedDispatchAction,
+        >,
+        signalbox_module_repo_watch_v2::StoreError,
+    > {
+        match &self.watch {
+            Some(watch) => watch.session_origins(sessions, &self.pool).await,
+            None => Ok(std::collections::BTreeMap::new()),
+        }
+    }
+
     pub(crate) async fn repository_watch_origin(
         &self,
         session: signalbox_domain::SessionId,

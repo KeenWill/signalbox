@@ -1144,6 +1144,167 @@ const schemas = {
         ],
         "type": "string"
       },
+      "WebLiveResourceId": {
+        "description": "Checked canonical UUID used for browser-visible live resource identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebRepositoryWatchEventKind": {
+        "description": "Closed repository-watch event categories.",
+        "oneOf": [
+          {
+            "const": "pull_request_opened",
+            "description": "The `pull_request_opened` event.",
+            "type": "string"
+          },
+          {
+            "const": "pull_request_closed",
+            "description": "The `pull_request_closed` event.",
+            "type": "string"
+          },
+          {
+            "const": "pull_request_merged",
+            "description": "The `pull_request_merged` event.",
+            "type": "string"
+          },
+          {
+            "const": "head_changed",
+            "description": "The `head_changed` event.",
+            "type": "string"
+          },
+          {
+            "const": "mergeable_state_changed",
+            "description": "The `mergeable_state_changed` event.",
+            "type": "string"
+          },
+          {
+            "const": "checks_completed",
+            "description": "The `checks_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "check_run_completed",
+            "description": "The `check_run_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "branch_workflow_run_completed",
+            "description": "The `branch_workflow_run_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "review_submitted",
+            "description": "The `review_submitted` event.",
+            "type": "string"
+          },
+          {
+            "const": "thread_opened",
+            "description": "The `thread_opened` event.",
+            "type": "string"
+          },
+          {
+            "const": "thread_resolved",
+            "description": "The `thread_resolved` event.",
+            "type": "string"
+          },
+          {
+            "const": "labeled",
+            "description": "The `labeled` event.",
+            "type": "string"
+          },
+          {
+            "const": "unlabeled",
+            "description": "The `unlabeled` event.",
+            "type": "string"
+          },
+          {
+            "const": "base_advanced",
+            "description": "The `base_advanced` event.",
+            "type": "string"
+          },
+          {
+            "const": "reaction_changed",
+            "description": "The `reaction_changed` event.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebRepositoryWatchProvenance": {
+        "additionalProperties": false,
+        "description": "Retained repository-watch creation origin, resolved from its dispatch ledger.",
+        "properties": {
+          "action_ordinal": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Position in the dispatch's action batch."
+          },
+          "base_branch": {
+            "description": "Base branch in the dispatched pull-request context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dispatch_id": {
+            "$ref": "#/$defs/WebLiveResourceId",
+            "description": "Exact retained dispatch."
+          },
+          "event_id": {
+            "$ref": "#/$defs/WebLiveResourceId",
+            "description": "Triggering immutable event."
+          },
+          "event_kind": {
+            "$ref": "#/$defs/WebRepositoryWatchEventKind",
+            "description": "Triggering event category."
+          },
+          "head_branch": {
+            "description": "Head branch in the dispatched pull-request context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pull_request": {
+            "anyOf": [
+              {
+                "description": "Triggering pull request, absent for branch events.",
+                "pattern": "^[1-9][0-9]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repository": {
+            "description": "Watched repository.",
+            "type": "string"
+          },
+          "rule_id": {
+            "description": "Retained rule identity.",
+            "type": "string"
+          },
+          "rule_revision": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Retained rule revision."
+          }
+        },
+        "required": [
+          "dispatch_id",
+          "action_ordinal",
+          "repository",
+          "rule_id",
+          "rule_revision",
+          "event_id",
+          "event_kind",
+          "pull_request"
+        ],
+        "type": "object"
+      },
       "WebSessionCatalogActivity": {
         "additionalProperties": false,
         "properties": {
@@ -1209,6 +1370,17 @@ const schemas = {
           },
           "queued_turn_count": {
             "$ref": "#/$defs/WebU64"
+          },
+          "repository_watch": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepositoryWatchProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Retained origin of a repository-watch create action."
           },
           "session_id": {
             "$ref": "#/$defs/WebSessionId"
@@ -2698,6 +2870,167 @@ const schemas = {
         ],
         "type": "string"
       },
+      "WebLiveResourceId": {
+        "description": "Checked canonical UUID used for browser-visible live resource identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebRepositoryWatchEventKind": {
+        "description": "Closed repository-watch event categories.",
+        "oneOf": [
+          {
+            "const": "pull_request_opened",
+            "description": "The `pull_request_opened` event.",
+            "type": "string"
+          },
+          {
+            "const": "pull_request_closed",
+            "description": "The `pull_request_closed` event.",
+            "type": "string"
+          },
+          {
+            "const": "pull_request_merged",
+            "description": "The `pull_request_merged` event.",
+            "type": "string"
+          },
+          {
+            "const": "head_changed",
+            "description": "The `head_changed` event.",
+            "type": "string"
+          },
+          {
+            "const": "mergeable_state_changed",
+            "description": "The `mergeable_state_changed` event.",
+            "type": "string"
+          },
+          {
+            "const": "checks_completed",
+            "description": "The `checks_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "check_run_completed",
+            "description": "The `check_run_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "branch_workflow_run_completed",
+            "description": "The `branch_workflow_run_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "review_submitted",
+            "description": "The `review_submitted` event.",
+            "type": "string"
+          },
+          {
+            "const": "thread_opened",
+            "description": "The `thread_opened` event.",
+            "type": "string"
+          },
+          {
+            "const": "thread_resolved",
+            "description": "The `thread_resolved` event.",
+            "type": "string"
+          },
+          {
+            "const": "labeled",
+            "description": "The `labeled` event.",
+            "type": "string"
+          },
+          {
+            "const": "unlabeled",
+            "description": "The `unlabeled` event.",
+            "type": "string"
+          },
+          {
+            "const": "base_advanced",
+            "description": "The `base_advanced` event.",
+            "type": "string"
+          },
+          {
+            "const": "reaction_changed",
+            "description": "The `reaction_changed` event.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebRepositoryWatchProvenance": {
+        "additionalProperties": false,
+        "description": "Retained repository-watch creation origin, resolved from its dispatch ledger.",
+        "properties": {
+          "action_ordinal": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Position in the dispatch's action batch."
+          },
+          "base_branch": {
+            "description": "Base branch in the dispatched pull-request context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dispatch_id": {
+            "$ref": "#/$defs/WebLiveResourceId",
+            "description": "Exact retained dispatch."
+          },
+          "event_id": {
+            "$ref": "#/$defs/WebLiveResourceId",
+            "description": "Triggering immutable event."
+          },
+          "event_kind": {
+            "$ref": "#/$defs/WebRepositoryWatchEventKind",
+            "description": "Triggering event category."
+          },
+          "head_branch": {
+            "description": "Head branch in the dispatched pull-request context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pull_request": {
+            "anyOf": [
+              {
+                "description": "Triggering pull request, absent for branch events.",
+                "pattern": "^[1-9][0-9]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repository": {
+            "description": "Watched repository.",
+            "type": "string"
+          },
+          "rule_id": {
+            "description": "Retained rule identity.",
+            "type": "string"
+          },
+          "rule_revision": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Retained rule revision."
+          }
+        },
+        "required": [
+          "dispatch_id",
+          "action_ordinal",
+          "repository",
+          "rule_id",
+          "rule_revision",
+          "event_id",
+          "event_kind",
+          "pull_request"
+        ],
+        "type": "object"
+      },
       "WebSessionCatalogActivity": {
         "additionalProperties": false,
         "properties": {
@@ -2770,6 +3103,17 @@ const schemas = {
           },
           "queued_turn_count": {
             "$ref": "#/$defs/WebU64"
+          },
+          "repository_watch": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepositoryWatchProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Retained origin of a repository-watch create action."
           },
           "session_id": {
             "$ref": "#/$defs/WebSessionId"
@@ -4216,6 +4560,13 @@ const schemas = {
                 "$ref": "#/$defs/WebPositiveU64",
                 "description": "Position in the dispatch's action batch."
               },
+              "base_branch": {
+                "description": "Base branch in the dispatched pull-request context.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "dispatch_id": {
                 "$ref": "#/$defs/WebLiveResourceId",
                 "description": "Exact retained dispatch."
@@ -4227,6 +4578,13 @@ const schemas = {
               "event_kind": {
                 "$ref": "#/$defs/WebRepositoryWatchEventKind",
                 "description": "Triggering event category."
+              },
+              "head_branch": {
+                "description": "Head branch in the dispatched pull-request context.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "pull_request": {
                 "anyOf": [

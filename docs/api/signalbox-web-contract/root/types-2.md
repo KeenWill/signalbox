@@ -415,6 +415,7 @@ pub struct WebSessionCatalogActivity {
 
 ```rust
 pub struct WebSessionCatalogSummary {
+    pub repository_watch: option::Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
     pub title_summary: option::Option<string::String>,
     pub title_truncated: bool,
@@ -497,6 +498,8 @@ impl error::Error for GenerateWebContractError {}
 
 ```rust
 pub struct WebRepositoryWatchProvenance {
+    pub head_branch: option::Option<string::String>,
+    pub base_branch: option::Option<string::String>,
     pub dispatch_id: WebLiveResourceId,
     pub action_ordinal: WebPositiveU64,
     pub repository: string::String,
