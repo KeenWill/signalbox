@@ -90,3 +90,17 @@ test('restores Tools after collapsing a turn by button or Escape', async ({ page
   await page.keyboard.press('Escape')
   await expect(summary).toContainText('passed')
 })
+
+test('opens an uppercase turn link using its canonical identity', async ({ page }) => {
+  const turnId = '00000000-0000-0000-0000-00000000abcf'
+  await turnApi(page, turnId)
+  const reads: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/turns/')) reads.push(new URL(request.url()).pathname)
+  })
+  await page.goto(`/src/session-timeline/transcript-scenario.html?turn=${turnId.toUpperCase()}`)
+  await expect(page.getByText('Inspect the release status and retain the result.')).toBeVisible()
+  expect(reads.length).toBeGreaterThan(0)
+  expect(reads.every((path) => path.includes(`/turns/${turnId}/`))).toBe(true)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+})

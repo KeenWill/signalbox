@@ -4,13 +4,19 @@ import {
   detailLive,
   detailPage,
   detailSessionId,
+  detailTurnId,
   detailWindow,
   resultCursor,
   toolResultItem,
 } from '../../e2e/session-detail-fixture'
+import type { WebSessionTimelineDetail } from '../generated/web-contract.mjs'
 import { transcriptFixture } from './transcript.fixture'
 
-export async function turnApi(page: Page) {
+export async function turnApi(page: Page, turnId = detailTurnId) {
+  const withTurn = (item: WebSessionTimelineDetail): WebSessionTimelineDetail => ({
+    ...item,
+    body: 'turn_id' in item.body ? { ...item.body, turn_id: turnId } : item.body,
+  })
   await page.route('**/api/**', (route) => {
     const url = new URL(route.request().url())
     if (url.pathname.endsWith('/follow'))
@@ -22,13 +28,15 @@ export async function turnApi(page: Page) {
     if (url.pathname.endsWith('/timeline')) return route.fulfill({ json: detailWindow })
     if (url.pathname.endsWith('/live')) return route.fulfill({ json: detailLive })
     if (url.pathname.endsWith('/timeline-detail')) {
-      const item = detailItems.find(
-        (entry) =>
-          entry.address.event_sequence ===
-          (url.searchParams.get('cursor_address') ?? url.searchParams.get('first') ?? '1'),
-      )
+      const item = detailItems
+        .map(withTurn)
+        .find(
+          (entry) =>
+            entry.address.event_sequence ===
+            (url.searchParams.get('cursor_address') ?? url.searchParams.get('first') ?? '1'),
+        )
       if (url.searchParams.get('cursor_field') === 'tool_result')
-        return route.fulfill({ json: detailPage([toolResultItem()]) })
+        return route.fulfill({ json: detailPage([withTurn(toolResultItem())]) })
       const items = item
         ? [
             item.body.type === 'user_input'

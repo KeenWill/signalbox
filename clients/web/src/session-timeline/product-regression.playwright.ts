@@ -12,6 +12,8 @@ export default defineConfig({
   testMatch: [
     'shell.spec.ts',
     'session-detail.spec.ts',
+    'session-transcript.spec.ts',
+    'session-transcript-turns.spec.ts',
     'product-session-send.spec.ts',
     'product-catalog.spec.ts',
     'product-shell.spec.ts',

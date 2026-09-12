@@ -15,15 +15,12 @@ import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { conversationEntryKey } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
-import {
-  readTranscriptWindow,
-  TRANSCRIPT_RETAINED_WINDOWS,
-} from './session-timeline/transcript'
+import { readTranscriptWindow, TRANSCRIPT_RETAINED_WINDOWS } from './session-timeline/transcript'
 import { readTurnTranscript } from './session-timeline/turn-detail'
 import {
   groupTranscriptTurns,
-  toolContinuationSequence,
   type TranscriptTurn,
+  toolContinuationSequence,
   turnSummaryParts,
 } from './session-timeline/turns'
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
@@ -121,7 +118,7 @@ export function SessionTranscriptText(props: SessionTranscriptTextProps) {
   const turnId =
     requestedTurn &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestedTurn)
-      ? requestedTurn
+      ? requestedTurn.toLowerCase()
       : undefined
   const location = useQuery({
     queryKey: ['production', 'transcript-turn-location', props.sessionId, turnId, props.limits],
