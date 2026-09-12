@@ -243,7 +243,7 @@ test('discovers the artifact inspector through the command palette', async ({ pa
   await expect(
     page.getByRole('button', { name: 'Open artifact inspector', exact: true }),
   ).toBeEnabled()
-  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toBeFocused()
+  await expect(page.getByRole('main')).toBeFocused()
   await page.getByRole('button', { name: 'Open artifact inspector', exact: true }).focus()
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
