@@ -560,6 +560,7 @@ fn production_router_with_budget(
     // `same_origin_router` additionally gates the whole listener, `/bootstrap`
     // and the static assets included, so this route layer is the inner of two.
     let session_inputs = Router::new()
+        .route("/sessions", post(sessions::create_session))
         .route("/sessions/{session_id}/input", post(session_submit_input))
         .route_layer(middleware::from_fn(validate_json_mutation))
         .route_layer(middleware::from_fn(validate_admitted_host))
@@ -698,6 +699,19 @@ async fn session_submit_input(
         state.model_configuration = Some(reload.catalogs().models);
     }
 
+    let request =
+        match decode_bounded_json::<signalbox_web_contract::WebSubmitInputRequest>(request).await {
+            Ok(request) => request,
+            Err(response) => return response,
+        };
+    submit_input(state, session_id, request).await
+}
+
+async fn submit_input(
+    state: WebApiState,
+    session_id: String,
+    request: signalbox_web_contract::WebSubmitInputRequest,
+) -> Response {
     use signalbox_application::{
         EligibilityNudge as _, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
         UuidV7SubmitInputIdGenerator,
@@ -710,11 +724,6 @@ async fn session_submit_input(
         session::SessionRepository,
         submit_input::{SubmitInputRepository, SubmitInputRepositoryError},
     };
-    let request =
-        match decode_bounded_json::<signalbox_web_contract::WebSubmitInputRequest>(request).await {
-            Ok(request) => request,
-            Err(response) => return response,
-        };
     let Ok(session) = parse_canonical_session_id(&session_id) else {
         return application_error(
             StatusCode::BAD_REQUEST,
@@ -1077,6 +1086,7 @@ mod usage;
 use usage::{usage_aggregate_cost_dto, usage_cost_dto};
 use usage::{usage_calls, usage_summary};
 
+mod sessions;
 mod timeline;
 #[cfg(test)]
 use timeline::{TimelineDetailQuery, parse_detail_query};

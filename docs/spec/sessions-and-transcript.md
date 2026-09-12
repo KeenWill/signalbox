@@ -131,6 +131,13 @@ with a visible reason, while retries remain available. A bounded rates read
 reports lifecycle state, turn outcome counts, the latest failed turn and its
 provider cause, and goal disposition for up to 32 listed sessions.
 
+`POST /api/sessions` creates a pathless interactive session from a named
+template through `CreateSession`, with an open start gate and unmonitored
+ownership. It accepts a creation command ID and an optional first text input
+with its own command ID; creation commits before input submission. A 201
+response returns the session ID and current catalog summary after both requested
+commands succeed. Retries retain both identities and payloads.
+
 ## Design decisions
 
 Cause and ancestry are recorded as independent facts, because deriving one from
