@@ -3254,3 +3254,31 @@ kbd {
 .surface-header-actions:empty {
   display: none;
 }
+
+.product-brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 0.4rem;
+}
+.product-navigation .product-link {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.product-link svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.navigation-collapsed .product-brand-row {
+  flex-direction: column;
+  padding: 0;
+}
+.navigation-collapsed .product-link {
+  justify-content: center;
+  min-height: 34px;
+}
+.navigation-collapsed .scenario-entry {
+  display: none;
+}

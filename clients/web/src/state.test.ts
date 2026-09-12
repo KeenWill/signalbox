@@ -124,6 +124,7 @@ describe('application state', () => {
 
     const app = selectApp(testStore.getState())
     const serialized = serializeBrowserPreferences({
+      navigationCollapsed: app.navigationCollapsed,
       layout: app.layout,
       density: app.density,
       detail: app.detail,
