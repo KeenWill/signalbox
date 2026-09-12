@@ -129,7 +129,7 @@ fn stacked_opening(head_branch: &str, labels: Vec<LabelName>) -> RepoWatchEvent 
 }
 
 #[test]
-fn example_watch_rules_dispatch_unlabeled_agent_openings() {
+fn example_review_rule_dispatches_unlabeled_agent_openings() {
     let configuration = example_watch_configuration();
     let rules = configuration
         .repository_watch()
@@ -142,8 +142,43 @@ fn example_watch_rules_dispatch_unlabeled_agent_openings() {
             .iter()
             .map(|rule| rule.id().as_str())
             .collect::<Vec<_>>(),
-        ["renovate-merge-forward", "labeled-review-response"],
+        ["labeled-review-response"],
     );
+}
+
+#[test]
+fn example_merge_rule_dispatches_only_observed_conflicts() {
+    use signalbox_domain::MergeableState;
+    let configuration = example_watch_configuration();
+    let rules = configuration
+        .repository_watch()
+        .expect("repository watch")
+        .rules();
+    let opening = stacked_opening("agent/stack-child", Vec::new());
+    let signalbox_domain::RepoWatchEventTarget::PullRequest(context) = opening.target() else {
+        panic!("pull request fixture");
+    };
+    for (state, expected) in [
+        (MergeableState::Conflicting, vec!["renovate-merge-forward"]),
+        (MergeableState::Mergeable, vec![]),
+        (MergeableState::Unknown, vec![]),
+    ] {
+        let event = RepoWatchEvent::try_pull_request(
+            opening.id(),
+            opening.repository().clone(),
+            context.clone(),
+            RepoWatchEventKindV1::MergeableStateChanged { current: state },
+        )
+        .expect("mergeability event");
+        assert_eq!(
+            matching_rules(rules, &event)
+                .iter()
+                .map(|rule| rule.id().as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "{state:?}"
+        );
+    }
 }
 
 #[test]
@@ -195,7 +230,9 @@ fn example_merge_template_uses_the_metadata_boolean_for_conflicts() {
 
     assert!(prompt.contains("github_pull_request_metadata"));
     assert!(prompt.contains("Continue only when mergeable is false (conflicting)"));
-    assert!(prompt.contains("otherwise reply once with the current head and mergeability and finish without edits or publication"));
+    assert!(
+        prompt.contains("otherwise finish without edits, publication or a pull request comment")
+    );
 }
 
 /// Whether one line is commented-out configuration rather than active TOML.
