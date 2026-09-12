@@ -44,3 +44,13 @@
     gap: 0.5rem;
   }
 }
+
+.search-result-link {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+.search-result-link:hover {
+  background: var(--surface-3);
+}
