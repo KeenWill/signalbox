@@ -1,22 +1,35 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { useState } from 'react'
+import {
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+} from '@tanstack/react-router'
 import { createRoot } from 'react-dom/client'
 import '../../app.css'
-import { TemplatesSurface } from './TemplatesSurface'
+import { TemplatesRoute } from './TemplatesRoute'
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-function Scenario() {
-  const [name, select] = useState<string>()
-  return (
+const rootRoute = createRootRoute({
+  component: () => (
     <main style={{ height: '100dvh' }}>
-      <TemplatesSurface selectedName={name} onSelect={select} />
+      <Outlet />
     </main>
-  )
-}
+  ),
+})
+const templateRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/$surface',
+  component: TemplatesRoute,
+})
+// The standalone fixture exercises the same URL and history transitions as the product mount.
+window.history.replaceState(null, '', '/templates')
+const router = createRouter({ routeTree: rootRoute.addChildren([templateRoute]) })
 const root = document.getElementById('root')
 if (root)
   createRoot(root).render(
     <QueryClientProvider client={queryClient}>
-      <Scenario />
+      <RouterProvider router={router} />
     </QueryClientProvider>,
   )

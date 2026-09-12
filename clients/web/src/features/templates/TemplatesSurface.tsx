@@ -67,7 +67,10 @@ export function TemplatesSurface({
   })
 
   useEffect(() => {
-    if (selectedName === undefined && restoreFocus.current) {
+    if (selectedName !== undefined) {
+      returnName.current = selectedName
+      restoreFocus.current = true
+    } else if (restoreFocus.current) {
       const index = templates.findIndex((template) => template.name === returnName.current)
       if (index >= 0) rows.scrollToIndex(index)
     }
@@ -76,14 +79,7 @@ export function TemplatesSurface({
   if (selectedName !== undefined)
     return (
       <section className="templates-surface" aria-label="Template definition">
-        <button
-          type="button"
-          className="button subtle"
-          onClick={() => {
-            restoreFocus.current = true
-            onSelect()
-          }}
-        >
+        <button type="button" className="button subtle" onClick={() => onSelect()}>
           Back to templates
         </button>
         {detail.isPending && <p role="status">Loading template…</p>}
@@ -149,10 +145,7 @@ export function TemplatesSurface({
                     restoreFocus.current = false
                   }
                 }}
-                onClick={() => {
-                  returnName.current = template.name
-                  onSelect(template.name)
-                }}
+                onClick={() => onSelect(template.name)}
                 style={{
                   position: 'absolute',
                   top: 0,

@@ -49,3 +49,18 @@ test('virtualizes a large loaded catalog', async ({ page }) => {
   await expect(page.getByRole('button', { name: /template-0 / })).toBeVisible()
   expect(await page.getByRole('button').count()).toBeLessThan(40)
 })
+
+test('restores list focus after browser Back', async ({ page }) => {
+  await page.goto(scenario)
+  const row = page.getByRole('button', { name: /code-review/ })
+  await row.focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/\/templates#code-review$/)
+  await expect(page.getByRole('heading', { name: 'code-review' })).toBeVisible()
+  await page.goBack()
+  await expect(row).toBeFocused()
+  await page.goForward()
+  await expect(page.getByRole('heading', { name: 'code-review' })).toBeVisible()
+  await page.goBack()
+  await expect(row).toBeFocused()
+})
