@@ -2282,7 +2282,16 @@ async fn run_hub_incarnation(
         };
         let composed = await_while_guarded(
             &mut database,
-            signalboxd::DaemonFileMediaExecutor::compose(pool.clone(), Arc::clone(stores)),
+            signalboxd::DaemonFileMediaExecutor::compose(
+                pool.clone(),
+                Arc::clone(stores),
+                model_configuration
+                    .numeric_bounds()
+                    .integer("max_raster_dimension")
+                    .flatten()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(signalbox_file_media_runtime::MAX_IMAGE_AXIS),
+            ),
         )
         .await;
         match composed {

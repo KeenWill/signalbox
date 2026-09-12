@@ -2831,6 +2831,32 @@ async fn approval_judge_loads_repo_watch_authority_before_ledger_settlement()
             }),
         )),
     );
+    let task = runtime
+        .approval_judge_task(session)
+        .await?
+        .expect("the unsettled creation dispatch retains task data");
+    assert_eq!(task["repository"], "checkout/project");
+    assert_eq!(task["pull_request"], 1);
+    assert_eq!(task["rule_id"], "review");
+    assert_eq!(task["event_kind"], "pull_request_opened");
+    assert_eq!(
+        task["parameters"]["target"]["title"],
+        "Review the retained head"
+    );
+    assert_eq!(
+        task["parameters"]["target"]["head_repository"],
+        "contributor/project"
+    );
+    assert_eq!(
+        task["parameters"]["target"]["head_sha"],
+        fixture.head.as_str()
+    );
+    fixture.dispatch().await;
+    assert_eq!(
+        runtime.approval_judge_task(session).await?,
+        Some(task),
+        "settling the ledger must preserve the exact task parameters"
+    );
     Ok(())
 }
 
