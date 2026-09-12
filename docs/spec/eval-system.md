@@ -15,6 +15,17 @@ and override reasoning with `--effort`. It performs no publication. A failed
 trial with no observed terminal frontier stops new session submissions until the
 caller resolves it. Labels and scoring stay with the caller.
 
+Selecting `--template review-judgment-agentic` requires `pr` and
+`review_context` in each case. The context carries matching `pr` and `head_sha`,
+`findings` with `finding_id`, and `threads` with `thread_id`; entries carry
+`author`, `path`, `line`, and `text`, and threads also carry `resolved`.
+Candidates may carry `source_thread_id` to exclude their own thread. The harness
+uploads the other entries as retained context, supplies short synopses, and
+exposes the case's `context` string through a file. It parses the terminal model
+call's assistant text as the judgment and retains its entry witnesses and
+per-judgment totals for all reported token-usage axes; any unknown component
+leaves that axis's total unknown.
+
 Before judgment, `scripts/review_citations.py` attaches structured resolution of
 the finding location, cited paths and line ranges, and explicit identifiers to
 each candidate. Evidence names the checked-out head and includes matching

@@ -43,19 +43,22 @@ class AgenticContextTests(unittest.TestCase):
             retained_context({"pr": 1, "head_sha": "other"}, pr=1, head_sha="head",
                              finding_ids=set(), source_thread_ids=set())
 
-    def test_result_comes_from_the_latest_assistant_entry_in_the_judged_turn(self):
+    def test_result_joins_all_text_blocks_of_the_terminal_call_in_response_order(self):
         def entry(index, turn):
             return {"type": "transcript_text_entry", "entry_index": str(index), "entry_id": str(index),
-                    "source_session_id": "session", "entry": {"type": "assistant", "turn_id": turn}}
+                    "source_session_id": "session", "entry": {"type": "assistant", "turn_id": turn,
+                    "model_call_id": "terminal" if index in (3, 4) else "other"}}
         def chunk(index, text):
             return {"type": "transcript_content", "entry_index": str(index), "fragment_index": "0",
                     "final_fragment": True, "content_fragment": text}
-        transcript = [entry(1, "judged"), chunk(1, "Working."), entry(3, "judged"),
-                      chunk(3, '{"members":[]}'), entry(5, "other"), chunk(5, "Unrelated.")]
+        transcript = [entry(1, "judged"), chunk(1, "Working."), entry(4, "judged"), chunk(4, '[]}'),
+                      entry(3, "judged"), chunk(3, '{"members":'), entry(5, "other"), chunk(5, "Unrelated.")]
         result, witness = terminal_result(transcript, "judged")
         self.assertEqual(result, {"members": []})
-        self.assertEqual(witness["entry_id"], "3")
-        transcript[3]["final_fragment"] = False
+        self.assertEqual(witness["model_call_id"], "terminal")
+        self.assertEqual(witness["entries"], [{"entry_id": "3", "entry_index": "3"},
+                                              {"entry_id": "4", "entry_index": "4"}])
+        transcript[5]["final_fragment"] = False
         with self.assertRaisesRegex(ValueError, "incomplete"):
             terminal_result(transcript, "judged")
 

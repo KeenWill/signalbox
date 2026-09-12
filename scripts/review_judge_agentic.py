@@ -73,14 +73,24 @@ def terminal_result(transcript, turn_id):
     if not assistants:
         raise ValueError("judge has no terminal assistant result")
     witness = max(assistants, key=lambda item: int(item["entry_index"]))
-    chunks = sorted((item for item in transcript if item["type"] == "transcript_content"
-                     and item["entry_index"] == witness["entry_index"]),
-                    key=lambda item: int(item["fragment_index"]))
-    if (not chunks or not chunks[-1]["final_fragment"]
-            or [int(item["fragment_index"]) for item in chunks] != list(range(len(chunks)))):
-        raise ValueError("terminal assistant result is incomplete")
-    text = "".join(item["content_fragment"] for item in chunks)
-    return json.loads(text), {key: witness[key] for key in ("source_session_id", "entry_id", "entry_index")}
+    terminal = sorted((item for item in assistants
+                       if item["source_session_id"] == witness["source_session_id"]
+                       and item["entry"]["model_call_id"] == witness["entry"]["model_call_id"]),
+                      key=lambda item: int(item["entry_index"]))
+    text = []
+    for entry in terminal:
+        chunks = sorted((item for item in transcript if item["type"] == "transcript_content"
+                         and item["entry_index"] == entry["entry_index"]),
+                        key=lambda item: int(item["fragment_index"]))
+        if (not chunks or not chunks[-1]["final_fragment"]
+                or [int(item["fragment_index"]) for item in chunks] != list(range(len(chunks)))):
+            raise ValueError("terminal assistant result is incomplete")
+        text.extend(item["content_fragment"] for item in chunks)
+    return json.loads("".join(text)), {
+        "source_session_id": witness["source_session_id"],
+        "model_call_id": witness["entry"]["model_call_id"],
+        "entries": [{key: entry[key] for key in ("entry_id", "entry_index")} for entry in terminal],
+    }
 
 
 def sum_usage(calls):
