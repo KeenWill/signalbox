@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
-import { fallbackDescriptor, imageDescriptor } from './artifactScenario'
+import { webContractBootstrapFixture } from '../../product.fixture'
+import { fallbackDescriptor, imageDescriptor, jpegDescriptor } from './artifactScenario'
 
 const withoutFilename = (descriptor: typeof imageDescriptor) => ({
   ...descriptor,
@@ -24,6 +25,9 @@ test('renders inline images and opens attachment details by keyboard', async ({
   page.on('request', (request) => {
     if (request.url().includes('/download')) originals.push(request.url())
   })
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
   await page.route('**/api/blobs/**/descriptor?*', (route) => {
     const descriptor = decodeURIComponent(route.request().url()).includes(imageDescriptor.digest)
       ? imageAttachment
@@ -63,4 +67,68 @@ test('renders inline images and opens attachment details by keyboard', async ({
   })
   expect(originals).toEqual([])
   expect(errors).toEqual([])
+})
+
+test('does not resolve attachments when blob delivery is disabled', async ({ page }) => {
+  const requests: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/api/blobs/')) requests.push(request.url())
+  })
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...webContractBootstrapFixture,
+        capabilities: {
+          ...webContractBootstrapFixture.capabilities,
+          immutable_blob_content: false,
+        },
+      },
+    }),
+  )
+  await page.goto('/src/features/artifacts/scenario.html')
+  await expect(page.getByRole('button', { name: /Image · image/ })).toBeDisabled()
+  await expect(page.getByText('Loading attachment…')).toHaveCount(0)
+  expect(requests).toEqual([])
+})
+
+test('defers descriptor reads for an attachment below the viewport', async ({ page }) => {
+  const requests: string[] = []
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/blobs/**/descriptor?*', (route) => {
+    requests.push(decodeURIComponent(route.request().url()))
+    return route.fulfill({ json: fileAttachment })
+  })
+  await page.goto('/src/features/artifacts/scenario.html?offscreen')
+  await expect(page.getByRole('heading', { name: 'Conversation attachments' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /File · application/ })).toBeEnabled()
+  expect(requests).toEqual([])
+  await page.getByRole('button', { name: /File · application/ }).scrollIntoViewIfNeeded()
+  await expect(page.getByRole('link', { name: 'Download' })).toBeVisible()
+  expect(requests.every((url) => url.includes(fileAttachment.digest))).toBe(true)
+})
+
+test('releases the original image state when its detail pane closes', async ({ page }) => {
+  const original = readFileSync(new URL('../../../e2e/fixtures/original.jpg', import.meta.url))
+  const thumbnail = readFileSync(new URL('../../../e2e/fixtures/thumbnail.png', import.meta.url))
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/blobs/**/descriptor?*', (route) =>
+    route.fulfill({ json: withoutFilename(jpegDescriptor) }),
+  )
+  await page.route('**/api/blobs/**/content/image-png', (route) =>
+    route.fulfill({ body: thumbnail, contentType: 'image/png' }),
+  )
+  await page.route('**/api/blobs/**/content/image-jpeg', (route) =>
+    route.fulfill({ body: original, contentType: 'image/jpeg' }),
+  )
+  await page.goto('/src/features/artifacts/scenario.html?original')
+  await page.getByRole('button', { name: /Image · image\/jpeg/ }).click()
+  const pane = page.getByRole('dialog', { name: 'Attachment details' })
+  await pane.getByRole('button', { name: 'Load original', exact: true }).click()
+  await expect(pane.getByRole('button', { name: 'Original loaded' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByLabel('Original image states')).toHaveText('0')
 })

@@ -19,3 +19,14 @@ export const useArtifactDescriptor = (input: BlobDescriptorInput | null) =>
     gcTime: 0,
     retry: false,
   })
+
+export const useBlobCapability = (enabled: boolean): boolean => {
+  const query = useQuery({
+    queryKey: ['production', 'bootstrap'],
+    queryFn: ({ signal }) => productTransport.readBootstrap(signal),
+    staleTime: Number.POSITIVE_INFINITY,
+    enabled,
+    select: (bootstrap) => bootstrap.capabilities.immutable_blob_content,
+  })
+  return query.data === true
+}
