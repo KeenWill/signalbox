@@ -1796,8 +1796,8 @@ async fn append_event(
         "INSERT INTO gh_event
             (event_id, content_identity, repository, event_kind, target_kind,
              pull_request_number, normalized_payload, producer,
-             repository_event_ordinal, frontier_generation, event_ordinal, recorded_at, source_review_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             repository_event_ordinal, frontier_generation, event_ordinal, recorded_at, source_review_id, source_review_actor)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT DO NOTHING",
     )
     .bind(event.id().into_uuid())
@@ -1813,6 +1813,10 @@ async fn append_event(
     .bind(Decimal::from(event_ordinal))
     .bind(recorded_at)
     .bind(candidate.source_review.map(|review| Decimal::from(review.get())))
+    .bind(match event.kind() {
+        RepoWatchEventKindV1::ReviewSubmitted { reviewer, .. } => Some(reviewer.as_str()),
+        _ => None,
+    })
     .execute(&mut **transaction)
     .await?
     .rows_affected()
