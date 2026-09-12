@@ -148,3 +148,66 @@ fn unicode_mutation_path_bound_matches_schema_and_runtime_validation() {
         )
         .expect("schema-admitted Unicode path validates at runtime");
 }
+
+#[test]
+fn oversized_edit_arguments_report_the_field_and_byte_limit() {
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    let catalog = fixture_catalog(&workspace);
+    // Multibyte text passes the schema's character bound but exceeds the byte bound.
+    let oversized = "é".repeat(MAX_WORKSPACE_MUTATION_FILE_BYTES / 2 + 1);
+    for (field, value) in [
+        (
+            "old_string",
+            json!({"path": "file.txt", "old_string": oversized, "new_string": "replacement"}),
+        ),
+        (
+            "new_string",
+            json!({"path": "file.txt", "old_string": "source", "new_string": oversized}),
+        ),
+    ] {
+        let result =
+            catalog.validate_arguments(&tool_name(EDIT_FILE_NAME), &arguments(&value.to_string()));
+        let Err(ToolCatalogValidationFailure::InvalidArguments {
+            detail: Some(detail),
+        }) = result
+        else {
+            panic!("oversized {field} must be rejected with detail")
+        };
+        assert_eq!(
+            detail.as_str(),
+            format!(
+                "workspace mutation argument {field:?} has {} UTF-8 bytes; maximum is {} bytes",
+                oversized.len(),
+                MAX_WORKSPACE_MUTATION_FILE_BYTES
+            )
+        );
+    }
+}
+
+#[test]
+fn oversized_patch_reports_the_byte_limit() {
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    let catalog = fixture_catalog(&workspace);
+    let patch = format!(
+        "*** Begin Patch\n*** Add File: new.txt\n+{}\n*** End Patch\n",
+        "é".repeat(crate::MAX_PATCH_BYTES / 2)
+    );
+    let result = catalog.validate_arguments(
+        &tool_name(APPLY_PATCH_NAME),
+        &arguments(&json!({"patch": patch}).to_string()),
+    );
+    let Err(ToolCatalogValidationFailure::InvalidArguments {
+        detail: Some(detail),
+    }) = result
+    else {
+        panic!("oversized patch must be rejected with detail")
+    };
+    assert_eq!(
+        detail.as_str(),
+        format!(
+            "workspace mutation argument \"patch\" has {} UTF-8 bytes; maximum is {} bytes",
+            patch.len(),
+            crate::MAX_PATCH_BYTES
+        )
+    );
+}

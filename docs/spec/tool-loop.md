@@ -361,6 +361,10 @@ effect class maps exactly, `EffectFree` to `Pure` and `ExternalEffect` to
 `SideEffecting`. Effect class controls crash classification, not permission
 identity.
 
+Workspace mutation tools advertise their UTF-8 byte limits. Oversized content,
+edit strings, and patches are rejected with the argument name, actual byte
+count, and maximum byte count.
+
 The workspace read, workspace mutation, local Git, and execution families bind
 one workspace root, and that root is per session;
 [configuration-and-credentials](configuration-and-credentials.md) owns its
