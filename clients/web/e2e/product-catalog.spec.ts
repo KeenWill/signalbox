@@ -162,6 +162,10 @@ const useCatalogFixture = async (page: Page) => {
         },
       })
     }
+    if (pathname.endsWith('/timeline-detail'))
+      return route.fulfill({
+        json: { session_id: sessionId, items: [], projected_body_bytes: 0, continuation: null },
+      })
     if (pathname.endsWith('/timeline')) {
       return route.fulfill({
         json: {

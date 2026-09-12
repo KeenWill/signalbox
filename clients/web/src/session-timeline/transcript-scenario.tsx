@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createRootRoute, createRouter, RouterProvider } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
+import { invokeCommand } from '../commands'
 import { webContractBootstrapFixture } from '../product.fixture'
 import { SessionTranscriptText } from '../SessionTranscriptText'
 import { store } from '../state'
@@ -19,6 +20,29 @@ const router = createRouter({
 
 function Scenario() {
   const [observed, setObserved] = useState(100000)
+  const unwind = useRef<(() => boolean) | null>(null)
+  const registerUnwind = useCallback((handler: () => boolean) => {
+    unwind.current = handler
+    return () => {
+      unwind.current = null
+    }
+  }, [])
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      invokeCommand('surface.escape', {
+        dispatch: store.dispatch,
+        getState: store.getState,
+        timelineIds: [],
+        artifactPreviewIds: [],
+        artifactOriginalIds: [],
+        focusTimeline: () => {},
+        unwindSurface: () => unwind.current?.() ?? false,
+      })
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
   return (
     <Provider store={store}>
       <QueryClientProvider client={queries}>
@@ -29,6 +53,7 @@ function Scenario() {
             through="100000"
             observed={String(observed)}
             limits={webContractBootstrapFixture.limits}
+            registerUnwind={registerUnwind}
             eventSequence={params.get('around') ?? undefined}
             turnId={params.get('turn') ?? undefined}
             renderTool={

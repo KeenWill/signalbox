@@ -108,6 +108,7 @@ export interface SessionTranscriptTextProps {
   eventSequence?: string
   turnId?: string
   context?: CommandContext
+  registerUnwind?: (unwind: () => boolean) => () => void
   renderTool?: (tool: WebTimelineToolAttempt, detail: DetailMode) => ReactNode
 }
 
@@ -158,10 +159,12 @@ function TranscriptWindow({
   renderTool,
   turnId: requestedTurn,
   context,
+  registerUnwind,
 }: SessionTranscriptTextProps) {
   const detail = useAppSelector((state) => state.app.detail)
   const dispatch = useAppDispatch()
   const [turnModes, setTurnModes] = useState<Record<string, DetailMode>>({})
+  const surface = useRef<HTMLElement>(null)
   const commandContext: CommandContext = {
     dispatch,
     getState: store.getState,
@@ -228,6 +231,32 @@ function TranscriptWindow({
         : current,
     )
   }, [entries])
+  useEffect(
+    () =>
+      registerUnwind?.(() => {
+        const row = document.activeElement?.closest<HTMLElement>('[data-transcript-turn]')
+        if (!row || !surface.current?.contains(row)) return false
+        const id = row.dataset.transcriptTurn
+        const turn = turns.find((turn) => turn.id === id)
+        if (
+          !turn ||
+          (turnModes[turn.id] !== 'full' &&
+            requestedTurn !== turn.turnId &&
+            !turn.events.some((event) => event.address.event_sequence === eventSequence))
+        )
+          return false
+        if (turnModes[turn.id] === 'results' || turnModes[turn.id] === 'condensed') return false
+        setTurnModes((current) => ({
+          ...current,
+          [turn.id]: detail === 'full' ? 'results' : detail,
+        }))
+        requestAnimationFrame(() =>
+          row.querySelector<HTMLButtonElement>('.session-turn-heading button')?.focus(),
+        )
+        return true
+      }),
+    [registerUnwind, turns, turnModes, requestedTurn, eventSequence, detail],
+  )
   const emptyScanned = useRef(0)
   useEffect(() => {
     if (turns.length > 0) {
@@ -251,7 +280,7 @@ function TranscriptWindow({
     transcript.fetchPreviousPage,
   ])
   return (
-    <section className="session-transcript-text" aria-label="Transcript text">
+    <section ref={surface} className="session-transcript-text" aria-label="Transcript text">
       <fieldset className="session-transcript-levels">
         <legend>Show</legend>
         {(
@@ -313,9 +342,11 @@ function TranscriptWindow({
               style={style}
               className="session-message-entry session-turn"
               data-turn-id={turn.turnId}
+              data-transcript-turn={turn.id}
             >
               <TurnContent
                 turn={turn}
+                collapsedDetail={detail === 'full' ? 'results' : detail}
                 detail={
                   turnModes[turn.id] ??
                   (detail === 'full' ||
@@ -329,7 +360,19 @@ function TranscriptWindow({
                 sessionId={sessionId}
                 limits={limits}
                 target={eventSequence}
-                onExpand={(mode) => setTurnModes((current) => ({ ...current, [turn.id]: mode }))}
+                onExpand={(mode) => {
+                  const row =
+                    surface.current?.querySelectorAll<HTMLElement>('[data-transcript-turn]')
+                  const target = Array.from(row ?? []).find(
+                    (row) => row.dataset.transcriptTurn === turn.id,
+                  )
+                  setTurnModes((current) => ({ ...current, [turn.id]: mode }))
+                  requestAnimationFrame(() =>
+                    target
+                      ?.querySelector<HTMLButtonElement>('.session-turn-heading button')
+                      ?.focus(),
+                  )
+                }}
               />
             </div>
           )
@@ -345,6 +388,7 @@ function TranscriptWindow({
 function TurnContent({
   turn,
   detailPages,
+  collapsedDetail,
   renderTool,
   detail,
   sessionId,
@@ -353,6 +397,7 @@ function TurnContent({
   onExpand,
 }: {
   turn: TranscriptTurn
+  collapsedDetail: DetailMode
   detailPages: readonly WebSessionTimelineDetailPage[]
   renderTool?: SessionTranscriptTextProps['renderTool']
   detail: DetailMode
@@ -381,7 +426,7 @@ function TurnContent({
           >
             Link to turn
           </a>
-          <button type="button" onClick={() => onExpand(detail === 'full' ? 'results' : 'full')}>
+          <button type="button" onClick={() => onExpand(collapsedDetail)}>
             Collapse turn
           </button>
         </header>
