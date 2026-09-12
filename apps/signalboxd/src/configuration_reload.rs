@@ -92,6 +92,16 @@ impl From<ReloadRepositoryError> for ConfigurationReloadError {
     }
 }
 
+/// Failure to validate, persist, or activate a template edit.
+#[derive(Debug)]
+pub(crate) enum TemplateSaveError {
+    NotFound,
+    Validation(String),
+    Unavailable,
+    Write,
+    Reload,
+}
+
 /// One daemon-wide reload mutex and one atomically replaced catalog pair.
 #[derive(Clone)]
 pub struct ConfigurationReload {
@@ -594,7 +604,15 @@ impl ConfigurationReload {
         if !self.repository.pending().await?.is_empty() {
             return Ok(ReloadLookup::Pending);
         }
-        let replacement = self.read_replacement();
+        self.install_replacement(request, self.read_replacement())
+            .await
+    }
+
+    async fn install_replacement(
+        &self,
+        request: ReloadConfiguration,
+        replacement: Result<ConfigurationCatalogs, ReloadResult>,
+    ) -> Result<ReloadLookup, ConfigurationReloadError> {
         let (replacement, intent) = match replacement.and_then(|replacement| {
             let prior = self.catalogs().retained()?;
             let retained = replacement.retained()?;
@@ -655,7 +673,87 @@ impl ConfigurationReload {
             .map_err(ConfigurationReloadError::RecoveryRequired)
     }
 
+    /// Validates and persists a replacement while sharing reload's serial admission.
+    pub(crate) async fn save_template(
+        &self,
+        name: &signalbox_domain::SessionTemplateName,
+        definition: &str,
+    ) -> Result<ConfigurationCatalogs, TemplateSaveError> {
+        use std::io::Write as _;
+
+        let _serial = self.serial.lock().await;
+        if self.catalogs().templates.resolve(name).is_none() {
+            return Err(TemplateSaveError::NotFound);
+        }
+        if !self
+            .repository
+            .pending()
+            .await
+            .map_err(|_| TemplateSaveError::Unavailable)?
+            .is_empty()
+        {
+            return Err(TemplateSaveError::Unavailable);
+        }
+        let current = self.read_replacement().map_err(template_validation_error)?;
+        if current.templates.resolve(name).is_none() {
+            return Err(TemplateSaveError::NotFound);
+        }
+        let document = std::fs::read_to_string(&self.template_path)
+            .map_err(|_| TemplateSaveError::Unavailable)?
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| TemplateSaveError::Unavailable)?;
+        let source = current
+            .templates
+            .replace_definition(name, definition, document)
+            .map_err(|error| TemplateSaveError::Validation(error.to_string()))?;
+        let replacement = self
+            .read_replacement_with_templates(Some(&source))
+            .map_err(template_validation_error)?;
+        if replacement.templates.resolve(name).is_none() {
+            return Err(TemplateSaveError::Validation(
+                "Replacement must retain the selected template name".to_owned(),
+            ));
+        }
+        let parent = self
+            .template_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let mut file =
+            tempfile::NamedTempFile::new_in(parent).map_err(|_| TemplateSaveError::Write)?;
+        let permissions = std::fs::metadata(&self.template_path)
+            .map_err(|_| TemplateSaveError::Write)?
+            .permissions();
+        file.as_file()
+            .set_permissions(permissions)
+            .map_err(|_| TemplateSaveError::Write)?;
+        file.write_all(source.as_bytes())
+            .map_err(|_| TemplateSaveError::Write)?;
+        file.as_file()
+            .sync_all()
+            .map_err(|_| TemplateSaveError::Write)?;
+        file.persist(&self.template_path)
+            .map_err(|_| TemplateSaveError::Write)?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| TemplateSaveError::Reload)?;
+        let request = ReloadConfiguration {
+            command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+        };
+        match self.install_replacement(request, Ok(replacement)).await {
+            Ok(ReloadLookup::Recorded(ReloadResult::Reloaded)) => Ok(self.catalogs()),
+            _ => Err(TemplateSaveError::Reload),
+        }
+    }
+
     fn read_replacement(&self) -> Result<ConfigurationCatalogs, ReloadResult> {
+        self.read_replacement_with_templates(None)
+    }
+
+    fn read_replacement_with_templates(
+        &self,
+        source: Option<&str>,
+    ) -> Result<ConfigurationCatalogs, ReloadResult> {
         let models = HubModelConfiguration::read(&self.model_path).map_err(|error| {
             let phase = if matches!(error, crate::HubModelConfigurationError::Read) {
                 ReloadPhase::Read
@@ -678,20 +776,31 @@ impl ConfigurationReload {
                 "repository-watch configuration changes require restart",
             ));
         }
-        let templates =
-            SessionTemplateConfiguration::read(&self.template_path, || self.home.clone(), &models)
-                .map_err(|error| {
-                    let phase = if matches!(
-                        error,
-                        crate::SessionTemplateConfigurationError::ReadCatalog
-                            | crate::SessionTemplateConfigurationError::ReadPrompt
-                    ) {
-                        ReloadPhase::Read
-                    } else {
-                        ReloadPhase::Validate
-                    };
-                    failure(phase, &error.to_string())
-                })?;
+        let templates = match source {
+            Some(source) => SessionTemplateConfiguration::parse_at_with_home(
+                source,
+                &self.template_path,
+                &|| self.home.clone(),
+                &models,
+            ),
+            None => SessionTemplateConfiguration::read(
+                &self.template_path,
+                || self.home.clone(),
+                &models,
+            ),
+        }
+        .map_err(|error| {
+            let phase = if matches!(
+                error,
+                crate::SessionTemplateConfigurationError::ReadCatalog
+                    | crate::SessionTemplateConfigurationError::ReadPrompt
+            ) {
+                ReloadPhase::Read
+            } else {
+                ReloadPhase::Validate
+            };
+            failure(phase, &error.to_string())
+        })?;
         let catalogs = ConfigurationCatalogs {
             models: Arc::new(models),
             templates: Arc::new(templates),
@@ -712,6 +821,13 @@ impl ConfigurationReload {
             ));
         }
         Ok(catalogs)
+    }
+}
+
+fn template_validation_error(result: ReloadResult) -> TemplateSaveError {
+    match result {
+        ReloadResult::Failed { reason, .. } => TemplateSaveError::Validation(reason),
+        ReloadResult::Reloaded => TemplateSaveError::Unavailable,
     }
 }
 
@@ -1020,6 +1136,144 @@ mod tests {
         )
         .expect("reload composition");
         (directory, reload)
+    }
+
+    // Arbitrary template name and prompt text for the save integration fixtures.
+    const SAVE_NAME: &str = "save-template";
+    const SAVE_PROMPT: &str = "Initial instructions.";
+    const UPDATED_PROMPT: &str = "Updated instructions.";
+
+    fn save_fixture(pool: sqlx::PgPool) -> (tempfile::TempDir, ConfigurationReload, String) {
+        let (directory, original) = fixture();
+        let alias = original
+            .catalogs()
+            .models
+            .model_aliases()
+            .next()
+            .expect("alias")
+            .0;
+        let source = format!(
+            "version = 1\n[[templates]]\nname = {SAVE_NAME:?}\nversion = 1\nalias = \"{}\"\nsystem_prompt = {SAVE_PROMPT:?}\ndangerous_tool_auto_approval = false\n",
+            alias.as_uuid()
+        );
+        std::fs::write(&original.template_path, &source).expect("initial templates");
+        let catalogs = original.read_replacement().expect("initial catalogs");
+        let reload = ConfigurationReload::new(
+            pool,
+            (*catalogs.models).clone(),
+            (*catalogs.templates).clone(),
+            original.model_path,
+            original.template_path,
+            None,
+        )
+        .expect("save fixture");
+        (directory, reload, source)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL"]
+    async fn template_save_installs_the_digest_that_reload_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::{Extension, body::Body, http::Request};
+        use http_body_util::BodyExt as _;
+        use tower::ServiceExt as _;
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let (_directory, reload, source) = save_fixture(pool.clone());
+        let name = signalbox_domain::SessionTemplateName::try_new(SAVE_NAME.to_owned())?;
+        let before = reload
+            .catalogs()
+            .templates
+            .resolve(&name)
+            .expect("before")
+            .provenance()
+            .content_digest();
+        let changed = source.replace(SAVE_PROMPT, UPDATED_PROMPT);
+        let router = crate::web_http::production_router(None, None, None, None, None, None, None)
+            .layer(Extension(reload.clone()));
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/templates/{SAVE_NAME}"))
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(
+                        &signalbox_web_contract::WebTemplateSaveRequest {
+                            definition_toml: changed,
+                        },
+                    )?))?,
+            )
+            .await?;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let detail: signalbox_web_contract::WebTemplateDetail =
+            serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+        assert_eq!(detail.system_prompt, UPDATED_PROMPT);
+        assert_ne!(detail.summary.digest, hex::encode(before.as_bytes()));
+        let disk = reload.read_replacement().expect("saved file validates");
+        assert_eq!(
+            detail.summary.digest,
+            hex::encode(
+                disk.templates
+                    .resolve(&name)
+                    .expect("saved template")
+                    .provenance()
+                    .content_digest()
+                    .as_bytes()
+            )
+        );
+        assert_eq!(
+            reload
+                .reload(ReloadConfiguration {
+                    command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                })
+                .await?,
+            ReloadLookup::Recorded(ReloadResult::Reloaded)
+        );
+        assert_eq!(
+            reload
+                .catalogs()
+                .templates
+                .resolve(&name)
+                .expect("reloaded")
+                .defaults()
+                .system_prompt()
+                .expect("prompt")
+                .as_str(),
+            UPDATED_PROMPT
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL"]
+    async fn invalid_template_save_preserves_file_and_loaded_catalog()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let (_directory, reload, source) = save_fixture(pool.clone());
+        let name = signalbox_domain::SessionTemplateName::try_new(SAVE_NAME.to_owned())?;
+        let invalid = format!("{source}unknown_field = true\n");
+        assert!(matches!(
+            reload.save_template(&name, &invalid).await,
+            Err(TemplateSaveError::Validation(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&reload.template_path)?, source);
+        assert_eq!(
+            reload
+                .catalogs()
+                .templates
+                .resolve(&name)
+                .expect("unchanged")
+                .defaults()
+                .system_prompt()
+                .expect("prompt")
+                .as_str(),
+            SAVE_PROMPT
+        );
+        pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]

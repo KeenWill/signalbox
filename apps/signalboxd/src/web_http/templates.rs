@@ -2,7 +2,7 @@
 
 use axum::{
     Extension, Json,
-    extract::Path,
+    extract::{Path, Request},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -12,15 +12,18 @@ use signalbox_domain::{
 use signalbox_tools_workflows::RegistrationNames;
 use signalbox_web_contract::{
     WebModelSelection, WebPositiveU64, WebTemplateApprovalPosture, WebTemplateDetail,
-    WebTemplateList, WebTemplateSourceKind, WebTemplateSummary, WebTemplateWorkflowGrant,
-    WebTemplateWorkflowTool,
+    WebTemplateList, WebTemplateSaveRequest, WebTemplateSourceKind, WebTemplateSummary,
+    WebTemplateWorkflowGrant, WebTemplateWorkflowTool,
 };
 use toml_edit::{ArrayOfTables, DocumentMut, Item};
 
-use super::application_error;
+use super::{
+    application_error, decode_bounded_json, has_json_content_type, transport_error,
+    validate_supplied_origin,
+};
 use crate::{
     ResolvedSessionTemplate,
-    configuration_reload::{ConfigurationCatalogs, ConfigurationReload},
+    configuration_reload::{ConfigurationCatalogs, ConfigurationReload, TemplateSaveError},
 };
 
 pub(super) async fn list(reload: Option<Extension<ConfigurationReload>>) -> Response {
@@ -69,6 +72,78 @@ pub(super) async fn detail(
     match detail_dto(&catalogs, template) {
         Some(detail) => Json(detail).into_response(),
         None => unavailable(),
+    }
+}
+
+pub(super) async fn save(
+    reload: Option<Extension<ConfigurationReload>>,
+    Path(name): Path<String>,
+    request: Request,
+) -> Response {
+    if !has_json_content_type(request.headers()) {
+        return transport_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "json_content_type_required",
+            "browser mutations require application/json",
+        );
+    }
+    if validate_supplied_origin(request.headers()).is_err() {
+        return transport_error(
+            StatusCode::FORBIDDEN,
+            "cross_origin_mutation_rejected",
+            "mutation origin does not match request authority",
+        );
+    }
+    let Some(Extension(reload)) = reload else {
+        return unavailable();
+    };
+    let Ok(name) = SessionTemplateName::try_new(name) else {
+        return application_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_template_name",
+            "Template name is invalid",
+        );
+    };
+    let request = match decode_bounded_json::<WebTemplateSaveRequest>(request).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    match reload.save_template(&name, &request.definition_toml).await {
+        Ok(catalogs) => match catalogs
+            .templates
+            .resolve(&name)
+            .and_then(|template| detail_dto(&catalogs, template))
+        {
+            Some(detail) => Json(detail).into_response(),
+            None => unavailable(),
+        },
+        Err(TemplateSaveError::NotFound) => application_error(
+            StatusCode::NOT_FOUND,
+            "template_not_found",
+            "Template was not found",
+        ),
+        Err(TemplateSaveError::Validation(reason)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(signalbox_web_contract::WebApiErrorResponse {
+                error: signalbox_web_contract::WebApiError {
+                    kind: signalbox_web_contract::WebApiErrorKind::Application,
+                    code: "invalid_template_edit".to_owned(),
+                    message: reason,
+                },
+            }),
+        )
+            .into_response(),
+        Err(TemplateSaveError::Unavailable) => unavailable(),
+        Err(TemplateSaveError::Write) => application_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "template_write_failed",
+            "Template file could not be saved",
+        ),
+        Err(TemplateSaveError::Reload) => application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "template_reload_failed",
+            "The file was saved, but reload did not complete. Reload the configuration before retrying.",
+        ),
     }
 }
 
@@ -189,6 +264,64 @@ mod tests {
     const TARGET_ID: &str = "20000000-0000-4000-8000-000000000002";
     const ALIAS_ID: &str = "30000000-0000-4000-8000-000000000003";
     const PROMPT: &str = "Inspect the change.";
+
+    #[tokio::test]
+    async fn save_rejects_unknown_request_members_before_configuration_io() {
+        let response = router(catalogs())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/templates/reviewer")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"definition_toml":"version = 1", "unknown":true}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_rejects_a_mismatched_origin_without_fetch_metadata() {
+        let response = router(catalogs())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/templates/reviewer")
+                    .header("host", "localhost")
+                    .header("origin", "http://other.example")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"definition_toml":"version = 1"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn save_rejects_json_above_the_advertised_request_limit() {
+        let body = serde_json::to_vec(&WebTemplateSaveRequest {
+            definition_toml: " ".repeat(signalbox_web_contract::MAX_JSON_BODY_BYTES),
+        })
+        .expect("JSON");
+        let response = router(catalogs())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/templates/reviewer")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
 
     fn models() -> HubModelConfiguration {
         HubModelConfiguration::parse_test_fixture(&format!(

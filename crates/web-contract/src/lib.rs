@@ -620,6 +620,13 @@ pub enum WebTemplateSourceKind {
     ReviewLibrary,
 }
 
+/// Replacement source for one template or its shared review library.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateSaveRequest {
+    pub definition_toml: String,
+}
+
 /// Full accepted definition, including retained external prompt contents.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -3055,6 +3062,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebTemplateList",
             decoder: "decodeWebTemplateList",
             schema: canonical_schema(schemars::schema_for!(WebTemplateList).to_value()),
+        },
+        ContractSchema {
+            name: "WebTemplateSaveRequest",
+            decoder: "decodeWebTemplateSaveRequest",
+            schema: canonical_schema(schemars::schema_for!(WebTemplateSaveRequest).to_value()),
         },
         ContractSchema {
             name: "WebTemplateDetail",
