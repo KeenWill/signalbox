@@ -804,6 +804,7 @@ fn parse_credential_profiles_with_home_admission(
     let mut profiles: HashMap<Arc<str>, CredentialProfile> = HashMap::with_capacity(tables.len());
     let mut ambient_adapters = HashSet::new();
     let mut file_paths = HashSet::new();
+    let mut onepassword_sources = HashSet::new();
     for profile in tables {
         if profile.get("adapter").and_then(Item::as_str) == Some("github") {
             continue;
@@ -852,6 +853,13 @@ fn parse_credential_profiles_with_home_admission(
         };
         if let Some(path) = path
             && !file_paths.insert((adapter, path.clone()))
+        {
+            return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+        }
+        if let CredentialDelivery::Onepassword {
+            item, executable, ..
+        } = &delivery
+            && !onepassword_sources.insert((adapter, Arc::clone(item), executable.clone()))
         {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }

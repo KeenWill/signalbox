@@ -4196,6 +4196,24 @@ fn configuration_rejects_duplicate_normalized_file_paths_for_one_adapter() {
 }
 
 #[test]
+fn configuration_rejects_duplicate_onepassword_sources_for_one_adapter() {
+    let duplicate_source = CONFIGURATION
+        .replace(
+            "delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"",
+            "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = \"/usr/bin/op\"",
+        )
+        .replace(
+            "delivery = \"file\"\nfile = \"/run/secrets/anthropic-overflow\"",
+            "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = \"/usr/bin/op\"",
+        );
+
+    assert_eq!(
+        HubModelConfiguration::parse(&duplicate_source).err(),
+        Some(HubModelConfigurationError::InvalidCredentialDelivery)
+    );
+}
+
+#[test]
 fn configuration_rejects_duplicate_ambient_profiles_for_one_cli_adapter() {
     let duplicate_ambient = CONFIGURATION.replace(
         r#"[[credential_profiles]]
