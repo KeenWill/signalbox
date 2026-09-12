@@ -548,8 +548,18 @@ impl FileMediaRegistry {
                         .min(reader.validation().source_bytes()),
                     view: request.view,
                     input: request.input,
-                    maximum_image_axis: self.ceilings.image_axis,
-                    maximum_decoded_image_pixels: self.ceilings.decoded_image_pixels,
+                    maximum_image_axis: match view.bounds() {
+                        crate::ReadViewBounds::Image { width, height, .. } => {
+                            self.ceilings.image_axis.min(width).min(height)
+                        }
+                        _ => self.ceilings.image_axis,
+                    },
+                    maximum_decoded_image_pixels: match view.bounds() {
+                        crate::ReadViewBounds::Image { pixels, .. } => {
+                            self.ceilings.decoded_image_pixels.min(pixels)
+                        }
+                        _ => self.ceilings.decoded_image_pixels,
+                    },
                     maximum_container_entries: self.ceilings.observed_container_entries,
                 },
                 source,

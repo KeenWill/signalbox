@@ -4,6 +4,7 @@ load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "r
 
 CRATE_DEPS = [
     ":signalbox_file_media_adapter_svg",
+    "//crates/file-media-adapters-image:signalbox_file_media_adapters_image",
     "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
     "//crates/file-media-runtime:signalbox_file_media_runtime",
 ]
@@ -13,7 +14,9 @@ rust_package()
 rust_library(
     name = "signalbox_file_media_adapter_svg",
     crate_root = "src/lib.rs",
+    compile_data = glob(["fonts/*"]),
     deps = [
+        "//crates/file-media-adapters-image:signalbox_file_media_adapters_image",
         "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
         "//crates/file-media-runtime:signalbox_file_media_runtime",
     ],
@@ -40,6 +43,13 @@ rust_integration_test(
     size = "small",
     srcs = glob(["tests/**/*.rs"]),
     crate_root = "tests/svg_adapter.rs",
+    data = [":signalbox-file-media-svg-worker", "//crates/file-media-adapters-image:signalbox-file-media-image-worker"],
+    env = {
+        "NEXTEST_BIN_EXE_signalbox_file_media_svg_worker": "$(rootpath :signalbox-file-media-svg-worker)",
+        "NEXTEST_BIN_EXE_signalbox_file_media_image_worker": "$(rootpath //crates/file-media-adapters-image:signalbox-file-media-image-worker)",
+    },
+    env_inherit = ["SIGNALBOX_FILE_MEDIA_CGROUP_ROOT"],
+    rustc_env = {"CARGO_BIN_EXE_signalbox-file-media-svg-worker": "$(rootpath :signalbox-file-media-svg-worker)"},
     deps = CRATE_DEPS,
 )
 

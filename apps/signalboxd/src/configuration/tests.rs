@@ -129,6 +129,7 @@ version = 1
 [numeric_bounds]
 max_git_object_bytes = "none"
 max_image_presentation_bytes = "none"
+max_raster_dimension = "none"
 max_image_request_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"

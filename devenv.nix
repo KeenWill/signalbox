@@ -604,6 +604,9 @@ in
       CARGO_PROFILE_DEV_STRIP=debuginfo cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
         "$DEVENV_ROOT/Cargo.toml" \
         signalbox-file-media-adapter-pdf signalbox-file-media-pdf-worker > /dev/null
+      CARGO_PROFILE_DEV_STRIP=debuginfo cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
+        "$DEVENV_ROOT/Cargo.toml" \
+        signalbox-file-media-adapter-svg signalbox-file-media-svg-worker > /dev/null
       supervisor_executable="$(
         cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
           "$DEVENV_ROOT/Cargo.toml" \
