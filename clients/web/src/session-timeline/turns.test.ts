@@ -119,3 +119,26 @@ it('continues merged result text at the event that supplied its excerpt', () => 
   if (!turn?.tools[0]) throw new Error('grouped tool fixture missing')
   expect(toolContinuationSequence(turn, turn.tools[0])).toBe('6')
 })
+
+it('retains a provider failure when no response or only a generic failed outcome is loaded', () => {
+  const model = detailItems[3]
+  const terminal = detailItems[4]
+  if (model?.body.type !== 'model_call' || terminal?.body.type !== 'turn_lifecycle')
+    throw new Error('turn fixture missing')
+  const failure = {
+    ...model,
+    body: {
+      ...model.body,
+      response: null,
+      provider_failure_cause: 'quota_exhausted' as const,
+      state: { type: 'terminal' as const, disposition: 'known_failed' as const },
+    },
+  }
+  expect(groupTranscriptTurns([failure])[0]?.outcome).toEqual(failure)
+  expect(
+    groupTranscriptTurns([
+      failure,
+      { ...terminal, kind: 'turn_failed', body: { ...terminal.body, cause_code: 'failed' } },
+    ])[0]?.outcome,
+  ).toEqual(failure)
+})

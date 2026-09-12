@@ -491,20 +491,22 @@ function TurnContent({
                   />
                 </div>
               ))}
+            {detail === 'results' &&
+              tool &&
+              part.tools.some((entry) => entry.request_id === tool.request_id) && (
+                <div className="session-tool-slot">
+                  <ToolSummary
+                    tool={tool}
+                    turn={turn}
+                    sessionId={sessionId}
+                    limits={limits}
+                    renderTool={renderTool}
+                  />
+                  {more(toolContinuationSequence(turn, tool))}
+                </div>
+              )}
           </section>
         ),
-      )}
-      {detail === 'results' && tool && (
-        <div className="session-tool-slot">
-          <ToolSummary
-            tool={tool}
-            turn={turn}
-            sessionId={sessionId}
-            limits={limits}
-            renderTool={renderTool}
-          />
-          {more(toolContinuationSequence(turn, tool))}
-        </div>
       )}
       {turn.outcome && <BodyText body={turn.outcome.body} />}
     </>
