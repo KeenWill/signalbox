@@ -289,6 +289,11 @@ fields, mistyped values, duplicate names, and every invalid field fail as
 sanitized `SessionTemplateConfigurationError` variants without file paths,
 prompt content, or document text.
 
+`GET /api/templates` lists the loaded templates in name order;
+`GET /api/templates/{name}` returns the selected definition with retained prompt
+contents and its template or shared review-library TOML source. Both use the
+browser API authority gate.
+
 Every session carries an append-only credential history. First handling of a
 native or imported session-creation command appends event ordinal 1 in the same
 transaction as the session. That event carries a complete nonempty
@@ -761,9 +766,8 @@ changed in the current catalog; the claim protocol is owned by
 identity resolves against the loaded catalog and copies the complete bundle into
 the session's immutable defaults version one. The session records the template
 name and content digest and retains no live catalog reference, so an edit
-affects only creations first handled under the new catalog. The daemon exposes
-only sorted name and version summaries to clients; clients never receive prompt
-text or parse the file.
+affects only creations first handled under the new catalog. The process-protocol
+template list returns sorted name and version summaries.
 
 Model-selection validation happens at two boundaries on frozen semantic meaning
 only; credential presence is never consulted. At session creation the requested
