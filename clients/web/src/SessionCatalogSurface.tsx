@@ -78,7 +78,9 @@ const SessionTitle = ({
   const truncated = savedTitle ? summary.title_truncated : automatic.data?.truncated
   return (
     <>
-      {savedTitle || automatic.data?.text || `Session ${summary.session_id}`}
+      <span className="catalog-title-text">
+        {savedTitle || automatic.data?.text || `Session ${summary.session_id}`}
+      </span>
       {truncated && <span className="catalog-title-truncated">Truncated</span>}
     </>
   )
