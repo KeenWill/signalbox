@@ -147,20 +147,37 @@ launch unshares the user, pid, ipc, uts, and network namespaces and mounts a
 fresh `/proc`. A container-process-namespace variant omits the pid unshare and
 read-only binds the existing `/proc`; it is admissible only when an outer
 container already isolates that namespace. The child inherits none of the
-daemon's environment; deployment settings supply additional runtime inputs. The
-required `[daemon_tools].sandboxed_exec_timeout_bound` is a friendly duration of
-at least one second or `"none"` and bounds the timeout requested from
-`sandboxed_exec`. The optional `[daemon_tools]` keys `sandbox_network` (default
-`"none"`, or `"host"`), `sandbox_read_only_binds` (default `[]`), and
-`sandbox_path_prepend` (default `[]`) select networking, absolute host paths
-bound read-only at the same paths, and absolute directories prepended to `PATH`.
-Programmatic read-only mounts at explicit destinations overlay the workspace,
-worktree, and working-directory binds. Host networking shares the daemon's
-network namespace and DNS configuration without destination filtering,
-independently of web-egress and tool-mapping policies. Optional
-`sandbox_rustup_home` and `sandbox_rustup_toolchain` set `RUSTUP_HOME` and
-`RUSTUP_TOOLCHAIN`; automatic toolchain installation is disabled, `CARGO_HOME`
-stays private and writable, and `npm_config_cache` is `/workspace/.npm`.
+daemon's environment by default; deployment settings and approved ambient
+credential requests supply additional runtime inputs. The required
+`[daemon_tools].sandboxed_exec_timeout_bound` is a friendly duration of at least
+one second or `"none"` and bounds the timeout requested from `sandboxed_exec`.
+The optional `[daemon_tools]` keys `sandbox_network` (default `"none"`, or
+`"host"`), `sandbox_read_only_binds` (default `[]`), and `sandbox_path_prepend`
+(default `[]`) select networking, absolute host paths bound read-only at the
+same paths, and absolute directories prepended to `PATH`. Programmatic read-only
+mounts at explicit destinations overlay the workspace, worktree, and
+working-directory binds. Host networking shares the daemon's network namespace
+and DNS configuration without destination filtering, independently of web-egress
+and tool-mapping policies. Optional `sandbox_rustup_home` and
+`sandbox_rustup_toolchain` set `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; automatic
+toolchain installation is disabled, `CARGO_HOME` stays private and writable, and
+`npm_config_cache` is `/workspace/.npm`.
+
+A `sandboxed_exec` request may name `credential_purpose`, selecting an
+operator's `adapter = "sandboxed_exec"`, `delivery = "ambient"` credential
+profile. The profile names exactly one absolute `file` or environment
+`variable`, without model billing or pool membership. The judge's request
+context names the purpose. Only the judge's approval of that exact request
+admits the credential; blanket, per-tool automatic, and user-override approval
+do not substitute. The task reads the current catalog and receives a private
+read-only file snapshot at the configured path or that variable through the
+cleared supervisor and bubblewrap environment, never through command-line
+arguments. Ambient credential values must be valid UTF-8; load, reload, and use
+reject invalid encoding with `InvalidUtf8`. Its expanded path or environment set
+ends with the task, and the file snapshot is removed. Captured output passes
+through credential redaction before becoming tool evidence. Truncated captures
+redact a trailing credential prefix before JSON serialization; a truncated
+capture with lossy UTF-8 is fully redacted.
 
 Loss of sandbox supervision retains a supervision failure even when the dispatch
 capture is lost; an unconfirmed dispatch does not prove that the command never
@@ -642,11 +659,12 @@ read at startup. `reload_configuration` validates the complete replacement and
 atomically replaces the model and alias catalog, session-template catalog, and
 repository-watch configuration, existing Codex-home profile paths, and the
 source delivery, file path, or variable of existing byte-delivered model
-profiles. GitHub profile source fields are startup-only; changing them rejects
-reload. Other profile fields, pool policies, and other sections are
-startup-only. A replacement whose startup-only sections differ leaves the
-running configuration in place. Reload never rewrites evidence already recorded.
-File watching and polling are external callers of the verb.
+profiles, and ambient sandboxed-task profiles and their source fields. GitHub
+profile source fields are startup-only; changing them rejects reload. Other
+profile fields, pool policies, and other sections are startup-only. A
+replacement whose startup-only sections differ leaves the running configuration
+in place. Reload never rewrites evidence already recorded. File watching and
+polling are external callers of the verb.
 
 Every serving record states its family, and the adapter mapping rather than the
 selectable record pointing at it supplies its adapter and credential pool. Input

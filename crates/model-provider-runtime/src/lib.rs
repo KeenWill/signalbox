@@ -720,6 +720,7 @@ impl CredentialAccessCode {
             CredentialAccessFailure::Unmapped => Self::Unmapped,
             CredentialAccessFailure::Unavailable => Self::Unavailable,
             CredentialAccessFailure::Unreadable
+            | CredentialAccessFailure::InvalidUtf8
             | CredentialAccessFailure::NotRegularFile
             | CredentialAccessFailure::WrongOwner
             | CredentialAccessFailure::InsecurePermissions

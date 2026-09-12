@@ -6305,6 +6305,7 @@ sandbox_rustup_toolchain = "stable"
             path_prepend: vec![runtime.path().to_owned()],
             rustup_home: Some(runtime.path().to_owned()),
             rustup_toolchain: Some(String::from("stable")),
+            environment: Default::default(),
         }
     );
 }
@@ -6743,4 +6744,33 @@ fn file_image_configuration_lowers_adapter_capabilities_and_none_retains_them() 
         }
     }
     assert!(images > 0);
+}
+
+#[test]
+fn ambient_task_profiles_require_exactly_one_valid_source() {
+    for source in [
+        "file = \"/run/secrets/task-fixture\"",
+        "variable = \"TASK_FIXTURE_TOKEN\"",
+    ] {
+        let configured = format!(
+            "{CONFIGURATION}\n[[credential_profiles]]\nname = \"task-fixture\"\nadapter = \"sandboxed_exec\"\ndelivery = \"ambient\"\n{source}\n"
+        );
+        HubModelConfiguration::parse(&configured).expect("ambient task source admitted");
+    }
+    for source in [
+        "",
+        "file = \"relative\"",
+        "variable = \"\"",
+        "variable = \"INVALID=NAME\"",
+        "file = \"/run/secrets/task-fixture\"\nvariable = \"TASK_FIXTURE_TOKEN\"",
+        "variable = \"TASK_FIXTURE_TOKEN\"\nbilling_kind = \"api_metered\"",
+    ] {
+        let configured = format!(
+            "{CONFIGURATION}\n[[credential_profiles]]\nname = \"task-fixture\"\nadapter = \"sandboxed_exec\"\ndelivery = \"ambient\"\n{source}\n"
+        );
+        assert!(
+            HubModelConfiguration::parse(&configured).is_err(),
+            "invalid source admitted: {source}"
+        );
+    }
 }

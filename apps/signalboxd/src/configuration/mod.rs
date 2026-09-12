@@ -126,6 +126,7 @@ pub struct HubModelConfiguration {
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
     github_credential_profiles: HashMap<String, crate::credential_pools::GithubCredentialProfile>,
     credential_profiles: HashMap<Arc<str>, CredentialProfile>,
+    pub(crate) ambient_task_profiles: HashMap<Arc<str>, CredentialDelivery>,
     credential_pools: HashMap<Arc<str>, CredentialPool>,
     model_capabilities: ModelCapabilityCatalog,
     runtime_model_capabilities: RuntimeModelCapabilityCatalog,
@@ -214,6 +215,9 @@ impl HubModelConfiguration {
             claude_cli_credential_profile,
         } = startup::parse_startup(content, &document)?;
         let github_credential_profiles = crate::credential_pools::parse_github_credential_profiles(
+            document.get("credential_profiles"),
+        )?;
+        let ambient_task_profiles = crate::credential_pools::parse_ambient_task_profiles(
             document.get("credential_profiles"),
         )?;
         let repository_watch = document
@@ -626,6 +630,7 @@ impl HubModelConfiguration {
             aliases,
             routes,
             github_credential_profiles,
+            ambient_task_profiles,
             credential_profiles,
             credential_pools,
             model_capabilities,

@@ -75,6 +75,11 @@ impl ToolDefinition {
         posture: signalbox_domain::ToolApprovalPosture,
     ) -> Self;
     pub const fn approval_posture(&self) -> option::Option<signalbox_domain::ToolApprovalPosture>;
+    pub fn with_judge_required_argument(self, argument: string::String) -> Self;
+    pub fn requires_approval_judge(
+        &self,
+        arguments: &signalbox_domain::NormalizedToolArguments,
+    ) -> bool;
     pub const fn effect_class(&self) -> signalbox_domain::ToolEffectClass;
 }
 ```

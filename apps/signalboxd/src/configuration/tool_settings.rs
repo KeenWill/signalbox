@@ -398,6 +398,7 @@ pub(super) fn parse_daemon_tool_settings(
             path_prepend,
             rustup_home,
             rustup_toolchain,
+            environment: Default::default(),
         },
     }))
 }
