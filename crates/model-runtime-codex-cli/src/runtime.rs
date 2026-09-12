@@ -133,6 +133,8 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
     "unified_exec",
     "view_image",
     "workspace_dependencies",
+    // Managed Git worktree creation executes outside the declared operation tools.
+    "worktrees",
 ];
 
 /// Codex CLI protocol snapshot covered by this adapter's offline fixtures.

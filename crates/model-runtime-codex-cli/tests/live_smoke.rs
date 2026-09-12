@@ -120,6 +120,7 @@ guardian_ext                             under development  false
 guardian_node_repl_transcript_images     under development  false
 guardian_reuse_parent_compaction         under development  false
 guardianv2                               under development  false
+guardianv2.thread_context                under development  false
 hooks                                    stable             true
 image_detail_original                    removed            false
 image_generation                         stable             true
@@ -151,7 +152,8 @@ plugins                                  stable             true
 powershell_shell_version                 under development  false
 prevent_idle_sleep                       experimental       false
 psp                                      under development  false
-realtime_conversation                    under development  false
+realtime_conversation                    removed            false
+reasoning_effort_override                under development  false
 recommended_plugins                      stable             false
 remote_compaction_v2                     stable             true
 remote_control                           removed            false
@@ -195,6 +197,7 @@ unavailable_dummy_tools                  removed            false
 unbounded_connection_retries             stable             true
 undo                                     removed            false
 unified_exec                             stable             true
+unified_exec_tty                         stable             true
 unified_exec_zsh_fork                    removed            true
 unified_image_budget                     under development  false
 use_agent_identity                       under development  false
@@ -203,8 +206,10 @@ use_linux_sandbox_bwrap                  removed            false
 view_image                               stable             true
 web_search_cached                        deprecated         false
 web_search_request                       deprecated         false
+windows_sandbox_service                  under development  false
 workspace_dependencies                   stable             true
 workspace_owner_usage_nudge              removed            false
+worktrees                                experimental       false
 write_stdin_approval                     under development  false
 "#;
 
@@ -244,6 +249,7 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "guardian_enhanced_node_repl_transcripts",
     "guardian_node_repl_transcript_images",
     "guardian_reuse_parent_compaction",
+    "guardianv2.thread_context",
     "image_detail_original",
     "image_resize_notice",
     "item_ids",
@@ -260,6 +266,7 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "plugin_hooks",
     "prevent_idle_sleep",
     "psp",
+    "reasoning_effort_override",
     "remote_compaction_v2",
     "remote_control",
     "remote_models",
@@ -288,6 +295,7 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "unavailable_dummy_tools",
     "unbounded_connection_retries",
     "undo",
+    "unified_exec_tty",
     "unified_exec_zsh_fork",
     "unified_image_budget",
     "use_agent_identity",
@@ -295,6 +303,7 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "use_linux_sandbox_bwrap",
     "web_search_cached",
     "web_search_request",
+    "windows_sandbox_service",
     "workspace_owner_usage_nudge",
     "write_stdin_approval",
 ];
