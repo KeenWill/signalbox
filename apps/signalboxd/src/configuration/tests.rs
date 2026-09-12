@@ -4095,6 +4095,10 @@ fn configuration_rejects_invalid_onepassword_sources() {
     for delivery in [
         "delivery = \"onepassword\"\nitem = \"not-a-reference\"\nexecutable = \"/usr/bin/op\"",
         "delivery = \"onepassword\"\nitem = \"op://\"\nexecutable = \"/usr/bin/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://vault\"\nexecutable = \"/usr/bin/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://vault/item\"\nexecutable = \"/usr/bin/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://vault//field\"\nexecutable = \"/usr/bin/op\"",
+        "delivery = \"onepassword\"\nitem = \"op://vault/item/section/field/extra\"\nexecutable = \"/usr/bin/op\"",
         "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = \"relative/op\"",
         "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"",
     ] {

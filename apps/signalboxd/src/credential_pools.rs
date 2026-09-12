@@ -282,7 +282,14 @@ fn parse_onepassword_source(
     profile: &Table,
 ) -> Result<(Arc<str>, PathBuf), HubModelConfigurationError> {
     let item = required_string(profile, "item")?;
-    if !item.starts_with("op://") || item.len() <= "op://".len() || item.contains('\0') {
+    let components = item
+        .strip_prefix("op://")
+        .map(|reference| reference.split('/').collect::<Vec<_>>())
+        .ok_or(HubModelConfigurationError::InvalidCredentialDelivery)?;
+    if !matches!(components.len(), 3 | 4)
+        || components.iter().any(|component| component.is_empty())
+        || item.contains('\0')
+    {
         return Err(HubModelConfigurationError::InvalidCredentialDelivery);
     }
     let executable = normalize_absolute_path(required_string(profile, "executable")?)?;
