@@ -627,6 +627,14 @@ the configured operation grant, or an explicit statement that no grant is
 configured, alongside the ordinary request context. [Workflows](workflows.md)
 owns run views, registration and mutation receipts.
 
+A model execution caller can supply a remaining tool-request allowance for one
+prepared call. The runtime narrows its configured per-response proposal limit to
+that allowance; it never widens the configured limit. Proposals above the limit
+remain in the observed response with `ProposalLimitExceeded` and cannot execute.
+A zero allowance also removes tools from the advertised call catalog. The
+[agentic judgment session](review-workflows.md#agentic-judgment-sessions)
+computes this allowance from the durable turn request count.
+
 ## Planned
 
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).

@@ -846,6 +846,7 @@ impl PreparedBinding {
 
 /// Opaque runtime capability plus the application facts it was prepared from.
 pub struct RuntimeModelCallCapability<Prepared> {
+    proposal_limits: signalbox_application::ToolProposalLimits,
     invocation_capacity_reserved: bool,
     prepared: Prepared,
     binding: PreparedBinding,
@@ -1304,6 +1305,20 @@ fn classify_runtime_input_count(
     }
 }
 
+fn narrowed_proposal_limits(
+    mut limits: signalbox_application::ToolProposalLimits,
+    remaining: Option<u64>,
+) -> signalbox_application::ToolProposalLimits {
+    if let Some(remaining) = remaining {
+        limits.max_requests = Some(
+            limits
+                .max_requests
+                .map_or(remaining, |limit| limit.min(remaining)),
+        );
+    }
+    limits
+}
+
 impl<R> ModelCallProvider for RuntimeModelCallProvider<R>
 where
     R: ModelRuntime<ModelCallId> + Send + Sync,
@@ -1403,6 +1418,10 @@ where
         {
             PreparationOutcome::Prepared(prepared) => Ok(ModelCallCapabilityPreparation::Ready(
                 RuntimeModelCallCapability {
+                    proposal_limits: narrowed_proposal_limits(
+                        self.proposal_limits,
+                        operation.tool_request_limit(),
+                    ),
                     invocation_capacity_reserved: operation.invocation_capacity_reserved(),
                     prepared,
                     binding,
@@ -1561,7 +1580,7 @@ where
             &observations.observations,
             &capability.resolved_target,
             self.diagnostic_model_identity_limit,
-            self.proposal_limits,
+            capability.proposal_limits,
         )
         .map_err(|failure| {
             fail_closed(telemetry, failure.error, failure.served_target.as_deref())
@@ -4491,6 +4510,51 @@ mod tests {
         assert_invalid_tool_proposal_closes(invalid_name);
         assert_invalid_tool_proposal_closes(nul_arguments);
         assert_invalid_tool_proposal_closes(mismatched_finish);
+    }
+
+    #[test]
+    fn a_remaining_allowance_rejects_a_batch_overrun_without_losing_the_response() {
+        for remaining in [0, 1, 8] {
+            let limits = super::narrowed_proposal_limits(Default::default(), Some(remaining));
+            let content = (0..10)
+                .map(|index| {
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new(format!("call-{index}")),
+                        name: ToolName::new("read_file"),
+                        arguments_json: String::from("{}"),
+                    })
+                })
+                .collect();
+            let classified = classify_terminal_with_limit(
+                completion_with_finish("model-exact", CompletionFinish::ToolUse, content),
+                &[],
+                &configured("model-exact"),
+                None,
+                limits,
+            )
+            .expect("bounded proposals retain the provider response");
+            let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+                classified.observation
+            else {
+                panic!("tool response is retained");
+            };
+            assert_eq!(response.parts().len(), 10);
+            for (index, part) in response.parts().iter().enumerate() {
+                let signalbox_domain::AssistantResponsePart::ToolCall(proposal) = part else {
+                    panic!("only tools")
+                };
+                assert_eq!(
+                    proposal.inadmissible_reason().is_none(),
+                    index < remaining as usize
+                );
+            }
+        }
+        let global = signalbox_application::ToolProposalLimits {
+            max_requests: Some(1),
+            max_argument_bytes: Some(100),
+        };
+        assert_eq!(super::narrowed_proposal_limits(global, Some(8)), global);
+        assert_eq!(super::narrowed_proposal_limits(global, None), global);
     }
 
     #[test]

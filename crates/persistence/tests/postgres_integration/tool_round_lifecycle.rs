@@ -4,6 +4,42 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn turn_tool_allowance_counts_durable_requests_in_only_the_selected_turn()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let (fixture, repository, _, _) =
+        checkpoint_confirmed_tool_round(&pool, 0x473_1000, "read_file", "{}").await?;
+    assert_eq!(
+        repository
+            .turn_tool_request_count(fixture.session, fixture.turn)
+            .await?,
+        1
+    );
+    assert_eq!(
+        repository
+            .turn_tool_request_count(fixture.session, TurnId::from_uuid(Uuid::now_v7()))
+            .await?,
+        0
+    );
+    assert_eq!(
+        repository
+            .turn_tool_request_count(SessionId::from_uuid(Uuid::now_v7()), fixture.turn)
+            .await?,
+        0
+    );
+    let reloaded = repository.clone();
+    drop(repository);
+    assert_eq!(
+        reloaded
+            .turn_tool_request_count(fixture.session, fixture.turn)
+            .await?,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn completed_image_attempt_reloads_in_the_active_batch() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _) = migrated_postgres().await?;
     // Supplies distinct identities for the completed tool-round fixture.

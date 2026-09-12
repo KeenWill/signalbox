@@ -62,6 +62,7 @@ mod conversation_introspection;
 pub mod credential_invocations;
 mod credential_pools;
 mod daemon_tools;
+mod review_judge_runtime;
 pub use daemon_tools::workflows::{DaemonWorkflowPort, WorkflowToolError, WorkflowToolPolicy};
 mod fenced_database;
 mod goal_mode;
@@ -3447,6 +3448,13 @@ where
             {
                 return Ok(());
             }
+            let agentic_judge = match &workflow_tool_policy {
+                Some(policy) => policy
+                    .is_agentic_review_judge(session)
+                    .await
+                    .map_err(PostgresProviderToolLoopExecutionError::WorkflowPolicy)?,
+                None => false,
+            };
             let workflow_policy = match workflow_tool_policy {
                 Some(policy) => policy
                     .for_session(session)
@@ -3457,6 +3465,20 @@ where
             let catalog = daemon_tools::workflows::SessionWorkflowCatalog {
                 catalog,
                 policy: workflow_policy.clone(),
+            };
+            let catalog = review_judge_runtime::JudgeCatalog {
+                catalog,
+                restricted: agentic_judge,
+            };
+            let automatic_tool_round_limit = if agentic_judge {
+                Some(
+                    automatic_tool_round_limit
+                        .map_or(review_judge_runtime::TOOL_ROUND_LIMIT, |limit| {
+                            limit.min(review_judge_runtime::TOOL_ROUND_LIMIT)
+                        }),
+                )
+            } else {
+                automatic_tool_round_limit
             };
             let mut model = ModelCallExecutionService::new(
                 UuidV7ModelCallExecutionIdGenerator,
@@ -3617,15 +3639,39 @@ where
                 {
                     return Ok(());
                 }
-                let model_outcome = match model.execute(session).await {
+                let model_outcome = match model
+                    .execute_with_tool_request_allowance(
+                        session,
+                        |prepared_session, prepared_turn| {
+                            review_judge_runtime::tool_allowance(
+                                &model_repository,
+                                agentic_judge,
+                                prepared_session,
+                                prepared_turn,
+                            )
+                        },
+                    )
+                    .await
+                {
                     Ok(outcome) => outcome,
-                    Err(error) if model.retained_state().is_some() => {
-                        reconcile_retained_once(error, model.execute(session))
-                            .await
-                            .map_err(|error| {
-                                PostgresProviderToolLoopExecutionError::Model(Box::new(error))
-                            })?
-                    }
+                    Err(error) if model.retained_state().is_some() => reconcile_retained_once(
+                        error,
+                        model.execute_with_tool_request_allowance(
+                            session,
+                            |prepared_session, prepared_turn| {
+                                review_judge_runtime::tool_allowance(
+                                    &model_repository,
+                                    agentic_judge,
+                                    prepared_session,
+                                    prepared_turn,
+                                )
+                            },
+                        ),
+                    )
+                    .await
+                    .map_err(|error| {
+                        PostgresProviderToolLoopExecutionError::Model(Box::new(error))
+                    })?,
                     Err(error) => {
                         return Err(PostgresProviderToolLoopExecutionError::Model(Box::new(
                             RetainedModelExecutionError::Primary(error),
