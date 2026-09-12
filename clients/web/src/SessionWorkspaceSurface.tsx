@@ -459,7 +459,16 @@ export function SessionWorkspaceSurface({
                       ? 'Live'
                       : 'Connecting…'}
               </span>
-              <details className="session-header-details">
+              <details
+                className="session-header-details"
+                onKeyDown={(event) => {
+                  if (event.key !== 'Escape' || !event.currentTarget.open) return
+                  event.preventDefault()
+                  event.stopPropagation()
+                  event.currentTarget.open = false
+                  event.currentTarget.querySelector('summary')?.focus()
+                }}
+              >
                 <summary>Session details</summary>
                 <div className="session-header-detail-content">
                   <p>Session {sessionId}</p>

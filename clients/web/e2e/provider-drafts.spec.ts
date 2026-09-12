@@ -126,9 +126,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
     }),
   )
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions?workspace=true')
-  await page.getByRole('textbox', { name: 'Session ID' }).fill(sessionId)
-  await page.getByRole('button', { name: 'Open', exact: true }).click()
+  await page.goto(`/sessions?workspace=true&session=${sessionId}`)
   await expect(page.getByText('Live', { exact: true })).toBeVisible()
   await page.waitForFunction(() => Reflect.get(window, 'fixtureFollowReady') === true)
   await page.evaluate(
@@ -149,6 +147,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
   await expect(page.getByRole('region', { name: 'Assistant draft' })).toContainText(
     'I am checking the recorded work',
   )
+  await page.getByText('Session details', { exact: true }).click()
   await expect(page.getByText('Runner: Assigned, Connection uncertain')).toBeVisible()
   if (testInfo.project.name === 'chromium' && process.platform === 'linux')
     await expect.soft(page).toHaveScreenshot('provider-drafts.png', { animations: 'disabled' })

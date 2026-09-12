@@ -263,10 +263,8 @@ async function openDetails(
       },
     })
   })
-  await page.goto('/sessions?workspace=true')
-  await page.getByRole('textbox', { name: 'Session ID' }).fill(detailSessionId)
-  await page.getByRole('button', { name: 'Open', exact: true }).click()
-  await expect(page.getByRole('heading', { name: detailSessionId })).toBeVisible()
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   return reads
 }
@@ -406,7 +404,9 @@ test('reads tool arguments and output in conversation order with events hidden',
   await expect(conversation).toBeFocused()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(toolRow(page)).toBeVisible()
+  await page.getByText('Session details', { exact: true }).click()
   await expect(page.locator('.session-telemetry')).toBeVisible()
+  await page.getByText('Session details', { exact: true }).press('Escape')
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   await expect(references.getByRole('listitem')).toHaveCount(2)
   await expect(references).toContainText('image/png · 4 B')
