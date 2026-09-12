@@ -155,6 +155,10 @@ export function ArtifactInspector({
               type="button"
               onClick={(event) => {
                 const opener = event.currentTarget
+                const focusScope = opener.closest('[role=dialog]')
+                const focusTarget = opener
+                  .closest('.artifact-inspector')
+                  ?.querySelector<HTMLButtonElement>('button')
                 let restoreFocus = document.activeElement === opener
                 const recordBlur = () => {
                   queueMicrotask(() => {
@@ -173,12 +177,11 @@ export function ArtifactInspector({
                     requestAnimationFrame(() => {
                       if (
                         document.activeElement === opener ||
-                        (!opener.isConnected && document.activeElement === document.body)
+                        (!opener.isConnected &&
+                          (document.activeElement === document.body ||
+                            document.activeElement === focusScope))
                       )
-                        opener
-                          .closest('.artifact-inspector')
-                          ?.querySelector<HTMLButtonElement>('button')
-                          ?.focus()
+                        focusTarget?.focus()
                     })
                   }
                 })

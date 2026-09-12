@@ -157,3 +157,20 @@ test('restores focus to the attachment after a successful retry', async ({ page 
   await page.keyboard.press('Enter')
   await expect(page.getByRole('button', { name: /Image · image\/png/ })).toBeFocused()
 })
+
+test('restores detail-pane focus after a successful retry', async ({ page }) => {
+  let unavailable = true
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/blobs/**/descriptor?*', (route) =>
+    route.fulfill({ json: unavailable ? { invalid: true } : fileAttachment }),
+  )
+  await page.goto('/src/features/artifacts/scenario.html')
+  await page.getByRole('button', { name: /File · application/ }).click()
+  const pane = page.getByRole('dialog', { name: 'Attachment details' })
+  await pane.getByRole('button', { name: 'Retry', exact: true }).focus()
+  unavailable = false
+  await page.keyboard.press('Enter')
+  await expect(pane.getByRole('button', { name: 'Close attachment details' })).toBeFocused()
+})
