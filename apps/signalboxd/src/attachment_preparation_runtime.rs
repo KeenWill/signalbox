@@ -6,6 +6,8 @@ use std::{
     sync::Arc,
 };
 
+use futures_util::FutureExt;
+
 use signalbox_application::{
     AttachmentPreparationFailure, ModelCallCapabilityPreparation, ModelCallInputTokenCount,
     ModelCallInputTokenCounter, ModelCallProvider, PreparedModelOperation,
@@ -22,8 +24,8 @@ use crate::BlobStoreRegistry;
 // The attachment-preparation admission bound is independent of direct reads.
 static PREPARATION_BUDGET: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
-/// Provider wrapper that verifies every rendered attachment before capability
-/// preparation or send authorization can begin.
+/// Provider wrapper that verifies every rendered attachment after capability
+/// preparation and before send authorization can begin.
 #[derive(Clone, Debug)]
 pub struct AttachmentPreparingModelCallProvider<Provider> {
     inner: Provider,
@@ -81,27 +83,15 @@ where
             return self.inner.prepare_capability(operation, cancellation).await;
         }
 
-        let mut cancellation = Box::pin(cancellation);
-        let prepared = {
-            let preparation = prepare_attachments(
-                &self.catalog,
-                self.registry.as_deref(),
-                operation.request(),
-                digests,
-            );
-            tokio::pin!(preparation);
-            tokio::select! {
-                biased;
-                () = &mut cancellation => {
-                    return Ok(ModelCallCapabilityPreparation::Cancelled);
-                }
-                prepared = &mut preparation => prepared,
-            }
-        };
-        if let Err(failure) = prepared {
-            return Ok(ModelCallCapabilityPreparation::AttachmentFailure(failure));
-        }
-        self.inner.prepare_capability(operation, cancellation).await
+        let cancellation = cancellation.shared();
+        let request = operation.request().clone();
+        prepare_attachment_capability(
+            self.inner
+                .prepare_capability(operation, cancellation.clone()),
+            prepare_attachments(&self.catalog, self.registry.as_deref(), &request, digests),
+            cancellation,
+        )
+        .await
     }
 
     async fn invoke<AcceptancePossible, Cancellation>(
@@ -169,6 +159,31 @@ where
         }
         self.inner.count_input_tokens(operation, cancellation).await
     }
+}
+
+async fn prepare_attachment_capability<Capability, Error>(
+    capability: impl Future<Output = Result<ModelCallCapabilityPreparation<Capability>, Error>>,
+    attachments: impl Future<Output = Result<(), AttachmentPreparationFailure>>,
+    cancellation: impl Future<Output = ()>,
+) -> Result<ModelCallCapabilityPreparation<Capability>, Error> {
+    tokio::pin!(capability, attachments, cancellation);
+    let prepared = tokio::select! {
+        biased;
+        () = &mut cancellation => return Ok(ModelCallCapabilityPreparation::Cancelled),
+        prepared = &mut capability => prepared?,
+    };
+    let ModelCallCapabilityPreparation::Ready(capability) = prepared else {
+        return Ok(prepared);
+    };
+    let prepared = tokio::select! {
+        biased;
+        () = &mut cancellation => return Ok(ModelCallCapabilityPreparation::Cancelled),
+        prepared = &mut attachments => prepared,
+    };
+    if let Err(failure) = prepared {
+        return Ok(ModelCallCapabilityPreparation::AttachmentFailure(failure));
+    }
+    Ok(ModelCallCapabilityPreparation::Ready(capability))
 }
 
 fn attachment_count_failure(failure: AttachmentPreparationFailure) -> ModelCallInputTokenCount {
@@ -266,10 +281,27 @@ async fn prepare_attachments_inner(
         }
         entries.push(entry);
     }
-    for entry in &entries {
-        verify_entry(registry, entry).await?;
+    let verifications = entries
+        .iter()
+        .map(|entry| verify_entry(registry, entry))
+        .collect::<Vec<_>>();
+    verify_attachment_entries(verifications).await
+}
+
+async fn verify_attachment_entries(
+    entries: impl IntoIterator<Item = impl Future<Output = Result<(), AttachmentPreparationFailure>>>,
+) -> Result<(), AttachmentPreparationFailure> {
+    let mut outcome = Ok(());
+    for entry in entries {
+        match entry.await {
+            Ok(()) => {}
+            Err(AttachmentPreparationFailure::Unavailable) => {
+                outcome = Err(AttachmentPreparationFailure::Unavailable);
+            }
+            Err(terminal) => return Err(terminal),
+        }
     }
-    Ok(())
+    outcome
 }
 
 async fn verify_entry(
@@ -327,6 +359,85 @@ mod tests {
     use signalbox_application::{AttachmentPreparationFailure, ModelCallInputTokenCount};
 
     use super::attachment_count_failure;
+
+    #[tokio::test]
+    async fn a_prepared_capability_survives_successful_attachment_verification() {
+        let result = super::prepare_attachment_capability(
+            std::future::ready(Ok::<_, std::convert::Infallible>(
+                signalbox_application::ModelCallCapabilityPreparation::Ready("call capability"),
+            )),
+            std::future::ready(Ok(())),
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            signalbox_application::ModelCallCapabilityPreparation::Ready("call capability")
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_capability_preparation_interrupts_attachment_verification() {
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        let result = super::prepare_attachment_capability(
+            async {
+                cancel.send(()).unwrap();
+                Ok::<_, std::convert::Infallible>(
+                    signalbox_application::ModelCallCapabilityPreparation::Ready(()),
+                )
+            },
+            std::future::pending(),
+            async { cancelled.await.unwrap() },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            signalbox_application::ModelCallCapabilityPreparation::Cancelled
+        ));
+    }
+
+    #[tokio::test]
+    async fn capability_failure_is_discovered_before_unavailable_attachments() {
+        let result = super::prepare_attachment_capability(
+            std::future::ready(Ok::<_, std::convert::Infallible>(
+                signalbox_application::ModelCallCapabilityPreparation::<()>::KnownFailure,
+            )),
+            std::future::ready(Err(AttachmentPreparationFailure::Unavailable)),
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            signalbox_application::ModelCallCapabilityPreparation::KnownFailure
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_attachment_failure_wins_over_temporary_loss_in_either_order() {
+        use AttachmentPreparationFailure::{Corrupt, Missing, Unavailable};
+        for terminal in [Missing, Corrupt] {
+            for failures in [[Unavailable, terminal], [terminal, Unavailable]] {
+                let outcome = super::verify_attachment_entries(
+                    failures.map(|failure| std::future::ready(Err(failure))),
+                )
+                .await;
+                assert_eq!(outcome, Err(terminal), "attachment failures: {failures:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn healthy_later_attachment_does_not_erase_temporary_loss() {
+        let outcome = super::verify_attachment_entries([
+            std::future::ready(Err(AttachmentPreparationFailure::Unavailable)),
+            std::future::ready(Ok(())),
+        ])
+        .await;
+        assert_eq!(outcome, Err(AttachmentPreparationFailure::Unavailable));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn preparation_rejects_immediately_when_all_eight_traversals_are_active() {
