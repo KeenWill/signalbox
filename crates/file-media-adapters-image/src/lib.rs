@@ -22,6 +22,40 @@ pub use signalbox_file_media_runtime::{
 
 const PROVIDER_NAME: &str = "signalbox_image";
 const READER_REVISION: &str = "v2";
+
+/// A worker-rendered raster with straight-alpha RGBA pixels.
+pub struct RenderedRaster {
+    /// Pixel width.
+    pub width: u32,
+    /// Pixel height.
+    pub height: u32,
+    /// Row-major, eight-bit RGBA pixels.
+    pub rgba: Vec<u8>,
+}
+
+impl RenderedRaster {
+    /// Encodes bounded deterministic PNG output naming the ordinary image reader.
+    pub fn into_generated_image(self) -> Option<ProcessorReadOutput> {
+        if self.width == 0
+            || self.height == 0
+            || self.width > MAX_IMAGE_AXIS
+            || self.height > MAX_IMAGE_AXIS
+            || u64::from(self.width) * u64::from(self.height) > MAX_IMAGE_DECODED_PIXELS
+        {
+            return None;
+        }
+        let image = image::RgbaImage::from_raw(self.width, self.height, self.rgba)?;
+        let bytes = transform::encode_png(&image)?;
+        Some(ProcessorReadOutput::GeneratedImage {
+            media_type: String::from("image/png"),
+            provider: String::from(PROVIDER_NAME),
+            reader: String::from("png"),
+            revision: String::from(READER_REVISION),
+            byte_length: bytes.len() as u64,
+            bytes,
+        })
+    }
+}
 pub(crate) const IMAGE_VIEW_NAME: &str = "image";
 pub(crate) const METADATA_VIEW_NAME: &str = "metadata";
 pub(crate) const MALFORMED_IMAGE_REASON: &str = "malformed_image";

@@ -42,7 +42,7 @@ untrusted until the registry has reparsed and cross-checked it.
 
 With `file_media = true` and blob storage configured, the daemon registers
 `file_inspect` and `file_read` as external-effect tools. Startup verifies the
-compiled text, image and PDF workers beside the daemon executable through
+compiled text, image, PDF and SVG workers beside the daemon executable through
 `/usr/bin/bwrap` and the delegated `SIGNALBOX_FILE_MEDIA_CGROUP_ROOT`. The
 resolver reuses `blob_read`'s projected-frontier attachment proof and completes
 catalog work before source or worker I/O. A digest outside that frontier is
@@ -121,10 +121,10 @@ Image output bytes use a separate bounded binary channel on worker stderr; other
 stderr is drained and discarded. Diagnostics are never parser evidence,
 telemetry content, or model-visible output.
 
-No adapter renders, executes active content, follows links, extracts embedded
-files, fetches external resources, or recurses into embedded containers.
-Recognized encrypted or locked content is a terminal outcome, and no password
-channel exists.
+No adapter executes active content, follows links, extracts embedded files,
+fetches external resources, or recurses into embedded containers. Recognized
+encrypted or locked content is a terminal outcome, and no password channel
+exists.
 
 A reader revision is immutable. An earlier durable tool result keeps what the
 model saw while a later request may use a newer revision. Why: a durable result
@@ -173,6 +173,12 @@ recovery is registered as part of the reader's validation.
   [design](../design/file-and-media.md).
 
 ## Image presentation
+
+The SVG reader's `raster` view renders a PNG inside its sandboxed worker, with
+an embedded fallback font. It preserves the SVG source identity and presents the
+independently validated image reader identity through generated-image
+publication. `numeric_bounds.max_raster_dimension` lowers the output-axis bound;
+`"none"` retains the compiled image-axis ceiling.
 
 PNG, JPEG and WebP readers offer direct image, downscale/compress and crop
 views. Inspection reads at most a 64 KiB prefix. A presentation read validates

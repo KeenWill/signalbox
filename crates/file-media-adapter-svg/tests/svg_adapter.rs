@@ -29,12 +29,22 @@ macro_rules! assert_malformed {
 
 struct DirectProcessor {
     provider: SvgProvider,
+    image: signalbox_file_media_adapters_image::ImageFamilyProvider,
 }
 
 impl DirectProcessor {
     const fn new() -> Self {
         Self {
             provider: SvgProvider::new(),
+            image: signalbox_file_media_adapters_image::ImageFamilyProvider,
+        }
+    }
+
+    fn provider(&self, reader: &ReaderIdentity) -> &dyn FileMediaProvider {
+        if reader.provider().as_str() == "signalbox_image" {
+            &self.image
+        } else {
+            &self.provider
         }
     }
 }
@@ -47,7 +57,7 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
         Box::pin(async move {
-            self.provider
+            self.provider(reader)
                 .probe(reader, source, cancellation)
                 .await
                 .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
@@ -62,7 +72,7 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
         Box::pin(async move {
-            self.provider
+            self.provider(reader)
                 .inspect(reader, request, source, cancellation)
                 .await
                 .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
@@ -77,7 +87,7 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
         Box::pin(async move {
-            self.provider
+            self.provider(reader)
                 .read(reader, request, source, cancellation)
                 .await
                 .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
@@ -1381,6 +1391,130 @@ async fn adversarial_decoder_text_is_rejected_by_registry_sanitization()
     .await;
 
     assert_eq!(result, Err(FileMediaFailure::ProcessorFailed));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn raster_preserves_source_identity_and_bounds_deterministic_png_dimensions()
+-> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32"><rect width="64" height="32" fill="red"/></svg>"#).into_source()?;
+    let registry = raster_registry(16)?;
+    let first = raster(&registry, &source).await?;
+    let second = raster(&registry, &source).await?;
+    assert_eq!(first.reference().source().digest(), source.digest());
+    assert_eq!(
+        first.reference().source().media_type().as_str(),
+        "image/svg+xml"
+    );
+    assert_ne!(first.reference().presented().digest(), source.digest());
+    assert_eq!(
+        first.reference().presented().media_type().as_str(),
+        "image/png"
+    );
+    assert_eq!(first.bytes(), second.bytes());
+    let decoded = image::load_from_memory(first.bytes())?.into_rgba8();
+    assert_eq!(decoded.dimensions(), (16, 8));
+    assert!(decoded.pixels().all(|pixel| pixel.0 == [255, 0, 0, 255]));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn raster_renders_text_using_the_embedded_font() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40"><text x="2" y="30" font-size="24">PDF</text></svg>"#).into_source()?;
+    let output = raster(&raster_registry(100)?, &source).await?;
+    let decoded = image::load_from_memory(output.bytes())?.into_rgba8();
+    assert!(decoded.pixels().any(|pixel| pixel[3] > 0));
+    assert!(decoded.pixels().any(|pixel| pixel[3] == 0));
+    Ok(())
+}
+
+fn raster_registry(maximum_dimension: u32) -> Result<FileMediaRegistry, Box<dyn Error>> {
+    Ok(FileMediaRegistry::try_new(
+        vec![
+            signalbox_file_media_adapter_svg::declaration_with_raster_dimension(maximum_dimension)?,
+            signalbox_file_media_adapters_image::image_family_declaration()
+                .map_err(|error| -> Box<dyn Error> { error })?,
+        ],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )?)
+}
+
+async fn raster(
+    registry: &FileMediaRegistry,
+    source: &MemorySource,
+) -> Result<signalbox_file_media_runtime::ValidatedMediaArtifact, Box<dyn Error>> {
+    let processor = DirectProcessor::new();
+    raster_with_processor(registry, &processor, source).await
+}
+
+async fn raster_with_processor(
+    registry: &FileMediaRegistry,
+    processor: &dyn FileMediaProcessor,
+    source: &MemorySource,
+) -> Result<signalbox_file_media_runtime::ValidatedMediaArtifact, Box<dyn Error>> {
+    let (_, prepared) = registry
+        .prepare_read_with_reader(
+            processor,
+            FileReadRequest {
+                inspection: InspectionRequest {
+                    source: source.file_use()?,
+                    visible_part: None,
+                },
+                view: ReadViewName::try_new("raster")?,
+                input: FileReadInput::Initial {
+                    options: serde_json::json!({}),
+                },
+            },
+            source,
+            &NeverCancelled,
+            None,
+        )
+        .await?;
+    let signalbox_file_media_runtime::PreparedFileRead::Generated(generated) = prepared else {
+        return Err("expected generated SVG raster".into());
+    };
+    Ok(registry
+        .validate_generated(processor, generated, &NeverCancelled)
+        .await?)
+}
+
+#[tokio::test]
+#[ignore = "requires the delegated real file-media sandbox profile"]
+async fn raster_uses_the_isolated_binary_channel() -> Result<(), Box<dyn Error>> {
+    use signalbox_file_media_processor_runtime::{SandboxedFileMediaProcessor, WorkerBinding};
+    let svg = signalbox_file_media_adapter_svg::declaration_with_raster_dimension(100)?;
+    let image = signalbox_file_media_adapters_image::image_family_declaration()
+        .map_err(|error| -> Box<dyn Error> { error })?;
+    let svg_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_svg_worker")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_signalbox-file-media-svg-worker").into());
+    let image_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_image_worker")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| svg_worker.with_file_name("signalbox-file-media-image-worker"));
+    let processor = SandboxedFileMediaProcessor::try_new(
+        "/usr/bin/bwrap",
+        vec![
+            WorkerBinding::try_new(svg_worker, declaration()?)?,
+            WorkerBinding::try_new(image_worker, image.clone())?,
+        ],
+        signalbox_file_media_runtime::FileMediaProcessCeilings::version_one(),
+    )?;
+    assert_eq!(
+        processor.verify_isolation().await,
+        ProcessorIsolation::Available
+    );
+    let registry = FileMediaRegistry::try_new(
+        vec![svg, image],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )?;
+    let source = SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40"><text x="2" y="30" font-size="24">PDF</text></svg>"#).into_source()?;
+    let output = raster_with_processor(&registry, &processor, &source).await?;
+    assert_eq!(output.reference().source().digest(), source.digest());
+    let decoded = image::load_from_memory(output.bytes())?.into_rgba8();
+    assert_eq!(decoded.dimensions(), (100, 40));
+    assert!(decoded.pixels().any(|pixel| pixel[3] > 0));
     Ok(())
 }
 

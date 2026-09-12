@@ -81,21 +81,25 @@ impl Transform {
             }
         }
         .to_rgba8();
-        let mut output = BoundedOutput(Vec::new());
-        image::codecs::png::PngEncoder::new_with_quality(
-            &mut output,
-            image::codecs::png::CompressionType::Best,
-            image::codecs::png::FilterType::Adaptive,
-        )
-        .write_image(
-            view.as_raw(),
-            view.width(),
-            view.height(),
-            image::ExtendedColorType::Rgba8,
-        )
-        .ok()?;
-        Some(output.0)
+        encode_png(&view)
     }
+}
+
+pub(crate) fn encode_png(view: &image::RgbaImage) -> Option<Vec<u8>> {
+    let mut output = BoundedOutput(Vec::new());
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut output,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    )
+    .write_image(
+        view.as_raw(),
+        view.width(),
+        view.height(),
+        image::ExtendedColorType::Rgba8,
+    )
+    .ok()?;
+    Some(output.0)
 }
 
 struct BoundedOutput(Vec<u8>);

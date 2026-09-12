@@ -3,6 +3,8 @@
 
 use std::{borrow::Cow, collections::HashSet, error::Error, num::NonZeroU64, str::FromStr};
 
+mod raster;
+
 use iri_string::types::IriReferenceStr;
 use quick_xml::{
     NsReader, Reader,
@@ -24,7 +26,7 @@ use signalbox_file_media_runtime::{
 const MEDIA_TYPE: &str = "image/svg+xml";
 const PROVIDER_NAME: &str = "svg";
 const READER_NAME: &str = "quick-xml";
-const READER_REVISION: &str = "quick-xml-0-41-svgtypes-0-16-v2";
+const READER_REVISION: &str = "quick-xml-svg-resvg-v3";
 const SVG_NAMESPACE: &[u8] = b"http://www.w3.org/2000/svg";
 const XLINK_NAMESPACE: &[u8] = b"http://www.w3.org/1999/xlink";
 const XML_EVENTS_NAMESPACE: &[u8] = b"http://www.w3.org/2001/xml-events";
@@ -32,6 +34,7 @@ const XML_NAMESPACE: &[u8] = b"http://www.w3.org/XML/1998/namespace";
 const XMLNS_NAMESPACE: &[u8] = b"http://www.w3.org/2000/xmlns/";
 const TEXT_VIEW: &str = "text";
 const METADATA_VIEW: &str = "metadata";
+const RASTER_VIEW: &str = "raster";
 const MALFORMED_REASON: &str = "malformed_svg";
 const ACTIVE_CONTENT_REASON: &str = "active_content";
 const EXTERNAL_REFERENCE_REASON: &str = "external_reference";
@@ -205,6 +208,7 @@ impl FileMediaProvider for SvgProvider {
                     cursor: None,
                 }),
                 METADATA_VIEW => metadata_output(&parsed),
+                RASTER_VIEW => raster::render(&bytes, &request),
                 _ => Ok(ProcessorReadOutput::UnsupportedView),
             }
         })
@@ -213,6 +217,14 @@ impl FileMediaProvider for SvgProvider {
 
 /// Returns the declaration shared by registration and the worker catalog.
 pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
+    declaration_with_raster_dimension(signalbox_file_media_runtime::MAX_IMAGE_AXIS)
+}
+
+/// Returns the worker declaration with a lowered raster output dimension.
+pub fn declaration_with_raster_dimension(
+    maximum_dimension: u32,
+) -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
+    let maximum_dimension = maximum_dimension.min(signalbox_file_media_runtime::MAX_IMAGE_AXIS);
     let provider = FileReaderProviderName::try_new(PROVIDER_NAME)?;
     let text_view = ReadViewDeclaration::try_new(
         ReadViewName::try_new(TEXT_VIEW)?,
@@ -247,7 +259,29 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
         // for oversized-source classification or the single whole-source read,
         // never both.
         validation: ValidationDeclaration::new(SOURCE_BYTES, 1),
-        views: vec![text_view, metadata_view],
+        views: vec![
+            text_view,
+            metadata_view,
+            ReadViewDeclaration::try_new(
+                ReadViewName::try_new(RASTER_VIEW)?,
+                String::from("Renders a bounded PNG image of the SVG."),
+                CanonicalJsonObjectSchema::try_new(
+                    r#"{"additionalProperties":false,"type":"object"}"#,
+                )?,
+                ReadAccessPattern::Streaming { maximum_ranges: 1 },
+                ReadViewBounds::Image {
+                    source_bytes: SOURCE_BYTES,
+                    width: maximum_dimension,
+                    height: maximum_dimension,
+                    pixels: signalbox_file_media_runtime::MAX_DECODED_IMAGE_PIXELS,
+                    output_bytes: signalbox_file_media_runtime::MAX_PRESENTED_IMAGE_BYTES,
+                },
+            )?
+            .with_image_output(
+                signalbox_file_media_runtime::ImageViewKind::Generated,
+                vec![CanonicalMediaType::from_str("image/png")?],
+            ),
+        ],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
             ReasonCode::try_new(ACTIVE_CONTENT_REASON)?,
