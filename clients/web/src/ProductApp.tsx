@@ -768,6 +768,10 @@ export function ProductApp({
               setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
           : undefined,
       openSession: (sessionId) => {
+        if (surface === 'sessions') {
+          updateSessionSearch({ ...sessionState, session: sessionId, workspace: true })
+          return
+        }
         void navigate({
           to: '/$surface',
           params: { surface: 'sessions' },
