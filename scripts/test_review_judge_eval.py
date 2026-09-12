@@ -3,13 +3,14 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import json
 import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from review_judge_eval import git, prepare_checkout, run_trials, validate_result
+from review_judge_eval import Trial, git, prepare_checkout, run_trials, validate_result
 
 
 class JudgmentResultTests(unittest.TestCase):
@@ -82,6 +83,22 @@ class ScratchCheckoutTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             prepare_checkout(self.repository, self.workspace, self.head)
         self.assertEqual((tree / "source.txt").read_text(), "changed by a case")
+
+    def test_citations_are_resolved_before_the_judge_session_is_created(self):
+        args = SimpleNamespace(repository=self.repository, workspace=self.workspace,
+                               output=self.repository.parent / "results",
+                               template="review-judgment")
+        case = {"id": "finding", "head_sha": self.head, "base_sha": self.head,
+                "pr_title": "Review source", "pr_scope": "Source change", "context": "",
+                "findings": [{"finding_id": "finding", "finding_text": "`missing_gate()` fails."}]}
+        trial = Trial(args, case)
+        with patch.object(trial, "mutate", side_effect=RuntimeError("before model")):
+            with self.assertRaisesRegex(RuntimeError, "before model"):
+                trial.run()
+        source = self.workspace / "review-judge-eval" / "results" / trial.key / "input.json"
+        reference = json.loads(source.read_text())["findings"][0]["citation_resolution"]
+        self.assertEqual(reference["head_sha"], self.head)
+        self.assertEqual(reference["references"][0]["status"], "absent_at_head")
 
 
 class TrialAdmissionTests(unittest.TestCase):
