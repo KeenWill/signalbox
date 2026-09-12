@@ -336,7 +336,11 @@ fn parse_onepassword_source(
         return Err(HubModelConfigurationError::InvalidCredentialDelivery);
     };
     let mut segments = reference.split('/');
-    if item.contains('\0') || segments.clone().count() < 3 || segments.any(str::is_empty) {
+    // https://developer.1password.com/docs/cli/secret-references/
+    if item.contains('\0')
+        || !matches!(segments.clone().count(), 3 | 4)
+        || segments.any(str::is_empty)
+    {
         return Err(HubModelConfigurationError::InvalidCredentialDelivery);
     }
     let executable = normalize_absolute_path(required_string(profile, "executable")?)?;

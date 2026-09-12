@@ -4150,7 +4150,7 @@ fn onepassword_references_require_nonempty_vault_item_and_field_segments() {
         ("op://vault/item/section//field", false),
         ("op://vault/item/field", true),
         ("op://vault/item/section/field", true),
-        ("op://vault/item/section/field/extra", true),
+        ("op://vault/item/section/field/extra", false),
     ] {
         let source = CONFIGURATION.replace(
             "delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"",

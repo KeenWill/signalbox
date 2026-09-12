@@ -582,12 +582,12 @@ contents. The credential of a currently routed S3 blob store is read after the
 recovery scan and before socket admission, as [blob storage](blob-storage.md)
 requires.
 
-Environment sources are checked at startup, reload, and use for presence and the
-same 64 KiB ceiling. Mounted Kubernetes Secrets use the file admission rules,
-including final-target checks through projection symlinks. Both sources are read
-at each use, trim trailing line termination, and seed the same exact-value
-redaction as file credentials. Source values never enter configuration
-snapshots.
+Environment sources are checked at startup, reload, and use for presence, a
+nonempty value after trimming trailing line termination, and the same 64 KiB
+ceiling. Mounted Kubernetes Secrets use the file admission rules, including
+final-target checks through projection symlinks. Both sources are read at each
+use, trim trailing line termination, and seed the same exact-value redaction as
+file credentials. Source values never enter configuration snapshots.
 
 Unauthenticated session, search, usage, attention, and blob reads require an IP
 or `localhost` `Host` authority; another authority receives a 403
@@ -648,13 +648,13 @@ opaque to code: no build-provided constant is compared against it. Catalogs are
 read at startup. `reload_configuration` validates the complete replacement and
 atomically replaces the model and alias catalog, session-template catalog, and
 repository-watch configuration, existing Codex-home profile paths, and the
-source delivery, file path, or variable of existing byte-delivered model
-profiles, and existing model-adapter 1Password profiles' item references and
-executable paths. GitHub profile source fields are startup-only; changing them
-rejects reload. Other profile fields, pool policies, and other sections are
-startup-only. A replacement whose startup-only sections differ leaves the
-running configuration in place. Reload never rewrites evidence already recorded.
-File watching and polling are external callers of the verb.
+source delivery, file path, variable, item reference, or executable of existing
+byte-delivered model profiles, including switches to and from 1Password. GitHub
+profile source fields are startup-only; changing them rejects reload. Other
+profile fields, pool policies, and other sections are startup-only. A
+replacement whose startup-only sections differ leaves the running configuration
+in place. Reload never rewrites evidence already recorded. File watching and
+polling are external callers of the verb.
 
 Every serving record states its family, and the adapter mapping rather than the
 selectable record pointing at it supplies its adapter and credential pool. Input
@@ -817,7 +817,7 @@ with no appended newline and caching disabled on each use. The daemon retains no
 secret cache, caps stdout at 64 KiB, discards stderr, and cancels the child when
 resolution is dropped. A single thirty-second deadline bounds capture and exit;
 timeout is credential unavailability. Source admission requires an `op://`
-reference with at least three non-empty slash-separated segments (vault, item,
+reference with three or four non-empty slash-separated segments (vault, item,
 and field, with an optional section) and an absolute executable path without
 contacting the vault. Missing CLI, failed reads, unsuccessful exits, empty
 values, and oversized output are credential unavailability, never provider

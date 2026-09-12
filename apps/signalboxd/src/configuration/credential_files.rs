@@ -335,6 +335,9 @@ fn read_environment(variable: &str) -> Result<Vec<u8>, CredentialAccessFailure> 
     if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
         return Err(CredentialAccessFailure::TooLarge);
     }
+    if credential_bytes(bytes).is_empty() {
+        return Err(CredentialAccessFailure::Unavailable);
+    }
     Ok(bytes.to_vec())
 }
 
