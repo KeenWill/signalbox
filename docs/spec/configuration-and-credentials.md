@@ -216,7 +216,9 @@ integers and an absolute `private_key_file`. Validation names a missing or
 invalid App field. The `code_host` and `github` mappings use `github-primary`; a
 declared profile supplies that reference, otherwise `GITHUB_TOKEN_FILE` supplies
 it. Repository-watch entries select either `credential_file` or
-`credential_profile`.
+`credential_profile`. Vault item identity is independent of the CLI executable:
+model profiles within one adapter, different watched repositories, and the
+GitHub tool and polling roles may not share one item.
 
 The App key is read at token minting under the credential-file admission rules,
 never at boot. The daemon signs an RS256 JWT with issuance sixty seconds in the

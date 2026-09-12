@@ -4207,10 +4207,19 @@ fn configuration_rejects_duplicate_onepassword_sources_for_one_adapter() {
             "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = \"/usr/bin/op\"",
         );
 
-    assert_eq!(
-        HubModelConfiguration::parse(&duplicate_source).err(),
-        Some(HubModelConfigurationError::InvalidCredentialDelivery)
-    );
+    for source in [
+        duplicate_source.clone(),
+        duplicate_source.replacen(
+            "executable = \"/usr/bin/op\"",
+            "executable = \"/usr/bin/op-wrapper\"",
+            1,
+        ),
+    ] {
+        assert_eq!(
+            HubModelConfiguration::parse(&source).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
 }
 
 #[test]
@@ -6697,4 +6706,56 @@ fn file_image_configuration_lowers_adapter_capabilities_and_none_retains_them() 
         }
     }
     assert!(images > 0);
+}
+
+#[test]
+fn github_onepassword_profiles_preserve_polling_source_isolation() {
+    let configured = format!(
+        "{}\n[[credential_profiles]]\nname = \"github-primary\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/github/tools\"\nexecutable = \"/unused/op\"\n[[credential_profiles]]\nname = \"watch-vault\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/github/polling\"\nexecutable = \"/unused/wrapper\"\n",
+        configuration_with_repository_watch().replace(
+            &format!("credential_file = {WATCH_CREDENTIAL_FILE:?}"),
+            "credential_profile = \"watch-vault\""
+        )
+    );
+    let distinct = HubModelConfiguration::parse(&configured).expect("distinct vault items");
+    assert!(!distinct.github_tool_credential_conflicts(Path::new("/unused/fallback")));
+    for shared in [
+        configured.replace("op://fixture/github/polling", "op://fixture/github/tools"),
+        configured.replace(
+            "credential_profile = \"watch-vault\"",
+            "credential_profile = \"github-primary\"",
+        ),
+    ] {
+        let shared = HubModelConfiguration::parse(&shared).expect("profiles parse");
+        assert!(shared.github_tool_credential_conflicts(Path::new("/unused/fallback")));
+    }
+}
+
+#[test]
+fn repository_watch_rejects_shared_onepassword_items_across_repositories() {
+    let configured = format!(
+        "{}\n[[credential_profiles]]\nname = \"watch-vault-first\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/github/first\"\nexecutable = \"/unused/op\"\n[[credential_profiles]]\nname = \"watch-vault-second\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/github/second\"\nexecutable = \"/unused/wrapper\"\n",
+        configuration_with_repository_watch()
+            .replace(
+                &format!("credential_file = {WATCH_CREDENTIAL_FILE:?}"),
+                "credential_profile = \"watch-vault-first\""
+            )
+            .replace(
+                &format!("credential_file = {SECOND_WATCH_CREDENTIAL_FILE:?}"),
+                "credential_profile = \"watch-vault-second\""
+            )
+    );
+    HubModelConfiguration::parse(&configured).expect("distinct items admitted");
+    for shared in [
+        configured.replace("op://fixture/github/second", "op://fixture/github/first"),
+        configured.replace(
+            "credential_profile = \"watch-vault-second\"",
+            "credential_profile = \"watch-vault-first\"",
+        ),
+    ] {
+        assert_eq!(
+            HubModelConfiguration::parse(&shared).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialItem)
+        );
+    }
 }

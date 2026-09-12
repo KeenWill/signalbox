@@ -228,6 +228,8 @@ pub enum HubModelConfigurationError {
     /// Two repository-watch polling credentials or webhook secrets resolve to
     /// the same file reference.
     DuplicateRepositoryWatchCredentialFile,
+    /// Two watched repositories select the same vault item.
+    DuplicateRepositoryWatchCredentialItem,
     /// Two webhook-enabled repositories named the same positive GitHub hook ID.
     DuplicateRepositoryWatchWebhookHookId,
     /// One direct selection appeared more than once.
@@ -455,6 +457,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::DuplicateRepositoryWatchCredentialFile => {
                 "model configuration repeats a repository-watch credential-file reference"
+            }
+            Self::DuplicateRepositoryWatchCredentialItem => {
+                "model configuration repeats a repository-watch credential item"
             }
             Self::DuplicateRepositoryWatchWebhookHookId => {
                 "model configuration repeats a repository-watch webhook hook ID"

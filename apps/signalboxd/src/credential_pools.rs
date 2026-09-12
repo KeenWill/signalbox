@@ -856,10 +856,8 @@ fn parse_credential_profiles_with_home_admission(
         {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
-        if let CredentialDelivery::Onepassword {
-            item, executable, ..
-        } = &delivery
-            && !onepassword_sources.insert((adapter, Arc::clone(item), executable.clone()))
+        if let CredentialDelivery::Onepassword { item, .. } = &delivery
+            && !onepassword_sources.insert((adapter, Arc::clone(item)))
         {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
