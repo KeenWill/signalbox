@@ -197,6 +197,50 @@ pub(crate) struct PreparedRepositoryWatchReload {
 }
 
 impl RepositoryWatchRuntime {
+    /// Loads task data from the immutable create action and its triggering event.
+    pub async fn approval_judge_task(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> Result<Option<serde_json::Value>, signalbox_module_repo_watch_v2::StoreError> {
+        use signalbox_module_repo_watch_v2::StoreError;
+        let core = self.state.lock().await.core_pool.clone();
+        let origin = signalbox_persistence::session::SessionRepository::new(core)
+            .repository_watch_creation_dispatch(session)
+            .await
+            .map_err(|error| match error {
+                signalbox_persistence::session::SessionRepositoryError::Database(error) => {
+                    StoreError::Database(error)
+                }
+                signalbox_persistence::session::SessionRepositoryError::Corruption(_) => {
+                    StoreError::InvalidRetainedCommand
+                }
+            })?;
+        let Some(origin) = origin else {
+            return Ok(None);
+        };
+        let action = self
+            .store
+            .origin_for_create_command(origin.dispatch, origin.command)
+            .await?
+            .ok_or(StoreError::InvalidRetainedCommand)?;
+        let checkout = self
+            .store
+            .dispatch_checkout(origin.command)
+            .await?
+            .ok_or(StoreError::InvalidRetainedCommand)?;
+        if checkout.dispatch != origin.dispatch {
+            return Err(StoreError::InvalidRetainedCommand);
+        }
+        let parameters = signalbox_module_repo_watch_v2::normalized_event_payload(&checkout.event);
+        Ok(Some(serde_json::json!({
+            "repository": action.repository().as_str(),
+            "pull_request": action.pull_request().map(|number| number.get()),
+            "rule_id": action.rule_id().as_str(),
+            "event_kind": parameters["kind"]["name"],
+            "parameters": parameters,
+        })))
+    }
+
     /// Loads the pull-request fence retained for the session's creation dispatch.
     pub async fn approval_judge_authority(
         &self,
