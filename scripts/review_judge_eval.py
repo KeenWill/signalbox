@@ -13,6 +13,7 @@ import time
 import uuid
 
 from review_citations import resolve_findings
+from review_judge_context import sibling_context
 
 
 CATEGORIES = (
@@ -138,6 +139,14 @@ class Trial:
             "id", "head_sha", "base_sha", "pr_title", "pr_scope", "findings", "context",
         )}
         context["findings"] = resolve_findings(tree, self.case["head_sha"], context["findings"])
+        if args.sibling_full_text_bytes is not None:
+            context["sibling_context"] = sibling_context(
+                self.case["review_context"], pr=self.case["pr"], head_sha=self.case["head_sha"],
+                finding_ids={finding["finding_id"] for finding in context["findings"]},
+                source_thread_ids={finding["source_thread_id"] for finding in context["findings"]
+                                   if "source_thread_id" in finding},
+                full_text_bytes=args.sibling_full_text_bytes,
+            )
         atomic_json(source / "input.json", context)
         (source / "change.patch").write_text(git(
             tree, "diff", "--no-ext-diff", self.case["base_sha"], self.case["head_sha"], "--",
@@ -260,6 +269,8 @@ def main():
     for name in ("socket", "repository", "workspace", "cases", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--template", default="review-judgment")
+    parser.add_argument("--sibling-full-text-bytes", type=int,
+                        help="include retained review_context; full text when the entire set fits this UTF-8 byte budget")
     model = parser.add_mutually_exclusive_group()
     model.add_argument("--alias")
     model.add_argument("--selection-id")
