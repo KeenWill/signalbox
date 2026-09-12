@@ -7,6 +7,8 @@
 //! deployment configuration, and migration policy at this executable
 //! boundary.
 
+mod heap_allocator;
+
 #[cfg(test)]
 use signalboxd::credential_files_conflict;
 use signalboxd::repo_watch_runtime::{

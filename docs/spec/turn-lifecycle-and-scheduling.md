@@ -92,6 +92,10 @@ watchdog together.
 
 ## Design decisions
 
+The daemon uses mimalloc for Rust allocations. Why: mixed-lifetime buffers on
+concurrent workers must not accumulate as free memory in glibc's per-thread
+arenas.
+
 Eligibility is a derived predicate, never a durable state, because acceptance
 positions, priority relations, and the active-slot owner are already durable and
 a second eligibility state could only diverge from them.

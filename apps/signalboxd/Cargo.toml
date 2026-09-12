@@ -51,6 +51,7 @@ image = { version = "0.25.8", default-features = false, features = [
 ] }
 percent-encoding = "2.3.2"
 mime = "0.3.17"
+mimalloc = { version = "0.1.52", default-features = false }
 # Classifies the error `axum::body::to_bytes` returns: only its
 # `LengthLimitError` is an oversized body; anything else is transport failure.
 # Already present transitively under axum.
