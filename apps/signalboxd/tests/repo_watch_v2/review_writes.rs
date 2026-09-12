@@ -153,6 +153,34 @@ async fn native_review_receipts_preserve_owner_reviews_and_later_thread_actions(
         "the owner's review and thread are both eligible"
     );
 
+    sqlx::query("INSERT INTO observer_actor(repository,login) VALUES ($1,'reviewer')")
+        .bind(repository.as_str())
+        .execute(&pool)
+        .await?;
+    let readable_reviews: i64 = sqlx::query_scalar("SELECT count(*) FROM gh_readable_event WHERE repository=$1 AND event_kind='review_submitted'")
+        .bind(repository.as_str()).fetch_one(&pool).await?;
+    assert_eq!(
+        readable_reviews, 0,
+        "all reviews by the authenticated account are excluded, even without a native receipt"
+    );
+    let retained_reviews: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gh_event WHERE repository=$1 AND event_kind='review_submitted'",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+    assert!(retained_reviews > 0, "excluded events remain durable");
+    sqlx::query("UPDATE observer_actor SET login='another-account' WHERE repository=$1")
+        .bind(repository.as_str())
+        .execute(&pool)
+        .await?;
+    let other_reviews: i64 = sqlx::query_scalar("SELECT count(*) FROM gh_readable_event WHERE repository=$1 AND event_kind='review_submitted'")
+        .bind(repository.as_str()).fetch_one(&pool).await?;
+    assert!(
+        other_reviews > 0,
+        "other accounts remain eligible after credential rotation"
+    );
+
     let resolved = review_and_thread(&repository, native_review.get(), true);
     restarted
         .ingest_observation(
@@ -177,6 +205,23 @@ async fn native_review_receipts_preserve_owner_reviews_and_later_thread_actions(
         reopening, 1,
         "an owner reopening a native thread is a distinct action"
     );
+    let poisoned: uuid::Uuid = sqlx::query_scalar("UPDATE gh_event SET normalized_payload=$2 WHERE repository=$1 AND source_review_id=3 AND event_kind='review_submitted' RETURNING event_id")
+        .bind(repository.as_str()).bind(b"not json".as_slice()).fetch_one(&pool).await?;
+    let next = restarted
+        .next_rule_event(&repository, &rule)
+        .await?
+        .expect("next readable event");
+    assert_ne!(next.event.id().into_uuid(), poisoned);
+    let quarantined: bool =
+        sqlx::query_scalar("SELECT decode_error IS NOT NULL FROM gh_event WHERE event_id=$1")
+            .bind(poisoned)
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        quarantined,
+        "actor filtering preserves ordinary event quarantine"
+    );
+
     pool.close().await;
     core.close().await;
     Ok(())

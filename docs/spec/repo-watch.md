@@ -39,9 +39,10 @@ Native review publication and thread replies retain their returned review IDs
 and reply comment IDs before releasing the repository frontier lock. Review
 submissions and new thread openings retain their source review ID with
 `gh_event`; matching native receipts exclude them from `gh_readable_event`.
-Other reviews by the same login and subsequent thread reopenings remain
-eligible. Receipts are permanent; writes without a retained acknowledgement have
-no self-write provenance.
+Observation resolves the authenticated GitHub account before ingesting facts;
+review submissions by that account are excluded from rule evaluation, including
+retries. Subsequent thread reopenings remain eligible. Receipts are permanent;
+writes without a retained acknowledgement have no receipt provenance.
 
 Rules are versioned `RepoWatchRule` values. Fields within one matcher are
 conjunctive and rules are evaluated independently. The checked matcher owns the
@@ -532,6 +533,9 @@ remains unchanged on replay.
 During checkout provisioning, non-repository-watch input admission is deferred
 without claiming its command identity, so the kickoff is the first queued input.
 Clients can retry the same command after provisioning completes.
+
+Review-response sessions submit no pull request review and post no completion
+comment when no thread was fixed and the head is unchanged.
 
 ## Planned
 
