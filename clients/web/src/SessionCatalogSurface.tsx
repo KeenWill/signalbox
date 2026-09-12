@@ -5,7 +5,6 @@ import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import type { WebSessionCatalogSnapshot } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import {
-  admittedSessionSearch,
   ProductRequestError,
   type ProductSessionState,
   ProductTransportError,
@@ -56,6 +55,13 @@ export function SessionCatalogSurface({
   onStateChange: (state: ProductSessionState, mode?: 'push' | 'close' | 'replace') => void
 }) {
   const navigate = useNavigate()
+  const bootstrap = useQuery({
+    queryKey: ['production', 'bootstrap'],
+    queryFn: ({ signal }) => productTransport.readBootstrap(signal),
+    staleTime: Number.POSITIVE_INFINITY,
+  })
+  const searchAvailable = bootstrap.data?.capabilities.bounded_lexical_search === true
+
   const dispatch = useAppDispatch()
   const keyboardSelection = useAppSelector((root) => root.app.selectedTimeline)
   const sessionButtons = useRef(new Map<string, HTMLButtonElement>())
@@ -148,9 +154,13 @@ export function SessionCatalogSurface({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
-    const q = String(form.get('q') ?? '')
-    if (q.length > 0 && admittedSessionSearch(q) === undefined) {
-      setSearchError('Search must fit 1,024 UTF-8 bytes and contain no null characters.')
+    const q = String(form.get('q') ?? '').trim()
+    const queryLimit = bootstrap.data?.limits.max_search_query_bytes ?? 0
+    if (
+      q &&
+      (!searchAvailable || new TextEncoder().encode(q).length > queryLimit || q.includes('\0'))
+    ) {
+      setSearchError('Check your search. Try a shorter phrase.')
       return
     }
     setSearchError(null)
@@ -194,6 +204,7 @@ export function SessionCatalogSurface({
             <Search aria-hidden="true" />
             <input
               name="q"
+              disabled={!searchAvailable}
               defaultValue={state.q}
               placeholder="Messages, tool arguments and results"
               onKeyDown={(event) => {
