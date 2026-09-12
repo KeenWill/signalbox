@@ -2,6 +2,20 @@
 
 # root: types-2
 
+## WebNullableU64
+
+```rust
+pub enum WebNullableU64 {
+    Value(WebU64),
+    Null,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl WebNullableU64 {
+    #[must_use]
+    pub fn from_option(value: option::Option<u64>) -> Self;
+}
+```
+
 ## WebNullableU128
 
 ```rust
