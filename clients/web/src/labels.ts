@@ -10,7 +10,7 @@ const labels = new Map<string, string>(
     scale: 'Scale',
     fast: 'Fast',
     abandoned: 'Abandoned',
-    accepted_input: 'Your message',
+    accepted_input: 'Message',
     achieved: 'Achieved',
     achieved_declared: 'Completion reported',
     achieved_verified: 'Completion verified',
