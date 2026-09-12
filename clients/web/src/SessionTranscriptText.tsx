@@ -15,7 +15,7 @@ import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { conversationEntryKey } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
-import { readTranscriptWindow, TRANSCRIPT_RETAINED_WINDOWS } from './session-timeline/transcript'
+import { TRANSCRIPT_RETAINED_WINDOWS, TranscriptWindowReader } from './session-timeline/transcript'
 import { readTurnTranscript } from './session-timeline/turn-detail'
 import {
   groupTranscriptTurns,
@@ -173,12 +173,13 @@ function TranscriptWindow({
     configuresTranscriptDetail: true,
   }
 
+  const reader = useMemo(() => new TranscriptWindowReader(sessionId), [sessionId])
   const transcript = useInfiniteQuery({
     queryKey: ['production', 'scrolling-transcript', sessionId, eventSequence, limits],
     initialPageParam: (eventSequence
       ? { kind: 'around', eventSequence }
       : { kind: 'latest' }) as SessionWindowAnchor,
-    queryFn: ({ pageParam, signal }) => readTranscriptWindow(sessionId, pageParam, limits, signal),
+    queryFn: ({ pageParam, signal }) => reader.read(pageParam, limits, signal),
     getPreviousPageParam: (page): SessionWindowAnchor | undefined =>
       page.window.continuation_before
         ? { kind: 'before', eventSequence: page.window.continuation_before.event_sequence }
@@ -571,6 +572,7 @@ function TurnContent({
                     limits={limits}
                     renderTool={renderTool}
                   />
+                  {more(toolContinuationSequence(turn, entry))}
                 </div>
               ))}
             {detail === 'results' &&
