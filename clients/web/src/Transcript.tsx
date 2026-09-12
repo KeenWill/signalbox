@@ -198,6 +198,7 @@ export function VirtualTranscript({
   className = 'session-transcript-scroll',
   autoFocus = false,
   initialEnd = false,
+  followEnd = false,
   onRange,
   onEdge,
   onKeyDown,
@@ -215,6 +216,7 @@ export function VirtualTranscript({
   className?: string
   autoFocus?: boolean
   initialEnd?: boolean
+  followEnd?: boolean
   onRange?: (start: number, end: number) => void
   onEdge?: (direction: 'before' | 'after') => void
   onKeyDown?: React.KeyboardEventHandler<HTMLDivElement>
@@ -226,6 +228,9 @@ export function VirtualTranscript({
   const selected = selectedId ? ids.indexOf(selectedId) : -1
   const anchor = useRef<{ id: string; offset: number } | null>(null)
   const initialized = useRef(false)
+  const atEnd = useRef(initialEnd)
+  const previousLast = useRef<string | undefined>(undefined)
+  const touchStart = useRef<number | null>(null)
   const virtualizer = useVirtualizer({
     count: ids.length,
     getScrollElement: () => parent.current,
@@ -259,12 +264,20 @@ export function VirtualTranscript({
     if (!initialized.current) {
       initialized.current = true
       if (initialEnd && selected < 0) virtualizer.scrollToIndex(ids.length - 1, { align: 'end' })
+    } else if (
+      followEnd &&
+      atEnd.current &&
+      previousLast.current &&
+      ids.includes(previousLast.current)
+    ) {
+      virtualizer.scrollToIndex(ids.length - 1, { align: 'end' })
     } else if (anchor.current) {
       const index = ids.indexOf(anchor.current.id)
       const position = index < 0 ? undefined : virtualizer.getOffsetForIndex(index, 'start')
       if (position) virtualizer.scrollToOffset(position[0] + anchor.current.offset)
     }
-  }, [ids, initialEnd, selected, virtualizer])
+    previousLast.current = ids.at(-1)
+  }, [ids, initialEnd, followEnd, selected, virtualizer])
   const remember = () => {
     const offset = parent.current?.scrollTop ?? 0
     const row = virtualizer.getVirtualItems().find((item) => item.end > offset)
@@ -274,6 +287,8 @@ export function VirtualTranscript({
     const element = parent.current
     if (!element) return
     remember()
+    atEnd.current =
+      direction !== 'before' && element.scrollHeight - element.scrollTop - element.clientHeight <= 1
     if (element.scrollTop < estimateSize && direction !== 'after') onEdge?.('before')
     else if (
       element.scrollHeight - element.scrollTop - element.clientHeight < estimateSize &&
@@ -292,7 +307,20 @@ export function VirtualTranscript({
       aria-activedescendant={
         role === 'listbox' && selected >= 0 ? (selectedId ?? undefined) : undefined
       }
-      onKeyDown={onKeyDown}
+      onKeyDown={(event) => {
+        onKeyDown?.(event)
+        if (event.target !== event.currentTarget || event.defaultPrevented) return
+        if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) edge('before')
+        if (['ArrowDown', 'PageDown', 'End'].includes(event.key)) edge('after')
+      }}
+      onTouchStart={(event) => {
+        touchStart.current = event.touches[0]?.clientY ?? null
+      }}
+      onTouchMove={(event) => {
+        const position = event.touches[0]?.clientY
+        if (position !== undefined && touchStart.current !== null)
+          edge(position > touchStart.current ? 'before' : 'after')
+      }}
       onScroll={() => edge()}
       onWheel={(event) => edge(event.deltaY < 0 ? 'before' : 'after')}
       data-mounted-rows={rows.length}
