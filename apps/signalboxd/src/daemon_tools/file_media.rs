@@ -57,6 +57,7 @@ impl DaemonFileMediaExecutor {
     pub async fn compose(
         pool: PgPool,
         stores: Arc<BlobStoreRegistry>,
+        maximum_raster_dimension: u32,
     ) -> Result<(CompiledToolCatalog, Self), DaemonToolExecutorError> {
         let executable =
             std::env::current_exe().map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
@@ -66,7 +67,17 @@ impl DaemonFileMediaExecutor {
             .join("signalbox-file-media-text-worker");
         let image_worker = worker.with_file_name("signalbox-file-media-image-worker");
         let pdf_worker = worker.with_file_name("signalbox-file-media-pdf-worker");
-        Self::compose_with_workers(pool, stores, worker, image_worker, pdf_worker).await
+        let svg_worker = worker.with_file_name("signalbox-file-media-svg-worker");
+        Self::compose_with_workers(
+            pool,
+            stores,
+            worker,
+            image_worker,
+            pdf_worker,
+            svg_worker,
+            maximum_raster_dimension,
+        )
+        .await
     }
 
     async fn compose_with_workers(
@@ -75,6 +86,8 @@ impl DaemonFileMediaExecutor {
         worker: std::path::PathBuf,
         image_worker: std::path::PathBuf,
         pdf_worker: std::path::PathBuf,
+        svg_worker: std::path::PathBuf,
+        maximum_raster_dimension: u32,
     ) -> Result<(CompiledToolCatalog, Self), DaemonToolExecutorError> {
         let declaration = signalbox_file_media_adapters_text::text_family_declaration()
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
@@ -99,6 +112,18 @@ impl DaemonFileMediaExecutor {
                 .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
         );
         declarations.push(pdf);
+        let svg = signalbox_file_media_adapter_svg::declaration()
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        bindings.push(
+            WorkerBinding::try_new(svg_worker, svg.clone())
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
+        );
+        declarations.push(
+            signalbox_file_media_adapter_svg::declaration_with_raster_dimension(
+                maximum_raster_dimension,
+            )
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
+        );
         let processor = SandboxedFileMediaProcessor::try_new(
             "/usr/bin/bwrap",
             bindings,
@@ -548,12 +573,17 @@ generated_artifact = "fixture"
         let pdf_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_pdf_worker")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| worker.with_file_name("signalbox-file-media-pdf-worker"));
+        let svg_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_svg_worker")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| worker.with_file_name("signalbox-file-media-svg-worker"));
         let (family, executor) = DaemonFileMediaExecutor::compose_with_workers(
             pool.clone(),
             stores,
             worker,
             image_worker,
             pdf_worker,
+            svg_worker,
+            signalbox_file_media_runtime::MAX_IMAGE_AXIS,
         )
         .await?;
         let composed = base.with_compiled_catalog(family)?;
