@@ -491,14 +491,14 @@ function ProductToolbar({
 // hidden aside and focus a Digest input nobody can see.
 const INSPECTOR_SHEET_MEDIA = '(max-width: 1260px)'
 
-function useNarrowInspector(): boolean {
-  const [narrow, setNarrow] = useState(() => window.matchMedia(INSPECTOR_SHEET_MEDIA).matches)
+function useMediaQuery(media: string): boolean {
+  const [narrow, setNarrow] = useState(() => window.matchMedia(media).matches)
   useEffect(() => {
-    const query = window.matchMedia(INSPECTOR_SHEET_MEDIA)
+    const query = window.matchMedia(media)
     const update = () => setNarrow(query.matches)
     query.addEventListener('change', update)
     return () => query.removeEventListener('change', update)
-  }, [])
+  }, [media])
   return narrow
 }
 
@@ -552,7 +552,8 @@ export function ProductApp({
       dispatch(actions.artifactOriginalReleased(artifactResolutionId(artifactRequest)))
     }
   }, [artifactRequest, dispatch])
-  const narrowInspector = useNarrowInspector()
+  const narrowInspector = useMediaQuery(INSPECTOR_SHEET_MEDIA)
+  const narrowNavigation = useMediaQuery('(max-width: 760px)')
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
   const [windowRequest, setWindowRequest] = useState<{
@@ -680,6 +681,7 @@ export function ProductApp({
           ? (anchor) =>
               setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
           : undefined,
+      sidebarAvailable: !narrowNavigation && app.layout === 'workbench',
       navigationLocked: navigationDisabled,
       navigate: (path) => {
         if (path === '/scenario/streaming') {
@@ -703,6 +705,8 @@ export function ProductApp({
       },
     }
   }, [
+    app.layout,
+    narrowNavigation,
     artifactAvailable,
     bootstrap.data,
     bootstrap.isSuccess,

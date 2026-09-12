@@ -6,6 +6,7 @@ import { actions } from './state'
 export interface ProductCommandContext extends CommandContext {
   navigate: (path: string) => void
   openNavigation: () => void
+  sidebarAvailable?: boolean
 }
 
 const productNavigationCommands = [
@@ -15,6 +16,7 @@ const productNavigationCommands = [
     description: 'Collapse or expand the sidebar.',
     category: 'Surface',
     bindings: [],
+    available: (context: ProductCommandContext) => context.sidebarAvailable === true,
     run: (context: ProductCommandContext) => context.dispatch(actions.navigationToggled()),
   },
   {
