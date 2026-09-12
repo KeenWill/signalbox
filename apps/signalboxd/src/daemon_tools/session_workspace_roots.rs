@@ -398,12 +398,14 @@ pub(super) fn another_session_bound(
     bindings: &BTreeMap<SessionId, RecordedSessionBinding>,
     session: SessionId,
     composed: ComposedWorkspaceIdentity,
+    still_reachable: impl Fn(SessionId) -> bool,
 ) -> bool {
     bindings.iter().any(|(bound, binding)| {
         *bound != session
             && binding
                 .derived_identity()
                 .is_some_and(|bound_identity| bound_identity.shares_a_directory_with(&composed))
+            && still_reachable(*bound)
     })
 }
 
@@ -468,34 +470,6 @@ pub(super) fn a_derived_binding_exists(
     bindings
         .iter()
         .any(|(bound, binding)| *bound != session && binding.derived_identity().is_some())
-}
-
-/// Whether any other session's derived binding shares a directory with the
-/// configured composition as its pathname stands now.
-///
-/// The mirror of the comparison a derived dispatch makes against the configured
-/// root. A configured-root request has to make it too: the configured
-/// composition is never re-resolved, so a `.git` bind-mounted from a derived
-/// session's workspace over the configured root's own leaves the configured
-/// executors reaching that workspace while the session that bound it keeps a
-/// separate serialization domain. Checking only on the derived branch would
-/// protect only the sessions that take it.
-pub(super) fn a_derived_binding_shares_the_configured_root(
-    bindings: &BTreeMap<SessionId, RecordedSessionBinding>,
-    session: SessionId,
-    pinned: ComposedWorkspaceIdentity,
-    standing: ComposedWorkspaceIdentity,
-) -> bool {
-    bindings.iter().any(|(bound, binding)| {
-        *bound != session
-            && binding.derived_identity().is_some_and(|identity| {
-                shares_a_directory_with_the_configured_root(
-                    identity,
-                    pinned.clone(),
-                    standing.clone(),
-                )
-            })
-    })
 }
 
 /// Filesystem identity of one directory.

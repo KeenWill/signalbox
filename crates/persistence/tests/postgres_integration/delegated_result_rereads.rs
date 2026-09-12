@@ -1157,11 +1157,11 @@ async fn delegated_initial_target_failure_materializes_parent_delivery()
     Ok(())
 }
 
-/// reconciliation-required delegated work remains unresolved relationship work and cannot publish a
-/// child result, parent update, or wake.
+/// reconciliation-required delegated work withholds parent delivery and is already terminal to a
+/// descendant cascade.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegated_reconciliation_withholds_result_and_parent_delivery()
+async fn delegated_reconciliation_withholds_result_and_is_already_terminal_to_cascade()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd600;
@@ -1248,6 +1248,127 @@ async fn delegated_reconciliation_withholds_result_and_parent_delivery()
         ModelCallTerminalOutcome::ReconciliationRequired(_)
     ));
     assert_eq!(evidence, (1, 0, 0, 0, 0));
+    let terminal_before: (String, String, Uuid, Uuid, Uuid, bool) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, terminal_frontier_id,
+                terminal_attempt_id, terminal_model_call_id, delegation_runtime_terminal
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal_before.0, "terminal");
+    assert_eq!(terminal_before.1, "reconciliation_required");
+
+    let nested_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x220));
+    let nested_child = SessionId::from_uuid(Uuid::from_u128(seed + 0x221));
+    sqlx::query("ALTER TABLE session_delegation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind, on_parent_stopped, on_parent_cancelled)
+         VALUES ($1, $2, $3, $4, 'bound', 'cancel', 'stop')",
+    )
+    .bind(nested_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(nested_child.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let nested_frontier: (String, String) = sqlx::query_as(
+        "SELECT effective_parent_kind, expected_action
+           FROM delegation_cascade_expected_frontier($1, 'stopped')
+          WHERE spawning_tool_request_id = $2",
+    )
+    .bind(parent.into_uuid())
+    .bind(nested_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(nested_frontier, ("stopped".into(), "cancel".into()));
+
+    sqlx::query("ALTER TABLE session_delegation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM session_delegation
+          WHERE spawning_tool_request_id = $1",
+    )
+    .bind(nested_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    use signalbox_domain::{
+        CommandPrincipal, SessionLifecycleCommand, SessionLifecycleOperation, StopStickiness,
+    };
+    use signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository;
+
+    let cascade_command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 34));
+    SessionLifecycleCommandRepository::new(pool.clone())
+        .handle(
+            SessionLifecycleCommand::new(
+                cascade_command,
+                parent,
+                SessionLifecycleOperation::Stop {
+                    sticky: StopStickiness::Sticky,
+                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                },
+            ),
+            CommandPrincipal::Operator,
+        )
+        .await?;
+    let cascade: (String, i64, i64, String, String, Uuid, Uuid, Uuid, bool) = sqlx::query_as(
+        "SELECT event.outcome_kind,
+                (SELECT count(*) FROM session_delegation_logical_terminal
+                  WHERE spawning_tool_request_id = $1),
+                (SELECT count(*) FROM session_child_result
+                  WHERE spawning_tool_request_id = $1),
+                lifecycle.state_kind, lifecycle.terminal_disposition_kind,
+                lifecycle.terminal_frontier_id, lifecycle.terminal_attempt_id,
+                lifecycle.terminal_model_call_id, lifecycle.delegation_runtime_terminal
+           FROM session_delegation_event AS event
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.session_id = $2 AND lifecycle.turn_id = $3
+          WHERE event.spawning_tool_request_id = $1
+            AND event.provenance_command_id = $4",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(cascade_command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(cascade.0, "already_terminal");
+    assert_eq!(cascade.1, 0);
+    assert_eq!(cascade.2, 0);
+    assert_eq!(
+        (
+            cascade.3.as_str(),
+            cascade.4.as_str(),
+            cascade.5,
+            cascade.6,
+            cascade.7,
+            cascade.8,
+        ),
+        (
+            terminal_before.0.as_str(),
+            terminal_before.1.as_str(),
+            terminal_before.2,
+            terminal_before.3,
+            terminal_before.4,
+            terminal_before.5,
+        )
+    );
 
     pool.close().await;
     drop(container);

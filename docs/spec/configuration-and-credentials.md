@@ -677,14 +677,18 @@ lifetime; the first record written wins, so two concurrent first requests
 converge on one root. Isolation is checked against directory identities rather
 than pathnames: a composed root sharing its worktree, worktree administration,
 or common administration directory with the configured root or with another
-bound session is refused. Linked worktrees sharing common references and objects
-cannot bind separate session serialization domains. Administration directories
-nested under another bound workspace or its Git administration are refused by
-comparing captured ancestry with all three bound directory identities. Ancestry
-capture needs only search permission on ancestor directories and refuses device
-boundaries or Linux mount-ID boundaries. Failure to compose or bind a derived
-root closes that tool request as a known failure whose sanitized detail names
-the closed reason, and it never falls back to another root.
+bound session is refused. A recorded derived identity whose executors are no
+longer retained and whose directory is confirmed absent does not reserve
+recycled inodes against other sessions; its own session remains bound to the
+missing root and fails closed. Linked worktrees sharing common references and
+objects cannot bind separate session serialization domains. Administration
+directories nested under another bound workspace or its Git administration are
+refused by comparing captured ancestry with all three bound directory
+identities. Ancestry capture needs only search permission on ancestor
+directories and refuses device boundaries or Linux mount-ID boundaries. Failure
+to compose or bind a derived root closes that tool request as a known failure
+whose sanitized detail names the closed reason, and it never falls back to
+another root.
 
 The secret reaches the provider through the profile's delivery, never through a
 process environment variable of the daemon. Two families of one adapter may

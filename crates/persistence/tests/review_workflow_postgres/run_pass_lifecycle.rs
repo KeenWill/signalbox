@@ -270,7 +270,8 @@ async fn pass_results_require_exact_child_rows() -> Result<(), Box<dyn Error>> {
                 result_finding_run_id = $3,
                 result_finding_pass_id = $4,
                 result_event_ordinal = 1,
-                result_event_kind = 'accepted'
+                result_event_kind = 'accepted',
+                result_judge_confidence = 5
           WHERE pass_id = $1",
     )
     .bind(judge_pass.pass().into_uuid())

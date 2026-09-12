@@ -502,6 +502,12 @@ pub(super) fn decode_finding_event(
     let referenced_pass: Option<Uuid> = row.try_get("referenced_finding_pass_id")?;
     let referenced_status: Option<String> = row.try_get("referenced_finding_status")?;
     let external_link: Option<Uuid> = row.try_get("external_link_id")?;
+    if kind != "accepted" && row.try_get::<Option<i16>, _>("judge_confidence")?.is_some() {
+        return Err(corruption(
+            "review_finding_event",
+            String::from("non-accepted event has judge confidence"),
+        ));
+    }
     let kind = match (
         kind.as_str(),
         reason,
@@ -512,7 +518,20 @@ pub(super) fn decode_finding_event(
         referenced_status,
         external_link,
     ) {
-        ("accepted", None, None, None, None, None, None, None) => ReviewFindingEventKind::Accepted,
+        ("accepted", None, None, None, None, None, None, None) => {
+            ReviewFindingEventKind::Accepted {
+                confidence: row
+                    .try_get::<Option<i16>, _>("judge_confidence")?
+                    .and_then(|value| u8::try_from(value).ok())
+                    .and_then(signalbox_domain::ReviewJudgeConfidence::try_new)
+                    .ok_or_else(|| {
+                        corruption(
+                            "review_finding_event",
+                            String::from("invalid judge confidence"),
+                        )
+                    })?,
+            }
+        }
         ("rejected", Some(reason), None, None, None, None, None, None) => {
             ReviewFindingEventKind::Rejected {
                 reason: review_text(reason, "review_finding_event")?,

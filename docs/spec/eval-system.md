@@ -3,6 +3,18 @@
 The evaluation system measures the approval judge against a labeled corpus and
 reports a scorecard.
 
+`scripts/review_judge_eval.py` runs externally supplied review findings through
+the daemon's configured judgment session template. Its JSONL cases carry `id`,
+`head_sha`, `base_sha`, `pr_title`, `pr_scope`, `findings` (with `finding_id`),
+and `context`. It reuses one detached scratch worktree per head SHA across runs
+under the configured workspace, keeps case inputs and outputs separate, supplies
+the base diff, and retains the structured tool-written judgment with session,
+turn, frontier, usage, and elapsed-time evidence. The caller can select a
+catalog alias with `--alias` or a direct catalog entry with `--selection-id`,
+and override reasoning with `--effort`. It performs no publication. A failed
+trial with no observed terminal frontier stops new session submissions until the
+caller resolves it. Labels and scoring stay with the caller.
+
 ## Overview
 
 The evaluation system defines, on top of the [workflows](workflows.md) layer,

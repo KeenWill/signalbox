@@ -857,6 +857,11 @@ impl CancelledTurnExecutionReconstitutionInput {
         ended_call: option::Option<ModelCallId>,
         interrupt: AppliedInterruptCommandResult,
     ) -> Self;
+    pub const fn foreground_child_wait(
+        owning_turn: TurnId,
+        wait: EndedToolAttempt,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
     pub fn with_terminal_tool_attempts(
         self,
         terminal_tool_attempts: vec::Vec<EndedToolAttempt>,

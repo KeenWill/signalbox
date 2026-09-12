@@ -668,6 +668,11 @@ fn tool_round_producing_call_in_window(
                                     .get(attempt)
                                     .is_some_and(|ended| ended.request() == request)
                         }
+                        Some(SemanticTranscriptEntryPayload::DelegationResult {
+                            awaiting_request,
+                            mode: crate::DelegationWaitMode::Foreground,
+                            ..
+                        }) => *awaiting_request == request,
                         Some(SemanticTranscriptEntryPayload::ToolDenied { request: actual }) => {
                             *actual == request
                                 && denied_requests.contains(actual)
