@@ -2063,7 +2063,7 @@ async fn run_hub_incarnation(
                 web_search: web_search_credentials,
                 code_host: code_host_credentials,
             },
-            code_host_transport,
+            code_host_transport.with_review_writes(Some(review_writes.clone())),
             model_configuration.web_fetch_egress_policy(),
         ),
     };
