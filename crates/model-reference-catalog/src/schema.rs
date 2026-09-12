@@ -1465,10 +1465,13 @@ fn validate_window(window: &DateWindow, subject: &str) -> Result<(), CatalogErro
         )));
     }
     if window.precision == DatePrecision::ExactDay
-        && window.effective_from.as_deref() != Some(window.first_observed_new_rate.as_str())
+        && window
+            .effective_from
+            .as_deref()
+            .is_some_and(|from| from > window.first_observed_new_rate.as_str())
     {
         return Err(CatalogError::new(format!(
-            "exact-day window {subject} has inconsistent effective and observation dates"
+            "exact-day window {subject} observes its rate before the effective date"
         )));
     }
     if let (Some(from), Some(until)) = (&window.effective_from, &window.effective_until)
@@ -1488,7 +1491,11 @@ fn validate_window(window: &DateWindow, subject: &str) -> Result<(), CatalogErro
         )));
     }
     if let Some(last_old) = &window.last_observed_old_rate
-        && last_old >= &window.first_observed_new_rate
+        && last_old
+            >= window
+                .effective_from
+                .as_ref()
+                .unwrap_or(&window.first_observed_new_rate)
     {
         return Err(CatalogError::new(format!(
             "window {subject} does not leave an ordered observation boundary"

@@ -752,6 +752,81 @@ fn consumer_mapping_cannot_start_after_model_retirement() {
 }
 
 #[test]
+fn exact_rate_resolves_from_effective_day_before_later_observation() {
+    let catalog = bundled_catalog().unwrap();
+    let resolution = catalog
+        .resolve(
+            Provider::Openai,
+            "gpt-6-astra",
+            "2026-09-03",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+    let rates = resolution.price().unwrap().resolved_rate_sets().unwrap();
+    let standard = rates
+        .iter()
+        .find(|set| set.id == "oai-gpt6-astra-standard")
+        .unwrap();
+    assert_eq!(
+        standard.window.effective_from.as_deref(),
+        Some("2026-09-03")
+    );
+    assert_eq!(standard.window.first_observed_new_rate, "2026-09-11");
+    assert_eq!(
+        standard
+            .rate(
+                RateDimension::Input,
+                "tier=standard, context=up_to_272k, region=global"
+            )
+            .unwrap()
+            .usd_per_million_tokens,
+        Some(Decimal::new(10, 0))
+    );
+    assert_eq!(
+        standard
+            .rate(
+                RateDimension::Output,
+                "tier=standard, context=over_272k, region=global"
+            )
+            .unwrap()
+            .usd_per_million_tokens,
+        Some(Decimal::new(75, 0))
+    );
+}
+
+#[test]
+fn exact_rate_cannot_be_observed_before_it_takes_effect() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    rate_set_mut(&mut raw, "oai-gpt6-astra-standard").unwrap()["window"]["first_observed_new_rate"] =
+        Value::String(String::from("2026-09-02"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("observes its rate before the effective date")
+    );
+}
+
+#[test]
+fn old_rate_observation_cannot_follow_the_exact_effective_day() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    let window = &mut rate_set_mut(&mut raw, "oai-gpt6-astra-standard").unwrap()["window"];
+    window["effective_from"] = Value::String(String::from("2026-09-03"));
+    window["first_observed_new_rate"] = Value::String(String::from("2026-09-11"));
+    window["last_observed_old_rate"] = Value::String(String::from("2026-09-10"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not leave an ordered observation boundary")
+    );
+}
+
+#[test]
 fn exact_day_observation_boundary_must_be_ordered() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
     rate_set_mut(&mut raw, "oai-o3-reduced").unwrap()["window"]["last_observed_old_rate"] =

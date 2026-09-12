@@ -189,6 +189,11 @@ selection_id = "6f62d570-5b7e-4fa2-bf0b-46c6f7114631"
 target_id = "b7e4e71b-a104-4ac2-b580-782927923fb5"
 model_family = "codex_cli"
 provider_model = "gpt-5.6-sol"
+rate_version = "2026-09-11-catalog"
+input_usd_per_million_tokens = "4"
+output_usd_per_million_tokens = "20"
+cache_creation_input_usd_per_million_tokens = "5"
+cache_read_input_usd_per_million_tokens = "0.40"
 max_output_tokens = 8192
 context_window_tokens = 258400
 
