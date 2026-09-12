@@ -5,7 +5,7 @@ test('tool summaries expose raw evidence by keyboard', async ({ page }, testInfo
   page.on('pageerror', (error) => errors.push(error.message))
   await page.goto('/src/features/tools/scenario.html')
   await expect(page.getByText('Exit 0')).toBeVisible()
-  const unknown = page.getByRole('article', { name: 'Tool custom_tool', exact: true })
+  const unknown = page.getByRole('article', { name: 'Tool custom_tool', exact: true }).first()
   await expect(unknown.getByText('Greeting')).toBeVisible()
   const raw = unknown.getByRole('button', { name: 'Raw' })
   await raw.focus()

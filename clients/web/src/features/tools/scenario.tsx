@@ -14,8 +14,11 @@ if (root)
   createRoot(root).render(
     <main style={{ maxWidth: '60rem', margin: '1rem auto', padding: '1rem' }}>
       <h1>Tool calls</h1>
-      {toolExamples.map((tool) => (
-        <ToolCall key={tool.tool_name} tool={tool} />
+      {toolExamples.flat().map((tool) => (
+        <ToolCall
+          key={`${tool.tool_name}:${tool.arguments ? 'arguments' : 'output'}`}
+          tool={tool}
+        />
       ))}
     </main>,
   )

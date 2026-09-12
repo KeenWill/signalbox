@@ -222,15 +222,7 @@ function Web({ arguments: args, result, resultExcerpt }: RendererProps) {
 function Git({ arguments: args, result, resultExcerpt }: RendererProps) {
   return (
     <>
-      <strong>
-        {[
-          textField(args.repository),
-          args.number == null ? '' : `#${textField(args.number)}`,
-          textField(args.title ?? args.message ?? args.branch ?? args.name ?? result.branch),
-        ]
-          .filter(Boolean)
-          .join(' · ')}
-      </strong>
+      <FieldList value={args} />
       {typeof result.url === 'string' && <Link url={result.url} title={result.title} />}
       {typeof result.patch === 'string' ? (
         <>
@@ -303,6 +295,13 @@ export function ToolCall({ tool }: ToolCallProps) {
             <Excerpt excerpt={tool.arguments} label="Arguments" />
           )}
         </>
+      )}
+      {!tool.arguments && <small>Arguments are on another detail page</small>}
+      {evidence?.result_present && !evidence.result && (
+        <small>Output is on another detail page</small>
+      )}
+      {evidence?.failure_present && !evidence.failure && (
+        <small>Failure details are on another detail page</small>
       )}
       <Excerpt excerpt={evidence?.failure} label="Failure" />
     </article>

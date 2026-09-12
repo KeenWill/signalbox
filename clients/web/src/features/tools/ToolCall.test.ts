@@ -1,34 +1,91 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
+import { detailItems, detailPage, resultCursor } from '../../../e2e/session-detail-fixture'
+import { decodeWebSessionTimelineDetailPage } from '../../generated/web-contract.mjs'
 import { ToolApproval, ToolCall } from './ToolCall'
 import { excerptFields, searchResultText, webLink } from './toolPresentation'
 import { toolExample, toolExcerpt } from './toolScenario'
 
-const render = (tool: ReturnType<typeof toolExample>) =>
-  renderToStaticMarkup(createElement(ToolCall, { tool }))
+const render = (tools: ReturnType<typeof toolExample>) =>
+  tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it('renders the availability of arguments and output on decoded continuation pages', () => {
+    const tools = toolExample(
+      'sandboxed_exec',
+      { program: 'cargo', arguments: ['check'] },
+      { outcome: { kind: 'exited', code: 7 } },
+    )
+    const item = detailItems[1]
+    if (item?.body.type !== 'tool_batch') throw new Error('Tool detail fixture required')
+    const body = item.body
+    const pages = tools.map((tool, index) =>
+      decodeWebSessionTimelineDetailPage(
+        detailPage(
+          [
+            {
+              ...item,
+              projected_body_bytes:
+                128 +
+                Number(
+                  (
+                    tool.arguments ??
+                    (tool.evidence.type === 'physical_attempt' ? tool.evidence.result : null)
+                  )?.total_bytes,
+                ),
+              body: { ...body, tools: [tool] },
+            },
+          ],
+          index === 0 ? resultCursor : null,
+        ),
+      ),
+    )
+    const markup = pages.map((page) => {
+      const body = page.items[0]?.body
+      if (body?.type !== 'tool_batch' || !body.tools[0]) throw new Error('Decoded tool required')
+      return renderToStaticMarkup(createElement(ToolCall, { tool: body.tools[0] }))
+    })
+    expect(markup[0]).toContain('cargo')
+    expect(markup[0]).toContain('Output is on another detail page')
+    expect(markup[1]).toContain('Exit 7')
+    expect(markup[1]).toContain('Arguments are on another detail page')
+  })
+
+  it.each([
+    ['git_stage', { paths: ['src/main.rs'] }, 'Paths', 'src/main.rs'],
+    ['git_diff', { scope: 'range', base: 'main', head: 'feature' }, 'Base', 'main'],
+    ['git_log', { revision: 'feature' }, 'Revision', 'feature'],
+  ] as const)('keeps selectors for %s visible', (name, args, label, value) => {
+    const markup = render(toolExample(name, args, {}))
+    expect(markup).toContain(`<dt>${label}</dt>`)
+    expect(markup).toContain(value)
+  })
+
   it.each([
     ['preauthorization_rejected', 'Authorization rejected'],
     ['invalid_arguments', 'Invalid arguments'],
     ['unknown_tool', 'Unknown tool'],
     ['execution_failed', 'Execution failed'],
   ] as const)('shows %s without a projected failure excerpt', (cause, label) => {
-    const tool = toolExample('read_file', { path: 'file.txt' }, null)
+    const [tool] = toolExample('read_file', { path: 'file.txt' }, null)
     if (tool.evidence.type !== 'physical_attempt') throw new Error('Physical fixture required')
-    const markup = render({
-      ...tool,
-      evidence: {
-        ...tool.evidence,
-        state: 'known_failed',
-        cause,
-        failure_present: true,
-        failure: null,
-        result_present: false,
-        result: null,
-      },
-    })
+    const markup = renderToStaticMarkup(
+      createElement(ToolCall, {
+        tool: {
+          ...tool,
+          evidence: {
+            ...tool.evidence,
+            state: 'known_failed',
+            cause,
+            failure_present: true,
+            failure: null,
+            result_present: false,
+            result: null,
+          },
+        },
+      }),
+    )
     expect(markup).toContain('Failed')
     expect(markup).toContain(label)
   })

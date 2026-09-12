@@ -15,22 +15,33 @@ export const toolExample = (
   name: string,
   args: unknown,
   result: unknown,
-): WebTimelineToolAttempt => ({
-  request_id: '00000000-0000-7000-8000-000000000001',
-  tool_name: name,
-  approval_posture: 'auto',
-  approval_judge_escalated: false,
-  arguments: toolExcerpt(JSON.stringify(args)),
-  evidence: {
-    type: 'physical_attempt',
-    attempt_id: '00000000-0000-7000-8000-000000000002',
-    state: 'completed',
-    effect_posture: 'effect_free',
-    result_present: true,
-    failure_present: false,
-    result: toolExcerpt(JSON.stringify(result)),
-  },
-})
+): [WebTimelineToolAttempt, WebTimelineToolAttempt] => {
+  const tool: WebTimelineToolAttempt = {
+    request_id: '00000000-0000-7000-8000-000000000001',
+    tool_name: name,
+    approval_posture: 'auto',
+    approval_judge_escalated: false,
+    arguments: toolExcerpt(JSON.stringify(args)),
+    evidence: {
+      type: 'physical_attempt',
+      attempt_id: '00000000-0000-7000-8000-000000000002',
+      state: 'completed',
+      effect_posture: 'effect_free',
+      result_present: true,
+      failure_present: false,
+      result: null,
+    },
+  }
+  if (tool.evidence.type !== 'physical_attempt') throw new Error('Physical fixture required')
+  return [
+    tool,
+    {
+      ...tool,
+      arguments: null,
+      evidence: { ...tool.evidence, result: toolExcerpt(JSON.stringify(result)) },
+    },
+  ]
+}
 
 export const toolExamples = [
   toolExample(
