@@ -127,13 +127,14 @@ use fixtures::*;
 use report::*;
 
 #[tokio::test(start_paused = true)]
-async fn turn_budget_covers_session_exchanges_and_two_delegated_web_judges() {
+async fn turn_budget_covers_recovery_from_a_premature_web_fetch() {
     let completion = timeout(TURN_TIMEOUT, async {
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Session requests a premature fetch.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Judge evaluates that fetch.
         tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Session requests a search.
         tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Judge evaluates the search.
         tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Session requests a fetch.
         tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Judge evaluates the fetch.
-        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Third tool-enabled session call.
         tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Final session answer.
         tokio::time::sleep(Duration::from_secs(59)).await; // Local work within its minute.
     })
@@ -143,10 +144,10 @@ async fn turn_budget_covers_session_exchanges_and_two_delegated_web_judges() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn turn_budget_expires_after_thirteen_minutes() {
+async fn turn_budget_expires_after_fifteen_minutes() {
     let completion = timeout(
         TURN_TIMEOUT,
-        tokio::time::sleep(Duration::from_secs(13 * 60 + 1)),
+        tokio::time::sleep(Duration::from_secs(15 * 60 + 1)),
     )
     .await;
 

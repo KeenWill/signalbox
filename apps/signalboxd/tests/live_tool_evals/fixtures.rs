@@ -22,11 +22,11 @@ pub(crate) const MAX_OUTPUT_TOKENS: u32 = 16_384;
 pub(crate) const MAX_NATURAL_APPROVAL_CONTINUATIONS: usize = 2;
 pub(crate) const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 pub(crate) const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-/// Three tool-enabled session exchanges, the final answer, and two delegated
-/// web approval-judge exchanges each receive the exchange budget, with one
-/// additional minute for local persistence and dispatch.
+/// Each execution or resume budgets three tool-enabled session exchanges,
+/// the final answer, and three delegated web approval-judge exchanges, covering
+/// recovery from a premature fetch. One additional minute covers local work.
 pub(crate) const TURN_TIMEOUT: Duration =
-    Duration::from_secs((4 + 2) * EXCHANGE_TIMEOUT.as_secs() + 60);
+    Duration::from_secs((4 + 3) * EXCHANGE_TIMEOUT.as_secs() + 60);
 pub(crate) const MAX_NATURAL_TOOL_EXCHANGES: usize = 3;
 pub(crate) const MAX_NATURAL_MODEL_CALLS: i64 = MAX_NATURAL_TOOL_EXCHANGES as i64 + 1;
 pub(crate) const LIVE_EVAL_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
