@@ -146,10 +146,14 @@ export function SessionCatalogSurface({
       ),
     gcTime: 0,
   })
+  const titleDetailsAvailable =
+    bootstrap.data?.capabilities.bounded_session_timeline_detail === true
   const titleSource = useQuery({
     queryKey: ['production', 'catalog-title-source'],
     queryFn: ({ signal }) => HttpSessionTimelineSource.connect(window.fetch.bind(window), signal),
-    enabled: sessions.data?.summaries.some((row) => !row.title_summary?.trim()) === true,
+    enabled:
+      titleDetailsAvailable &&
+      sessions.data?.summaries.some((row) => !row.title_summary?.trim()) === true,
     staleTime: Number.POSITIVE_INFINITY,
     gcTime: 0,
   })
@@ -400,7 +404,7 @@ export function SessionCatalogSurface({
                         <strong>
                           <SessionTitle
                             summary={summary}
-                            source={titleSource.data}
+                            source={titleDetailsAvailable ? titleSource.data : undefined}
                             limits={bootstrap.data?.limits}
                           />
                         </strong>
