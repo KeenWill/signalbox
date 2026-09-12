@@ -13,8 +13,6 @@ These rules apply to every user-facing web change.
   task.
 - Live status and refresh actions share the relevant surface header instead of
   occupying a separate bar.
-- Timeline history uses virtualized continuous scrolling over bounded keyset
-  pages.
 - Paging controls never occupy the transcript layout.
 - First and latest timeline actions remain compact navigation controls.
 - Primary navigation collapses to an icon rail on wide screens and a drawer on
