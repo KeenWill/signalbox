@@ -107,9 +107,11 @@ export function Workspace({
   })
   const timeline = revealedTimeline ?? timelineQuery.data
   const fleet = fleetQuery.data
+  const hasTimeline = knownId !== 'blobs' && knownId !== 'attachments'
   const timelineIds = useMemo(
-    () => visibleTimeline(timeline?.items ?? [], app.detail).map((item) => item.id),
-    [app.detail, timeline?.items],
+    () =>
+      hasTimeline ? visibleTimeline(timeline?.items ?? [], app.detail).map((item) => item.id) : [],
+    [app.detail, hasTimeline, timeline?.items],
   )
   const firstTimelineId = timelineIds[0] ?? null
   const initialSelection = useMemo(
@@ -121,7 +123,7 @@ export function Workspace({
       dispatch,
       getState: store.getState,
       timelineIds,
-      timelineWindowAvailable: timeline !== undefined,
+      timelineWindowAvailable: hasTimeline && timeline !== undefined,
       artifactPreviewIds: knownId === 'blobs' ? artifactPreviewIds : [],
       artifactOriginalIds: knownId === 'blobs' ? artifactOriginalIds : [],
       navigate: (path) => {
@@ -147,7 +149,7 @@ export function Workspace({
       searchAvailable: knownId === 'search-usage' && route.view === 'search',
       focusSearch: () => document.querySelector<HTMLInputElement>('#lexical-search-input')?.focus(),
     }),
-    [dispatch, knownId, navigate, timeline, timelineIds, route.view],
+    [dispatch, hasTimeline, knownId, navigate, timeline, timelineIds, route.view],
   )
   useCommandHotkeys(commandContext)
 
