@@ -15,33 +15,37 @@ export interface TranscriptWindow {
   details: readonly WebSessionTimelineDetailPage[]
 }
 
-export async function readTranscriptWindow(
-  sessionId: string,
-  anchor: SessionWindowAnchor,
-  limits: SessionTranscriptLimits,
-  signal: AbortSignal,
-): Promise<TranscriptWindow> {
-  const source = await HttpSessionTimelineSource.connect(
-    (input, init) => fetch(input, init),
-    signal,
-  )
-  const history = new BoundedSessionHistory(sessionId, source)
-  const window = await history.load(
-    anchor,
-    { maxItems: TRANSCRIPT_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
-    signal,
-  )
-  const details = await Promise.all(
-    window.items.map((item) =>
-      readSessionTranscript(
-        sessionId,
-        item.address.event_sequence,
-        item.address.event_sequence,
-        null,
-        limits,
-        signal,
+export class TranscriptWindowReader {
+  private history: BoundedSessionHistory | undefined
+
+  constructor(private readonly sessionId: string) {}
+
+  async read(
+    anchor: SessionWindowAnchor,
+    limits: SessionTranscriptLimits,
+    signal: AbortSignal,
+  ): Promise<TranscriptWindow> {
+    this.history ??= new BoundedSessionHistory(
+      this.sessionId,
+      await HttpSessionTimelineSource.connect((input, init) => fetch(input, init), signal),
+    )
+    const window = await this.history.load(
+      anchor,
+      { maxItems: TRANSCRIPT_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
+      signal,
+    )
+    const details = await Promise.all(
+      window.items.map((item) =>
+        readSessionTranscript(
+          this.sessionId,
+          item.address.event_sequence,
+          item.address.event_sequence,
+          null,
+          limits,
+          signal,
+        ),
       ),
-    ),
-  )
-  return { window, details }
+    )
+    return { window, details }
+  }
 }
