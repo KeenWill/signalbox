@@ -149,6 +149,34 @@ pub(super) fn cancellation_poll_interval() -> tokio::time::Interval {
 impl CommitModelCallObservationTransaction for PostgresModelCallRepository {
     type Error = ModelCallRepositoryError;
 
+    async fn retain_provider_failure_evidence(
+        &mut self,
+        correlation: signalbox_domain::IssuedModelCallCorrelation,
+        evidence: signalbox_domain::ModelCallAmbiguityEvidence,
+    ) -> Result<(), Self::Error> {
+        let mut transaction = self.pool.begin().await?;
+        super::lock_session(&mut transaction, correlation.session()).await?;
+        let rows = sqlx::query(
+            "UPDATE model_call SET terminal_ambiguity_evidence = $6,
+                    terminal_ambiguity_evidence_original_bytes = $7
+              WHERE model_call_id = $1 AND session_id = $2 AND turn_id = $3
+                AND turn_attempt_id = $4 AND context_frontier_id = $5
+                AND state_kind IN ('in_flight', 'cancellation_requested')",
+        )
+        .bind(correlation.call().into_uuid())
+        .bind(correlation.session().into_uuid())
+        .bind(correlation.turn().into_uuid())
+        .bind(correlation.attempt().into_uuid())
+        .bind(correlation.frontier().into_uuid())
+        .bind(evidence.summary())
+        .bind(rust_decimal::Decimal::from(evidence.original_bytes() as u64))
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        super::require_single(rows, "provider failure evidence call")?;
+        super::finish_commit(transaction, Ok(())).await
+    }
+
     async fn commit_observation<NextTurn>(
         &mut self,
         session: SessionId,

@@ -247,6 +247,7 @@ pub enum RepoWatchEventIdentityFrontierError {
 pub struct RepoWatchEventOccurrenceV1 {
     event: RepoWatchEvent,
     content_identity: RepoWatchEventContentIdentityV1,
+    source_review: Option<GitHubObjectId>,
 }
 
 impl RepoWatchEventOccurrenceV1 {
@@ -266,7 +267,13 @@ impl RepoWatchEventOccurrenceV1 {
         Self {
             event,
             content_identity,
+            source_review: None,
         }
+    }
+
+    /// GitHub review responsible for a review submission or thread opening.
+    pub const fn source_review(&self) -> Option<GitHubObjectId> {
+        self.source_review
     }
 
     /// The normalized event this occurrence states.
@@ -456,6 +463,7 @@ pub enum RepoWatchThreadState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchThreadObservation {
     thread: ReviewThreadId,
+    source_review: Option<GitHubObjectId>,
     state: RepoWatchThreadState,
     author: Option<RepoWatchAuthorLogin>,
     resolver: Option<RepoWatchAuthorLogin>,
@@ -465,6 +473,7 @@ impl RepoWatchThreadObservation {
     pub const fn open(thread: ReviewThreadId, author: Option<RepoWatchAuthorLogin>) -> Self {
         Self {
             thread,
+            source_review: None,
             state: RepoWatchThreadState::Open,
             author,
             resolver: None,
@@ -478,6 +487,7 @@ impl RepoWatchThreadObservation {
     ) -> Self {
         Self {
             thread,
+            source_review: None,
             state: RepoWatchThreadState::Resolved,
             author,
             resolver,
@@ -498,6 +508,13 @@ impl RepoWatchThreadObservation {
 
     pub const fn resolver(&self) -> Option<&RepoWatchAuthorLogin> {
         self.resolver.as_ref()
+    }
+
+    /// Attaches provider provenance used when deriving a newly opened thread.
+    /// Comparison baselines retain thread state without this creation evidence.
+    pub const fn with_source_review(mut self, review: Option<GitHubObjectId>) -> Self {
+        self.source_review = review;
+        self
     }
 }
 
@@ -1132,6 +1149,7 @@ enum RepoWatchEventStreamKeyV1<'value> {
         number: PullRequestNumber,
         kind: RepoWatchEventKindNameV1,
         thread: &'value ReviewThreadId,
+        source_review: Option<GitHubObjectId>,
     },
     Workflow {
         branch: &'value BranchName,
@@ -1857,6 +1875,7 @@ fn derive_compacted_thread_events(
                     number: current.context().number(),
                     kind: RepoWatchEventKindNameV1::ThreadOpened,
                     thread: thread.thread(),
+                    source_review: thread.source_review,
                 },
                 identity_frontier,
                 ids,
@@ -1876,6 +1895,7 @@ fn derive_compacted_thread_events(
                         number: current.context().number(),
                         kind: RepoWatchEventKindNameV1::ThreadResolved,
                         thread: thread.thread(),
+                        source_review: thread.source_review,
                     },
                     identity_frontier,
                     ids,
@@ -1894,6 +1914,7 @@ fn derive_compacted_thread_events(
                         number: current.context().number(),
                         kind: RepoWatchEventKindNameV1::ThreadOpened,
                         thread: thread.thread(),
+                        source_review: None,
                     },
                     identity_frontier,
                     ids,
@@ -2054,6 +2075,7 @@ fn derive_thread_events(
                     number: current.context().number(),
                     kind: RepoWatchEventKindNameV1::ThreadOpened,
                     thread: thread.thread(),
+                    source_review: thread.source_review,
                 },
                 identity_frontier,
                 ids,
@@ -2073,6 +2095,7 @@ fn derive_thread_events(
                         number: current.context().number(),
                         kind: RepoWatchEventKindNameV1::ThreadResolved,
                         thread: thread.thread(),
+                        source_review: thread.source_review,
                     },
                     identity_frontier,
                     ids,
@@ -2091,6 +2114,7 @@ fn derive_thread_events(
                         number: current.context().number(),
                         kind: RepoWatchEventKindNameV1::ThreadOpened,
                         thread: thread.thread(),
+                        source_review: None,
                     },
                     identity_frontier,
                     ids,
@@ -2320,6 +2344,15 @@ fn push_identified_event(
     identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
+    let source_review = match &stream_key {
+        RepoWatchEventStreamKeyV1::Review { review, .. } => Some(*review),
+        RepoWatchEventStreamKeyV1::Thread {
+            kind: RepoWatchEventKindNameV1::ThreadOpened,
+            source_review,
+            ..
+        } => *source_review,
+        _ => None,
+    };
     let is_recurring = stream_key.is_recurring();
     let pull_request_number = stream_key.pull_request_number();
     let stream_identity = repo_watch_event_stream_identity_v1(stream_key);
@@ -2332,6 +2365,7 @@ fn push_identified_event(
     events.push(RepoWatchEventOccurrenceV1 {
         event,
         content_identity,
+        source_review,
     });
     Ok(())
 }
@@ -2414,6 +2448,7 @@ fn repo_watch_event_stream_identity_v1(key: RepoWatchEventStreamKeyV1<'_>) -> [u
             number,
             kind,
             thread,
+            ..
         } => {
             hash.text("thread");
             hash.u64(number.get());

@@ -32,7 +32,6 @@ use signalbox_domain::{
     TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
-use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, create_session::CreateSessionRepository,
@@ -457,13 +456,8 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 .ok_or(DebugDriverError::Configuration)?
                 .credential_profile()
                 .to_owned();
-            let credential_access = FileCredentialAccess::from_files(
-                configuration
-                    .file_credential_profiles(ModelAdapter::Anthropic)
-                    .map(|(reference, path)| {
-                        (CredentialReference::new(reference), path.to_path_buf())
-                    }),
-            );
+            let credential_access =
+                FileCredentialAccess::from_configuration(&configuration, ModelAdapter::Anthropic);
             let credential_reference = ModelCallCredentialReference::new(credential_profile);
             let native_message_limit = configuration
                 .numeric_bounds()

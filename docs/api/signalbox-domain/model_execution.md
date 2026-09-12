@@ -487,6 +487,11 @@ pub enum ProviderModelCallFailureCause {
 pub struct CorrelatedModelCallTerminalObservation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl CorrelatedModelCallTerminalObservation {
+    pub fn with_ambiguity_evidence(
+        self,
+        evidence: option::Option<ModelCallAmbiguityEvidence>,
+    ) -> Self;
+    pub fn ambiguity_evidence(&self) -> option::Option<&ModelCallAmbiguityEvidence>;
     pub fn with_credential_recovery(
         self,
         recovery: option::Option<CredentialRejectionRecovery>,
@@ -512,6 +517,18 @@ pub enum CredentialRejectionRecovery {
     Unavailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelCallAmbiguityEvidence
+
+```rust
+pub struct ModelCallAmbiguityEvidence {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelCallAmbiguityEvidence {
+    pub fn new(summary: &str) -> Self;
+    pub fn summary(&self) -> &str;
+    pub const fn original_bytes(&self) -> usize;
+}
 ```
 
 ## ModelCallTerminalObservation

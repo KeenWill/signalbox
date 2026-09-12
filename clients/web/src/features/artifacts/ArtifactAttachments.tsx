@@ -1,7 +1,8 @@
 import { FileQuestion, Paperclip, X } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import { enumLabel } from '../../labels'
+import { actions, useAppDispatch, useAppSelector } from '../../state'
 import { ArtifactRenderer } from './ArtifactRenderer'
 import { attachmentScenario } from './artifactScenario'
 import type { ArtifactItem } from './artifactTypes'
@@ -112,7 +113,17 @@ export function AttachmentWorkbench({ commandContext }: { commandContext: Comman
   const [composerItems, setComposerItems] = useState<ReadonlyArray<ArtifactItem>>(() =>
     attachmentScenario.map((artifact) => ({ ...artifact, id: `composer:${artifact.id}` })),
   )
-  const [selectedId, setSelectedId] = useState(attachmentScenario[0]?.id ?? null)
+  const dispatch = useAppDispatch()
+  const selectedId = useAppSelector((state) => state.app.selectedArtifact)
+  useEffect(() => {
+    dispatch(actions.artifactSelected(attachmentScenario[0]?.id ?? null))
+  }, [dispatch])
+  const selectAttachment = (artifact: ArtifactItem) => {
+    invokeCommand('artifact.select', {
+      ...commandContext,
+      artifactSelectionTarget: artifact.id,
+    })
+  }
   const allItems = useMemo(() => [...attachmentScenario, ...composerItems], [composerItems])
   const selected = allItems.find((artifact) => artifact.id === selectedId) ?? null
 
@@ -131,19 +142,19 @@ export function AttachmentWorkbench({ commandContext }: { commandContext: Comman
             label="Transcript attachments"
             items={attachmentScenario}
             selectedId={selectedId}
-            onSelect={(artifact) => setSelectedId(artifact.id)}
+            onSelect={selectAttachment}
           />
           <AttachmentList
             label="Composer attachments"
             items={composerItems}
             selectedId={selectedId}
-            onSelect={(artifact) => setSelectedId(artifact.id)}
+            onSelect={selectAttachment}
             onRemove={(artifact) => {
               invokeCommand('artifact.attachment.remove', {
                 ...commandContext,
                 removeAttachment: () => {
                   setComposerItems((items) => items.filter((item) => item.id !== artifact.id))
-                  if (selectedId === artifact.id) setSelectedId(null)
+                  if (selectedId === artifact.id) dispatch(actions.artifactSelected(null))
                 },
               })
             }}

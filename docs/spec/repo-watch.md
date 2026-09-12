@@ -35,6 +35,14 @@ sequences distinguish later conclusion changes. `ThreadOpened` carries the
 thread author's GitHub login when GitHub reports it, and `ThreadResolved`
 carries the resolver's when GitHub reports it.
 
+Native review publication and thread replies retain their returned review IDs
+and reply comment IDs before releasing the repository frontier lock. Review
+submissions and new thread openings retain their source review ID with
+`gh_event`; matching native receipts exclude them from `gh_readable_event`.
+Other reviews by the same login and subsequent thread reopenings remain
+eligible. Receipts are permanent; writes without a retained acknowledgement have
+no self-write provenance.
+
 Rules are versioned `RepoWatchRule` values. Fields within one matcher are
 conjunctive and rules are evaluated independently. The checked matcher owns the
 repository, event-kind, pull-request context, label, draft, author,

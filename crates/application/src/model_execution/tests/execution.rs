@@ -1,3 +1,4 @@
+use super::support::FailureEvidenceObservation;
 use super::{
     Arc, AssistantText, AttemptDispatchGate, BoundaryBlockingProvider, FakeAuthorization,
     FakeError, FakeFailure, FakeObservation, FakePrepare, FixedIds, InProcessAttemptDispatchGate,
@@ -256,6 +257,7 @@ async fn stale_authorization_returns_no_work_without_provider_entry() {
 #[tokio::test]
 async fn resumed_provider_failure_stays_at_provider_stage() {
     let (request, authorized) = prepared_fixture();
+    let expected_correlation = authorized.observation_correlation();
     let mut service = ModelCallExecutionService::new(
         FixedIds::baseline(),
         FakePrepare {
@@ -269,7 +271,7 @@ async fn resumed_provider_failure_stays_at_provider_stage() {
             calls: 0,
             reread_calls: 0,
         },
-        UnusedObservation,
+        FailureEvidenceObservation::default(),
         ScriptedModelCallProvider::new([ScriptedModelCallStep::InteractionOperatorFailure]),
         InProcessAttemptDispatchGate::default(),
         None,
@@ -282,7 +284,18 @@ async fn resumed_provider_failure_stays_at_provider_stage() {
         error,
         ModelCallExecutionError::Provider(ScriptedModelCallError::InteractionOperatorFailure)
     ));
-    let (_, prepare, _, authorization, _, provider, _, _, _, _) = service.into_parts();
+    let (_, prepare, _, authorization, observation, provider, _, _, _, _) = service.into_parts();
+    assert_eq!(observation.records.len(), 1);
+    assert_eq!(observation.records[0].0, expected_correlation);
+    assert!(observation.records[0].1.summary().starts_with(
+        "classification_point=provider_invocation_error\ncause=caller_or_hub_bug\nelapsed_ms=",
+    ));
+    assert!(
+        observation.records[0]
+            .1
+            .summary()
+            .ends_with("\nresponse_progress=unknown")
+    );
     assert_eq!(prepare.calls, 1);
     assert_eq!(authorization.calls, 1);
     assert_eq!(provider.capability_preparation_count(), 1);

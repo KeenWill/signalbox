@@ -12,6 +12,8 @@ import subprocess
 import time
 import uuid
 
+from review_citations import resolve_findings
+
 
 CATEGORIES = (
     "false-statement", "broken-reference", "contradiction",
@@ -135,6 +137,7 @@ class Trial:
         context = {key: self.case[key] for key in (
             "id", "head_sha", "base_sha", "pr_title", "pr_scope", "findings", "context",
         )}
+        context["findings"] = resolve_findings(tree, self.case["head_sha"], context["findings"])
         atomic_json(source / "input.json", context)
         (source / "change.patch").write_text(git(
             tree, "diff", "--no-ext-diff", self.case["base_sha"], self.case["head_sha"], "--",

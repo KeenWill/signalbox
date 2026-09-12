@@ -562,6 +562,25 @@ For `ambient`:
 Missing, stale, cross-session, or non-successor placement authority fails
 rendering instead of inventing text.
 
+### Ambiguous-call diagnostic evidence
+
+An ambiguous ordinary model call retains at most 4,096 UTF-8 bytes of typed
+terminal diagnostics, with the original diagnostic byte count. The record names
+the loss or timeout/classification point, elapsed invocation time, observed send
+and response progress, status, partial content byte count, tool/finish progress,
+and closed cause tokens. Adapter-authored detail is omitted because it can
+contain response content. The exact call links this evidence to its retained
+request context frontier, target, credential reference, settings and token
+usage; it does not duplicate request bodies or retain partial model text as
+transcript. A provider-stage error retains its closed cause token before the
+unchanged error propagates. If the database cannot accept that diagnostic, the
+original failure still propagates. An absent runtime report is recorded
+explicitly at terminalization with the prior call state; response progress then
+remains unknown. The restart-recovery origin identifies a restart
+classification. These diagnostics never change disposition, retry policy or
+reconciliation authority. SQL readers inspect the model-call record; no browser
+or transcript protocol is added.
+
 ## Planned
 
 - Multipart attachment rendering ([design](../design/model-call-execution.md)).

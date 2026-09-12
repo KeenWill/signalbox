@@ -1946,6 +1946,7 @@ fn truncate_sanitized(mut text: String) -> String {
 /// Production REST/GraphQL transport with request-scoped authentication.
 #[derive(Clone, Debug)]
 pub struct GitHubApiTransport {
+    review_writes: Option<std::sync::Arc<dyn signalbox_github_transport::ReviewWriteRecorder>>,
     app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
     timeout: Duration,
     rest_base: Url,
@@ -1953,10 +1954,20 @@ pub struct GitHubApiTransport {
 }
 
 impl GitHubApiTransport {
+    /// Records native review-write identities before repository ingestion continues.
+    pub fn with_review_writes(
+        mut self,
+        recorder: Option<std::sync::Arc<dyn signalbox_github_transport::ReviewWriteRecorder>>,
+    ) -> Self {
+        self.review_writes = recorder;
+        self
+    }
+
     /// Constructs the fixed production transport.
     pub fn try_new() -> Result<Self, GitHubApiTransportConstructionError> {
         Ok(Self {
             app: None,
+            review_writes: None,
             timeout: DEFAULT_TIMEOUT,
             rest_base: Url::parse(REST_BASE_URL)
                 .map_err(|_| GitHubApiTransportConstructionError)?,
@@ -2187,16 +2198,35 @@ impl GitHubApiTransport {
         let url =
             self.repository_url(arguments.repository(), &["pulls", &number, "reviews"], None)?;
         let body = publish_review_body(&arguments)?;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.timeout)
+            .ok_or(GitHubTransportFailure::PreDispatchInfrastructure)?;
+        let receipt = match &self.review_writes {
+            Some(recorder) => Some(
+                tokio::time::timeout_at(deadline, recorder.begin(arguments.repository().as_str()))
+                    .await
+                    .map_err(|_| GitHubTransportFailure::PreDispatchInfrastructure)?
+                    .map_err(|_| GitHubTransportFailure::PreDispatchInfrastructure)?,
+            ),
+            None => None,
+        };
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(GitHubTransportFailure::PreDispatchInfrastructure)?;
         let response = self
-            .send(Method::POST, url, Some(body), credential, policy)
+            .send_with_timeout(Method::POST, url, Some(body), credential, policy, remaining)
             .await?;
         let value = self
             .success_json(response, StatusCode::OK, credential)
             .await
             .map_err(mutation_failure)?;
-        normalize_published_review(&value, arguments.commit_id().as_str(), arguments.event())
-            .map(GitHubResult::published_review)
-            .map_err(mutation_failure)
+        tokio::time::timeout_at(
+            deadline,
+            finish_published_review(&value, &arguments, receipt),
+        )
+        .await
+        .map_err(|_| GitHubTransportFailure::DispatchUnknown)?
     }
 
     async fn send(
@@ -2306,6 +2336,27 @@ impl GitHubApiTransport {
         }
         Ok(value)
     }
+}
+
+async fn finish_published_review(
+    value: &serde_json::Value,
+    arguments: &PublishReviewArguments,
+    receipt: Option<Box<dyn signalbox_github_transport::PendingReviewWrite>>,
+) -> Result<GitHubResult, GitHubTransportFailure> {
+    let normalized =
+        normalize_published_review(value, arguments.commit_id().as_str(), arguments.event())
+            .map_err(mutation_failure)?;
+    if let Some(receipt) = receipt {
+        let review = value["id"]
+            .as_u64()
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or(GitHubTransportFailure::DispatchUnknown)?;
+        receipt
+            .record(review, None)
+            .await
+            .map_err(|_| GitHubTransportFailure::DispatchUnknown)?;
+    }
+    Ok(GitHubResult::published_review(normalized))
 }
 
 fn publish_review_body(
@@ -3836,6 +3887,111 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<PublishReviewArguments>(value).is_err());
+    }
+
+    #[derive(Debug)]
+    struct StalledReviewWrites;
+
+    impl signalbox_github_transport::ReviewWriteRecorder for StalledReviewWrites {
+        fn begin<'a>(
+            &'a self,
+            _repository: &'a str,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Box<dyn signalbox_github_transport::PendingReviewWrite>,
+                signalbox_github_transport::ReviewWriteError,
+            >,
+        > {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_review_write_lock_timeout_is_known_not_dispatched() {
+        let transport = GitHubApiTransport::try_new()
+            .expect("transport")
+            .with_review_writes(Some(std::sync::Arc::new(StalledReviewWrites)));
+        let arguments = publish_arguments(serde_json::json!({
+            "repository": "KeenWill/signalbox", "number": 1,
+            "commit_id": HEAD_REVISION, "event": "approve"
+        }));
+        let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
+        let policy = GitHubEgressPolicy::github_api_only();
+        let result = tokio::time::timeout(
+            transport.request_timeout() * 2,
+            transport.publish_review(arguments, &credential, &policy),
+        )
+        .await
+        .expect("receipt acquisition must honor the existing request timeout");
+        assert!(matches!(
+            result,
+            Err(GitHubTransportFailure::PreDispatchInfrastructure)
+        ));
+    }
+
+    type PublishedReviewReceipt = (u64, Option<String>);
+
+    struct CapturedPublishedReview {
+        captured: std::sync::Arc<std::sync::Mutex<Option<PublishedReviewReceipt>>>,
+        fail: bool,
+    }
+
+    impl signalbox_github_transport::PendingReviewWrite for CapturedPublishedReview {
+        fn record(
+            self: Box<Self>,
+            review: std::num::NonZeroU64,
+            comment: Option<String>,
+        ) -> futures_util::future::BoxFuture<
+            'static,
+            Result<(), signalbox_github_transport::ReviewWriteError>,
+        > {
+            Box::pin(async move {
+                *self.captured.lock().expect("receipt lock") = Some((review.get(), comment));
+                if self.fail {
+                    Err(signalbox_github_transport::ReviewWriteError)
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn native_review_write_returns_success_only_after_retaining_published_id() {
+        let arguments = publish_arguments(serde_json::json!({
+            "repository": "KeenWill/signalbox", "number": 1,
+            "commit_id": HEAD_REVISION, "event": "approve"
+        }));
+        // Arbitrary provider ID, shared with the normalized acknowledgement fixture.
+        let review_id = 7001_u64;
+        let response = serde_json::json!({
+            "id": review_id,
+            "state": "APPROVED",
+            "html_url": "https://github.com/KeenWill/signalbox/pull/1#pullrequestreview-7001",
+            "commit_id": HEAD_REVISION
+        });
+        for fail in [false, true] {
+            let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let receipt = CapturedPublishedReview {
+                captured: captured.clone(),
+                fail,
+            };
+            let result =
+                finish_published_review(&response, &arguments, Some(Box::new(receipt))).await;
+            assert_eq!(
+                *captured.lock().expect("receipt lock"),
+                Some((review_id, None))
+            );
+            if fail {
+                assert!(matches!(
+                    result,
+                    Err(GitHubTransportFailure::DispatchUnknown)
+                ));
+            } else {
+                assert!(result.is_ok());
+            }
+        }
     }
 
     #[test]

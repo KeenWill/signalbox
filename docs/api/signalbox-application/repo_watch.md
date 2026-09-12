@@ -92,6 +92,7 @@ impl RepoWatchEventOccurrenceV1 {
         event: signalbox_domain::RepoWatchEvent,
         content_identity: RepoWatchEventContentIdentityV1,
     ) -> Self;
+    pub const fn source_review(&self) -> option::Option<signalbox_domain::GitHubObjectId>;
     pub const fn event(&self) -> &signalbox_domain::RepoWatchEvent;
     pub const fn content_identity(&self) -> RepoWatchEventContentIdentityV1;
     pub fn into_event(self) -> signalbox_domain::RepoWatchEvent;
@@ -219,6 +220,10 @@ impl RepoWatchThreadObservation {
     pub const fn state(&self) -> RepoWatchThreadState;
     pub const fn author(&self) -> option::Option<&signalbox_domain::RepoWatchAuthorLogin>;
     pub const fn resolver(&self) -> option::Option<&signalbox_domain::RepoWatchAuthorLogin>;
+    pub const fn with_source_review(
+        self,
+        review: option::Option<signalbox_domain::GitHubObjectId>,
+    ) -> Self;
 }
 ```
 

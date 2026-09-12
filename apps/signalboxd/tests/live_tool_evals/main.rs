@@ -6,6 +6,8 @@
 //! unforced misses are written to the requested Markdown summary and never make
 //! this test fail. Harness, persistence, or tool-executor defects still fail the
 //! test so the report cannot silently claim that an evaluation ran.
+//! Delegated tool requests use the daemon's approval judge with the same live
+//! model and credential provider as the evaluated session.
 
 #![allow(
     clippy::expect_used,
@@ -46,7 +48,7 @@ use signalbox_application::{
 use signalbox_domain::{
     ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult,
     DeliveryRequest, DirectModelSelection, DurableCommandId, ModelCallId, ModelSelectionOverride,
-    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments,
     PerInputConfigurationChoices, ProviderModelIdentity, ResolvedProviderTarget, RunnerGeneration,
     RunnerId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
@@ -54,7 +56,7 @@ use signalbox_domain::{
     TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
-    RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
+    RuntimeApprovalJudgeModel, RuntimeModelCallProvider, RuntimeModelCatalog,
 };
 use signalbox_model_runtime::{
     CancellationSignal, CredentialAccess, CredentialAccessError, CredentialAccessFailure,
@@ -113,6 +115,8 @@ use tokio::{sync::Mutex, time::timeout};
 mod family;
 mod fixtures;
 mod report;
+#[path = "../support/mod.rs"]
+mod support;
 
 use family::cargo::*;
 use family::exec::*;
@@ -121,6 +125,34 @@ use family::web::*;
 use family::workspace::*;
 use fixtures::*;
 use report::*;
+
+#[tokio::test(start_paused = true)]
+async fn turn_budget_covers_recovery_from_a_premature_web_fetch() {
+    let completion = timeout(TURN_TIMEOUT, async {
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Session requests a premature fetch.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Judge evaluates that fetch.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Session requests a search.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Judge evaluates the search.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Session requests a fetch.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Judge evaluates the fetch.
+        tokio::time::sleep(EXCHANGE_TIMEOUT).await; // Final session answer.
+        tokio::time::sleep(Duration::from_secs(59)).await; // Local work within its minute.
+    })
+    .await;
+
+    assert!(completion.is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn turn_budget_expires_after_fifteen_minutes() {
+    let completion = timeout(
+        TURN_TIMEOUT,
+        tokio::time::sleep(Duration::from_secs(15 * 60 + 1)),
+    )
+    .await;
+
+    assert!(completion.is_err());
+}
 
 #[test]
 #[ignore = "spends real OpenAI exchanges; run only from the gated tool-eval workflow"]

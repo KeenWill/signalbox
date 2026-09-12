@@ -534,6 +534,14 @@ impl signalbox_application::CommitModelCallObservationTransaction
     for model_execution::PostgresModelCallRepository
 {
     type Error = model_execution::ModelCallRepositoryError;
+    async fn retain_provider_failure_evidence(
+        &mut self,
+        correlation: signalbox_domain::IssuedModelCallCorrelation,
+        evidence: signalbox_domain::ModelCallAmbiguityEvidence,
+    ) -> result::Result<
+        (),
+        <Self as signalbox_application::CommitModelCallObservationTransaction>::Error,
+    >;
     async fn commit_observation<NextTurn>(
         &mut self,
         session: signalbox_domain::SessionId,

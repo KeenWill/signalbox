@@ -64,6 +64,9 @@ mod provider_identity;
 #[path = "repo_watch_v2/retirement.rs"]
 mod retirement;
 
+#[path = "repo_watch_v2/review_writes.rs"]
+mod review_writes;
+
 #[path = "repo_watch_v2/retry.rs"]
 mod retry;
 #[path = "repo_watch_v2/workflows.rs"]
@@ -81,6 +84,7 @@ fn event_candidate<'a>(
     EventCandidate {
         event,
         content_identity,
+        source_review: None,
     }
 }
 
