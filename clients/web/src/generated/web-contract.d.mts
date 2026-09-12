@@ -1151,6 +1151,10 @@ export type WebTemplateList = {
   readonly templates: ReadonlyArray<WebTemplateSummary>;
 };
 
+export type WebTemplateSaveRequest = {
+  readonly definition_toml: string;
+};
+
 export type WebTemplateDetail = {
   readonly definition_toml: string;
   readonly source_kind: WebTemplateSourceKind;
@@ -1249,6 +1253,7 @@ export function decodeWebSessionCatalogSnapshot(value: unknown): WebSessionCatal
 export function decodeWebSessionLiveSnapshot(value: unknown): WebSessionLiveSnapshot;
 export function decodeWebSessionLiveStreamEvent(value: unknown): WebSessionLiveStreamEvent;
 export function decodeWebTemplateList(value: unknown): WebTemplateList;
+export function decodeWebTemplateSaveRequest(value: unknown): WebTemplateSaveRequest;
 export function decodeWebTemplateDetail(value: unknown): WebTemplateDetail;
 export function decodeWebImportListRequest(value: unknown): WebImportListRequest;
 export function decodeWebImportListPage(value: unknown): WebImportListPage;

@@ -7361,6 +7361,21 @@ const schemas = {
     "title": "WebTemplateList",
     "type": "object"
   },
+  "WebTemplateSaveRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Replacement source for one template or its shared review library.",
+    "properties": {
+      "definition_toml": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "definition_toml"
+    ],
+    "title": "WebTemplateSaveRequest",
+    "type": "object"
+  },
   "WebUsageCallPage": {
     "$defs": {
       "WebDollarAmount": {
@@ -9929,6 +9944,11 @@ export function decodeWebSessionLiveStreamEvent(value) {
 
 export function decodeWebTemplateList(value) {
   assertSchema(schemas.WebTemplateList, schemas.WebTemplateList, value, "webtemplatelist");
+  return value;
+}
+
+export function decodeWebTemplateSaveRequest(value) {
+  assertSchema(schemas.WebTemplateSaveRequest, schemas.WebTemplateSaveRequest, value, "webtemplatesaverequest");
   return value;
 }
 

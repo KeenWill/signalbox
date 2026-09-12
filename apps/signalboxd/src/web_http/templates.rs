@@ -2,7 +2,7 @@
 
 use axum::{
     Extension, Json,
-    extract::Path,
+    extract::{Path, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -12,15 +12,15 @@ use signalbox_domain::{
 use signalbox_tools_workflows::RegistrationNames;
 use signalbox_web_contract::{
     WebModelSelection, WebPositiveU64, WebTemplateApprovalPosture, WebTemplateDetail,
-    WebTemplateList, WebTemplateSourceKind, WebTemplateSummary, WebTemplateWorkflowGrant,
-    WebTemplateWorkflowTool,
+    WebTemplateList, WebTemplateSaveRequest, WebTemplateSourceKind, WebTemplateSummary,
+    WebTemplateWorkflowGrant, WebTemplateWorkflowTool,
 };
 use toml_edit::{ArrayOfTables, DocumentMut, Item};
 
 use super::application_error;
 use crate::{
     ResolvedSessionTemplate,
-    configuration_reload::{ConfigurationCatalogs, ConfigurationReload},
+    configuration_reload::{ConfigurationCatalogs, ConfigurationReload, TemplateSaveError},
 };
 
 pub(super) async fn list(reload: Option<Extension<ConfigurationReload>>) -> Response {
@@ -69,6 +69,70 @@ pub(super) async fn detail(
     match detail_dto(&catalogs, template) {
         Some(detail) => Json(detail).into_response(),
         None => unavailable(),
+    }
+}
+
+pub(super) async fn save(
+    reload: Option<Extension<ConfigurationReload>>,
+    Path(name): Path<String>,
+    body: Result<Json<WebTemplateSaveRequest>, JsonRejection>,
+) -> Response {
+    let Some(Extension(reload)) = reload else {
+        return unavailable();
+    };
+    let Ok(name) = SessionTemplateName::try_new(name) else {
+        return application_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_template_name",
+            "Template name is invalid",
+        );
+    };
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(error) => {
+            return application_error(
+                error.status(),
+                "invalid_template_edit",
+                "Template edit must contain only a definition_toml string",
+            );
+        }
+    };
+    match reload.save_template(&name, &request.definition_toml).await {
+        Ok(catalogs) => match catalogs
+            .templates
+            .resolve(&name)
+            .and_then(|template| detail_dto(&catalogs, template))
+        {
+            Some(detail) => Json(detail).into_response(),
+            None => unavailable(),
+        },
+        Err(TemplateSaveError::NotFound) => application_error(
+            StatusCode::NOT_FOUND,
+            "template_not_found",
+            "Template was not found",
+        ),
+        Err(TemplateSaveError::Validation(reason)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(signalbox_web_contract::WebApiErrorResponse {
+                error: signalbox_web_contract::WebApiError {
+                    kind: signalbox_web_contract::WebApiErrorKind::Application,
+                    code: "invalid_template_edit".to_owned(),
+                    message: reason,
+                },
+            }),
+        )
+            .into_response(),
+        Err(TemplateSaveError::Unavailable) => unavailable(),
+        Err(TemplateSaveError::Write) => application_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "template_write_failed",
+            "Template file could not be saved",
+        ),
+        Err(TemplateSaveError::Reload) => application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "template_reload_failed",
+            "The file was saved, but reload did not complete. Reload the configuration before retrying.",
+        ),
     }
 }
 
@@ -189,6 +253,25 @@ mod tests {
     const TARGET_ID: &str = "20000000-0000-4000-8000-000000000002";
     const ALIAS_ID: &str = "30000000-0000-4000-8000-000000000003";
     const PROMPT: &str = "Inspect the change.";
+
+    #[tokio::test]
+    async fn save_rejects_unknown_request_members_before_configuration_io() {
+        let response = router(catalogs())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/templates/reviewer")
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"definition_toml":"version = 1", "unknown":true}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
 
     fn models() -> HubModelConfiguration {
         HubModelConfiguration::parse_test_fixture(&format!(

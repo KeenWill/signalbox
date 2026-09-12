@@ -574,7 +574,10 @@ fn production_router_with_budget(
         .route("/sessions/{session_id}/follow", get(session_live_follow))
         .route("/sessions", get(session_catalog))
         .route("/templates", get(templates::list))
-        .route("/templates/{name}", get(templates::detail))
+        .route(
+            "/templates/{name}",
+            get(templates::detail).put(templates::save),
+        )
         .route("/sessions/rates", get(session_rates))
         .route("/search", get(search))
         .route("/usage/summary", get(usage_summary))
