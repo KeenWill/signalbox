@@ -1,18 +1,25 @@
-import { useQuery } from '@tanstack/react-query'
-import { type RefObject, useRef, useState } from 'react'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
+import type { CommandContext } from './commands'
 import type {
   WebSessionTimelineDetailBody,
-  WebTimelineDetailContinuation,
+  WebSessionTimelineDetailPage,
   WebTimelineTextExcerpt,
+  WebTimelineToolAttempt,
 } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
+import { readSessionTranscript, type SessionTranscriptLimits } from './product'
+import { conversationEntryKey, hasConversationContent } from './session-timeline/conversation'
+import type { SessionWindowAnchor } from './session-timeline/model'
 import {
-  type HeldSessionTranscript,
-  readExtendedSessionTranscript,
-  type SessionTranscriptLimits,
-} from './product'
-import { conversationEntryKey } from './session-timeline/conversation'
+  readTranscriptWindow,
+  TRANSCRIPT_RETAINED_WINDOWS,
+  TRANSCRIPT_WINDOW_ITEMS,
+} from './session-timeline/transcript'
+import { SESSION_WINDOW_ITEMS } from './session-workspace'
+import type { DetailMode } from './state'
+import { VirtualTranscript } from './Transcript'
 
 function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextExcerpt }) {
   let content = excerpt.text
@@ -71,7 +78,7 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
     ) : null
   return (
     <>
-      <span className="eyebrow">{body.type === 'user_input' ? 'Accepted input' : 'Assistant'}</span>
+      <span className="eyebrow">{body.type === 'user_input' ? 'You' : 'Assistant'}</span>
       <p className="session-message-text">{excerpt.text}</p>
       {body.type === 'user_input' && <AttachmentReferences attachments={body.attachments} />}
       {(excerpt.offset_bytes !== '0' || excerpt.continuation !== null) && (
@@ -83,100 +90,219 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
   )
 }
 
-interface SessionTranscriptTextProps {
+export interface SessionTranscriptTextProps {
   sessionId: string
   first: string
   through: string
   observed: string
   limits: SessionTranscriptLimits
+  eventSequence?: string
+  turnId?: string
+  context?: CommandContext
+  renderTool?: (tool: WebTimelineToolAttempt, detail: DetailMode) => ReactNode
 }
 
 export function SessionTranscriptText(props: SessionTranscriptTextProps) {
-  const held = useRef<HeldSessionTranscript | null>(null)
   return (
     <TranscriptWindow
-      key={`${props.sessionId}:${props.first}:${props.through}:${props.observed}`}
+      key={`${props.sessionId}:${props.eventSequence ?? ''}:${props.turnId ?? ''}`}
       {...props}
-      held={held}
     />
   )
 }
 
 function TranscriptWindow({
   sessionId,
-  first,
-  through,
   observed,
   limits,
-  held,
-}: SessionTranscriptTextProps & { held: RefObject<HeldSessionTranscript | null> }) {
-  const [continuation, setContinuation] = useState<WebTimelineDetailContinuation | null>(null)
-  const transcript = useQuery({
-    queryKey: [
-      'production',
-      'session-text',
-      sessionId,
-      first,
-      through,
-      observed,
-      limits,
-      continuation,
-    ],
-    queryFn: async ({ signal }) => {
-      const next = await readExtendedSessionTranscript(
-        { sessionId, first, through },
-        continuation,
-        limits,
-        held.current,
-        signal,
-      )
-      if (!signal.aborted) held.current = next
-      return { ...next.page, hasEarlierItems: next.omittedThrough !== null }
-    },
+  eventSequence,
+}: SessionTranscriptTextProps) {
+  const transcript = useInfiniteQuery({
+    queryKey: ['production', 'scrolling-transcript', sessionId, eventSequence, limits],
+    initialPageParam: (eventSequence
+      ? { kind: 'around', eventSequence }
+      : { kind: 'latest' }) as SessionWindowAnchor,
+    queryFn: ({ pageParam, signal }) => readTranscriptWindow(sessionId, pageParam, limits, signal),
+    getPreviousPageParam: (page): SessionWindowAnchor | undefined =>
+      page.window.continuation_before
+        ? { kind: 'before', eventSequence: page.window.continuation_before.event_sequence }
+        : undefined,
+    getNextPageParam: (page): SessionWindowAnchor | undefined =>
+      page.window.continuation_after
+        ? { kind: 'after', eventSequence: page.window.continuation_after.event_sequence }
+        : undefined,
+    maxPages: TRANSCRIPT_RETAINED_WINDOWS,
     gcTime: 0,
   })
+  useEffect(() => {
+    if (transcript.error) console.error('Transcript load failed', transcript.error)
+  }, [transcript.error])
+  const previousObservation = useRef(observed)
+  useEffect(() => {
+    if (previousObservation.current !== observed) {
+      previousObservation.current = observed
+      void transcript.refetch()
+    }
+  }, [observed, transcript.refetch])
+  const pages = transcript.data?.pages
+  const entries = useMemo(
+    () => pages?.flatMap((page) => page.details.flatMap((detail) => detail.items)) ?? [],
+    [pages],
+  )
+  const visible = useMemo(
+    () => entries.filter((item, index) => hasConversationContent(item, entries.slice(0, index))),
+    [entries],
+  )
+  const ids = useMemo(() => visible.map(conversationEntryKey), [visible])
+  const emptyScanned = useRef(0)
+  useEffect(() => {
+    if (visible.length > 0) {
+      emptyScanned.current = 0
+      return
+    }
+    if (
+      transcript.isFetching ||
+      transcript.isError ||
+      !transcript.hasPreviousPage ||
+      emptyScanned.current >= SESSION_WINDOW_ITEMS
+    )
+      return
+    emptyScanned.current += TRANSCRIPT_WINDOW_ITEMS
+    void transcript.fetchPreviousPage()
+  }, [
+    visible.length,
+    transcript.isFetching,
+    transcript.isError,
+    transcript.hasPreviousPage,
+    transcript.fetchPreviousPage,
+  ])
   return (
     <section className="session-transcript-text" aria-label="Transcript text">
-      {transcript.isPending && <p>Loading transcript…</p>}
+      {transcript.isPending && <p role="status">Loading transcript…</p>}
       {transcript.isError && (
         <p role="alert">
           Transcript failed to load.{' '}
           <button type="button" onClick={() => void transcript.refetch()}>
-            Retry transcript text
+            Retry transcript
           </button>
         </p>
       )}
-      {transcript.data?.items.map((item) => (
-        <div
-          key={conversationEntryKey(item)}
-          className="session-message-entry"
-          data-event-sequence={item.address.event_sequence}
-        >
+      {!transcript.isPending && !transcript.isFetching && visible.length === 0 && (
+        <p>No messages in this part of the conversation. Scroll up to keep looking.</p>
+      )}
+      <VirtualTranscript
+        ids={ids}
+        initialEnd={!eventSequence}
+        selectedId={eventSequence}
+        onEdge={(direction) => {
+          if (transcript.isFetching || transcript.isError) return
+          if (direction === 'before' && transcript.hasPreviousPage)
+            void transcript.fetchPreviousPage()
+          if (direction === 'after' && transcript.hasNextPage) void transcript.fetchNextPage()
+        }}
+        renderRow={(index, measure, style) => {
+          const item = visible[index]
+          if (!item) return null
+          const detailPage = pages
+            ?.flatMap((page) => page.details)
+            .find((page) => page.items.at(-1) === item)
+          return (
+            <div
+              key={conversationEntryKey(item)}
+              ref={measure}
+              data-index={index}
+              style={style}
+              className="session-message-entry"
+              data-event-sequence={item.address.event_sequence}
+            >
+              <BodyText body={item.body} />
+              {detailPage?.continuation && (
+                <ContinuedEvent sessionId={sessionId} page={detailPage} limits={limits} />
+              )}
+            </div>
+          )
+        }}
+      />
+      {transcript.isFetching && !transcript.isPending && (
+        <small role="status">Loading messages…</small>
+      )}
+    </section>
+  )
+}
+
+function ContinuedEvent({
+  sessionId,
+  page,
+  limits,
+}: {
+  sessionId: string
+  page: WebSessionTimelineDetailPage
+  limits: SessionTranscriptLimits
+}) {
+  const [open, setOpen] = useState(false)
+  const [cursor, setCursor] = useState(page.continuation ?? null)
+  const previous = useRef(page)
+  const sequence = page.items.at(-1)?.address.event_sequence ?? ''
+  const detail = useQuery({
+    queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
+    enabled: open,
+    queryFn: ({ signal }) =>
+      readSessionTranscript(
+        sessionId,
+        sequence,
+        sequence,
+        cursor,
+        limits,
+        signal,
+        previous.current,
+      ),
+    gcTime: 0,
+  })
+  if (!open)
+    return (
+      <button type="button" onClick={() => setOpen(true)}>
+        Read more
+      </button>
+    )
+  return (
+    <section aria-label="More message text">
+      {detail.isPending && <p role="status">Loading details…</p>}
+      {detail.isError && (
+        <p role="alert">
+          Details could not be loaded.{' '}
+          <button type="button" onClick={() => void detail.refetch()}>
+            Retry details
+          </button>
+        </p>
+      )}
+      {detail.data?.items.map((item) => (
+        <div key={conversationEntryKey(item)}>
           <BodyText body={item.body} />
         </div>
       ))}
-      <div className="session-text-pagination">
-        {(continuation !== null || transcript.data?.hasEarlierItems) && (
-          <button
-            type="button"
-            onClick={() => {
-              held.current = null
-              if (continuation !== null) setContinuation(null)
-              else void transcript.refetch()
-            }}
-          >
-            First text page
-          </button>
-        )}
-        {transcript.data?.continuation && (
-          <button
-            type="button"
-            onClick={() => setContinuation(transcript.data?.continuation ?? null)}
-          >
-            Next text page
-          </button>
-        )}
-      </div>
+      {detail.data?.continuation && (
+        <button
+          type="button"
+          onClick={() => {
+            if (detail.data) {
+              previous.current = detail.data
+              setCursor(detail.data.continuation ?? null)
+            }
+          }}
+        >
+          Continue reading
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(false)
+          setCursor(page.continuation ?? null)
+          previous.current = page
+        }}
+      >
+        Close details
+      </button>
     </section>
   )
 }
