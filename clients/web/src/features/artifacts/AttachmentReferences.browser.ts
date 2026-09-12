@@ -44,6 +44,12 @@ test('renders inline images and opens attachment details by keyboard', async ({
     exact: true,
   })
   await expect(file).toBeVisible()
+  await page.evaluate(() => {
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' || event.key === 'j')
+        document.body.dataset.navigationEscape = 'received'
+    })
+  })
   await file.focus()
   await page.keyboard.press('Enter')
   const pane = page.getByRole('dialog', { name: 'Attachment details' })
@@ -53,9 +59,12 @@ test('renders inline images and opens attachment details by keyboard', async ({
     'href',
     fileAttachment.available_views[0]?.content_url ?? '',
   )
+  await page.keyboard.press('j')
+  expect(await page.evaluate(() => document.body.dataset.navigationEscape)).toBeUndefined()
   await page.keyboard.press('Escape')
   await expect(pane).not.toBeVisible()
   await expect(file).toBeFocused()
+  expect(await page.evaluate(() => document.body.dataset.navigationEscape)).toBeUndefined()
   await page.screenshot({ path: testInfo.outputPath('inline-attachments.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
   await file.click()

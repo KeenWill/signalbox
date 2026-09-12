@@ -161,7 +161,12 @@ function AttachmentReference({
       </div>
       <Dialog.Portal>
         <Dialog.Overlay className="attachment-detail-overlay" />
-        <Dialog.Content className="attachment-detail-pane" aria-describedby={undefined}>
+        <Dialog.Content
+          className="attachment-detail-pane"
+          aria-describedby={undefined}
+          onEscapeKeyDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
           <Dialog.Title className="sr-only">Attachment details</Dialog.Title>
           <ArtifactInspector
             available={available}
