@@ -105,11 +105,7 @@ function AttachmentReference({
         if (!open) close()
       }}
     >
-      <div
-        ref={container}
-        className="inline-attachment"
-        style={{ minHeight: visible ? undefined : reservedHeight }}
-      >
+      <div ref={container} className="inline-attachment" style={{ minHeight: reservedHeight }}>
         <div className="inline-attachment-chip">
           <Dialog.Trigger asChild>
             <button

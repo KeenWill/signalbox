@@ -41,6 +41,7 @@ if (root)
               }))}
             />
           </div>
+          {location.search.includes('revisit') && <div style={{ height: '200vh' }} />}
         </main>
       </QueryClientProvider>
     </Provider>,

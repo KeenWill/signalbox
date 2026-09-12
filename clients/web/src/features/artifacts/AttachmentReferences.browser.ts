@@ -174,3 +174,36 @@ test('restores detail-pane focus after a successful retry', async ({ page }) => 
   await page.keyboard.press('Enter')
   await expect(pane.getByRole('button', { name: 'Close attachment details' })).toBeFocused()
 })
+
+test('keeps attachment space while revisiting an unloaded preview', async ({ page }) => {
+  let imageReads = 0
+  const reload = Promise.withResolvers<void>()
+  await page.setViewportSize({ width: 1000, height: 200 })
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/blobs/**/descriptor?*', async (route) => {
+    if (!decodeURIComponent(route.request().url()).includes(imageDescriptor.digest))
+      return route.fulfill({ json: fileAttachment })
+    imageReads += 1
+    if (imageReads > 1) await reload.promise
+    return route.fulfill({ json: imageAttachment })
+  })
+  await page.route('**/api/blobs/**/content/image-png', (route) =>
+    route.fulfill({ body: preview, contentType: 'image/png' }),
+  )
+  await page.goto('/src/features/artifacts/scenario.html?revisit')
+  await expect(page.getByRole('img', { name: 'Preview of Image' })).toBeVisible()
+  const attachment = page.getByRole('listitem').first()
+  const initial = await attachment.boundingBox()
+  if (!initial) throw new Error('The image attachment must be mounted')
+  await page.evaluate((top) => scrollTo(0, top), initial.y + initial.height + 1)
+  await expect(page.getByRole('img', { name: 'Preview of Image' })).toHaveCount(0)
+  // Revisit the bottom of the reserved preview while the attachment chip is still above view.
+  await page.evaluate((top) => scrollTo(0, top), initial.y + initial.height - 80)
+  await expect.poll(() => imageReads).toBe(2)
+  expect((await attachment.boundingBox())?.height).toBeCloseTo(initial.height)
+  reload.resolve()
+  await expect(page.getByRole('img', { name: 'Preview of Image' })).toBeVisible()
+  expect(imageReads).toBe(2)
+})
