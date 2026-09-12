@@ -122,6 +122,9 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
       {(stdout.completeness === 'truncated' || stderr.completeness === 'truncated') && (
         <small>Output was trimmed</small>
       )}
+      {(stdout.encoding === 'lossy_utf8' || stderr.encoding === 'lossy_utf8') && (
+        <small>Some output bytes could not be decoded</small>
+      )}
       {!Object.keys(result).length && <Excerpt excerpt={resultExcerpt} label="Output" />}
     </>
   )

@@ -23,6 +23,17 @@ describe('tool presentation', () => {
     expect(markup).not.toContain('&quot;stdout&quot;')
   })
 
+  it('identifies command output decoded with replacement characters', () => {
+    const markup = render(
+      toolExample(
+        'sandboxed_exec',
+        { program: 'cat', arguments: ['data.bin'] },
+        { stdout: { text: 'a�b', completeness: 'complete', encoding: 'lossy_utf8' } },
+      ),
+    )
+    expect(markup).toContain('Some output bytes could not be decoded')
+  })
+
   it('renders file replacements with textual diff markers', () => {
     const markup = render(
       toolExample(
