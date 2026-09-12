@@ -130,6 +130,7 @@ version = 1
 max_git_object_bytes = "none"
 max_image_presentation_bytes = "none"
 max_raster_dimension = "none"
+max_document_presentation_bytes = "none"
 max_image_request_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
@@ -6744,4 +6745,40 @@ fn file_image_configuration_lowers_adapter_capabilities_and_none_retains_them() 
         }
     }
     assert!(images > 0);
+}
+
+#[test]
+fn file_document_configuration_applies_only_to_claude_and_lowers_its_byte_bound() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let configuration = format!(
+        "{}{CLAUDE_MODEL_ENTRY}",
+        configuration_with_claude_paths(&executable, &executable, root.path())
+    );
+    let bounded = HubModelConfiguration::parse(&configuration.replace(
+        "max_document_presentation_bytes = \"none\"",
+        "max_document_presentation_bytes = 1234",
+    ))
+    .unwrap();
+    let mut documents = 0;
+    for definition in bounded.runtime_model_capability_catalog().iter() {
+        if let Some(document) = definition.capabilities().document_presentation() {
+            documents += 1;
+            assert_eq!(document.maximum_document_bytes(), 1234);
+            assert!(document.admits("application/pdf", 1234));
+            assert!(!document.admits("application/pdf", 1235));
+        }
+    }
+    assert!(documents > 0);
+    let codex = HubModelConfiguration::parse(&configuration_with_api_metered_codex_model(
+        &executable,
+        root.path(),
+    ))
+    .unwrap();
+    assert!(
+        codex
+            .runtime_model_capability_catalog()
+            .iter()
+            .all(|definition| definition.capabilities().document_presentation().is_none())
+    );
 }

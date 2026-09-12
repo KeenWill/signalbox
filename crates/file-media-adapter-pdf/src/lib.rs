@@ -24,9 +24,10 @@ use signalbox_file_media_runtime::{
 const MEDIA_TYPE: &str = "application/pdf";
 const PROVIDER_NAME: &str = "pdf";
 const READER_NAME: &str = "lopdf";
-const READER_REVISION: &str = "lopdf-hayro-v3";
+const READER_REVISION: &str = "lopdf-hayro-v4";
 const TEXT_VIEW: &str = "text";
 const METADATA_VIEW: &str = "metadata";
+const DOCUMENT_VIEW: &str = "document";
 const PAGE_IMAGE_VIEW: &str = "page_image";
 const MALFORMED_REASON: &str = "malformed_pdf";
 const DECODED_CONTENT_LIMIT: &str = "decoded_content_limit";
@@ -327,6 +328,9 @@ impl FileMediaProvider for PdfProvider {
             };
             require_active(cancellation)?;
             match request.view.as_str() {
+                DOCUMENT_VIEW => Ok(ProcessorReadOutput::DirectReference {
+                    media_type: String::from(MEDIA_TYPE),
+                }),
                 TEXT_VIEW => read_text(&document, &pages, cancellation),
                 METADATA_VIEW => read_metadata(&document, pages.len()),
                 PAGE_IMAGE_VIEW => page_image.ok_or(FileMediaProviderFailure::Failed)?.render(
@@ -390,6 +394,13 @@ pub fn declaration_with_raster_dimension(
             signalbox_file_media_runtime::MAX_VALIDATION_RANGES,
         ),
         views: vec![text_view, metadata_view, ReadViewDeclaration::try_new(
+            ReadViewName::try_new(DOCUMENT_VIEW)?,
+            String::from("Presents the validated PDF as a native document where the model supports it."),
+            CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
+            ReadAccessPattern::Streaming { maximum_ranges: 32 },
+            ReadViewBounds::File { source_bytes: signalbox_file_media_runtime::MAX_PRESENTED_FILE_BYTES,
+                output_bytes: signalbox_file_media_runtime::MAX_PRESENTED_FILE_BYTES },
+        )?, ReadViewDeclaration::try_new(
             ReadViewName::try_new(PAGE_IMAGE_VIEW)?,
             String::from("Renders one PDF page as PNG; page is one-based, scale defaults to 1 and is bounded to fit."),
             CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"properties":{"page":{"minimum":1,"type":"integer"},"scale":{"exclusiveMinimum":0,"type":"number"}},"required":["page"],"type":"object"}"#)?,

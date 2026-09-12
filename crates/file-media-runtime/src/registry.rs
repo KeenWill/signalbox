@@ -1006,6 +1006,33 @@ fn sanitize_read(
         }
         ProcessorReadOutput::GeneratedImage { .. } => Err(FileMediaFailure::ProcessorFailed),
         ProcessorReadOutput::DirectReference { media_type } => {
+            if let ReadViewBounds::File {
+                source_bytes,
+                output_bytes,
+            } = view.bounds()
+            {
+                if !initial_request
+                    || media_type != "application/pdf"
+                    || media_type != validated.detected_media_type().as_str()
+                    || !matches!(
+                        validated.validation(),
+                        ValidationEvidence::StrongSignature
+                            | ValidationEvidence::StructuralValidation
+                    )
+                {
+                    return Err(FileMediaFailure::ProcessorFailed);
+                }
+                if validated.source().byte_length().get()
+                    > source_bytes
+                        .min(output_bytes)
+                        .min(ceilings.presented_file_bytes)
+                {
+                    return Err(FileMediaFailure::OutputUnitTooLarge);
+                }
+                return Ok(FileReadResult::Reference(
+                    crate::FileMediaReference::direct_document(validated),
+                ));
+            }
             let ReadViewBounds::Image {
                 source_bytes,
                 output_bytes,
@@ -1282,6 +1309,12 @@ fn validate_reader(
         return Err(FileMediaRegistryConstructionError::ValidationBounds);
     }
     for view in reader.views() {
+        if matches!(view.bounds(), ReadViewBounds::File { .. })
+            && (reader.media_types().len() != 1
+                || reader.media_types()[0].as_str() != "application/pdf")
+        {
+            return Err(FileMediaRegistryConstructionError::ViewBounds);
+        }
         validate_view(view.access(), view.bounds(), ceilings)?;
         if matches!(view.bounds(), ReadViewBounds::Image { .. }) {
             if view.image_kind().is_none()
@@ -1511,7 +1544,10 @@ fn validate_view(
                 && output_bytes > 0
                 && output_bytes <= crate::MAX_PRESENTED_IMAGE_BYTES
         }
-        ReadViewBounds::Audio { .. } | ReadViewBounds::File { .. } => false,
+        ReadViewBounds::File { output_bytes, .. } => {
+            output_bytes > 0 && output_bytes <= crate::MAX_PRESENTED_FILE_BYTES
+        }
+        ReadViewBounds::Audio { .. } => false,
     };
     if valid {
         Ok(())

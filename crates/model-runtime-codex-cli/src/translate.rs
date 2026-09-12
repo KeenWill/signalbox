@@ -305,6 +305,11 @@ fn render_part(part: &MessagePart) -> Result<PromptPart<'_>, TranslationError> {
         MessagePart::Image(image) => Ok(PromptPart::Image {
             media_type: &image.media_type,
         }),
+        MessagePart::DocumentReference(_) | MessagePart::Document(_) => Err(
+            TranslationError::Failure(PreparationFailure::UnsupportedOperation {
+                detail: String::from("Codex CLI does not present documents"),
+            }),
+        ),
         MessagePart::ImageReference(_) => Err(TranslationError::Failure(
             PreparationFailure::UnsupportedOperation {
                 detail: String::from("image reference was not authenticated"),
