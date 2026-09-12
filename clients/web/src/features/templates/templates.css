@@ -1,0 +1,150 @@
+.templates-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  height: 100%;
+  padding: 16px;
+  overflow: auto;
+}
+.template-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.template-heading h2,
+.template-heading p,
+.templates-surface > p {
+  margin: 0;
+}
+.template-muted {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.template-heading .template-muted {
+  margin-top: 6px;
+}
+.template-list {
+  min-height: 180px;
+  flex: 1;
+  overflow: auto;
+}
+.template-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.template-row:hover {
+  background: var(--surface-2);
+}
+.template-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.template-row-name,
+.template-row-summary {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.template-row-name {
+  font-weight: 600;
+}
+.template-row-summary {
+  text-align: right;
+  font-size: 12px;
+}
+.template-row-name .template-muted {
+  font-weight: 400;
+}
+.template-grants {
+  margin: 0;
+}
+.template-grants > div {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) 2fr;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.template-grants dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.template-prompt,
+.template-source {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.template-digest {
+  overflow-wrap: anywhere;
+  font-family: monospace;
+  font-size: 12px;
+}
+.templates-surface details > summary {
+  cursor: pointer;
+  padding: 8px 0;
+}
+.templates-surface > .button {
+  align-self: flex-start;
+}
+@media (max-width: 600px) {
+  .templates-surface {
+    padding: 12px;
+  }
+  .template-heading {
+    flex-direction: column;
+  }
+  .template-row {
+    padding-inline: 4px;
+  }
+}
+
+.templates-surface {
+  font-size: 14px;
+  line-height: 1.4;
+}
+.template-heading h2 {
+  font-size: 18px;
+  font-weight: 600;
+}
+.templates-surface .button {
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+.templates-surface .button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.templates-surface .button:disabled {
+  color: var(--text-muted);
+  border-color: var(--border);
+  cursor: default;
+}
+.templates-surface .button.subtle {
+  padding-inline: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent);
+}
+.template-row-name > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
