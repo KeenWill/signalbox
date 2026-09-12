@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import { AlertTriangle, ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react'
 import type { WebContractBootstrap, WebSearchPage } from './generated/web-contract.mjs'
@@ -11,11 +12,12 @@ import {
   productTransport,
 } from './product'
 
+import './catalog.css'
+
 type SearchResult = WebSearchPage['results'][number]
 
 const MAX_U64 = 18_446_744_073_709_551_615n
 const MAX_I64 = 9_223_372_036_854_775_807n
-const MAX_SESSION_DRAFT_LENGTH = 45
 
 const validUuid = (value: string) => {
   const simple = /^[0-9a-f]{32}$/i
@@ -69,9 +71,7 @@ export function SearchSurface({
   onStateChange: (state: ProductSearchState) => void
 }) {
   const [draftQuery, setDraftQuery] = useState(state.q ?? '')
-  const [draftSession, setDraftSession] = useState(state.session ?? '')
   const [queryOverflow, setQueryOverflow] = useState(false)
-  const [sessionOverflow, setSessionOverflow] = useState(false)
   const [draftIsInvalid, setDraftIsInvalid] = useState(false)
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null)
   const errorHeadingRef = useRef<HTMLHeadingElement>(null)
@@ -95,10 +95,6 @@ export function SearchSurface({
     setDraftQuery(state.q ?? '')
     setQueryOverflow(state.q !== undefined && state.queryParameterIsValid === false)
   }, [state.q, state.queryParameterIsValid])
-  useEffect(() => {
-    setDraftSession(state.session ?? '')
-    setSessionOverflow(state.session !== undefined && state.sessionParameterIsValid === false)
-  }, [state.session, state.sessionParameterIsValid])
   useEffect(() => {
     const previous = routeStateRef.current
     const routeChanged =
@@ -201,12 +197,11 @@ export function SearchSurface({
     event.preventDefault()
     const form = new FormData(event.currentTarget)
     const q = String(form.get('q') ?? '').trim()
-    const session = String(form.get('session') ?? '').trim()
+    const session = state.session ?? ''
     const qBytes = new TextEncoder().encode(q).length
     const submittedSession = session || undefined
     const draftParametersAreValid =
       !queryOverflow &&
-      !sessionOverflow &&
       qBytes > 0 &&
       qBytes <= queryLimit &&
       !q.includes('\0') &&
@@ -262,24 +257,19 @@ export function SearchSurface({
             />
           </span>
         </label>
-        <label>
-          <span>Session ID</span>
-          <input
-            name="session"
-            value={draftSession}
-            onChange={(event) => {
-              setSessionOverflow(event.currentTarget.value.length > MAX_SESSION_DRAFT_LENGTH)
-              setDraftSession(event.currentTarget.value.slice(0, MAX_SESSION_DRAFT_LENGTH))
-              setDraftIsInvalid(false)
-            }}
-            placeholder="All sessions"
-          />
-        </label>
         <button type="submit" disabled={bootstrap === undefined}>
           Search
         </button>
       </form>
-      {(draftIsInvalid || queryOverflow || sessionOverflow) && !routeValidationIsVisible && (
+      {state.session && (
+        <p className="search-notice">
+          Searching within this session ·{' '}
+          <button type="button" onClick={() => onStateChange({ q: state.q })}>
+            Search all sessions
+          </button>
+        </p>
+      )}
+      {(draftIsInvalid || queryOverflow) && !routeValidationIsVisible && (
         <p className="search-notice" role="alert">
           Check your search.
         </p>
@@ -368,14 +358,25 @@ export function SearchSurface({
                   <li
                     key={`${result.session_id}:${result.address.event_sequence}:${result.projection_id}`}
                   >
-                    <div className="search-result-meta">
-                      <span>{enumLabel(result.content_class)}</span>
-                      <code>{result.address.event_sequence}</code>
-                    </div>
-                    <p>{highlightedSnippet(result)}</p>
-                    <div className="search-result-footer">
-                      <span>{result.session_id}</span>
-                    </div>
+                    <Link
+                      to="/$surface"
+                      params={{ surface: 'sessions' }}
+                      search={{
+                        session: result.session_id,
+                        workspace: true,
+                        around: result.address.event_sequence,
+                      }}
+                      className="search-result-link"
+                    >
+                      <div className="search-result-meta">
+                        <span>{enumLabel(result.content_class)}</span>
+                        <code>{result.address.event_sequence}</code>
+                      </div>
+                      <p>{highlightedSnippet(result)}</p>
+                      <div className="search-result-footer">
+                        <span>{result.session_id}</span>
+                      </div>
+                    </Link>
                   </li>
                 ))}
               </ol>

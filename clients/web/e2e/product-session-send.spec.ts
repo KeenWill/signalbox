@@ -32,6 +32,7 @@ async function sessionApi(
     grown: false,
     observed: false,
     historyReads: [] as string[],
+    historyAddresses: [] as Array<string | null>,
     textReads: [] as string[],
     submissions: [] as Array<{ command_id: string; message: string }>,
   }
@@ -120,6 +121,7 @@ async function sessionApi(
     const latest = state.grown ? '44' : '43'
     if (url.pathname.endsWith('/timeline')) {
       state.historyReads.push(url.searchParams.get('anchor') ?? '')
+      state.historyAddresses.push(url.searchParams.get('address'))
       return route.fulfill({
         json: {
           session_id: selectedSessionId,
@@ -898,5 +900,38 @@ for (const response of [204, 500]) {
     await expect(
       page.getByRole('status').filter({ hasText: 'Session recovery required' }),
     ).toBeVisible()
+  })
+}
+
+for (const active of [false, true]) {
+  test(`opens a search result at its matching address when active is ${active}`, async ({
+    page,
+  }) => {
+    const api = await sessionApi(page, active)
+    await page.route('**/api/search?**', (route) =>
+      route.fulfill({
+        json: {
+          results: [
+            {
+              session_id: sessionId,
+              address: { event_sequence: '41' },
+              projection_id: '1',
+              source: { kind: 'accepted_input', accepted_input_id: turnId, turn_id: turnId },
+              content_class: 'user_transcript',
+              snippet: initialMessage,
+              highlights: [],
+            },
+          ],
+          continuation: null,
+        },
+      }),
+    )
+    await page.goto('/search?q=check')
+    await page.getByRole('link', { name: new RegExp(initialMessage) }).click()
+    await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+    expect(api.state.historyReads).toEqual(['around'])
+    expect(api.state.historyAddresses).toEqual(['41'])
+    await page.getByRole('button', { name: /^Latest/ }).click()
+    await expect.poll(() => api.state.historyReads).toEqual(['around', 'latest'])
   })
 }
