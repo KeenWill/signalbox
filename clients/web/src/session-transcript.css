@@ -1,0 +1,25 @@
+.session-transcript-text {
+  min-width: 0;
+}
+.session-transcript-scroll {
+  height: clamp(18rem, 60dvh, 55rem);
+  overflow: auto;
+  overflow-anchor: none;
+  position: relative;
+}
+.session-transcript-scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.session-transcript-scroll .virtual-stage {
+  position: relative;
+}
+.session-transcript-scroll .session-message-entry {
+  box-sizing: border-box;
+  padding: 0.6rem 1rem;
+  overflow-wrap: anywhere;
+}
+.session-transcript-scroll pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
