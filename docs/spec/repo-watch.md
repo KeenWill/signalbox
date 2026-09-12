@@ -50,11 +50,12 @@ mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
 
-The example rules dispatch non-draft `agent/*` pull requests on opening without
-a required label, excluding `no-auto` and including stacked branches. They also
-match reviews, completed checks and mergeability changes. The example
-`merge-forward` template instructs the session to reply without editing unless
-the metadata tool reports `mergeable: false`.
+The example rules match non-draft `agent/*` pull requests without a required
+label, excluding `no-auto` and including stacked branches. Review-response
+matches openings, reviews and completed checks; merge-forward matches observed
+conflicts. The example `merge-forward` template finishes without edits,
+publication or a pull request comment unless the metadata tool reports
+`mergeable: false`.
 
 The module schema contains eighteen tables:
 
