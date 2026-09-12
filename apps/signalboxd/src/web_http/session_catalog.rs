@@ -153,7 +153,9 @@ fn session_catalog_snapshot_dto(
     })
 }
 
-fn session_catalog_summary_dto(summary: AttentionSummary) -> Result<WebSessionCatalogSummary, ()> {
+pub(super) fn session_catalog_summary_dto(
+    summary: AttentionSummary,
+) -> Result<WebSessionCatalogSummary, ()> {
     if summary
         .title_summary
         .as_ref()

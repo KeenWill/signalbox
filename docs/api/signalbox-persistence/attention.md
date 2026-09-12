@@ -80,6 +80,13 @@ impl attention::AttentionRepository {
         pool: sqlx_postgres::PgPool,
         automatic_resume_attempts: attention::AutomaticResumeAttemptBounds,
     ) -> Self;
+    pub async fn summary(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<
+        option::Option<signalbox_application::AttentionSummary>,
+        attention::AttentionRepositoryError,
+    >;
     pub async fn snapshot(
         &self,
         query: signalbox_application::AttentionQuery,

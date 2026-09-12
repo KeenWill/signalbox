@@ -360,6 +360,74 @@ fn example_model_configuration() -> HubModelConfiguration {
         .expect("the shared model configuration fixture is valid")
 }
 
+#[tokio::test]
+async fn session_creation_rejects_cross_origin_before_command_handling() {
+    let response = production_router(None, None, None, None, None)
+        .oneshot(
+            Request::post("/api/sessions")
+                .header(header::HOST, "localhost")
+                .header(header::ORIGIN, "http://other.example")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .expect("valid HTTP request"),
+        )
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn session_creation_rejects_invalid_payload_before_configuration_lookup() {
+    let command = Uuid::now_v7().to_string();
+    let cases = [
+        (
+            "unknown metadata",
+            serde_json::json!({"command_id": command, "template_name": "chat", "title": "unadmitted"}),
+        ),
+        (
+            "reserved identity",
+            serde_json::json!({"command_id": Uuid::nil().to_string(), "template_name": "chat"}),
+        ),
+        (
+            "empty template",
+            serde_json::json!({"command_id": command, "template_name": ""}),
+        ),
+        (
+            "reused command identity",
+            serde_json::json!({"command_id": command, "template_name": "chat", "first_input": {"command_id": command, "message": "hello"}}),
+        ),
+        (
+            "empty first input",
+            serde_json::json!({"command_id": command, "template_name": "chat", "first_input": {"command_id": Uuid::now_v7().to_string(), "message": ""}}),
+        ),
+    ];
+    for (case, body) in cases {
+        let response = production_router(None, None, None, None, None)
+            .oneshot(
+                Request::post("/api/sessions")
+                    .header(header::HOST, "localhost")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("valid HTTP request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case}");
+    }
+}
+
+#[tokio::test]
+async fn session_creation_reports_unconfigured_command_service() {
+    let response = production_router(None, None, None, None, None)
+        .oneshot(Request::post("/api/sessions")
+            .header(header::HOST, "localhost")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::json!({"command_id": Uuid::now_v7().to_string(), "template_name": "chat"}).to_string()))
+            .expect("valid HTTP request"))
+        .await.expect("router response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
 fn rated_example_target() -> ResolvedProviderTarget {
     ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(uuid::uuid!(
         "20000000-0000-4000-8000-000000000001"

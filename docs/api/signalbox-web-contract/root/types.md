@@ -81,6 +81,27 @@ pub struct WebSubmitInputRequest {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebCreateSessionRequest
+
+```rust
+pub struct WebCreateSessionRequest {
+    pub command_id: string::String,
+    pub template_name: string::String,
+    pub first_input: option::Option<WebSubmitInputRequest>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebCreateSessionResponse
+
+```rust
+pub struct WebCreateSessionResponse {
+    pub session_id: WebSessionId,
+    pub summary: WebSessionCatalogSummary,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebContractExample
 
 ```rust
@@ -1968,19 +1989,6 @@ pub struct WebUsageTokenCoverage {
 pub enum WebUsageCostLabel {
     Real,
     MeteredEquivalent,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageCostUnavailableReason
-
-```rust
-pub enum WebUsageCostUnavailableReason {
-    NoTokenEvidence,
-    UnknownInputSemantics,
-    IncompleteCacheAxes,
-    InvalidCacheBreakdown,
-    ConfigurationUnavailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

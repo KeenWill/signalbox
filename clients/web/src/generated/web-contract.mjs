@@ -994,6 +994,283 @@ const schemas = {
     "title": "WebContractExample",
     "type": "object"
   },
+  "WebCreateSessionRequest": {
+    "$defs": {
+      "WebSubmitInputRequest": {
+        "additionalProperties": false,
+        "description": "An idempotent text submission using the session's current defaults.",
+        "properties": {
+          "command_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "message": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "message"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Creates an interactive session using the named template's defaults.",
+    "properties": {
+      "command_id": {
+        "description": "Durable identity for creation, retained when retrying.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "first_input": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebSubmitInputRequest"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Separately idempotent input submitted after creation commits."
+      },
+      "template_name": {
+        "description": "Configured session template name.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "template_name"
+    ],
+    "title": "WebCreateSessionRequest",
+    "type": "object"
+  },
+  "WebCreateSessionResponse": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure",
+          "finish_check_failed"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "parked",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebSessionCatalogActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_microseconds": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "unix_microseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebSessionCatalogSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "active_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "current_turn_id": {
+            "anyOf": [
+              {
+                "description": "Checked canonical UUID used for browser-visible non-session identities.",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebSessionCatalogActivity"
+          },
+          "queued_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          },
+          "title_summary": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_id",
+          "title_summary",
+          "title_truncated",
+          "archived",
+          "current_turn_id",
+          "active_turn_count",
+          "queued_turn_count",
+          "state",
+          "action",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Committed creation identity and a current catalog projection.",
+    "properties": {
+      "session_id": {
+        "$ref": "#/$defs/WebSessionId"
+      },
+      "summary": {
+        "$ref": "#/$defs/WebSessionCatalogSummary"
+      }
+    },
+    "required": [
+      "session_id",
+      "summary"
+    ],
+    "title": "WebCreateSessionResponse",
+    "type": "object"
+  },
   "WebImportContinuationRequest": {
     "$defs": {
       "WebImportContinuationReference": {
@@ -9475,6 +9752,16 @@ export function decodeWebContractBootstrap(value) {
 
 export function decodeWebSubmitInputRequest(value) {
   assertSchema(schemas.WebSubmitInputRequest, schemas.WebSubmitInputRequest, value, "websubmitinputrequest");
+  return value;
+}
+
+export function decodeWebCreateSessionRequest(value) {
+  assertSchema(schemas.WebCreateSessionRequest, schemas.WebCreateSessionRequest, value, "webcreatesessionrequest");
+  return value;
+}
+
+export function decodeWebCreateSessionResponse(value) {
+  assertSchema(schemas.WebCreateSessionResponse, schemas.WebCreateSessionResponse, value, "webcreatesessionresponse");
   return value;
 }
 
