@@ -61,3 +61,18 @@
     grid-column: 1 / 3;
   }
 }
+
+.catalog-session-copy strong {
+  display: flex;
+  align-items: baseline;
+}
+
+.catalog-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.catalog-title-truncated {
+  flex-shrink: 0;
+}

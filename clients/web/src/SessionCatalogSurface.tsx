@@ -10,7 +10,10 @@ import {
   ProductTransportError,
   productTransport,
   readSessionRates,
+  readSessionTranscript,
+  type SessionTranscriptLimits,
 } from './product'
+import { HttpSessionTimelineSource } from './session-timeline/model'
 import { actions, useAppDispatch, useAppSelector } from './state'
 import './catalog.css'
 
@@ -26,12 +29,62 @@ const activityTime = (unixMicroseconds: string) => {
   }).format(new Date(value))
 }
 
-const SessionTitle = ({ summary }: { summary: SessionSummary }) => (
-  <>
-    {summary.title_summary ?? 'Untitled session'}
-    {summary.title_truncated && <span className="catalog-title-truncated">Truncated</span>}
-  </>
-)
+// WebSessionCatalogSummary limits titles to 128 Unicode scalars.
+const MAX_SESSION_SUMMARY_SCALARS = 128
+
+async function readAutomaticTitle(
+  sessionId: string,
+  source: HttpSessionTimelineSource,
+  limits: SessionTranscriptLimits,
+  signal: AbortSignal,
+) {
+  const descriptor = await source.readDescriptor(sessionId, signal)
+  const pullRequest = descriptor.repository_watch?.pull_request
+  const prefix = pullRequest ? `PR #${pullRequest}` : ''
+  const page = await readSessionTranscript(
+    sessionId,
+    descriptor.first_address.event_sequence,
+    descriptor.latest_address.event_sequence,
+    null,
+    limits,
+    signal,
+  )
+  const message = page.items.find((item) => item.body.type === 'user_input')?.body
+  const text = message?.type === 'user_input' ? message.text.text.trim().split('\n', 1)[0] : ''
+  const scalars = Array.from([prefix, text].filter(Boolean).join(': '))
+  return {
+    text: scalars.slice(0, MAX_SESSION_SUMMARY_SCALARS).join(''),
+    truncated: scalars.length > MAX_SESSION_SUMMARY_SCALARS,
+  }
+}
+
+const SessionTitle = ({
+  summary,
+  source,
+  limits,
+}: {
+  summary: SessionSummary
+  source?: HttpSessionTimelineSource
+  limits?: SessionTranscriptLimits
+}) => {
+  const automatic = useQuery({
+    queryKey: ['production', 'automatic-session-title', summary.session_id],
+    queryFn: ({ signal }) =>
+      source && limits ? readAutomaticTitle(summary.session_id, source, limits, signal) : null,
+    enabled: !summary.title_summary?.trim() && source !== undefined && limits !== undefined,
+    gcTime: 0,
+  })
+  const savedTitle = summary.title_summary?.trim()
+  const truncated = savedTitle ? summary.title_truncated : automatic.data?.truncated
+  return (
+    <>
+      <span className="catalog-title-text">
+        {savedTitle || automatic.data?.text || `Session ${summary.session_id}`}
+      </span>
+      {truncated && <span className="catalog-title-truncated">Truncated</span>}
+    </>
+  )
+}
 
 export function SessionCatalogSurface({
   returnSessionId,
@@ -91,6 +144,13 @@ export function SessionCatalogSurface({
         },
         signal,
       ),
+    gcTime: 0,
+  })
+  const titleSource = useQuery({
+    queryKey: ['production', 'catalog-title-source'],
+    queryFn: ({ signal }) => HttpSessionTimelineSource.connect(window.fetch.bind(window), signal),
+    enabled: sessions.data?.summaries.some((row) => !row.title_summary?.trim()) === true,
+    staleTime: Number.POSITIVE_INFINITY,
     gcTime: 0,
   })
   const sessionIds = useMemo(
@@ -338,7 +398,11 @@ export function SessionCatalogSurface({
                     >
                       <span className="catalog-session-copy">
                         <strong>
-                          <SessionTitle summary={summary} />
+                          <SessionTitle
+                            summary={summary}
+                            source={titleSource.data}
+                            limits={bootstrap.data?.limits}
+                          />
                         </strong>
                         <code>{summary.session_id}</code>
                         {summary.action && <small>{enumLabel(summary.action)}</small>}
