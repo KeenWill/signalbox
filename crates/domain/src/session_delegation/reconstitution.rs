@@ -20,6 +20,7 @@ pub struct SessionDelegationReconstitutionInput {
     pub(super) spawning_request: DelegatedSpawnRequest,
     pub(super) child: SessionId,
     pub(super) child_turn: TurnId,
+    pub(super) reconciliation_required_child: bool,
     pub(super) events: Vec<DelegationEvent>,
 }
 
@@ -34,6 +35,7 @@ impl SessionDelegationReconstitutionInput {
             spawning_request,
             child,
             child_turn,
+            reconciliation_required_child: false,
             events,
         }
     }
@@ -52,6 +54,13 @@ impl SessionDelegationReconstitutionInput {
 
     pub fn events(&self) -> &[DelegationEvent] {
         &self.events
+    }
+
+    /// Records that the exact delegated initial turn has independently
+    /// validated reconciliation-required terminal lifecycle evidence.
+    pub fn with_reconciliation_required_child(mut self) -> Self {
+        self.reconciliation_required_child = true;
+        self
     }
 
     /// Validates the complete ordered history without authorizing a new
@@ -176,7 +185,7 @@ pub(super) fn validate_reconstituted_history(
     let mut seen_message_requests = HashSet::new();
     let mut seen_parent_commands = HashSet::new();
     let mut seen_outcome_provenance = HashSet::new();
-    let mut seen_child_terminal = false;
+    let mut seen_child_terminal = input.reconciliation_required_child;
     for (index, event) in input.events.iter().enumerate() {
         let expected = u64::try_from(index)
             .ok()
@@ -275,7 +284,10 @@ fn validate_reconstituted_outcome(
     {
         return Err(SessionDelegationReconstitutionFailure::EventAfterTerminal);
     }
-    if lifecycle == DelegationLifecycle::Active && records_terminal_evaluation {
+    if lifecycle == DelegationLifecycle::Active
+        && records_terminal_evaluation
+        && !*seen_child_terminal
+    {
         return Err(SessionDelegationReconstitutionFailure::OutcomeReasonMismatch);
     }
     if !outcome_matches_relation(relation, outcome) {

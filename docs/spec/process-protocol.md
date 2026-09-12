@@ -385,15 +385,16 @@ prove an authorized executable attempt that is not awaiting approval, denied,
 closed, or ended. A foreground await subscribes before registering its durable
 wait and queries durable delivery before blocking, so a completion cannot be
 lost; a disconnect or daemon shutdown abandons only the socket wait, never the
-durable child wait. An `already_terminal` disposition requires the
-relationship's pre-existing immutable child result and never creates or replaces
-it. `delivery_sequence` is allocated under the recipient session lock and is
-unique and gap-free per recipient across messages and background deliveries. The
-internal `delegation_wake` outbox event is a scheduler signal, not a
-session-follow update; a client observes the durable result instead. A stopped
-or cancelled `child_lifecycle_disposition` caused by a parent cascade is emitted
-on both the parent and child streams; every other typed update has one recipient
-stream.
+durable child wait. An `already_terminal` disposition requires either the
+relationship's pre-existing immutable child result or its delegated initial
+turn's reconciliation-required terminal lifecycle evidence. It never creates or
+replaces a child result. `delivery_sequence` is allocated under the recipient
+session lock and is unique and gap-free per recipient across messages and
+background deliveries. The internal `delegation_wake` outbox event is a
+scheduler signal, not a session-follow update; a client observes the durable
+result instead. A stopped or cancelled `child_lifecycle_disposition` caused by a
+parent cascade is emitted on both the parent and child streams; every other
+typed update has one recipient stream.
 
 An import begin declares the format and the exact total byte count, and commit
 requires the assembled count to equal the declared count before conversion.

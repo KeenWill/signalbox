@@ -611,6 +611,7 @@ impl ReviewWorkflowStore {
                         AS pass_result_event_ordinal,
                     pass.result_event_kind AS pass_result_event_kind,
                     pass.result_reason AS pass_result_reason,
+                    pass.result_judge_confidence AS pass_result_judge_confidence,
                     pass.result_referenced_finding_id
                         AS pass_result_referenced_finding_id,
                     pass.result_referenced_finding_run_id
@@ -744,6 +745,7 @@ impl ReviewWorkflowStore {
                     pass.result_finding_pass_id,
                     pass.result_event_ordinal, pass.result_event_kind,
                     pass.result_reason,
+                    pass.result_judge_confidence,
                     pass.result_referenced_finding_id,
                     pass.result_referenced_finding_run_id,
                     pass.result_referenced_finding_target_id,

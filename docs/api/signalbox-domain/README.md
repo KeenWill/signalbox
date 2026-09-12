@@ -31,7 +31,7 @@
 | rate_limit | 2 | 0 | 0 | [rate_limit](rate_limit.md) |
 | replace_session_defaults | 13 | 0 | 0 | [replace_session_defaults](replace_session_defaults.md) |
 | repo_watch | 43 | 0 | 0 | [repo_watch](repo_watch.md) |
-| review_workflow | 83 | 0 | 1 | [review_workflow](review_workflow.md) |
+| review_workflow | 88 | 0 | 1 | [review_workflow](review_workflow.md) |
 | runner | 80 | 0 | 0 | [runner](runner.md) |
 | semantic_entry | 8 | 0 | 0 | [semantic_entry](semantic_entry.md) |
 | session | 23 | 0 | 0 | [session](session.md) |

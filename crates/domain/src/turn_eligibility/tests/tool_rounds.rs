@@ -997,3 +997,166 @@ fn scheduling_reconstitutes_tool_round_history() {
             if *actual == closed_request
     ));
 }
+
+/// A delivered child result remains part of the cancelled round's ordered suffix.
+#[test]
+fn cancelled_tool_round_preserves_delivered_child_result() {
+    let session = current_session();
+    let cancelled = accepted_origin(1);
+    let successor = accepted_origin(2);
+    let origin_entry = semantic_entry(30);
+    let tool_use_entry = semantic_entry(31);
+    let result_entry = semantic_entry(32);
+    let cancellation_entry = semantic_entry(33);
+    let starting_frontier = frontier(40);
+    let terminal_frontier = frontier(41);
+    let producing_call = model_call_id(50);
+    let producing_attempt = turn_attempt_id(51);
+    let terminal_attempt = turn_attempt_id(52);
+    let request = tool_request_id(60);
+    let child = session_id(61);
+    let spawning_request = tool_request_id(62);
+    let child_turn = turn_id(63);
+    let outcome = crate::DelegationOutcome::reconstitute(
+        crate::DelegationOutcomeKind::ResultReturned,
+        Some(
+            crate::DelegationContent::try_new(String::from("delivered child result"))
+                .expect("fixture result"),
+        ),
+        crate::DelegationOutcomeReason::ChildCompleted,
+        crate::DelegationProvenanceReconstitutionInput::ChildTurn {
+            session: child,
+            turn: child_turn,
+        },
+    )
+    .expect("child completion is correlated");
+    let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+        successor.position(),
+        cancelled.turn(),
+    );
+    let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+        command_id(70),
+        session.id(),
+        cancelled.turn(),
+        successor.accepted_input(),
+        successor.turn(),
+        successor_order,
+    )
+    .expect("the terminal interrupt is exactly correlated");
+    let cancelled_record = cancelled.record(
+        &session,
+        AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
+            starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+            starting_frontier: starting_frontier.id(),
+            terminal_execution: CancelledTurnExecutionReconstitutionInput::new(
+                cancelled.turn(),
+                terminal_attempt,
+                TerminalAttemptEndReconstitutionInput::after_cancellation(
+                    CancellationStopDisposition::Cancelled,
+                    interrupt,
+                ),
+                None,
+                interrupt,
+            ),
+            terminal_frontier: terminal_frontier.id(),
+        },
+    );
+    let successor_record = successor.record_with(
+        &session,
+        OriginRecordFacts {
+            order: successor_order,
+            delivery: DeliveryRequest::Interrupt {
+                expected_active_turn: cancelled.turn(),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+            state: AcceptedInputTurnSchedulingRecordState::Queued,
+        },
+    );
+    let semantic_entries = vec![
+        cancelled.entry(&session, origin_entry),
+        SemanticTranscriptEntryReconstitutionInput::new(
+            tool_use_entry.id(),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call,
+                request,
+            },
+        ),
+        SemanticTranscriptEntryReconstitutionInput::new(
+            result_entry.id(),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::DelegationResult {
+                awaiting_request: request,
+                spawning_request,
+                child,
+                mode: crate::DelegationWaitMode::Foreground,
+                delivery_sequence: None,
+                outcome: Box::new(outcome),
+            },
+        ),
+        SemanticTranscriptEntryReconstitutionInput::new(
+            cancellation_entry.id(),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::TurnCancelled {
+                turn: cancelled.turn(),
+            },
+        ),
+    ];
+    let target = ResolvedProviderTarget::naming(provider_model_identity(80));
+    let input = AcceptedInputSchedulingReconstitutionInput::new(
+        session.clone(),
+        vec![cancelled_record, successor_record],
+        semantic_entries,
+        vec![
+            starting_frontier.snapshot(&session, &[origin_entry]),
+            terminal_frontier.snapshot(
+                &session,
+                &[
+                    origin_entry,
+                    tool_use_entry,
+                    result_entry,
+                    cancellation_entry,
+                ],
+            ),
+        ],
+        None,
+    )
+    .with_model_call_facts(
+        vec![crate::PinnedProviderTargetReconstitutionInput::new(
+            cancelled.turn(),
+            target,
+        )],
+        vec![ModelCallReconstitutionInput::new(
+            producing_call,
+            cancelled.turn(),
+            producing_attempt,
+            FrozenModelSelection::Direct(direct(1)),
+            target,
+            starting_frontier.id(),
+            ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
+        )],
+    );
+
+    let projection = input
+        .reconstitute()
+        .expect("the writer-produced cancelled tool-round shape reconstitutes");
+
+    assert_eq!(
+        projection
+            .turn(cancelled.turn())
+            .expect("the cancelled turn remains present")
+            .status(),
+        AcceptedInputTurnSchedulingStatus::TerminalCancelled
+    );
+    assert_eq!(
+        projection
+            .earliest_queued_turn()
+            .expect("the interrupt successor remains queued")
+            .turn(),
+        successor.turn()
+    );
+}

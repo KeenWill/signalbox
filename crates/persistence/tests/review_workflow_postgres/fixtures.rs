@@ -295,7 +295,9 @@ pub(crate) fn finding_event(
     kind: ReviewFindingEventKind,
 ) -> ReviewFindingEvent {
     let result_kind = match &kind {
-        ReviewFindingEventKind::Accepted => ReviewFindingEventResultKind::Accepted,
+        ReviewFindingEventKind::Accepted { confidence } => ReviewFindingEventResultKind::Accepted {
+            confidence: *confidence,
+        },
         ReviewFindingEventKind::Rejected { reason } => ReviewFindingEventResultKind::Rejected {
             reason: reason.clone(),
         },
