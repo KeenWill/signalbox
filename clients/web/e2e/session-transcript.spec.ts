@@ -40,65 +40,80 @@ test('scrolls a hundred thousand messages in both directions with bounded rows',
   await page.screenshot({ path: testInfo.outputPath('transcript-scroll.png') })
 })
 
-test('automatically crosses a tail containing only lifecycle events', async ({ page }) => {
-  const reads: string[] = []
-  await page.route('**/api/**', (route) => {
-    const url = new URL(route.request().url())
-    if (url.pathname.endsWith('/follow'))
-      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
-    if (url.pathname === '/api/attention')
-      return route.fulfill({
-        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
-      })
-    const payload = transcriptFixture(url)
-    if (url.pathname.endsWith('/timeline')) {
-      reads.push(url.searchParams.get('anchor') ?? '')
-      const window = payload as import('../src/generated/web-contract.mjs').WebSessionTimelineWindow
-      return route.fulfill({
-        json: {
-          ...window,
-          items: window.items.map((item) =>
-            Number(item.address.event_sequence) > 99984
-              ? { ...item, kind: 'turn_completed' }
-              : item,
-          ),
-        },
-      })
-    }
-    if (
-      url.pathname.endsWith('/timeline-detail') &&
-      Number(url.searchParams.get('first')) > 99984
-    ) {
-      const page =
-        payload as import('../src/generated/web-contract.mjs').WebSessionTimelineDetailPage
-      return route.fulfill({
-        json: {
-          ...page,
-          projected_body_bytes: 128,
-          items: page.items.map((item) => ({
-            ...item,
-            kind: 'turn_completed',
+for (const maximumItems of [1, 8]) {
+  test(`automatically crosses a lifecycle-only tail with ${maximumItems} items per page`, async ({
+    page,
+  }) => {
+    const reads: string[] = []
+    await page.route('**/api/**', (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname.endsWith('/follow'))
+        return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+      if (url.pathname === '/api/attention')
+        return route.fulfill({
+          json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+        })
+      const payload = transcriptFixture(url)
+      if (url.pathname === '/api/bootstrap') {
+        const bootstrap =
+          payload as typeof import('../src/product.fixture').webContractBootstrapFixture
+        return route.fulfill({
+          json: {
+            ...bootstrap,
+            limits: { ...bootstrap.limits, max_timeline_window_items: maximumItems },
+          },
+        })
+      }
+      if (url.pathname.endsWith('/timeline')) {
+        reads.push(url.searchParams.get('anchor') ?? '')
+        const window =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineWindow
+        return route.fulfill({
+          json: {
+            ...window,
+            items: window.items.map((item) =>
+              Number(item.address.event_sequence) > 99984
+                ? { ...item, kind: 'turn_completed' }
+                : item,
+            ),
+          },
+        })
+      }
+      if (
+        url.pathname.endsWith('/timeline-detail') &&
+        Number(url.searchParams.get('first')) > 99984
+      ) {
+        const page =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineDetailPage
+        return route.fulfill({
+          json: {
+            ...page,
             projected_body_bytes: 128,
-            body: {
-              type: 'turn_lifecycle',
-              turn_id: transcriptSessionId,
-              lifecycle: 'terminalized',
-              cause_code: 'completed',
-            },
-          })),
-        },
-      })
-    }
-    return route.fulfill({ json: payload })
+            items: page.items.map((item) => ({
+              ...item,
+              kind: 'turn_completed',
+              projected_body_bytes: 128,
+              body: {
+                type: 'turn_lifecycle',
+                turn_id: transcriptSessionId,
+                lifecycle: 'terminalized',
+                cause_code: 'completed',
+              },
+            })),
+          },
+        })
+      }
+      return route.fulfill({ json: payload })
+    })
+    await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+    await expect(
+      page
+        .getByRole('region', { name: 'Session transcript', exact: true })
+        .getByText('Message 99984', { exact: true }),
+    ).toBeVisible()
+    expect(reads.filter((anchor) => anchor === 'before').length).toBeGreaterThanOrEqual(2)
   })
-  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
-  await expect(
-    page
-      .getByRole('region', { name: 'Session transcript', exact: true })
-      .getByText('Message 99984', { exact: true }),
-  ).toBeVisible()
-  expect(reads.filter((anchor) => anchor === 'before').length).toBeGreaterThanOrEqual(2)
-})
+}
 
 test('opens the next excerpt directly and closes its expanded text', async ({ page }) => {
   const offsets: string[] = []
@@ -156,4 +171,79 @@ test('opens the next excerpt directly and closes its expanded text', async ({ pa
   expect(offsets).toEqual(['0', '1'])
   await continuation.getByRole('button', { name: 'Close details' }).click()
   await expect(continuation).toHaveCount(0)
+})
+
+test('follows live growth after loading earlier history and returning to the end', async ({
+  page,
+}) => {
+  const problems: string[] = []
+  page.on('pageerror', (error) => problems.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') problems.push(message.text())
+  })
+  let latest = 100000
+  let release = () => {}
+  const growth = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const anchors: string[] = []
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === `/api/sessions/${transcriptSessionId}/follow`) {
+      await growth
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body:
+          [
+            {
+              kind: 'snapshot',
+              snapshot: {
+                session_id: transcriptSessionId,
+                observed_through: '100000',
+                active: null,
+                queued_turn_count: '0',
+                queued_turn_ids: [],
+                reconciliation: null,
+                runner: null,
+              },
+            },
+            {
+              kind: 'durable',
+              cursor: '100001',
+              address: { event_sequence: '100001' },
+              event_kind: 'input_accepted',
+            },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join('\n') + '\n',
+      })
+    }
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    if (url.pathname.endsWith('/timeline')) anchors.push(url.searchParams.get('anchor') ?? '')
+    return route.fulfill({ json: transcriptFixture(url, latest) })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
+  await transcript.evaluate((element) => {
+    element.scrollTop = 0
+  })
+  await transcript.hover()
+  await page.mouse.wheel(0, -900)
+  await expect.poll(() => anchors).toContain('before')
+  await expect.poll(() => transcript.getAttribute('data-total-loaded')).toBe('16')
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await page.mouse.wheel(0, 900)
+  await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
+  latest = 100001
+  release()
+  await expect(transcript.getByText('Message 100001', { exact: true })).toBeVisible()
+  expect(problems).toEqual([])
 })
