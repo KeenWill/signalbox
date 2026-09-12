@@ -159,10 +159,50 @@ function TranscriptWindow({
       ),
     [entries],
   )
-  const ids = useMemo(() => turns.map((turn) => turn.id), [turns])
+  const pending = useMemo(
+    () =>
+      pages?.flatMap((page) =>
+        page.details.filter((detail) => detail.items.length === 0 && detail.continuation),
+      ) ?? [],
+    [pages],
+  )
+  const rows = useMemo(
+    () =>
+      [
+        ...turns.flatMap((turn) => {
+          const first = turn.events[0]
+          return first
+            ? [{ id: turn.id, sequence: first.address.event_sequence, turn, pending: undefined }]
+            : []
+        }),
+        ...pending.map((page) => ({
+          id: `pending-${continuationSequence(page)}`,
+          sequence: continuationSequence(page),
+          turn: undefined,
+          pending: page,
+        })),
+      ].sort((a, b) => (BigInt(a.sequence) < BigInt(b.sequence) ? -1 : 1)),
+    [turns, pending],
+  )
+  const ids = useMemo(() => rows.map((row) => row.id), [rows])
   const emptyScanned = useRef({ count: 0, first: '' })
   useEffect(() => {
-    if (turns.length > 0) {
+    const oldest = pages?.[0]
+    if (
+      oldest?.details.some(
+        (page) =>
+          page.continuation ||
+          page.items.some((item) =>
+            turns.some(
+              (turn) =>
+                turn.messages.includes(item) ||
+                turn.result === item ||
+                turn.outcome === item ||
+                (item.body.type === 'tool_batch' && turn.events.includes(item)),
+            ),
+          ),
+      )
+    ) {
       emptyScanned.current = { count: 0, first: '' }
       return
     }
@@ -178,7 +218,7 @@ function TranscriptWindow({
     if (emptyScanned.current.count >= SESSION_WINDOW_ITEMS) return
     void transcript.fetchPreviousPage()
   }, [
-    turns.length,
+    turns,
     pages,
     transcript.isFetching,
     transcript.isError,
@@ -196,7 +236,7 @@ function TranscriptWindow({
           </button>
         </p>
       )}
-      {!transcript.isPending && !transcript.isFetching && turns.length === 0 && (
+      {!transcript.isPending && !transcript.isFetching && rows.length === 0 && (
         <p>No messages in this part of the conversation. Scroll up to keep looking.</p>
       )}
       <VirtualTranscript
@@ -206,7 +246,7 @@ function TranscriptWindow({
         selectedId={
           turns.find((turn) =>
             turn.events.some((event) => event.address.event_sequence === eventSequence),
-          )?.id
+          )?.id ?? rows.find((row) => row.sequence === eventSequence)?.id
         }
         onEdge={(direction) => {
           if (transcript.isFetching || transcript.isError) return
@@ -215,8 +255,22 @@ function TranscriptWindow({
           if (direction === 'after' && transcript.hasNextPage) void transcript.fetchNextPage()
         }}
         renderRow={(index, measure, style) => {
-          const turn = turns[index]
-          if (!turn) return null
+          const row = rows[index]
+          if (!row) return null
+          if (row.pending)
+            return (
+              <div
+                key={row.id}
+                ref={measure}
+                data-index={index}
+                style={style}
+                className="session-message-entry"
+                data-event-sequence={row.sequence}
+              >
+                <ContinuedEvent sessionId={sessionId} page={row.pending} limits={limits} />
+              </div>
+            )
+          const turn = row.turn
           return (
             <div
               key={turn.id}
@@ -322,6 +376,13 @@ function ToolSummary({ tool }: { tool: WebTimelineToolAttempt }) {
   )
 }
 
+function continuationSequence(page: WebSessionTimelineDetailPage): string {
+  const cursor = page.continuation
+  return cursor?.type === 'more_at'
+    ? cursor.address.event_sequence
+    : (cursor?.body.address.event_sequence ?? '')
+}
+
 function ContinuedEvent({
   sessionId,
   page,
@@ -334,7 +395,7 @@ function ContinuedEvent({
   const [open, setOpen] = useState(false)
   const [cursor, setCursor] = useState(page.continuation ?? null)
   const previous = useRef(page)
-  const sequence = page.items.at(-1)?.address.event_sequence ?? ''
+  const sequence = page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)
   const detail = useQuery({
     queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
     enabled: open,

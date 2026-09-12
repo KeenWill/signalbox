@@ -40,11 +40,17 @@ test('scrolls a hundred thousand messages in both directions with bounded rows',
   await page.screenshot({ path: testInfo.outputPath('transcript-scroll.png') })
 })
 
-for (const maximumItems of [1, 8]) {
-  test(`automatically crosses a lifecycle-only tail with ${maximumItems} items per page`, async ({
+for (const [maximumItems, internal] of [
+  [1, false],
+  [8, false],
+  [8, true],
+] as const) {
+  test(`automatically crosses a lifecycle-only ${internal ? 'internal window' : 'tail'} with ${maximumItems} items per page`, async ({
     page,
   }) => {
     const reads: string[] = []
+    const hidden = (sequence: string | null) =>
+      Number(sequence) > 99984 && (!internal || Number(sequence) <= 99992)
     await page.route('**/api/**', (route) => {
       const url = new URL(route.request().url())
       if (url.pathname.endsWith('/follow'))
@@ -72,17 +78,12 @@ for (const maximumItems of [1, 8]) {
           json: {
             ...window,
             items: window.items.map((item) =>
-              Number(item.address.event_sequence) > 99984
-                ? { ...item, kind: 'turn_completed' }
-                : item,
+              hidden(item.address.event_sequence) ? { ...item, kind: 'turn_completed' } : item,
             ),
           },
         })
       }
-      if (
-        url.pathname.endsWith('/timeline-detail') &&
-        Number(url.searchParams.get('first')) > 99984
-      ) {
+      if (url.pathname.endsWith('/timeline-detail') && hidden(url.searchParams.get('first'))) {
         const page =
           payload as import('../src/generated/web-contract.mjs').WebSessionTimelineDetailPage
         return route.fulfill({
@@ -106,6 +107,18 @@ for (const maximumItems of [1, 8]) {
       return route.fulfill({ json: payload })
     })
     await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+    if (internal) {
+      const transcript = page.getByRole('region', {
+        name: 'Session transcript',
+        exact: true,
+      })
+      await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
+      await transcript.hover()
+      await transcript.evaluate((element) => {
+        element.scrollTop = 0
+      })
+      await page.mouse.wheel(0, -900)
+    }
     await expect(
       page
         .getByRole('region', { name: 'Session transcript', exact: true })
@@ -166,7 +179,9 @@ test('opens the next excerpt directly and closes its expanded text', async ({ pa
   await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
-  const continuation = transcript.getByRole('region', { name: 'More message text' })
+  const continuation = transcript.getByRole('region', {
+    name: 'More message text',
+  })
   await expect(continuation.getByText('b', { exact: true })).toBeVisible()
   expect(offsets).toEqual(['0', '1'])
   await continuation.getByRole('button', { name: 'Close details' }).click()
@@ -246,4 +261,42 @@ test('follows live growth after loading earlier history and returning to the end
   release()
   await expect(transcript.getByText('Message 100001', { exact: true })).toBeVisible()
   expect(problems).toEqual([])
+})
+
+test('keeps an empty detail continuation available without retrying it automatically', async ({
+  page,
+}) => {
+  const cursors: (string | null)[] = []
+  await page.route('**/api/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    if (url.pathname.endsWith('/timeline-detail') && url.searchParams.get('first') === '100000') {
+      cursors.push(url.searchParams.get('cursor_address'))
+      if (!url.searchParams.has('cursor_address'))
+        return route.fulfill({
+          json: {
+            session_id: transcriptSessionId,
+            items: [],
+            projected_body_bytes: 0,
+            continuation: {
+              type: 'more_at',
+              address: { event_sequence: '100000' },
+            },
+          },
+        })
+    }
+    return route.fulfill({ json: transcriptFixture(url) })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.getByRole('button', { name: 'Read more', exact: true })).toBeVisible()
+  expect(cursors).toEqual([null])
+  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
+  expect(cursors).toEqual([null, '100000'])
 })
