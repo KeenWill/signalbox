@@ -57,3 +57,12 @@
 .usage-product {
   font-size: 0.8rem;
 }
+.cost-chip {
+  display: inline-block;
+  max-width: 22rem;
+  overflow: hidden;
+  vertical-align: middle;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
