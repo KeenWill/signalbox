@@ -42,6 +42,11 @@ describe('tool presentation', () => {
     ).toContain('<dt>Input path</dt><dd>sample.txt</dd>')
   })
 
+  it('keeps custom tools with familiar names in the labeled fallback', () => {
+    const markup = render(toolExample('shell', { script: 'custom syntax' }, { answer: 'done' }))
+    expect(markup).toContain('<dt>Script</dt><dd>custom syntax</dd>')
+  })
+
   it('does not interpret partial JSON as complete tool arguments', () => {
     expect(excerptFields({ ...toolExcerpt('{"path":"tail"}'), offset_bytes: '123' })).toEqual({})
   })

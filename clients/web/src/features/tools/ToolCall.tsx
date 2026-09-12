@@ -244,16 +244,12 @@ function Fallback({ arguments: args, result, resultExcerpt }: RendererProps) {
 }
 
 export const toolRenderers: ReadonlyMap<string, ComponentType<RendererProps>> = new Map([
-  ...['sandboxed_exec', 'unsandboxed_exec', 'Bash', 'bash', 'exec_command', 'shell'].map(
-    (name) => [name, Command] as const,
-  ),
-  ...['read_file', 'Read', 'list_directory', 'glob_files', 'search_files'].map(
+  ...['sandboxed_exec', 'unsandboxed_exec'].map((name) => [name, Command] as const),
+  ...['read_file', 'list_directory', 'glob_files', 'search_files'].map(
     (name) => [name, FileRead] as const,
   ),
-  ...['write_file', 'edit_file', 'apply_patch', 'Edit', 'Write'].map(
-    (name) => [name, FileEdit] as const,
-  ),
-  ...['web_fetch', 'web_search', 'WebFetch', 'WebSearch'].map((name) => [name, Web] as const),
+  ...['write_file', 'edit_file', 'apply_patch'].map((name) => [name, FileEdit] as const),
+  ...['web_fetch', 'web_search'].map((name) => [name, Web] as const),
   ...[
     'git_status',
     'git_diff',
