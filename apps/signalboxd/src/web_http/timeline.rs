@@ -457,9 +457,9 @@ fn repository_projection_error(error: SessionTimelineRepositoryError) -> Respons
         SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Database(_)) => {
             "infrastructure"
         }
-        SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Corruption(_)) => {
-            "fail_closed_corruption"
-        }
+        SessionTimelineRepositoryError::Outbox(
+            OutboxDispatchError::CursorCorruption(_) | OutboxDispatchError::RowCorruption(_),
+        ) => "fail_closed_corruption",
     };
     tracing::error!(
         failure_class,
@@ -523,6 +523,30 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
+        supervision: descriptor.supervision.map(|facts| {
+            use signalbox_application::OperatorFailureClass;
+            use signalbox_web_contract::{WebSessionSupervision, WebSessionSupervisionClass};
+
+            WebSessionSupervision {
+                class: match facts.class {
+                    OperatorFailureClass::Infrastructure {
+                        commit_ambiguous: false,
+                    } => WebSessionSupervisionClass::Infrastructure,
+                    OperatorFailureClass::Infrastructure {
+                        commit_ambiguous: true,
+                    } => WebSessionSupervisionClass::CommitAmbiguous,
+                    OperatorFailureClass::FailClosedCorruption => {
+                        WebSessionSupervisionClass::Corruption
+                    }
+                    OperatorFailureClass::IdentityCollision => {
+                        WebSessionSupervisionClass::IdentityCollision
+                    }
+                    OperatorFailureClass::CallerOrHubBug => WebSessionSupervisionClass::Bug,
+                },
+                cause_code: facts.cause_code,
+                pending: facts.pending,
+            }
+        }),
         workspace_root_kind: descriptor.workspace_root_kind.map(workspace_root_kind_dto),
         repository_watch: None,
         session_id: WebSessionId::from_uuid_bytes(*descriptor.session.into_uuid().as_bytes()),
@@ -761,6 +785,11 @@ fn detail_body_dto(
                 }
                 TimelineToolBatchState::RecoveryRequired { attempt_id } => {
                     WebTimelineToolBatchState::RecoveryRequired {
+                        tool_attempt_id: web_uuid(attempt_id.into_uuid()),
+                    }
+                }
+                TimelineToolBatchState::ChildWaitResumed { attempt_id } => {
+                    WebTimelineToolBatchState::ChildWaitResumed {
                         tool_attempt_id: web_uuid(attempt_id.into_uuid()),
                     }
                 }

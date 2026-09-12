@@ -291,6 +291,7 @@ async fn run_live_smoke() -> SmokeResult {
         &exec_supervisor_executable,
         None,
         &Default::default(),
+        None,
         sandboxed_exec_timeout_bound,
         web_fetch_egress_policy,
     )?;
@@ -1114,6 +1115,7 @@ async fn assert_pending_approval(
     connection
         .send(ClientRequest::ReadTranscript {
             session_id: session,
+            after_frontier: None,
         })
         .await?;
     let start = connection.response_within().await?;

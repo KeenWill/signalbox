@@ -6,5 +6,5 @@
 | --- | ---: | ---: | ---: | --- |
 | patch | 13 | 0 | 3 | [patch](patch.md) |
 | mutation | 17 | 1 | 0 | [mutation](mutation.md) |
-| path | 10 | 1 | 0 | [path](path.md) |
+| path | 11 | 1 | 0 | [path](path.md) |
 | read | 14 | 0 | 0 | [read](read.md) |

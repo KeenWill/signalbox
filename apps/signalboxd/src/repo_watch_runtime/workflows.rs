@@ -44,9 +44,9 @@ impl RepositoryWatchRuntime {
             RepositoryWatchCommandFactory,
             RepositoryWatchCommandCodec,
             (),
-        >::acknowledge_store_receipts(&self.measurements_store, journals)
+        >::acknowledge_store_receipts(&self.store, journals)
         .await?;
-        crate::workflows::repo_watch::observe::acknowledge(&self.measurements_store, journals).await
+        crate::workflows::repo_watch::observe::acknowledge(&self.store, journals).await
     }
 }
 

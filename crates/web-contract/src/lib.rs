@@ -18,7 +18,7 @@ use signalbox_application::{
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
-pub const WEB_CONTRACT_VERSION: &str = "2";
+pub const WEB_CONTRACT_VERSION: &str = "3";
 /// Stable name of the browser HTTP contract family.
 pub const WEB_CONTRACT_NAME: &str = "signalbox.web-http";
 
@@ -911,10 +911,33 @@ pub struct WebSessionWorkFacts {
     pub queued_turn_count: WebU64,
 }
 
+/// Closed class of a retained session supervision failure.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionSupervisionClass {
+    Infrastructure,
+    CommitAmbiguous,
+    Corruption,
+    IdentityCollision,
+    Bug,
+}
+
+/// Session supervision evidence independent of transcript detail reads.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionSupervision {
+    pub class: WebSessionSupervisionClass,
+    pub cause_code: String,
+    pub pending: bool,
+}
+
 /// Browser descriptor for one authoritative bounded session projection.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDescriptor {
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub supervision: Option<WebSessionSupervision>,
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub workspace_root_kind: Option<WebSessionWorkspaceRootKind>,
@@ -1170,6 +1193,7 @@ pub enum WebTimelineToolBatchState {
     Proposed { frontier_id: WebSessionId },
     ResultsProjected { frontier_id: WebSessionId },
     RecoveryRequired { tool_attempt_id: WebSessionId },
+    ChildWaitResumed { tool_attempt_id: WebSessionId },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1821,6 +1845,15 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
+/// Closed credential-admission reason shown for an active waiting turn.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebCredentialAvailabilityWaitCause {
+    Contended,
+    Exhausted,
+    NetworkUnavailable,
+}
+
 /// Current durable state of one active turn.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1829,6 +1862,10 @@ pub enum WebSessionLiveActiveState {
         #[serde(deserialize_with = "deserialize_present_option")]
         #[schemars(required)]
         model_call_id: Option<WebLiveResourceId>,
+    },
+    AwaitingCredentialAvailability {
+        wait_attempt_id: WebLiveResourceId,
+        cause: WebCredentialAvailabilityWaitCause,
     },
     AwaitingModelCallRecovery {
         model_call_id: WebLiveResourceId,
@@ -2795,6 +2832,7 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
         "/properties/repository_watch/properties/pull_request",
     )?;
     make_property_nullable(&mut descriptor_schema, "repository_watch")?;
+    make_property_nullable(&mut descriptor_schema, "supervision")?;
     make_property_nullable(&mut descriptor_schema, "workspace_root_kind")?;
     let mut timeline_window_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
@@ -3656,6 +3694,17 @@ function assertTimelineDetailPage(value) {{
             fail(
               `${{path}}.body.tools[0].evidence.state`,
               "ambiguous for the recovery target attempt",
+            );
+          }}
+          if (
+            physical !== null &&
+            item.body.state.type === "child_wait_resumed" &&
+            physical.attempt_id === item.body.state.tool_attempt_id &&
+            physical.state !== "awaiting_child"
+          ) {{
+            fail(
+              `${{path}}.body.tools[0].evidence.state`,
+              "awaiting_child for the resumed target attempt",
             );
           }}
           if (physical !== null) {{

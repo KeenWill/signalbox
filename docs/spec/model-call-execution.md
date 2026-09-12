@@ -78,6 +78,8 @@ summary still leaves insufficient headroom, the queued turn closes without
 another compaction call. A failed provider compaction closes the queued turn
 without preparing an ordinary call.
 
+A zero tool-result admission budget also requires a compaction checkpoint.
+
 A tool-result continuation exceeding reserved headroom commits its results and a
 compaction checkpoint while retaining the active turn. The daemon summarizes the
 checkpoint through its last safe boundary, then prepares the continuation from
@@ -405,7 +407,10 @@ A tool continuation must prove that the exact stored call frontier includes the
 current tool round's complete result evidence. A checkpointed call becomes
 resumable only when its extended snapshot is a strict prefix-preserving
 extension of the turn's starting snapshot and its membership equals the checked
-semantic entries.
+semantic entries. An interrupt at a tool-result compaction checkpoint retains
+the recorded result entries and completed compaction boundaries without
+inserting the results again; scheduling reconstitution validates the results
+before those retained boundaries.
 
 Every rendered message keeps its source-qualified semantic-entry reference and
 content-authority provenance; role and provenance derive from the entry itself,

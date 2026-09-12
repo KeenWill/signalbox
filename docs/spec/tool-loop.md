@@ -47,12 +47,15 @@ ever, and a second command is rejected.
 The daemon composes one process-lifetime immutable registry from the implemented
 tool families in `apps/signalboxd/src/daemon_tools/`: basic, blob-read, web,
 code-host, workspace, conversation, plan, session-delegation, goal-declaration,
-local Git, and execution tools. The workspace, conversation, local Git,
-execution, and mapped GitHub families are composed only under the complete
+local Git, workflow, and execution tools. The workspace, conversation, local
+Git, execution, and mapped GitHub families are composed only under the complete
 mapped composition
 ([configuration-and-credentials](configuration-and-credentials.md)), and
 blob-read is composed only when blob storage is configured. Each family's crate
 or daemon module documents its tools.
+
+`cargo_diagnostics` resolves dependencies under the configured sandbox network
+policy without forcing Cargo offline.
 
 Each approved request that reaches execution runs as one physical attempt
 through staged transactions. A prepare transaction mints the attempt and commits
@@ -112,7 +115,9 @@ not a blanket but a distinct decider that can still deny or escalate.
 Every decision records its source, so unattended operation is inspectable
 without presenting policy as human consent, and only an explicit user, delegate,
 or consumed-override decision emits an approval-decided event naming its
-decider, its decision, and, for a delegate, its rationale.
+decider, its decision, and, for a delegate, its rationale; a delivered
+foreground child wait emits a child-wait-resumed tool-batch event naming the
+awaited attempt in the commit that reopens the parent turn.
 
 A denial reason is at most 4,096 UTF-8 bytes, admits internal U+000A, and is
 free of other control characters and surrounding POSIX whitespace. An oversized
@@ -155,45 +160,28 @@ refuses every exchange; a root-level union in a schema is a family-wide outage,
 not a per-tool cost.
 
 The daemon registers `git_push_configured` when mapped workspace tools are
-composed and a watched repository configures `push_credential_file`; execution
-resolves the session's retained commissioned or repository-dispatched branch and
-head fences and current repository configuration on every call; the judge or CLI
-approval authorizes execution. The transport pushes without force to the
-configured repository URL and confirms the remote branch equals the resolved
-commit before acknowledging success. For a two-parent merge, exactly one parent
-must equal or descend from the retained-head fence; it is the branch parent,
-regardless of parent order. A missing or ambiguous fence binding refuses the
-push with `UnprovenMergeParents`. Multiple merge bases refuse it with
-`AmbiguousMergeBases`, listing base object IDs and an omitted count when the
-detail cannot fit them all; verification does not construct a virtual merge
-base. Before pushing a merge, the executor compares the base parent's additions
-and removals relative to the merge base with the merge result's additions and
-removals relative to that same ancestor, ignoring line offsets and consuming
-each matching effect once. The merge result must keep every line the base added
-verbatim and must not restore a line the base removed; the branch's own lines
-may be re-expressed only in regions of overlapping parent hunks with different
-replacement text; non-conflicting text stays verbatim. A missing base effect or
-a changed non-conflicting span refuses the push with `MergeDroppedBaseChanges`
-and a hunk preview. Rename detection correlates parent renames through their
-common source paths, permitting either parent's destination while retaining
-exact carried destinations. Non-text changes relative to the base parent must
-occur in the branch diff. Collected dropped-hunk previews share a 4 KiB budget,
-and collection truncation remains explicit in the detail. Its bounded JSON
-detail lists filenames before hunk previews, marks each shortened preview with
-`truncated`, and counts omitted filenames and previews explicitly when they
-cannot fit. Filenames use bytewise Git path quoting. Verification supports
+composed and a watched repository configures `push_credential_file`, a GitHub
+HTTPS destination with a `github_app` credential profile, or an SSH
+`push_remote_url` with an available host agent on Linux; execution resolves the
+session's retained commissioned or repository-dispatched branch and head fences
+and current repository configuration on every call; the judge or CLI approval
+authorizes execution. The transport pushes without force to the configured
+repository URL and confirms the remote branch equals the resolved commit before
+acknowledging success. For a two-parent merge, exactly one parent must equal or
+descend from the retained-head fence; it is the branch parent, regardless of
+parent order. A missing or ambiguous fence binding refuses the push with
+`UnprovenMergeParents`. The parents must share exactly one merge base; multiple
+merge bases refuse with `AmbiguousMergeBases`. The merge verifier checks
+ancestry only; it does not compare file contents or classify production,
+generated or fixture paths. Required validation on `refs/pull/N/merge` checks
+the combined tree, including dropped base changes. Verification supports
 two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
-the parent count before capturing the push snapshot or traversing ancestry. It
-retains only the first dropped hunk per file. Non-merge pushes are unaffected.
+the parent count before capturing the push snapshot or traversing ancestry.
+Non-merge pushes are unaffected.
 
-Before constructing merge diffs, verification counts tree-entry occurrences
-across the four compared trees against `MAX_REPOSITORY_INSPECTIONS`, including
-reused subtrees. Cumulative expanded path bytes, including every directory
-prefix, must fit `MAX_WORKTREE_PATH_BYTES` before diffs are constructed. Rename
-detection sets `MAX_MERGE_RENAME_SOURCES` explicitly; repository configuration
-cannot raise the search limit.
-
-The seven local Git tools perform no remote operation.
+The seven local Git tools perform no remote operation. `git_log` limits its
+returned page to `max_entries`; merge ancestry traversal is independent of
+worktree inspection limits.
 
 The daemon-local registry supplies no runner execution path.
 
@@ -234,7 +222,9 @@ resumes from durable wait and result rows and cannot duplicate an external
 effect. A batch can retain multiple foreground waits; continuation and
 interruption associate delivered child results with their await requests in
 proposal order. The next model call closes that batch across the intervening
-child-wait attempts, including when an ordinary tool follows the final wait.
+child-wait attempts, including when an ordinary tool follows the final wait. A
+delegated turn waiting on its own child remains interruptible and closable
+without a live model call.
 
 The error kind set stays closed; a family whose failures do not fit maps into it
 and may fix the detail to its own closed token vocabulary.
@@ -345,9 +335,10 @@ and the interrupt remains the proof-bearing authority for ending the turn. An
 interrupt alone against an approval wait is not a denial and does not bypass the
 decision command. A committed session closure first records core-issued
 lifecycle-closure denials for the outstanding approval waits, then applies its
-interrupt. A cancelled judge call discards late provider completions and
-failures, retaining its cancellation and unreported usage without changing the
-decision.
+interrupt. A logically terminated delegated turn's judge call is cancelled
+before authorization or acceptance of a provider completion or failure. A
+cancelled judge call discards late provider completions and failures, retaining
+its cancellation and unreported usage without changing the decision.
 
 Recorded overrides are frozen into each prepared model call in the same
 transaction as the blanket posture. Two things retire an override: the consuming
@@ -381,13 +372,20 @@ retained set a request still holds is never released. Every declaration a
 workspace-root-bound family advertises is a property of the family's code, not
 of the repository it binds. Local Git is the exception: it compiles the pinned
 repository's object format into its argument validators, and session composition
-refuses an object-format disagreement. Configured pushes use the same bound
-workspace.
+refuses an object-format disagreement when both configured and derived roots
+have Git. A plain configured root registers local Git declarations admitting
+either supported object-ID width so it can bind a repository-backed derived
+session; its Git executor enforces the bound repository's format. Local Git
+requests for a plain bound root return a known tool failure. Configured pushes
+use the same bound workspace.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
-correlated with that exact attempt. A tool that executes and exits nonzero
-returns bounded structured `ExecutionFailed` evidence and is `KnownFailed`. A
+correlated with that exact attempt. Delegated turns retain the same recovery
+evidence for automatic reconciliation and explicit stop without erasing the
+physical ambiguity. Automatic reconciliation publishes an unavailable child
+result and wakes the parent. A tool that executes and exits nonzero returns
+bounded structured `ExecutionFailed` evidence and is `KnownFailed`. A
 supervisor-reported sandbox timeout or cancellation retains its bounded output
 without requiring a launcher completion record. Output admission applies the
 size, U+0000, credential-redaction, and correlation checks before durable
@@ -414,8 +412,8 @@ effect-class crash-loss transition. A committed classification carrying an
 infrastructure or identity-collision failure fails or parks the affected turn
 without failing unrelated session execution. A fail-closed corruption or
 caller-or-hub bug remains an error after classification closes the attempt, so
-the execution supervisor parks that session with its cause;
-[runtime-substrate](runtime-substrate.md) owns the failure classes. If
+the execution supervisor parks that session with its cause without stopping the
+daemon; [runtime-substrate](runtime-substrate.md) owns the failure classes. If
 trustworthy evidence returns but its commit fails, the service retains that
 exact correlated observation as an opaque linear same-incarnation value and
 never downgrades still-owned evidence to restart crash loss.
@@ -607,16 +605,36 @@ complete locked relationship inventory for request and child uniqueness.
 The daemon nudges the child for eligibility after its spawn commits, retaining
 the hint until a full nudge buffer has capacity.
 
+The workflow family exposes `workflow_list`, `workflow_read`, `workflow_start`,
+`workflow_stop`, `workflow_replay` and `workflow_register`. List and read
+default to automatic approval and are effect-free; mutations default to
+delegated approval. Each template's `workflow_tools` operation entry selects
+`auto`, `delegated` or `human` posture. List, read and stop require
+`enabled = true`; start, replay and register require `names`, an exact
+registration-name list or `"*"`. Absent grants refuse with
+`workflow_grant_denied`, retained as an ordinary typed tool failure
+independently of approval. Grants and postures resolve from the retained
+template snapshot keyed by the session's template name and content digest, which
+includes the workflow policy. A session without a retained policy snapshot has
+no workflow grants. Reloading the catalog cannot change a live session's grants
+or postures; each proposed call freezes its selected posture. The judge receives
+the configured operation grant, or an explicit statement that no grant is
+configured, alongside the ordinary request context. [Workflows](workflows.md)
+owns run views, registration and mutation receipts.
+
 ## Planned
 
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
+
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a `ToolInadmissible`
   result entry; see [tool-loop design](../design/tool-loop.md).
+
 - Instruction admission: the commit-result and continuation transactions append
   an `InstructionAdmission` and a successor instruction manifest for a
   successful `instructions_read`; see
   [tool-loop design](../design/tool-loop.md).
+
 - Runner-locus execution rules: the lost-lease retry exception and the runner
   approval ladder; see [runner protocol design](../design/runner-protocol.md).
 

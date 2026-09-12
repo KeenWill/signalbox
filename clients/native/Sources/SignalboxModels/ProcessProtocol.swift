@@ -650,6 +650,7 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     case .readTranscript(let sessionID):
       try container.encode("read_transcript", forKey: "type")
       try container.encode(sessionID, forKey: "session_id")
+      try container.encodeNil(forKey: SignalboxDynamicCodingKey("after_frontier"))
     case .followSession(let sessionID):
       try container.encode("follow_session", forKey: "type")
       try container.encode(sessionID, forKey: "session_id")
@@ -1366,9 +1367,10 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         self = .transcriptContent(try SignalboxTranscriptContent(from: decoder))
       case "transcript_snapshot_end":
         try tagged.rejectUnadmittedFields(
-          ["type", "session_id", "cursor", "turn_count", "entry_count"],
+          ["type", "session_id", "cursor", "frontier", "turn_count", "entry_count"],
           decoder: decoder
         )
+        try tagged.requireFields(["frontier"], decoder: decoder)
         self = .transcriptSnapshotEnd(try SignalboxTranscriptSnapshotEnd(from: decoder))
       case "session_event":
         try tagged.rejectUnadmittedFields(
@@ -3096,6 +3098,7 @@ public enum SignalboxSessionWorkspaceRootKind: String, Decodable, Equatable, Sen
 public struct SignalboxTranscriptSnapshotBoundary: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let cursor: SignalboxCanonicalUInt64
+  public let afterFrontier: SignalboxCanonicalUUID?
   public let runner: SignalboxRunnerProjection?
   public let repositoryWatch: SignalboxRepositoryWatchProvenance?
   public let workspaceRootKind: SignalboxSessionWorkspaceRootKind?
@@ -3103,12 +3106,14 @@ public struct SignalboxTranscriptSnapshotBoundary: Decodable, Equatable, Sendabl
   public init(
     sessionID: SignalboxCanonicalUUID,
     cursor: SignalboxCanonicalUInt64,
+    afterFrontier: SignalboxCanonicalUUID?,
     runner: SignalboxRunnerProjection?,
     repositoryWatch: SignalboxRepositoryWatchProvenance?,
     workspaceRootKind: SignalboxSessionWorkspaceRootKind?
   ) {
     self.sessionID = sessionID
     self.cursor = cursor
+    self.afterFrontier = afterFrontier
     self.runner = runner
     self.repositoryWatch = repositoryWatch
     self.workspaceRootKind = workspaceRootKind
@@ -3117,12 +3122,17 @@ public struct SignalboxTranscriptSnapshotBoundary: Decodable, Equatable, Sendabl
   public init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     let fields: Set<String> = [
-      "type", "session_id", "cursor", "runner", "repository_watch", "workspace_root_kind",
+      "type", "session_id", "cursor", "after_frontier", "runner", "repository_watch",
+      "workspace_root_kind",
     ]
     try tagged.rejectUnadmittedFields(fields, decoder: decoder)
-    try tagged.requireFields(["runner", "repository_watch", "workspace_root_kind"], decoder: decoder)
+    try tagged.requireFields(
+      ["after_frontier", "runner", "repository_watch", "workspace_root_kind"],
+      decoder: decoder
+    )
     sessionID = try decoder.decode("session_id")
     cursor = try decoder.decode("cursor")
+    afterFrontier = try decoder.decodeIfPresent("after_frontier")
     runner = try decoder.decodeIfPresent("runner")
     repositoryWatch = try decoder.decodeIfPresent("repository_watch")
     workspaceRootKind = try decoder.decodeIfPresent("workspace_root_kind")
@@ -3132,12 +3142,14 @@ public struct SignalboxTranscriptSnapshotBoundary: Decodable, Equatable, Sendabl
 public struct SignalboxTranscriptSnapshotEnd: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let cursor: SignalboxCanonicalUInt64
+  public let frontier: SignalboxCanonicalUUID?
   public let turnCount: SignalboxCanonicalUInt64
   public let entryCount: SignalboxCanonicalUInt64
 
   private enum CodingKeys: String, CodingKey {
     case sessionID = "session_id"
     case cursor
+    case frontier
     case turnCount = "turn_count"
     case entryCount = "entry_count"
   }
@@ -3327,6 +3339,7 @@ public struct SignalboxTranscriptTurn: Decodable, Equatable, Sendable {
 public enum SignalboxCredentialAvailabilityWaitCause: String, Decodable, Equatable, Sendable {
   case contended
   case exhausted
+  case networkUnavailable = "network_unavailable"
 }
 
 public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
@@ -5011,6 +5024,7 @@ public enum SignalboxToolBatchState: Decodable, Equatable, Sendable {
   case proposed(frontierID: SignalboxCanonicalUUID)
   case resultsProjected(frontierID: SignalboxCanonicalUUID)
   case recoveryRequired(toolAttemptID: SignalboxCanonicalUUID)
+  case childWaitResumed(toolAttemptID: SignalboxCanonicalUUID)
   case unknown(kind: String, payload: [String: SignalboxJSONValue])
 
   public init(from decoder: Decoder) throws {
@@ -5025,6 +5039,9 @@ public enum SignalboxToolBatchState: Decodable, Equatable, Sendable {
     case "recovery_required":
       try tagged.rejectUnadmittedFields(["type", "tool_attempt_id"], decoder: decoder)
       self = .recoveryRequired(toolAttemptID: try decoder.decode("tool_attempt_id"))
+    case "child_wait_resumed":
+      try tagged.rejectUnadmittedFields(["type", "tool_attempt_id"], decoder: decoder)
+      self = .childWaitResumed(toolAttemptID: try decoder.decode("tool_attempt_id"))
     default:
       self = .unknown(kind: tagged.kind, payload: tagged.payload)
     }

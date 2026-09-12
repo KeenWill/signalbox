@@ -531,16 +531,19 @@ required column advances it, and a decoder that predates the advance rejects the
 record as unsupported.
 
 Dispatch locks the consumer's delivery cursor FOR UPDATE and reads exactly the
-next sequence and its typed record. An accepted event advances the cursor in the
-same transaction. An undecodable event records its quarantine and advances that
-consumer's cursor atomically, logs on the first quarantine, then selection
-continues. A transaction that appends an event never advances a delivery cursor
-and one that advances a cursor never appends; the schema rejects both orders. An
-absent header for a sequence the allocator has already allocated fails the
-dispatch instead of reporting an idle queue, and a delivery cursor or any
-committed header beyond the allocator fails it too. A consumer retry or exit
-before the commit request leaves the valid event pending for redelivery, and a
-lost commit response is resolved by the next locked cursor read.
+next sequence and its typed record through one database view that unifies the
+two header tables and excludes quarantined sequences. An accepted event advances
+the cursor in the same transaction. An undecodable event records its quarantine
+and advances that consumer's cursor atomically, logs on the first quarantine,
+then selection continues. Row corruption is distinct from cursor and allocator
+corruption; only the former enters quarantine. A transaction that appends an
+event never advances a delivery cursor and one that advances a cursor never
+appends; the schema rejects both orders. An absent header for a sequence the
+allocator has already allocated fails the dispatch instead of reporting an idle
+queue, and a delivery cursor or any committed header beyond the allocator fails
+it too. A consumer retry or exit before the commit request leaves the valid
+event pending for redelivery, and a lost commit response is resolved by the next
+locked cursor read.
 
 Dispatch validates each record against durable state: an activation against the
 turn's attempt, a call transition against monotonic call state, and a terminal

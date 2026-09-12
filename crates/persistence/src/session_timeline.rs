@@ -2015,6 +2015,11 @@ const fn tool_batch_state(state: DispatchedToolBatchState) -> TimelineToolBatchS
                 attempt_id: attempt,
             }
         }
+        DispatchedToolBatchState::ChildWaitResumed { attempt } => {
+            TimelineToolBatchState::ChildWaitResumed {
+                attempt_id: attempt,
+            }
+        }
     }
 }
 
@@ -3060,6 +3065,8 @@ fn optional_nonnegative(
 
 const DESCRIPTOR_SQL: &str = r#"
 SELECT session.session_id, workspace.workspace_root_kind,
+       supervision.supervision_failure_class, supervision.supervision_cause_code,
+       supervision.supervision_pending,
        facts.session_id IS NOT NULL AS facts_present,
        facts.item_count, facts.first_sequence,
        facts.latest_sequence,
@@ -3070,6 +3077,7 @@ SELECT session.session_id, workspace.workspace_root_kind,
   FROM session
   LEFT JOIN session_timeline_fact AS facts USING (session_id)
   LEFT JOIN session_workspace_binding AS workspace USING (session_id)
+  LEFT JOIN session_supervision AS supervision USING (session_id)
  WHERE session.session_id = $1
 "#;
 
@@ -3174,6 +3182,13 @@ async fn load_descriptor(
         return Err(SessionTimelineCorruption::InvalidOrdinal("projected structured bytes").into());
     }
     Ok(Some(SessionTimelineDescriptor {
+        supervision: crate::session_lifecycle::decode_supervision_failure(&row)
+            .map_err(|_| SessionTimelineCorruption::InvalidStoredValue("supervision"))?
+            .map(|record| signalbox_application::SessionSupervisionFacts {
+                class: record.class,
+                cause_code: record.cause_code,
+                pending: record.pending,
+            }),
         workspace_root_kind: crate::session_workspace::decode(row.try_get("workspace_root_kind")?)?,
         session,
         sizes: SessionTimelineSizeFacts {

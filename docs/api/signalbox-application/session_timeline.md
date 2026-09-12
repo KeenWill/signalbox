@@ -187,10 +187,22 @@ pub struct SessionWorkFacts {
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
+## SessionSupervisionFacts
+
+```rust
+pub struct SessionSupervisionFacts {
+    pub class: OperatorFailureClass,
+    pub cause_code: string::String,
+    pub pending: bool,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## SessionTimelineDescriptor
 
 ```rust
 pub struct SessionTimelineDescriptor {
+    pub supervision: option::Option<SessionSupervisionFacts>,
     pub workspace_root_kind: option::Option<signalbox_domain::SessionWorkspaceRootKind>,
     pub session: signalbox_domain::SessionId,
     pub sizes: SessionTimelineSizeFacts,
@@ -456,6 +468,9 @@ pub enum TimelineToolBatchState {
         frontier_id: signalbox_domain::ContextFrontierId,
     },
     RecoveryRequired {
+        attempt_id: signalbox_domain::ToolAttemptId,
+    },
+    ChildWaitResumed {
         attempt_id: signalbox_domain::ToolAttemptId,
     },
 }

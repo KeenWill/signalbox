@@ -195,19 +195,24 @@ fn attachment_byte_budget_rejection_requires_a_positive_maximum() {
 }
 
 #[test]
-fn read_transcript_round_trips_in_the_single_vocabulary() -> Result<(), Box<dyn std::error::Error>>
-{
+fn read_transcript_suffix_frontier_round_trips_in_the_single_vocabulary()
+-> Result<(), Box<dyn std::error::Error>> {
     let frame = ClientFrame::try_new_for_version(
         ProtocolVersion::One,
         request(7)?,
         ClientRequest::ReadTranscript {
             session_id: uuid(1),
+            after_frontier: Some(uuid(6)),
         },
     )?;
     let encoded = encode_client_line(&frame)?;
 
     assert_eq!(frame.version(), ProtocolVersion::One);
     assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":1,"));
+    assert!(
+        String::from_utf8(encoded.clone())?
+            .contains("\"after_frontier\":\"00000000-0000-0000-0000-000000000006\"")
+    );
     assert_eq!(decode_client_line(&encoded)?, frame);
     Ok(())
 }

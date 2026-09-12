@@ -11,6 +11,9 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let response = match error {
+        ProcessReadError::ResyncRequired => {
+            ProtocolError::without_detail(ErrorCode::ResyncRequired)
+        }
         ProcessReadError::Database(_) => ProtocolError::without_detail(ErrorCode::Unavailable),
         ProcessReadError::Corruption(_) => internal_protocol_error(
             session_id.map(CanonicalUuid::into_uuid),
@@ -1433,8 +1436,8 @@ pub(super) fn wire_uuid(value: uuid::Uuid) -> CanonicalUuid {
     CanonicalUuid::from_uuid(value)
 }
 
-pub(super) struct ProtocolError {
-    pub(super) code: ErrorCode,
+pub(crate) struct ProtocolError {
+    pub(crate) code: ErrorCode,
     pub(super) message: &'static str,
     pub(super) detail: ErrorDetail,
 }
@@ -1898,6 +1901,11 @@ impl ProcessUpdateEvent {
                     }
                     DispatchedToolBatchState::RecoveryRequired { attempt } => {
                         ToolBatchState::RecoveryRequired {
+                            tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                        }
+                    }
+                    DispatchedToolBatchState::ChildWaitResumed { attempt } => {
+                        ToolBatchState::ChildWaitResumed {
                             tool_attempt_id: wire_uuid(attempt.into_uuid()),
                         }
                     }

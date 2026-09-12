@@ -167,7 +167,10 @@ async fn review_workflow_store_reconstructs_complete_evidence() -> Result<(), Bo
         finding_ref,
         ReviewEventOrdinal::one(),
         judge_evidence,
-        ReviewFindingEventKind::Accepted,
+        ReviewFindingEventKind::Accepted {
+            confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                .expect("judge confidence"),
+        },
     );
     let accepted_finding = open_finding
         .clone()

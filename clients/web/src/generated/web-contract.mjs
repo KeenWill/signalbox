@@ -2618,6 +2618,15 @@ const schemas = {
   },
   "WebSessionLiveSnapshot": {
     "$defs": {
+      "WebCredentialAvailabilityWaitCause": {
+        "description": "Closed credential-admission reason shown for an active waiting turn.",
+        "enum": [
+          "contended",
+          "exhausted",
+          "network_unavailable"
+        ],
+        "type": "string"
+      },
       "WebLiveResourceId": {
         "description": "Checked canonical UUID used for browser-visible live resource identities.",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -2659,6 +2668,27 @@ const schemas = {
             "required": [
               "kind",
               "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause": {
+                "$ref": "#/$defs/WebCredentialAvailabilityWaitCause"
+              },
+              "kind": {
+                "const": "awaiting_credential_availability",
+                "type": "string"
+              },
+              "wait_attempt_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "wait_attempt_id",
+              "cause"
             ],
             "type": "object"
           },
@@ -3004,6 +3034,15 @@ const schemas = {
   },
   "WebSessionLiveStreamEvent": {
     "$defs": {
+      "WebCredentialAvailabilityWaitCause": {
+        "description": "Closed credential-admission reason shown for an active waiting turn.",
+        "enum": [
+          "contended",
+          "exhausted",
+          "network_unavailable"
+        ],
+        "type": "string"
+      },
       "WebLiveResourceId": {
         "description": "Checked canonical UUID used for browser-visible live resource identities.",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -3045,6 +3084,27 @@ const schemas = {
             "required": [
               "kind",
               "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause": {
+                "$ref": "#/$defs/WebCredentialAvailabilityWaitCause"
+              },
+              "kind": {
+                "const": "awaiting_credential_availability",
+                "type": "string"
+              },
+              "wait_attempt_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "wait_attempt_id",
+              "cause"
             ],
             "type": "object"
           },
@@ -3774,6 +3834,17 @@ const schemas = {
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": "string"
       },
+      "WebSessionSupervisionClass": {
+        "description": "Closed class of a retained session supervision failure.",
+        "enum": [
+          "infrastructure",
+          "commit_ambiguous",
+          "corruption",
+          "identity_collision",
+          "bug"
+        ],
+        "type": "string"
+      },
       "WebSessionTimelineSizeFacts": {
         "additionalProperties": false,
         "description": "Explicit lifetime size facts used only for browser loading policy.",
@@ -3928,6 +3999,34 @@ const schemas = {
       "sizes": {
         "$ref": "#/$defs/WebSessionTimelineSizeFacts"
       },
+      "supervision": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "description": "Session supervision evidence independent of transcript detail reads.",
+            "properties": {
+              "cause_code": {
+                "type": "string"
+              },
+              "class": {
+                "$ref": "#/$defs/WebSessionSupervisionClass"
+              },
+              "pending": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "class",
+              "cause_code",
+              "pending"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "work": {
         "$ref": "#/$defs/WebSessionWorkFacts"
       },
@@ -3949,6 +4048,7 @@ const schemas = {
       }
     },
     "required": [
+      "supervision",
       "workspace_root_kind",
       "repository_watch",
       "session_id",
@@ -6548,6 +6648,23 @@ const schemas = {
               "tool_attempt_id"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "tool_attempt_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "child_wait_resumed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "tool_attempt_id"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -7926,6 +8043,17 @@ function assertTimelineDetailPage(value) {
             fail(
               `${path}.body.tools[0].evidence.state`,
               "ambiguous for the recovery target attempt",
+            );
+          }
+          if (
+            physical !== null &&
+            item.body.state.type === "child_wait_resumed" &&
+            physical.attempt_id === item.body.state.tool_attempt_id &&
+            physical.state !== "awaiting_child"
+          ) {
+            fail(
+              `${path}.body.tools[0].evidence.state`,
+              "awaiting_child for the resumed target attempt",
             );
           }
           if (physical !== null) {
@@ -9330,7 +9458,7 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
 }
 export function decodeWebContractBootstrap(value) {
   assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "webcontractbootstrap");
-  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "2" ||
+  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "3" ||
       value.capabilities.bounded_json !== true ||
       value.capabilities.same_origin_json_mutations !== true ||
       value.capabilities.ndjson_streaming !== true ||

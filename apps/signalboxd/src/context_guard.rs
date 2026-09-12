@@ -1547,7 +1547,28 @@ mod tests {
         )
         .expect("Claude closed result");
         assert_eq!(codex.get(&source), Some(&(expected_cli.len() as u64)));
-        assert_eq!(claude.get(&source), Some(&(expected_cli.len() as u64)));
+        // Arbitrary fixed-width native identities and timestamp; the parent
+        // reserves the envelope used when this entry follows another message.
+        let expected_claude = serde_json::json!({
+            "parentUuid": "00000000-0000-0000-0000-000000000001",
+            "uuid": "00000000-0000-0000-0000-000000000002",
+            "sessionId": "00000000-0000-0000-0000-000000000003",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "isSidechain": false,
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": r#"{"type":"tool_result","tool_call_id":"00000000-0000-0000-0000-000000000003","content":"{\"error\":{\"detail\":null,\"kind\":\"closed_by_turn_end\"}}","is_error":true}"#,
+                }],
+            },
+        });
+        let expected_claude_bytes = serde_json::to_vec(&expected_claude)
+            .expect("native history record")
+            .len()
+            + 1;
+        assert_eq!(claude.get(&source), Some(&(expected_claude_bytes as u64)));
 
         let expected_anthropic = r#"[{"role":"user","content":[{"type":"tool_result","tool_use_id":"00000000-0000-0000-0000-000000000003","content":"{\"error\":{\"detail\":null,\"kind\":\"closed_by_turn_end\"}}","is_error":true,"cache_control":{"type":"ephemeral"}}]}]"#;
         let anthropic = rendered_entry_bytes(&messages, &[], &models, |message| {

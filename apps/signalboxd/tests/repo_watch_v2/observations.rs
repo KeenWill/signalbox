@@ -157,9 +157,6 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Result<Self, Box<dyn Error>> {
         let (database, core, url) = postgres().await?;
-        sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
-            .execute(&core)
-            .await?;
         let module = module_pool(&url).await?;
         let store = RepoWatchStore::new(module.clone());
         let repository = RepositorySlug::try_new("example/project".into())?;
@@ -615,20 +612,42 @@ async fn unchanged_frontier_commits_retain_the_invocation_until_its_answer_is_ad
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn observation_leases_leave_connections_available_for_frontier_work()
+async fn observation_leases_share_one_connection_without_blocking_frontier_work()
 -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new().await?;
     let store = &fixture.effects.store;
     let other = RepositorySlug::try_new("example/other".into())?;
-    let first = store
+    let mut first = store
         .lock_observation(fixture.input().repository(), Uuid::now_v7())
         .await?;
-    let second = store.lock_observation(&other, Uuid::now_v7()).await?;
-    // Both module pool slots would be occupied if leases borrowed frontier connections.
+    let first_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *first)
+        .await?;
+    let clone = store.with_observation_invocation(ObservationInvocation {
+        effect: Uuid::now_v7(),
+        input: b"second observation".to_vec(),
+        repository: other.clone(),
+    });
+    let second = clone.lock_observation(&other, Uuid::now_v7());
+    tokio::pin!(second);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut second)
+            .await
+            .is_err(),
+        "a second repository must wait for the shared observation connection"
+    );
     let baseline =
         tokio::time::timeout(Duration::from_secs(5), store.ingest_baseline(&other)).await??;
     assert_eq!(baseline.generation, 0);
     first.rollback().await?;
+    let mut second = tokio::time::timeout(Duration::from_secs(5), second).await??;
+    let second_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *second)
+        .await?;
+    assert_eq!(
+        first_backend, second_backend,
+        "store clones reuse the lock pool"
+    );
     second.rollback().await?;
     Ok(())
 }

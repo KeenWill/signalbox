@@ -273,11 +273,13 @@ operation.
 Startup acquires the single-daemon guard, fences the prior pool incarnation once
 the fence migration has run, runs the remaining migrations, marks prior-process
 runner connections lost and propagates their loss before the generic scan,
-initializes every configured blob store, binds the runner socket, binds the
-process socket, and then starts enrollment, admission, dispatch, and scheduling
-concurrently. No request, dispatch cursor advance, scheduler pass, or runner
-admission occurs before recovery completes. Any phase failure is a failed
-startup with a classified, key-bearing log line and a failure exit code.
+initializes every available configured blob store, binds the runner socket,
+binds the process socket, and then starts enrollment, admission, dispatch, and
+scheduling concurrently. No request, dispatch cursor advance, scheduler pass, or
+runner admission occurs before recovery completes. A blob-store initialization
+failure makes that store unavailable and does not fail the phase. Any other
+phase failure is a failed startup with a classified, key-bearing log line and a
+failure exit code.
 
 Each scan transaction classifies the lost tenure by its durable evidence and
 never fabricates a live end. A running turn with no model call ends its attempt
@@ -307,14 +309,18 @@ parked, while terminal sessions retain their outcome. Missing or undecodable
 lifecycle projections retain independent operator evidence and remain suspended
 without automatic repair. Operator status exposes both kinds of pending
 supervision item. Successful startup reconstitution settles repaired terminal
-items without resuming them. Other sessions continue. Infrastructure failures
-stop initial startup visibly. Fenced migrations and the startup scan run under
-guard monitoring, including operator-item identity reconciliation. Observed
-guard loss starts the recovery clock even while pool drain waits, so the elapsed
-bound and shutdown can interrupt that wait. During guard recovery, database
-failures throughout incarnation reconstruction, including repository-watch
-startup, continue reacquisition with the same capped backoff and elapsed bound,
-after closing the failed incarnation’s fenced pool. Migration validation, fence
+items without resuming them. Other sessions continue. Session-scoped recovery
+failures, including failed operator-item writes, remain suspended in the
+execution supervisor while operator parking retries. Runtime components that
+read durable lifecycle state launch only after those failures are parked
+durably. Only failures without session scope stop initial startup visibly.
+Fenced migrations and the startup scan run under guard monitoring, including
+operator-item identity reconciliation. Observed guard loss starts the recovery
+clock even while pool drain waits, so the elapsed bound and shutdown can
+interrupt that wait. During guard recovery, unscoped database failures
+throughout incarnation reconstruction, including repository-watch startup,
+continue reacquisition with the same capped backoff and elapsed bound, after
+closing the failed incarnation’s fenced pool. Migration validation, fence
 corruption, and reload corruption failures stop recovery visibly. Recovery is
 idempotent, and a stale observation rolls back.
 
@@ -378,6 +384,10 @@ prefix. Imported ancestry resolves only through the checked session-creation
 producer, and its one-to-one seed must name the exact stored frontier whose
 membership matches the selected prefix.
 
+Active-turn compaction retains the active turn while its dedicated call is
+prepared or in flight. Consumed steering after completion extends the validated
+compaction result by exactly the consumed entries in acceptance order.
+
 Stored active phases are conclusions derived from complete owner facts, never
 trusted discriminators. A recovery-decision wait reconstitutes from an ambiguous
 terminal model call or tool attempt correlated with its ended turn attempt; an
@@ -401,27 +411,32 @@ no call, its one correlated terminal cancelled call, or, when cancellation
 terminalized a tool round, that round's completed producing call, and its
 terminal frontier extends the starting or call frontier by exactly the
 cancellation marker, preceded, when cancellation terminalized a tool round, by
-one result entry per request in proposal order. A refused turn names its ended
-attempt and correlated terminal refused call, and its terminal frontier is an
-equal-content boundary over that call's frontier. A reconciliation-required turn
-names its ended attempt and exactly one terminal ambiguous model call or tool
-attempt; the attempt end is lost or ambiguous without a stop, with a later
-applied interrupt or a durable automatic recovery attempt, or it is a
-cancellation end carrying the interrupt proof. Automatic reconciliation
-authority binds the exact session, turn, and the model call or tool attempt it
-reconciles. A model-call reconciliation terminal frontier is an equal-content
-boundary over the ambiguous call's source frontier; a tool reconciliation adds
-one result per request with the ambiguous request closed. A consumed steering
-input reconstitutes only against its exact consuming call, whose frontier is the
-start or round-result projection extended by the consumed entries in acceptance
-order; a consumer that completed by proposing a tool round stays correlated
-through its validated assistant history for the rest of the turn. Every active
-turn's projection carries a session-scoped acceptance tail anchored at the
-turn's origin and extending gap-free through the last observed acceptance
-position; a position consumed by the predecessor remains in that tail after a
-queued origin activates, and only steering consumed by the new active turn
-enters its execution aggregate. A tail entry recording an accepted interrupt is
-admitted only when the current stop or recovery state carries its exact proof.
+one result entry per request in proposal order. Cancellation of a pending
+foreground child wait instead names its already-yielded wait with no
+continuation and its applied interrupt, with that wait closed in the terminal
+tool-result suffix by a turn-end closure or its available child result. Startup
+and terminal outbox delivery authenticate that wait without requiring a terminal
+turn attempt. A refused turn names its ended attempt and correlated terminal
+refused call, and its terminal frontier is an equal-content boundary over that
+call's frontier. A reconciliation-required turn names its ended attempt and
+exactly one terminal ambiguous model call or tool attempt; the attempt end is
+lost or ambiguous without a stop, with a later applied interrupt or a durable
+automatic recovery attempt, or it is a cancellation end carrying the interrupt
+proof. Automatic reconciliation authority binds the exact session, turn, and the
+model call or tool attempt it reconciles. A model-call reconciliation terminal
+frontier is an equal-content boundary over the ambiguous call's source frontier;
+a tool reconciliation adds one result per request with the ambiguous request
+closed. A consumed steering input reconstitutes only against its exact consuming
+call, whose frontier is the start or round-result projection extended by the
+consumed entries in acceptance order; a consumer that completed by proposing a
+tool round stays correlated through its validated assistant history for the rest
+of the turn. Every active turn's projection carries a session-scoped acceptance
+tail anchored at the turn's origin and extending gap-free through the last
+observed acceptance position; a position consumed by the predecessor remains in
+that tail after a queued origin activates, and only steering consumed by the new
+active turn enters its execution aggregate. A tail entry recording an accepted
+interrupt is admitted only when the current stop or recovery state carries its
+exact proof.
 
 A spawned child's first turn has a closed delegated-task origin naming the exact
 spawning request, with a starting frontier containing the delegated-task entry

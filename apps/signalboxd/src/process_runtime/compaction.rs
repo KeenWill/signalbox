@@ -417,15 +417,20 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             Self::Read(ProcessReadError::Corruption(_)) | Self::Integrity => {
                 signalbox_application::OperatorFailureClass::FailClosedCorruption
             }
-            Self::Configuration | Self::State | Self::AlreadyAttempted | Self::NoProgress => {
-                signalbox_application::OperatorFailureClass::CallerOrHubBug
-            }
+            Self::Read(ProcessReadError::ResyncRequired)
+            | Self::Configuration
+            | Self::State
+            | Self::AlreadyAttempted
+            | Self::NoProgress => signalbox_application::OperatorFailureClass::CallerOrHubBug,
         }
     }
 
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
             Self::Credential(error) => error.operator_failure_cause_code(),
+            Self::Read(ProcessReadError::ResyncRequired) => {
+                "context_compaction_read_resync_required"
+            }
             Self::Read(ProcessReadError::Database(_)) => "context_compaction_read_database",
             Self::Read(ProcessReadError::Corruption(_)) => "context_compaction_read_corruption",
             Self::Repository(ContextCompactionRepositoryError::Database(_)) => {
@@ -1109,6 +1114,7 @@ pub(super) async fn context_compaction_entry_value(
         .hyphenated()
         .to_string();
     let entry_id = reference.entry().into_uuid().hyphenated().to_string();
+    // Bounded sources retain each entry's prefix, so render payloads before IDs.
     let value = match entry {
         ProcessTranscriptEntry::DelegatedTask {
             entry_index,
@@ -1118,14 +1124,14 @@ pub(super) async fn context_compaction_entry_value(
             content,
             ..
         } => serde_json::json!({
+            "type": "delegated_task",
+            "content": content,
             "position": entry_index + 1,
             "source_session_id": source_session_id,
             "entry_id": entry_id,
-            "type": "delegated_task",
             "spawning_request_id": spawning_request.into_uuid().hyphenated().to_string(),
             "parent_session_id": parent_session.into_uuid().hyphenated().to_string(),
             "parent_turn_id": parent_turn.into_uuid().hyphenated().to_string(),
-            "content": content,
         }),
         ProcessTranscriptEntry::DelegationMessage {
             entry_index,
@@ -1138,17 +1144,17 @@ pub(super) async fn context_compaction_entry_value(
             content,
             ..
         } => serde_json::json!({
+            "type": "delegation_message",
+            "content": content,
             "position": entry_index + 1,
             "source_session_id": source_session_id,
             "entry_id": entry_id,
-            "type": "delegation_message",
             "spawning_request_id": spawning_request.into_uuid().hyphenated().to_string(),
             "message_id": message.into_uuid().hyphenated().to_string(),
             "sender_session_id": sender.into_uuid().hyphenated().to_string(),
             "recipient_session_id": recipient.into_uuid().hyphenated().to_string(),
             "ordinal": ordinal,
             "delivery_sequence": delivery_sequence,
-            "content": content,
         }),
         ProcessTranscriptEntry::DelegationResult {
             entry_index,
@@ -1163,10 +1169,11 @@ pub(super) async fn context_compaction_entry_value(
             provenance,
             ..
         } => serde_json::json!({
+            "type": "delegation_result",
+            "content": content,
             "position": entry_index + 1,
             "source_session_id": source_session_id,
             "entry_id": entry_id,
-            "type": "delegation_result",
             "await_request_id": awaiting_request.into_uuid().hyphenated().to_string(),
             "spawning_request_id": spawning_request.into_uuid().hyphenated().to_string(),
             "child_session_id": child.into_uuid().hyphenated().to_string(),
@@ -1176,7 +1183,6 @@ pub(super) async fn context_compaction_entry_value(
             },
             "delivery_sequence": delivery_sequence,
             "outcome": wire_delegation_outcome(*outcome),
-            "content": content,
             "reason": wire_delegation_reason(*reason),
             "provenance": wire_delegation_provenance(*provenance),
         }),
@@ -1203,16 +1209,16 @@ pub(super) async fn context_compaction_entry_value(
             content,
             ..
         } => serde_json::json!({
+            "type": "context_summary",
+            "content": content,
             "position": entry_index + 1,
             "source_session_id": source_session_id,
             "entry_id": entry_id,
-            "type": "context_summary",
             "model_call_id": model_call.into_uuid().hyphenated().to_string(),
             "first_source_session_id": first.source_session().into_uuid().hyphenated().to_string(),
             "first_entry_id": first.entry().into_uuid().hyphenated().to_string(),
             "through_source_session_id": through.source_session().into_uuid().hyphenated().to_string(),
             "through_entry_id": through.entry().into_uuid().hyphenated().to_string(),
-            "content": content,
         }),
         ProcessTranscriptEntry::User {
             entry_index,
@@ -1250,13 +1256,13 @@ pub(super) async fn context_compaction_entry_value(
                 .map(|part| part.as_str())
                 .collect::<Vec<_>>();
             serde_json::json!({
+                "type": "user",
+                "content": rendered_parts,
                 "position": entry_index + 1,
                 "source_session_id": source_session_id,
                 "entry_id": entry_id,
-                "type": "user",
                 "accepted_input_id": accepted_input.into_uuid().hyphenated().to_string(),
                 "turn_id": turn.into_uuid().hyphenated().to_string(),
-                "content": rendered_parts,
             })
         }
         ProcessTranscriptEntry::Assistant {
@@ -1266,13 +1272,13 @@ pub(super) async fn context_compaction_entry_value(
             content,
             ..
         } => serde_json::json!({
+            "type": "assistant",
+            "content": content,
             "position": entry_index + 1,
             "source_session_id": source_session_id,
             "entry_id": entry_id,
-            "type": "assistant",
             "turn_id": turn.into_uuid().hyphenated().to_string(),
             "model_call_id": model_call.into_uuid().hyphenated().to_string(),
-            "content": content,
         }),
         ProcessTranscriptEntry::ProviderCompaction {
             entry_index,
@@ -1309,15 +1315,15 @@ pub(super) async fn context_compaction_entry_value(
             arguments,
             ..
         } => serde_json::json!({
+            "type": "assistant_tool_use",
+            "name": name,
+            "arguments": arguments,
             "position": entry_index + 1,
             "source_session_id": source_session_id,
             "entry_id": entry_id,
-            "type": "assistant_tool_use",
             "turn_id": turn.into_uuid().hyphenated().to_string(),
             "model_call_id": model_call.into_uuid().hyphenated().to_string(),
             "tool_request_id": request.into_uuid().hyphenated().to_string(),
-            "name": name,
-            "arguments": arguments,
         }),
         ProcessTranscriptEntry::ToolExecutionResult {
             entry_index,
@@ -1327,13 +1333,13 @@ pub(super) async fn context_compaction_entry_value(
             content,
             ..
         } => serde_json::json!({
+            "type": "tool_execution_result",
+            "content": content,
             "position": entry_index + 1,
             "source_session_id": source_session_id,
             "entry_id": entry_id,
-            "type": "tool_execution_result",
             "tool_request_id": request.into_uuid().hyphenated().to_string(),
             "tool_attempt_id": attempt.into_uuid().hyphenated().to_string(),
-            "content": content,
         }),
         ProcessTranscriptEntry::ToolDenied {
             entry_index,
@@ -1341,12 +1347,12 @@ pub(super) async fn context_compaction_entry_value(
             content,
             ..
         } => serde_json::json!({
+            "type": "tool_denied",
+            "content": content,
             "position": entry_index + 1,
             "source_session_id": source_session_id,
             "entry_id": entry_id,
-            "type": "tool_denied",
             "tool_request_id": request.into_uuid().hyphenated().to_string(),
-            "content": content,
         }),
         ProcessTranscriptEntry::RunnerPlacementChanged {
             entry_index,
@@ -1362,12 +1368,12 @@ pub(super) async fn context_compaction_entry_value(
             content,
             ..
         } => serde_json::json!({
+            "type": "tool_inadmissible",
+            "content": content,
             "position": entry_index + 1,
             "source_session_id": source_session_id,
             "entry_id": entry_id,
-            "type": "tool_inadmissible",
             "tool_request_id": request.into_uuid().hyphenated().to_string(),
-            "content": content,
         }),
         ProcessTranscriptEntry::ToolClosed {
             entry_index,
@@ -1375,12 +1381,12 @@ pub(super) async fn context_compaction_entry_value(
             content,
             ..
         } => serde_json::json!({
+            "type": "tool_closed_by_turn_end",
+            "content": content,
             "position": entry_index + 1,
             "source_session_id": source_session_id,
             "entry_id": entry_id,
-            "type": "tool_closed_by_turn_end",
             "tool_request_id": request.into_uuid().hyphenated().to_string(),
-            "content": content,
         }),
         ProcessTranscriptEntry::TurnFailed {
             entry_index, turn, ..
@@ -1417,14 +1423,14 @@ pub(super) async fn context_compaction_entry_value(
             content,
             ..
         } => serde_json::json!({
+            "type": "imported_text",
+            "content": content,
             "position": entry_index + 1,
             "source_session_id": source_session_id,
             "entry_id": entry_id,
-            "type": "imported_text",
             "imported_conversation_id": imported_conversation.into_uuid().hyphenated().to_string(),
             "imported_entry_id": imported_entry.into_uuid().hyphenated().to_string(),
             "source_speaker": imported_source_speaker_label(*source_speaker),
-            "content": content,
         }),
         ProcessTranscriptEntry::Imported {
             entry_index,
@@ -1759,6 +1765,10 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let response = match error {
+        ProcessReadError::ResyncRequired => internal_protocol_error(
+            Some(session.into_uuid()),
+            InternalDiagnostic::ContextCompactionReadCorruption,
+        ),
         ProcessReadError::Database(_) => ProtocolError::mutation_unavailable(false),
         ProcessReadError::Corruption(_) => internal_protocol_error(
             Some(session.into_uuid()),

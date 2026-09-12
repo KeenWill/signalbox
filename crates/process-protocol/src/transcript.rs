@@ -20,6 +20,8 @@ pub enum CredentialAvailabilityWaitCause {
     Contended,
     /// Every pool member is excluded and at least one can become available again.
     Exhausted,
+    /// Every pool member exhausted provider-internal retries and awaits network recovery.
+    NetworkUnavailable,
 }
 
 /// Durable nonterminal model-call state carried by a transcript snapshot.
@@ -1162,6 +1164,11 @@ pub enum ToolBatchState {
     /// One ambiguous physical attempt requires user recovery.
     RecoveryRequired {
         /// Exact ambiguous tool attempt.
+        tool_attempt_id: CanonicalUuid,
+    },
+    /// One delivered foreground child wait resumed its parent turn.
+    ChildWaitResumed {
+        /// Exact tool attempt that entered the durable wait.
         tool_attempt_id: CanonicalUuid,
     },
 }

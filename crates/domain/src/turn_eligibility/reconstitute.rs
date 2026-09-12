@@ -1080,7 +1080,7 @@ fn reconstitute_inner(
                         terminal_execution,
                         ..
                     } => {
-                        model_call.attempt() == terminal_execution.ended_attempt
+                        Some(model_call.attempt()) == terminal_execution.ended_attempt
                             && terminal_execution.ended_call == Some(model_call.id())
                             && model_call.state()
                                 == crate::ModelCallReconstitutionState::Terminal(
@@ -1246,7 +1246,8 @@ fn reconstitute_inner(
         // frontier is exactly the starting frontier plus the consumed suffix.
         // With round evidence the call was prepared at a tool-round
         // continuation boundary, so everything before the consumed suffix
-        // must be exactly one completed round's result projection.
+        // must be exactly one completed round's result projection followed
+        // by any validated compaction summaries.
         let exact_frontier_matches = starting_frontier
             .and_then(|frontier| snapshots.get(&frontier))
             .zip(snapshots.get(&model_call.frontier()))
@@ -1263,6 +1264,19 @@ fn reconstitute_inner(
                         else {
                             return false;
                         };
+                        // Compaction summaries follow the round results and
+                        // precede the consumed suffix. Peel only exact,
+                        // validated compaction results from this boundary.
+                        let mut results_end = base_entry_count;
+                        for compaction in compaction_chain.iter().rev() {
+                            let result = &snapshots[&compaction.result_frontier().snapshot()];
+                            if result.entry_count() == results_end
+                                && result.is_semantic_prefix_of(call_snapshot)
+                            {
+                                results_end = snapshots[&compaction.source_frontier().snapshot()]
+                                    .entry_count();
+                            }
+                        }
                         // The round's tools were issued by the same
                         // continuation attempt that owns the consuming call.
                         round
@@ -1278,7 +1292,7 @@ fn reconstitute_inner(
                             && tool_round_continuation_producing_call(
                                 model_call.turn(),
                                 call_snapshot,
-                                base_entry_count,
+                                results_end,
                                 round.round_tool_attempts(),
                                 round.round_tool_denials(),
                                 &input.inadmissible_requests,
@@ -2261,6 +2275,7 @@ fn reconstitute_inner(
                                 &assistant_by_call,
                                 &snapshots,
                                 &semantic_entries,
+                                &compaction_chain,
                             )
                             .is_some()
                     });
@@ -2567,14 +2582,32 @@ fn reconstitute_inner(
                 let interrupt = terminal_execution.interrupt;
                 let attempt_end = &terminal_execution.attempt_end;
                 let successor = records_by_turn.get(&interrupt.successor());
-                let attempt_end_matches = match attempt_end.end() {
-                    AttemptEnd::AfterCancellation {
+                let attempt_end_matches = match attempt_end.as_ref().map(|end| end.end()) {
+                    Some(AttemptEnd::AfterCancellation {
                         cause,
                         disposition: CancellationStopDisposition::Cancelled,
-                    } => *cause == interrupt.proof() && attempt_end.interrupt() == Some(interrupt),
-                    AttemptEnd::WithoutStop {
+                    }) => {
+                        *cause == interrupt.proof()
+                            && attempt_end.as_ref().and_then(|end| end.interrupt())
+                                == Some(interrupt)
+                    }
+                    Some(AttemptEnd::WithoutStop {
                         disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
-                    } => attempt_end.interrupt() == Some(interrupt),
+                    }) => attempt_end.as_ref().and_then(|end| end.interrupt()) == Some(interrupt),
+                    None => {
+                        attempt.is_none()
+                            && terminal_execution
+                                .foreground_wait
+                                .as_ref()
+                                .is_some_and(|wait| {
+                                    wait.session() == session
+                                        && wait.turn() == turn
+                                        && matches!(
+                                            wait.end(),
+                                            crate::ToolAttemptEnd::AwaitingChild { .. }
+                                        )
+                                })
+                    }
                     _ => false,
                 };
                 if terminal_execution.owning_turn != turn
@@ -2586,14 +2619,12 @@ fn reconstitute_inner(
                             || successor.accepted_input.id() != interrupt.accepted_input()
                             || successor.order != interrupt.successor_order()
                     })
-                    || attempt_owners.insert(attempt, turn).is_some()
+                    || attempt.is_some_and(|attempt| attempt_owners.insert(attempt, turn).is_some())
                 {
-                    return Err(
-                        AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptEndMismatch {
-                            turn,
-                            attempt,
-                        },
-                    );
+                    return Err(match attempt {
+                        Some(attempt) => AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptEndMismatch { turn, attempt },
+                        None => AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch { turn },
+                    });
                 }
                 let start = validate_start(
                     index,
@@ -2646,7 +2677,7 @@ fn reconstitute_inner(
                                 }
                             };
                             if call.turn() != turn
-                                || call.attempt() != attempt
+                                || Some(call.attempt()) != attempt
                                 || call.selection()
                                     != *record.origin_configuration.effective().model()
                                 || call.target() != pinned.target()
@@ -2714,7 +2745,8 @@ fn reconstitute_inner(
                             .terminal_tool_attempts()
                             .iter()
                             .all(|tool_attempt| {
-                                tool_attempt.issuing_attempt() == terminal_execution.ended_attempt
+                                Some(tool_attempt.issuing_attempt())
+                                    == terminal_execution.ended_attempt
                             })
                         && tool_round_continuation_producing_call(
                             turn,
@@ -2754,11 +2786,48 @@ fn reconstitute_inner(
                         &assistant_by_call,
                         &snapshots,
                         &semantic_entries,
+                        &compaction_chain,
                     )
                     .is_some_and(|producing_call| {
+                        let wait_closed = terminal_execution.foreground_wait.as_ref().is_none_or(
+                            |wait| {
+                                let wait_proposed = assistant_by_call
+                                    .get(&producing_call)
+                                    .is_some_and(|entries| {
+                                        entries.iter().any(|entry| {
+                                            matches!(
+                                                semantic_entries.get(entry).map(SemanticTranscriptEntry::payload),
+                                                Some(SemanticTranscriptEntryPayload::AssistantToolUse { request, .. })
+                                                    if *request == wait.request()
+                                            )
+                                        })
+                                    });
+                                wait_proposed && terminal.ordered_entries().any(|entry| {
+                                    match semantic_entries.get(&entry).map(SemanticTranscriptEntry::payload) {
+                                        Some(SemanticTranscriptEntryPayload::ToolClosed { request }) =>
+                                            *request == wait.request(),
+                                        Some(SemanticTranscriptEntryPayload::DelegationResult {
+                                            awaiting_request,
+                                            spawning_request,
+                                            child,
+                                            mode: crate::DelegationWaitMode::Foreground,
+                                            ..
+                                        }) => *awaiting_request == wait.request()
+                                            && matches!(wait.end(), crate::ToolAttemptEnd::AwaitingChild {
+                                                spawning_request: expected_spawn,
+                                                child: expected_child,
+                                            } if spawning_request == expected_spawn && child == expected_child),
+                                        _ => false,
+                                    }
+                                })
+                            },
+                        );
                         named_tool_round_producer.is_none_or(|named| named == producing_call)
+                            && wait_closed
                     });
-                if !ordinary_terminal_matches && !tool_round_terminal_matches {
+                if (terminal_execution.foreground_wait.is_some() && !tool_round_terminal_matches)
+                    || (!ordinary_terminal_matches && !tool_round_terminal_matches)
+                {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
                             turn,
@@ -3154,12 +3223,6 @@ fn reconstitute_inner(
             execution_position_by_turn: &execution_position_by_turn,
         },
     )?;
-
-    if let Some(call) = active_compaction_call
-        && active.is_some()
-    {
-        return Err(AcceptedInputSchedulingReconstitutionFailure::InvalidCompactionCall { call });
-    }
 
     Ok(AcceptedInputSchedulingProjection {
         runner_placement_frontier: input.runner_placement_frontiers.last().copied(),

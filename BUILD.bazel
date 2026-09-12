@@ -21,6 +21,7 @@ exports_files([
     "config/signalbox-runner.example.toml",
     "tooling/codex-cli/release.json",
     "tooling/postgres_test_image.rs",
+    "tooling/generate-git-scale.py",
     "tooling/postgres_test_container.py",
     ".github/postgres-integration-suites.toml",
     "tooling/requirements-mdformat.txt",
@@ -48,6 +49,18 @@ filegroup(
         ".github/workflows/swift.yml",
     ],
     visibility = ["//scripts:__pkg__"],
+)
+
+py_test(
+    name = "test_bazel_scratch",
+    size = "small",
+    srcs = ["tooling/test_bazel_scratch.py"],
+    data = [
+        ".github/actions/setup-bazel/action.yml",
+        ".github/actions/setup-bazel/prepare-scratch.sh",
+    ],
+    main = "tooling/test_bazel_scratch.py",
+    deps = [requirement("PyYAML")],
 )
 
 py_test(
@@ -79,12 +92,25 @@ py_test(
     tags = ["external"],
 )
 
+py_test(
+    name = "test_test_database_lifecycle",
+    size = "small",
+    srcs = ["tooling/test_postgres_test_container.py"],
+    data = [
+        "config/signalboxd.example.toml",
+        "tooling/postgres_test_container.py",
+    ],
+    main = "tooling/test_postgres_test_container.py",
+)
+
 test_suite(
     name = "python_checker_tests",
     tests = [
+        ":test_bazel_scratch",
         ":test_summarize_coverage",
         ":test_supervise_lifecycle",
         ":test_sweep_test_containers",
+        ":test_test_database_lifecycle",
         "//scripts:checker_tests",
     ],
 )
@@ -207,6 +233,7 @@ filegroup(
         "//crates/tools-github:signalbox_tools_github",
         "//crates/tools-plan:signalbox_tools_plan",
         "//crates/tools-sessions:signalbox_tools_sessions",
+        "//crates/tools-workflows:signalbox_tools_workflows",
         "//crates/tools-web:signalbox_tools_web",
         "//crates/tools-workspace:signalbox_tools_workspace",
         "//crates/web-contract:generate-web-contract",
@@ -290,6 +317,7 @@ test_suite(
         "//crates/tools-github:unit_tests",
         "//crates/tools-plan:unit_tests",
         "//crates/tools-sessions:unit_tests",
+        "//crates/tools-workflows:unit_tests",
         "//crates/tools-web:unit_tests",
         "//crates/tools-workspace:unit_tests",
         "//crates/web-contract:generate_web_contract_unit_tests",
@@ -355,6 +383,7 @@ filegroup(
         "//crates/tools-github:rust_sources",
         "//crates/tools-plan:rust_sources",
         "//crates/tools-sessions:rust_sources",
+        "//crates/tools-workflows:rust_sources",
         "//crates/tools-web:rust_sources",
         "//crates/tools-workspace:rust_sources",
         "//crates/web-contract:rust_sources",
@@ -544,6 +573,7 @@ filegroup(
         "//crates/tools-github:api_json",
         "//crates/tools-plan:api_json",
         "//crates/tools-sessions:api_json",
+        "//crates/tools-workflows:api_json",
         "//crates/tools-web:api_json",
         "//crates/tools-workspace:api_json",
         "//crates/web-contract:api_json",
@@ -644,6 +674,7 @@ test_suite(
         "//crates/tools-github:doc_tests",
         "//crates/tools-plan:doc_tests",
         "//crates/tools-sessions:doc_tests",
+        "//crates/tools-workflows:doc_tests",
         "//crates/tools-web:doc_tests",
         "//crates/tools-workspace:doc_tests",
         "//crates/web-contract:doc_tests",
@@ -679,12 +710,61 @@ rust_selection_test(
     test = "//crates/file-media-adapters-text:adapters",
 )
 
+rust_selection_test(
+    name = "git_push_agent_sandbox",
+    args = [
+        "daemon_tools::git_push::ssh_tests::ssh_push_uses_agent_and_account_trust_files_inside_sandbox_for_both_destination_forms",
+        "daemon_tools::git_push::ssh_tests::ssh_push_streams_a_generated_gigabyte_blob",
+        "--exact",
+        "--ignored",
+    ],
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+    test = "//apps/signalboxd:unit_tests",
+)
+
+rust_selection_test(
+    name = "git_administration_sandbox",
+    args = [
+        "daemon_tools::composed_identity::mount_tests::administration_ancestry_rejects_a_same_device_bind_mount",
+        "--exact",
+        "--ignored",
+    ],
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+    test = "//apps/signalboxd:unit_tests",
+)
+
+rust_selection_test(
+    name = "git_push_workspace_trust_sandbox",
+    args = [
+        "daemon_tools::git_push::ssh_tests::ssh_push_keeps_account_trust_visible_under_workspace",
+        "--exact",
+        "--ignored",
+    ],
+    tags = [
+        "external",
+        "manual",
+        "no-sandbox",
+    ],
+    test = "//apps/signalboxd:unit_tests",
+)
+
 test_suite(
     name = "host_integration_tests",
     tags = ["manual"],
     tests = [
         ":file_media_daemon_sandbox",
         ":file_media_text_sandbox",
+        ":git_administration_sandbox",
+        ":git_push_agent_sandbox",
+        ":git_push_workspace_trust_sandbox",
         "//crates/file-media-adapters-audio:adapters",
         "//crates/file-media-processor-runtime:isolation",
         "//crates/tools-exec:bwrap",
@@ -844,6 +924,7 @@ test_suite(
         "//crates/tools-github:clippy",
         "//crates/tools-plan:clippy",
         "//crates/tools-sessions:clippy",
+        "//crates/tools-workflows:clippy",
         "//crates/tools-web:clippy",
         "//crates/tools-workspace:clippy",
         "//crates/web-contract:clippy",
@@ -926,6 +1007,7 @@ filegroup(
         "//crates/tools-github:rustdoc_signalbox_tools_github",
         "//crates/tools-plan:rustdoc_signalbox_tools_plan",
         "//crates/tools-sessions:rustdoc_signalbox_tools_sessions",
+        "//crates/tools-workflows:rustdoc_signalbox_tools_workflows",
         "//crates/tools-web:rustdoc_signalbox_tools_web",
         "//crates/tools-workspace:rustdoc_signalbox_tools_workspace",
         "//crates/web-contract:rustdoc_generate-web-contract",
@@ -991,6 +1073,7 @@ test_suite(
         "//crates/tools-github:rustfmt",
         "//crates/tools-plan:rustfmt",
         "//crates/tools-sessions:rustfmt",
+        "//crates/tools-workflows:rustfmt",
         "//crates/tools-web:rustfmt",
         "//crates/tools-workspace:rustfmt",
         "//crates/web-contract:rustfmt",

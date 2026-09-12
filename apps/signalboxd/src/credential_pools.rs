@@ -14,6 +14,7 @@ use std::{
 };
 
 use signalbox_model_runtime_claude_cli::CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY;
+pub(crate) use signalbox_process_protocol::MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES;
 use signalbox_process_protocol::MAX_HEADROOM_RESERVE_PERCENT;
 use toml_edit::{InlineTable, Item, Table};
 use url::Url;
@@ -25,9 +26,6 @@ use crate::configuration::{
 
 /// Maximum UTF-8 byte length admitted for a credential-delivery path.
 pub(crate) const MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES: usize = 4_096;
-
-/// Maximum UTF-8 byte length admitted for a credential profile or pool name.
-pub(crate) const MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES: usize = 256;
 
 /// Maximum number of members admitted in one credential pool.
 pub(crate) const MAX_CREDENTIAL_POOL_MEMBERS: usize = 1_024;
@@ -72,7 +70,7 @@ pub enum CredentialDelivery {
     /// The daemon validates directory shape but never reads its auth material,
     /// per `docs/spec/configuration-and-credentials.md`.
     CodexHome {
-        /// Absolute existing nonempty directory passed only as `CODEX_HOME`.
+        /// Absolute existing directory passed only as `CODEX_HOME`.
         path: PathBuf,
         /// Optional per-home process concurrency declaration.
         max_concurrent_invocations: Option<NonZeroU32>,
@@ -106,7 +104,7 @@ impl OauthDelivery {
 /// Typed startup failure for one configured credential home.
 ///
 /// `docs/spec/configuration-and-credentials.md` owns
-/// these fail-closed admission conditions.
+/// these admission conditions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialHomeAdmissionFailure {
     /// The configured path was not an absolute normalized path.
@@ -115,8 +113,6 @@ pub enum CredentialHomeAdmissionFailure {
     MissingOrNotDirectory,
     /// Directory enumeration failed closed.
     UnreadableDirectory,
-    /// The directory contains no provisioned entries.
-    EmptyDirectory,
 }
 
 impl CredentialHomeAdmissionFailure {
@@ -130,7 +126,6 @@ impl CredentialHomeAdmissionFailure {
             Self::InvalidPath => "path is not absolute and normalized",
             Self::MissingOrNotDirectory => "path is not an existing directory",
             Self::UnreadableDirectory => "directory could not be enumerated",
-            Self::EmptyDirectory => "directory contains no provisioned entries",
         }
     }
 }
@@ -191,6 +186,7 @@ impl CredentialDelivery {
         adapter: ModelAdapter,
         name: &Arc<str>,
         billing_kind: BillingKind,
+        admit_credential_homes: bool,
     ) -> Result<Self, HubModelConfigurationError> {
         let key = required_string(profile, "delivery")?;
         if !DELIVERY_KEYS.contains(&key) {
@@ -222,12 +218,19 @@ impl CredentialDelivery {
                 let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
                 allowed.extend_from_slice(&["codex_home", "max_concurrent_invocations"]);
                 reject_unknown_fields(profile, &allowed)?;
-                let path = normalize_absolute_path(required_string(profile, "codex_home")?)
-                    .map_err(|_| HubModelConfigurationError::InvalidCredentialHome {
-                        credential_profile: Arc::clone(name),
-                        failure: CredentialHomeAdmissionFailure::InvalidPath,
+                let codex_home = required_string(profile, "codex_home")?;
+                let path = if admit_credential_homes {
+                    let path = normalize_absolute_path(codex_home).map_err(|_| {
+                        HubModelConfigurationError::InvalidCredentialHome {
+                            credential_profile: Arc::clone(name),
+                            failure: CredentialHomeAdmissionFailure::InvalidPath,
+                        }
                     })?;
-                admit_credential_home(name, &path)?;
+                    admit_credential_home(name, &path)?;
+                    path
+                } else {
+                    PathBuf::new()
+                };
                 let max_concurrent_invocations = parse_max_concurrent_invocations(profile)?;
                 Ok(Self::CodexHome {
                     path,
@@ -267,14 +270,10 @@ fn admit_credential_home(
             failure: CredentialHomeAdmissionFailure::UnreadableDirectory,
         })?;
     match entries.next() {
-        Some(Ok(_)) => Ok(()),
+        Some(Ok(_)) | None => Ok(()),
         Some(Err(_)) => Err(HubModelConfigurationError::InvalidCredentialHome {
             credential_profile: Arc::clone(profile),
             failure: CredentialHomeAdmissionFailure::UnreadableDirectory,
-        }),
-        None => Err(HubModelConfigurationError::InvalidCredentialHome {
-            credential_profile: Arc::clone(profile),
-            failure: CredentialHomeAdmissionFailure::EmptyDirectory,
         }),
     }
 }
@@ -367,7 +366,7 @@ fn parse_file_env_key(
     }
 }
 
-fn normalize_absolute_path(value: &str) -> Result<PathBuf, HubModelConfigurationError> {
+pub(crate) fn normalize_absolute_path(value: &str) -> Result<PathBuf, HubModelConfigurationError> {
     if value.is_empty()
         || value.len() > MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES
         || value.contains('\0')
@@ -748,6 +747,19 @@ impl CredentialPool {
 pub(crate) fn parse_credential_profiles(
     item: Option<&Item>,
 ) -> Result<HashMap<Arc<str>, CredentialProfile>, HubModelConfigurationError> {
+    parse_credential_profiles_with_home_admission(item, true)
+}
+
+pub(crate) fn parse_bootstrap_credential_profiles(
+    item: Option<&Item>,
+) -> Result<HashMap<Arc<str>, CredentialProfile>, HubModelConfigurationError> {
+    parse_credential_profiles_with_home_admission(item, false)
+}
+
+fn parse_credential_profiles_with_home_admission(
+    item: Option<&Item>,
+    admit_credential_homes: bool,
+) -> Result<HashMap<Arc<str>, CredentialProfile>, HubModelConfigurationError> {
     let tables = item
         .and_then(Item::as_array_of_tables)
         .ok_or(HubModelConfigurationError::MissingCredentialProfiles)?;
@@ -764,7 +776,13 @@ pub(crate) fn parse_credential_profiles(
         let name = validated_credential_catalog_name(required_string(profile, "name")?)?;
         let adapter = ModelAdapter::parse(required_string(profile, "adapter")?)?;
         let billing_kind = BillingKind::parse(required_string(profile, "billing_kind")?)?;
-        let delivery = CredentialDelivery::parse(profile, adapter, &name, billing_kind)?;
+        let delivery = CredentialDelivery::parse(
+            profile,
+            adapter,
+            &name,
+            billing_kind,
+            admit_credential_homes,
+        )?;
         // The mixed-delivery rule is a property of one adapter's login store,
         // so both sides of the pair must be Codex profiles. Another adapter's
         // `ambient` profile shares no store with a Codex home and must not be
@@ -789,8 +807,14 @@ pub(crate) fn parse_credential_profiles(
         if delivery == CredentialDelivery::Ambient && !ambient_adapters.insert(adapter) {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
-        if let CredentialDelivery::File { path, .. } | CredentialDelivery::CodexHome { path, .. } =
-            &delivery
+        let path = match &delivery {
+            CredentialDelivery::File { path, .. } => Some(path),
+            CredentialDelivery::CodexHome { path, .. } if admit_credential_homes => Some(path),
+            CredentialDelivery::Ambient
+            | CredentialDelivery::Oauth(_)
+            | CredentialDelivery::CodexHome { .. } => None,
+        };
+        if let Some(path) = path
             && !file_paths.insert((adapter, path.clone()))
         {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);

@@ -45,6 +45,7 @@ pub mod program_registration;
 pub mod program_session;
 pub mod replace_session_defaults;
 pub mod repo_watch_command;
+mod review_judgment;
 pub mod review_orchestration;
 pub mod review_workflow;
 mod review_workflow_command;
@@ -116,7 +117,7 @@ pub async fn connect_production(database_url: &str) -> Result<PgPool, Error> {
         .await
 }
 
-/// Environment variables SQLx consults while building connection options,
+/// Environment variables ignored while building production connection options,
 /// mirroring the libpq `PG*` surface, in alphabetical order: fallback defaults
 /// for anything the URL omits — including the `PGPASSWORD` credential and the
 /// `PGPASSFILE` password-file override — plus `PGAPPNAME` and `PGOPTIONS`,
@@ -137,36 +138,37 @@ const AMBIENT_POSTGRES_VARIABLES: [&str; 13] = [
     "PGUSER",
 ];
 
-/// Environment variables that decide which roots verify the production
-/// server's certificate, in alphabetical order. This crate selects SQLx's
-/// `tls-rustls-ring-native-roots` feature, so SQLx seeds its root store from
-/// `rustls-native-certs`, which loads roots only from the file and directories
-/// these variables name whenever either is set, in place of the platform store.
-/// SQLx then adds an `sslrootcert` the URL states to that store rather than
-/// replacing it, so a root named by the environment stays trusted even under an
-/// explicit root certificate: stating the root in the URL cannot neutralize
-/// these variables, only their absence can.
+/// Ambient certificate-store variables ignored by production composition.
 const AMBIENT_TLS_TRUST_VARIABLES: [&str; 2] = ["SSL_CERT_DIR", "SSL_CERT_FILE"];
 
-/// Reports whether the password file SQLx falls back to when `PGPASSFILE` is
-/// unset exists: `~/.pgpass` under the process home directory, mirroring
-/// libpq's default. SQLx consults it whenever the parsed URL carries no
-/// password, so its presence is a second credential channel exactly like
-/// `PGPASSFILE`. Presence alone decides; the file is never opened.
+/// Environment variables the daemon removes before constructing production
+/// connection options.
+///
+/// SQLx seeds PostgreSQL options and native TLS roots from these variables.
+/// Removing them before the asynchronous runtime starts keeps `DATABASE_URL`
+/// authoritative without mutating the process environment while other threads
+/// are running.
+pub fn production_connection_environment_variables() -> impl Iterator<Item = &'static str> {
+    AMBIENT_POSTGRES_VARIABLES
+        .into_iter()
+        .chain(AMBIENT_TLS_TRUST_VARIABLES)
+}
+
+/// Reports whether `~/.pgpass` exists so startup can warn without opening it.
 fn default_passfile_is_present() -> bool {
     std::env::home_dir().is_some_and(|home| home.join(".pgpass").exists())
 }
 
 /// Names the connection parameters SQLx would take from outside the URL
-/// because this URL omits them: the user name from the process account
-/// (`whoami`), and the host from a probe of the local PostgreSQL socket
-/// directories that falls back to `localhost`. Each may be stated in the URL's
-/// authority or in the query parameter SQLx reads for it — `user` for the user
-/// name, `host` or `hostaddr` for the TLS host. A socket path selects the
-/// transport without stating the TLS host. Port and database name are left to
-/// SQLx: an omitted port is the fixed 5432, and an omitted database name lets
-/// the server apply the user name the URL states, so neither reaches outside
-/// the URL once the ambient variables are refused.
+/// because this URL omits them: the user name from the process account, the
+/// host from a probe of local PostgreSQL socket directories, and the password
+/// from a password file. Each may be stated in the URL's authority or in the
+/// query parameter SQLx reads for it — `user` for the user name, `host` or
+/// `hostaddr` for the TLS host, and `password` for the password. An explicitly
+/// empty password still states that no password is supplied. A socket path
+/// selects the transport without stating the TLS host. Port and database name
+/// are left to SQLx: an omitted port is the fixed 5432, and an omitted database
+/// name lets the server apply the user name the URL states.
 fn parameters_taken_from_outside_the_url(url: &Url) -> Vec<&'static str> {
     let mut host_is_stated = url.host_str().is_some_and(|host| {
         !host.is_empty()
@@ -176,11 +178,13 @@ fn parameters_taken_from_outside_the_url(url: &Url) -> Vec<&'static str> {
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case("%2f"))
     });
     let mut user_is_stated = !url.username().is_empty();
+    let mut password_is_stated = url.password().is_some();
     for (parameter, value) in url.query_pairs() {
         match &*parameter {
             "host" if !value.starts_with('/') => host_is_stated = !value.is_empty(),
             "hostaddr" => host_is_stated = !value.is_empty(),
             "user" => user_is_stated = !value.is_empty(),
+            "password" => password_is_stated = true,
             _ => {}
         }
     }
@@ -192,19 +196,19 @@ fn parameters_taken_from_outside_the_url(url: &Url) -> Vec<&'static str> {
     if !user_is_stated {
         taken.push("user");
     }
+    if !password_is_stated {
+        taken.push("password");
+    }
     taken
 }
 
 /// Parses production connection options with certificate and hostname checks.
 ///
-/// The database URL is the only supported configuration channel for the
-/// production connection: when any ambient libpq-style `PG*` variable or
-/// certificate-store variable is present in the process environment (even with
-/// an empty value), when the default `~/.pgpass` password file exists, or when
-/// the URL omits a parameter SQLx would then take from the process account or
-/// the host filesystem, parsing fails closed instead of letting the environment
-/// silently seed connection defaults, credentials, or trust anchors. The error
-/// names the offending channel, never its contents.
+/// The database URL supplies every production connection parameter. The daemon
+/// removes ambient libpq and certificate-store variables before calling this
+/// function, and the required explicit password prevents password-file lookup.
+/// An omitted host, user, or password fails parsing before SQLx can supply it
+/// from outside the URL.
 pub fn production_connection_options(database_url: &str) -> Result<PgConnectOptions, Error> {
     production_connection_options_with_environment(
         database_url,
@@ -213,49 +217,24 @@ pub fn production_connection_options(database_url: &str) -> Result<PgConnectOpti
     )
 }
 
+/// Names ambient PostgreSQL channels present in this process or its default
+/// password-file location.
+pub fn production_connection_ambient_warnings() -> Vec<&'static str> {
+    let mut warnings = production_connection_environment_variables()
+        .filter(|name| std::env::var_os(name).is_some())
+        .collect::<Vec<_>>();
+    if default_passfile_is_present() {
+        warnings.push("~/.pgpass");
+    }
+    warnings
+}
+
 /// Parses production options against explicit ambient-channel lookups.
 fn production_connection_options_with_environment(
     database_url: &str,
-    variable_is_present: impl Fn(&'static str) -> bool,
-    passfile_is_present: impl Fn() -> bool,
+    _variable_is_present: impl Fn(&'static str) -> bool,
+    _passfile_is_present: impl Fn() -> bool,
 ) -> Result<PgConnectOptions, Error> {
-    let ambient: Vec<&'static str> = AMBIENT_POSTGRES_VARIABLES
-        .into_iter()
-        .filter(|&name| variable_is_present(name))
-        .collect();
-    if !ambient.is_empty() {
-        return Err(Error::Configuration(
-            format!(
-                "ambient PostgreSQL variables would shape the production connection: {}; \
-                 unset them and carry every connection parameter in the database URL",
-                ambient.join(", ")
-            )
-            .into(),
-        ));
-    }
-    let trust: Vec<&'static str> = AMBIENT_TLS_TRUST_VARIABLES
-        .into_iter()
-        .filter(|&name| variable_is_present(name))
-        .collect();
-    if !trust.is_empty() {
-        return Err(Error::Configuration(
-            format!(
-                "ambient certificate variables would choose the roots that verify the production \
-                 server: {}; unset them and leave the platform trust store to the host, which an \
-                 `sslrootcert` in the database URL adds to rather than replaces",
-                trust.join(", ")
-            )
-            .into(),
-        ));
-    }
-    if passfile_is_present() {
-        return Err(Error::Configuration(
-            "the default PostgreSQL password file would supply the production credential: \
-             `~/.pgpass` is present; remove it and carry every connection parameter in the \
-             database URL"
-                .into(),
-        ));
-    }
     let url = Url::parse(database_url).map_err(Error::config)?;
     let taken = parameters_taken_from_outside_the_url(&url);
     if !taken.is_empty() {
@@ -472,31 +451,30 @@ mod tests {
     }
 
     #[test]
-    fn production_options_reject_an_ambient_credential_variable() {
-        let error = production_connection_options_with_environment(
+    fn production_options_ignore_an_ambient_credential_variable() {
+        let options = production_connection_options_with_environment(
             DATABASE_URL,
             |name| name == "PGPASSWORD",
             no_default_passfile,
         )
-        .expect_err("an ambient credential channel must fail closed");
+        .expect("the complete URL is authoritative");
 
-        expect!["error with configuration: ambient PostgreSQL variables would shape the production connection: PGPASSWORD; unset them and carry every connection parameter in the database URL"].assert_eq(&error.to_string());
+        assert_eq!(options.get_username(), "signalbox");
     }
 
     /// The one spelling of the ambient channel the proof below plants, used
-    /// both to build the child's environment and to check what the refusal
-    /// names, so exercising a different variable cannot leave a stale
+    /// both to build the child's environment and to check the observed
+    /// outcome, so exercising a different variable cannot leave a stale
     /// expectation behind.
     const AMBIENT_CREDENTIAL_VARIABLE: &str = "PGPASSWORD";
 
-    /// Synthetic only: the refusal happens before any database contact, so
-    /// this value must never reach a real connection attempt.
+    /// Synthetic only: this value must never reach a real connection attempt.
     const AMBIENT_CREDENTIAL_VALUE: &str = "sb-fix9-synthetic-not-a-real-credential";
 
     /// The libtest path `--exact` needs for the fixture below. A stale path
     /// selects zero tests, which libtest still reports as success — the
     /// evidence assertion in the parent is what turns that into a failure.
-    const REAL_ENVIRONMENT_FIXTURE: &str = "tests::real_ambient_environment_refusal_fixture";
+    const REAL_ENVIRONMENT_FIXTURE: &str = "tests::real_ambient_environment_fixture";
 
     /// Prefix the fixture prints its outcome behind, so the parent can tell a
     /// fixture that ran from a filter that matched nothing.
@@ -507,8 +485,8 @@ mod tests {
     /// owns the expectation, and this crate's PostgreSQL suite is swept with a
     /// bare `--ignored` in CI, where no parent has planted anything.
     #[test]
-    #[ignore = "subprocess fixture for the real-environment refusal proof"]
-    fn real_ambient_environment_refusal_fixture() {
+    #[ignore = "subprocess fixture for the real-environment isolation proof"]
+    fn real_ambient_environment_fixture() {
         println!(
             "{FIXTURE_EVIDENCE}{:?}",
             production_connection_options(DATABASE_URL).map(|_| ())
@@ -516,11 +494,11 @@ mod tests {
     }
 
     #[test]
-    fn production_options_refuse_a_real_ambient_pgpassword_variable() {
+    fn production_options_accept_a_real_ambient_pgpassword_variable() {
         // `Command::env` sets only the child's environment, so proving the
         // public, env-reading entry point needs no `std::env::set_var` — which
         // the crate's forbidden `unsafe_code` would reject anyway. Every other
-        // refusal test drives the injected lookup instead of the process
+        // environment test drives the injected lookup instead of the process
         // environment `production_connection_options` actually reads.
         let executable =
             std::env::current_exe().expect("test binary path is available under `cargo test`");
@@ -546,62 +524,58 @@ mod tests {
              matches nothing runs zero tests and still exits zero: {observed}"
         );
         assert!(
-            observed.contains(&format!("{FIXTURE_EVIDENCE}Err(")),
-            "a real ambient {AMBIENT_CREDENTIAL_VARIABLE} must be refused, not silently \
-             consulted: {observed}"
-        );
-        assert!(
-            observed.contains(AMBIENT_CREDENTIAL_VARIABLE),
-            "the refusal must name the ambient channel the parent planted: {observed}"
+            observed.contains(&format!("{FIXTURE_EVIDENCE}Ok(")),
+            "a real ambient {AMBIENT_CREDENTIAL_VARIABLE} must not override the complete URL: \
+             {observed}"
         );
     }
 
     #[test]
-    fn production_options_name_every_consulted_ambient_variable() {
-        let error = production_connection_options_with_environment(
+    fn production_options_ignore_every_ambient_variable() {
+        let options = production_connection_options_with_environment(
             DATABASE_URL,
             |_| true,
             no_default_passfile,
         )
-        .expect_err("a fully ambient environment must fail closed");
+        .expect("the complete URL is authoritative");
 
-        expect!["error with configuration: ambient PostgreSQL variables would shape the production connection: PGAPPNAME, PGDATABASE, PGHOST, PGHOSTADDR, PGOPTIONS, PGPASSFILE, PGPASSWORD, PGPORT, PGSSLCERT, PGSSLKEY, PGSSLMODE, PGSSLROOTCERT, PGUSER; unset them and carry every connection parameter in the database URL"].assert_eq(&error.to_string());
+        assert_eq!(options.get_host(), "database.example");
     }
 
     #[test]
-    fn production_options_reject_an_ambient_trust_store_variable() {
-        let error = production_connection_options_with_environment(
+    fn production_options_ignore_an_ambient_trust_store_variable() {
+        let options = production_connection_options_with_environment(
             DATABASE_URL,
             |name| name == "SSL_CERT_FILE",
             no_default_passfile,
         )
-        .expect_err("an ambient trust-anchor channel must fail closed");
+        .expect("the complete URL is authoritative");
 
-        expect!["error with configuration: ambient certificate variables would choose the roots that verify the production server: SSL_CERT_FILE; unset them and leave the platform trust store to the host, which an `sslrootcert` in the database URL adds to rather than replaces"].assert_eq(&error.to_string());
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
     }
 
     #[test]
-    fn production_options_name_every_consulted_trust_store_variable() {
-        let error = production_connection_options_with_environment(
+    fn production_options_ignore_every_ambient_trust_store_variable() {
+        let options = production_connection_options_with_environment(
             DATABASE_URL,
             |name| name.starts_with("SSL_CERT_"),
             no_default_passfile,
         )
-        .expect_err("a fully ambient trust store must fail closed");
+        .expect("the complete URL is authoritative");
 
-        expect!["error with configuration: ambient certificate variables would choose the roots that verify the production server: SSL_CERT_DIR, SSL_CERT_FILE; unset them and leave the platform trust store to the host, which an `sslrootcert` in the database URL adds to rather than replaces"].assert_eq(&error.to_string());
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
     }
 
     #[test]
-    fn production_options_reject_the_default_password_file() {
-        let error = production_connection_options_with_environment(
+    fn production_options_ignore_the_default_password_file() {
+        let options = production_connection_options_with_environment(
             DATABASE_URL,
             no_ambient_variables,
             || true,
         )
-        .expect_err("the default passfile is a second credential channel and must fail closed");
+        .expect("the complete URL is authoritative");
 
-        expect!["error with configuration: the default PostgreSQL password file would supply the production credential: `~/.pgpass` is present; remove it and carry every connection parameter in the database URL"].assert_eq(&error.to_string());
+        assert_eq!(options.get_username(), "signalbox");
     }
 
     #[test]
@@ -613,7 +587,7 @@ mod tests {
         )
         .expect_err("a URL SQLx would complete from outside must fail closed");
 
-        expect!["error with configuration: the process account and host filesystem would supply production connection parameters the database URL omits: host, user; state every connection parameter in the database URL"].assert_eq(&error.to_string());
+        expect!["error with configuration: the process account and host filesystem would supply production connection parameters the database URL omits: host, user, password; state every connection parameter in the database URL"].assert_eq(&error.to_string());
     }
 
     #[test]
@@ -625,13 +599,13 @@ mod tests {
         )
         .expect_err("a URL without a user name must fail closed");
 
-        expect!["error with configuration: the process account and host filesystem would supply production connection parameters the database URL omits: user; state every connection parameter in the database URL"].assert_eq(&error.to_string());
+        expect!["error with configuration: the process account and host filesystem would supply production connection parameters the database URL omits: user, password; state every connection parameter in the database URL"].assert_eq(&error.to_string());
     }
 
     #[test]
     fn production_options_accept_parameters_stated_in_the_query() {
         let options = production_connection_options_with_environment(
-            "postgres:///signalbox?host=database.example&user=signalbox",
+            "postgres:///signalbox?host=database.example&user=signalbox&password=secret",
             no_ambient_variables,
             no_default_passfile,
         )
@@ -644,10 +618,10 @@ mod tests {
     #[test]
     fn production_options_reject_socket_paths_without_a_tls_host() {
         for url in [
-            "postgres:///signalbox?user=signalbox&host=/var/run/postgresql",
-            "postgres:///signalbox?user=signalbox&host=%2Fvar%2Frun%2Fpostgresql",
-            "postgres://signalbox@%2Fvar%2Frun%2Fpostgresql/signalbox",
-            "postgres://signalbox@%2fvar%2frun%2fpostgresql/signalbox",
+            "postgres:///signalbox?user=signalbox&password=secret&host=/var/run/postgresql",
+            "postgres:///signalbox?user=signalbox&password=secret&host=%2Fvar%2Frun%2Fpostgresql",
+            "postgres://signalbox:secret@%2Fvar%2Frun%2Fpostgresql/signalbox",
+            "postgres://signalbox:secret@%2fvar%2frun%2fpostgresql/signalbox",
         ] {
             let error = production_connection_options_with_environment(
                 url,
@@ -663,9 +637,9 @@ mod tests {
     #[test]
     fn production_socket_options_verify_the_tls_host_stated_in_the_url() {
         for url in [
-            "postgres://signalbox@database.example/signalbox?host=/var/run/postgresql",
-            "postgres:///signalbox?user=signalbox&host=/var/run/postgresql&host=database.example",
-            "postgres://signalbox@%2Fvar%2Frun%2Fpostgresql/signalbox?host=database.example",
+            "postgres://signalbox:secret@database.example/signalbox?host=/var/run/postgresql",
+            "postgres:///signalbox?user=signalbox&password=secret&host=/var/run/postgresql&host=database.example",
+            "postgres://signalbox:secret@%2Fvar%2Frun%2Fpostgresql/signalbox?host=database.example",
         ] {
             let options = production_connection_options_with_environment(
                 url,
@@ -695,6 +669,28 @@ mod tests {
 
             assert!(error.to_string().contains(&format!("omits: {parameter};")));
         }
+    }
+
+    #[test]
+    fn production_options_require_an_explicit_password() {
+        let error = production_connection_options_with_environment(
+            "postgres://signalbox@database.example/signalbox",
+            no_ambient_variables,
+            no_default_passfile,
+        )
+        .expect_err("a URL without a password must not consult a password file");
+
+        expect!["error with configuration: the process account and host filesystem would supply production connection parameters the database URL omits: password; state every connection parameter in the database URL"].assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn production_options_accept_an_explicit_empty_password() {
+        production_connection_options_with_environment(
+            "postgres://signalbox@database.example/signalbox?password=",
+            no_ambient_variables,
+            no_default_passfile,
+        )
+        .expect("an explicit empty password disables password-file lookup");
     }
 
     #[test]

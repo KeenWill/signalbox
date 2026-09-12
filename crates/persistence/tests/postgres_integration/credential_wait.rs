@@ -361,6 +361,9 @@ async fn credential_pool_wait_retains_the_failed_predecessor_and_never_readmits_
 #[path = "credential_wait_wakes.rs"]
 mod wakes;
 
+#[path = "credential_wait_auth.rs"]
+mod authentication;
+
 #[path = "credential_wait_capacity.rs"]
 mod capacity;
 
@@ -574,3 +577,6 @@ async fn credential_pool_quota_rotation_prefers_another_member_after_capacity_re
     drop(container);
     Ok(())
 }
+
+#[path = "credential_wait_network.rs"]
+mod network;

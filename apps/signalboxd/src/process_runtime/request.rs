@@ -1221,7 +1221,10 @@ where
             })
             .await
         }
-        ClientRequest::ReadTranscript { session_id } => {
+        ClientRequest::ReadTranscript {
+            session_id,
+            after_frontier,
+        } => {
             Box::pin(async move {
                 let Some(snapshot_permit) = snapshot_permit else {
                     return Ok(());
@@ -1231,6 +1234,7 @@ where
                     version,
                     request_id,
                     session_id,
+                    after_frontier,
                     &services.pool,
                     &services.model_configuration,
                     services.configuration_reload.as_ref(),

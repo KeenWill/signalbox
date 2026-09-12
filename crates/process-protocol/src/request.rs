@@ -55,7 +55,7 @@ pub enum ClientRequest {
     },
     /// Register a directory resolved by the daemon operator boundary.
     RegisterWorkspace { command_id: CommandId, root: String },
-    /// Mint an HTTPS Git remote for a registered workspace.
+    /// Mint an HTTPS or SSH Git remote for a registered workspace.
     MintGitRemote {
         command_id: CommandId,
         workspace_id: CanonicalUuid,
@@ -340,10 +340,13 @@ pub enum ClientRequest {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         through_position: Option<CanonicalU64>,
     },
-    /// Read one durable transcript snapshot.
+    /// Read one durable transcript snapshot or the suffix after an acknowledged frontier.
     ReadTranscript {
         /// Target session.
         session_id: CanonicalUuid,
+        /// Exclusive semantic frontier of the last fully consumed transcript snapshot.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        after_frontier: Option<CanonicalUuid>,
     },
     /// Read a snapshot and follow later durable updates.
     FollowSession {
@@ -1166,6 +1169,7 @@ impl ClientRequest {
             let mut findings = HashSet::new();
             for member in members {
                 validate_review_judgment_disposition(&member.disposition)?;
+                crate::shared_validation::validate_review_judgment_result(&member.judgment)?;
                 if !findings.insert(member.finding_id) {
                     return Err(FrameValidationError::ReviewShape);
                 }

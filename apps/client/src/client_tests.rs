@@ -28,7 +28,8 @@ use signalbox_process_protocol::{
     RunnerPlacementRevision, RunnerProjection, RunnerProjectionSelector, RunnerProjectionState,
     RunnerSandboxProfile, RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent,
     SessionPlacement, SettingOverlay, SystemPromptMember, SystemPromptText, ToolBatchState,
-    ToolDecision, TurnState, UserInputContent, decode_client_line, encode_server_line,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UserInputContent,
+    decode_client_line, encode_server_line,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -106,8 +107,10 @@ use super::{
     validate_system_prompt_policy, write_blob_output,
 };
 use crate::{
-    child_lifecycle_terminalization, error::ClientError, presentation::Output,
-    transcript::TranscriptSnapshot,
+    child_lifecycle_terminalization,
+    error::ClientError,
+    presentation::Output,
+    transcript::{SnapshotEntryKind, SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot},
 };
 
 /// The session a follower reads. Only a delegation event addressed to this
@@ -439,6 +442,68 @@ async fn accept_request_and_reply(
     writer
         .write_all(&encode_server_line(&frame).map_err(io::Error::other)?)
         .await
+}
+
+async fn accept_request_and_reply_many(
+    listener: &UnixListener,
+    expected: &ClientRequest,
+    responses: Vec<ServerMessage>,
+) -> io::Result<()> {
+    let (stream, _) = listener.accept().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line).await?;
+    let request = decode_client_line(&line).map_err(io::Error::other)?;
+    assert_eq!(request.request(), expected);
+    for response in responses {
+        let frame =
+            ServerFrame::try_new_for_version(request.version(), request.request_id(), response)
+                .map_err(io::Error::other)?;
+        writer
+            .write_all(&encode_server_line(&frame).map_err(io::Error::other)?)
+            .await?;
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the fixture states each transcript snapshot framing field explicitly"
+)]
+fn transcript_snapshot_messages(
+    session_id: CanonicalUuid,
+    cursor: u64,
+    after_frontier: Option<CanonicalUuid>,
+    turns: Vec<ServerMessage>,
+    entries: Vec<ServerMessage>,
+    turn_count: u64,
+    entry_count: u64,
+    frontier: Option<CanonicalUuid>,
+) -> Vec<ServerMessage> {
+    let mut messages = vec![ServerMessage::TranscriptSnapshotStart {
+        after_frontier,
+        workspace_root_kind: None,
+        repository_watch: None,
+        session_id,
+        cursor: CanonicalU64::new(cursor),
+        runner: None,
+    }];
+    messages.extend(turns);
+    if after_frontier.is_none() {
+        messages.push(ServerMessage::TranscriptModelCallsEnd {
+            model_call_count: CanonicalU64::new(0),
+        });
+    }
+    messages.extend(entries);
+    messages.push(ServerMessage::TranscriptSnapshotEnd {
+        session_id,
+        cursor: CanonicalU64::new(cursor),
+        turn_count: CanonicalU64::new(turn_count),
+        entry_count: CanonicalU64::new(entry_count),
+        frontier,
+    });
+    messages
 }
 
 fn deployment_limits_message(limits: ClientDeploymentLimits) -> ServerMessage {
@@ -1230,6 +1295,7 @@ async fn queued_send_wait_uses_active_slot_not_acceptance_order_or_terminal_hist
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    after_frontier: None,
                     workspace_root_kind: None,
                     repository_watch: None,
                     session_id,
@@ -1279,6 +1345,7 @@ async fn queued_send_wait_uses_active_slot_not_acceptance_order_or_terminal_hist
             );
             response.extend_from_slice(
                 &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                    frontier: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     turn_count: CanonicalU64::new(3),
@@ -1327,7 +1394,10 @@ async fn queued_send_wait_uses_active_slot_not_acceptance_order_or_terminal_hist
         let refresh_request = decode_client_line(&refresh_line).map_err(io::Error::other)?;
         assert_eq!(
             refresh_request.request(),
-            &ClientRequest::ReadTranscript { session_id }
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            }
         );
         let refreshed = snapshot(
             refresh_request.version(),
@@ -1351,7 +1421,10 @@ async fn queued_send_wait_uses_active_slot_not_acceptance_order_or_terminal_hist
         let exhausted_request = decode_client_line(&exhausted_line).map_err(io::Error::other)?;
         assert_eq!(
             exhausted_request.request(),
-            &ClientRequest::ReadTranscript { session_id }
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            }
         );
         let exhausted = snapshot(
             exhausted_request.version(),
@@ -1394,6 +1467,7 @@ async fn selected_send_polls_after_an_automatic_recovery_transition() -> Result<
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    after_frontier: None,
                     workspace_root_kind: None,
                     repository_watch: None,
                     session_id,
@@ -1418,6 +1492,7 @@ async fn selected_send_polls_after_an_automatic_recovery_transition() -> Result<
             );
             response.extend_from_slice(
                 &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                    frontier: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     turn_count: CanonicalU64::new(1),
@@ -1530,6 +1605,7 @@ async fn selected_send_recovery_poll_is_not_postponed_by_follow_traffic()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    after_frontier: None,
                     workspace_root_kind: None,
                     repository_watch: None,
                     session_id,
@@ -1554,6 +1630,7 @@ async fn selected_send_recovery_poll_is_not_postponed_by_follow_traffic()
             );
             response.extend_from_slice(
                 &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                    frontier: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     turn_count: CanonicalU64::new(1),
@@ -1694,6 +1771,7 @@ async fn selected_send_polls_after_an_automatic_tool_recovery_transition()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    after_frontier: None,
                     workspace_root_kind: None,
                     repository_watch: None,
                     session_id,
@@ -1718,6 +1796,7 @@ async fn selected_send_polls_after_an_automatic_tool_recovery_transition()
             );
             response.extend_from_slice(
                 &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                    frontier: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     turn_count: CanonicalU64::new(1),
@@ -1836,6 +1915,7 @@ async fn send_wait_continues_after_a_superseded_runner_loss_event() -> Result<()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    after_frontier: None,
                     workspace_root_kind: None,
                     repository_watch: None,
                     session_id,
@@ -1863,6 +1943,7 @@ async fn send_wait_continues_after_a_superseded_runner_loss_event() -> Result<()
             );
             response.extend_from_slice(
                 &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                    frontier: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     turn_count: CanonicalU64::new(1),
@@ -1904,7 +1985,10 @@ async fn send_wait_continues_after_a_superseded_runner_loss_event() -> Result<()
         let refresh_request = decode_client_line(&refresh_line).map_err(io::Error::other)?;
         assert_eq!(
             refresh_request.request(),
-            &ClientRequest::ReadTranscript { session_id }
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            }
         );
         refresh_writer
             .write_all(&snapshot(
@@ -1970,6 +2054,7 @@ async fn send_wait_ignores_streamed_text_until_the_durable_terminal_event()
                 .map_err(io::Error::other)
         };
         let mut response = encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+            after_frontier: None,
             workspace_root_kind: None,
             repository_watch: None,
             session_id,
@@ -1997,6 +2082,7 @@ async fn send_wait_ignores_streamed_text_until_the_durable_terminal_event()
         );
         response.extend_from_slice(
             &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                frontier: None,
                 session_id,
                 cursor: CanonicalU64::new(0),
                 turn_count: CanonicalU64::new(1),
@@ -2063,6 +2149,7 @@ async fn send_wait_rejects_streamed_text_for_another_session() -> Result<(), Box
                 .map_err(io::Error::other)
         };
         let mut response = encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+            after_frontier: None,
             workspace_root_kind: None,
             repository_watch: None,
             session_id,
@@ -2090,6 +2177,7 @@ async fn send_wait_rejects_streamed_text_for_another_session() -> Result<(), Box
         );
         response.extend_from_slice(
             &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                frontier: None,
                 session_id,
                 cursor: CanonicalU64::new(0),
                 turn_count: CanonicalU64::new(1),
@@ -5862,6 +5950,654 @@ async fn reload_configuration_reuses_the_supplied_command_id() -> Result<(), Box
     Ok(())
 }
 
+#[tokio::test]
+async fn follow_terminal_event_rereads_the_full_snapshot_before_rendering_refused_material()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+    let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let model_call_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+    let attempt_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+    let acknowledged_frontier = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+    let terminal_frontier = CanonicalUuid::from_uuid(Uuid::from_u128(6));
+    let accepted_input_id = CanonicalUuid::from_uuid(Uuid::from_u128(7));
+    let server = tokio::spawn(async move {
+        let (stream, mut follow_writer) = listener.accept().await?.0.into_split();
+        let mut follow_reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        follow_reader.read_until(b'\n', &mut line).await?;
+        let follow_request = decode_client_line(&line).map_err(io::Error::other)?;
+        assert_eq!(
+            follow_request.request(),
+            &ClientRequest::FollowSession { session_id }
+        );
+        let mut initial = transcript_snapshot_messages(
+            session_id,
+            1,
+            None,
+            vec![ServerMessage::TranscriptTurn {
+                turn_id,
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::ActiveRunning {
+                    current_attempt_id: attempt_id,
+                    current_model_call: None,
+                },
+            }],
+            vec![ServerMessage::TranscriptUserEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: session_id,
+                entry_id: acknowledged_frontier,
+                accepted_input_id,
+                turn_id,
+                content: UserInputContent::text(String::from("refuse this input")),
+            }],
+            1,
+            1,
+            Some(acknowledged_frontier),
+        );
+        initial.push(ServerMessage::SessionEvent {
+            cursor: CanonicalU64::new(2),
+            session_id,
+            event: SessionEvent::TurnRefused {
+                turn_id,
+                model_call_id,
+                terminal_frontier_id: terminal_frontier,
+            },
+        });
+        for message in initial {
+            let frame = ServerFrame::try_new_for_version(
+                follow_request.version(),
+                follow_request.request_id(),
+                message,
+            )
+            .map_err(io::Error::other)?;
+            follow_writer
+                .write_all(&encode_server_line(&frame).map_err(io::Error::other)?)
+                .await?;
+        }
+
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
+            transcript_snapshot_messages(
+                session_id,
+                2,
+                None,
+                vec![ServerMessage::TranscriptTurn {
+                    turn_id,
+                    acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
+                    state: TurnState::Refused {
+                        terminal_frontier_id: terminal_frontier,
+                        terminal_attempt_id: attempt_id,
+                        terminal_model_call_id: model_call_id,
+                    },
+                }],
+                vec![
+                    ServerMessage::TranscriptUserEntry {
+                        entry_index: CanonicalU64::new(0),
+                        source_session_id: session_id,
+                        entry_id: acknowledged_frontier,
+                        accepted_input_id,
+                        turn_id,
+                        content: UserInputContent::text(String::from("refuse this input")),
+                    },
+                    ServerMessage::TranscriptEntry {
+                        entry_index: CanonicalU64::new(1),
+                        source_session_id: session_id,
+                        entry_id: terminal_frontier,
+                        entry: TranscriptEntry::ProviderCompaction {
+                            turn_id,
+                            model_call_id,
+                        },
+                    },
+                ],
+                1,
+                2,
+                Some(terminal_frontier),
+            ),
+        )
+        .await?;
+
+        let unexpected = ServerFrame::try_new_for_version(
+            follow_request.version(),
+            follow_request.request_id(),
+            ServerMessage::SessionsStart {},
+        )
+        .map_err(io::Error::other)?;
+        follow_writer
+            .write_all(&encode_server_line(&unexpected).map_err(io::Error::other)?)
+            .await
+    });
+
+    let mut client = ProcessClient::new(socket);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = {
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        crate::follow_status::follow(&mut client, &mut output, session_id).await
+    };
+
+    assert!(matches!(
+        result,
+        Err(ClientError::Protocol(
+            "follow returned an unexpected response"
+        ))
+    ));
+    let rendered = String::from_utf8(stdout)?;
+    assert!(rendered.contains(&format!(
+        "turn_refused turn={turn_id} call={model_call_id} frontier={terminal_frontier}"
+    )));
+    assert!(rendered.contains(&format!(
+        "provider_compaction turn={turn_id} call={model_call_id}"
+    )));
+    assert!(stderr.is_empty());
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn truncated_transcript_suffix_leaves_acknowledgement_unchanged() -> Result<(), Box<dyn Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+    let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let frontier = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+    let server = tokio::spawn(async move {
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
+            transcript_snapshot_messages(
+                session_id,
+                1,
+                None,
+                Vec::new(),
+                vec![ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: session_id,
+                    entry_id: frontier,
+                    entry: TranscriptEntry::TurnCompleted { turn_id },
+                }],
+                0,
+                1,
+                Some(frontier),
+            ),
+        )
+        .await?;
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: Some(frontier),
+            },
+            vec![ServerMessage::TranscriptSnapshotStart {
+                after_frontier: Some(frontier),
+                workspace_root_kind: None,
+                repository_watch: None,
+                session_id,
+                cursor: CanonicalU64::new(2),
+                runner: None,
+            }],
+        )
+        .await?;
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: Some(frontier),
+            },
+            transcript_snapshot_messages(
+                session_id,
+                3,
+                Some(frontier),
+                Vec::new(),
+                Vec::new(),
+                0,
+                0,
+                Some(frontier),
+            ),
+        )
+        .await
+    });
+
+    let mut client = ProcessClient::new(socket);
+    let mut snapshot = crate::follow_status::transcript(&mut client, session_id).await?;
+    let error = crate::follow_status::refresh_transcript(&mut client, session_id, &mut snapshot)
+        .await
+        .expect_err("a truncated suffix must fail");
+    assert!(matches!(error, ClientError::ConnectionClosed));
+    assert_eq!(
+        snapshot
+            .acknowledgement()
+            .expect("the retained snapshot remains acknowledged")
+            .frontier(),
+        frontier
+    );
+
+    crate::follow_status::refresh_transcript(&mut client, session_id, &mut snapshot).await?;
+    assert_eq!(snapshot.cursor(), 3);
+    assert_eq!(
+        snapshot
+            .acknowledgement()
+            .expect("the empty suffix retains its acknowledgement")
+            .frontier(),
+        frontier
+    );
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn retained_prefix_and_suffix_display_later_event_output_exactly_once()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(10));
+    let first_turn = CanonicalUuid::from_uuid(Uuid::from_u128(11));
+    let first_call = CanonicalUuid::from_uuid(Uuid::from_u128(12));
+    let first_reply = CanonicalUuid::from_uuid(Uuid::from_u128(13));
+    let first_frontier = CanonicalUuid::from_uuid(Uuid::from_u128(14));
+    let later_turn = CanonicalUuid::from_uuid(Uuid::from_u128(21));
+    let later_call = CanonicalUuid::from_uuid(Uuid::from_u128(22));
+    let later_reply = CanonicalUuid::from_uuid(Uuid::from_u128(23));
+    let later_frontier = CanonicalUuid::from_uuid(Uuid::from_u128(24));
+    let server = tokio::spawn(async move {
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
+            transcript_snapshot_messages(
+                session_id,
+                1,
+                None,
+                Vec::new(),
+                vec![
+                    ServerMessage::TranscriptTextEntry {
+                        entry_index: CanonicalU64::new(0),
+                        source_session_id: session_id,
+                        entry_id: first_reply,
+                        entry: TranscriptTextEntry::Assistant {
+                            turn_id: first_turn,
+                            model_call_id: first_call,
+                        },
+                    },
+                    ServerMessage::TranscriptContent {
+                        entry_index: CanonicalU64::new(0),
+                        fragment_index: CanonicalU64::new(0),
+                        final_fragment: true,
+                        content_fragment: ContentFragment::try_new(String::from("cached A output"))
+                            .map_err(io::Error::other)?,
+                    },
+                ],
+                0,
+                1,
+                Some(first_frontier),
+            ),
+        )
+        .await?;
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: Some(first_frontier),
+            },
+            transcript_snapshot_messages(
+                session_id,
+                2,
+                Some(first_frontier),
+                Vec::new(),
+                vec![
+                    ServerMessage::TranscriptEntry {
+                        entry_index: CanonicalU64::new(1),
+                        source_session_id: session_id,
+                        entry_id: first_frontier,
+                        entry: TranscriptEntry::TurnCompleted {
+                            turn_id: first_turn,
+                        },
+                    },
+                    ServerMessage::TranscriptTextEntry {
+                        entry_index: CanonicalU64::new(2),
+                        source_session_id: session_id,
+                        entry_id: later_reply,
+                        entry: TranscriptTextEntry::Assistant {
+                            turn_id: later_turn,
+                            model_call_id: later_call,
+                        },
+                    },
+                    ServerMessage::TranscriptContent {
+                        entry_index: CanonicalU64::new(2),
+                        fragment_index: CanonicalU64::new(0),
+                        final_fragment: true,
+                        content_fragment: ContentFragment::try_new(String::from("later B output"))
+                            .map_err(io::Error::other)?,
+                    },
+                    ServerMessage::TranscriptEntry {
+                        entry_index: CanonicalU64::new(3),
+                        source_session_id: session_id,
+                        entry_id: later_frontier,
+                        entry: TranscriptEntry::TurnCompleted {
+                            turn_id: later_turn,
+                        },
+                    },
+                ],
+                0,
+                3,
+                Some(later_frontier),
+            ),
+        )
+        .await?;
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: Some(later_frontier),
+            },
+            transcript_snapshot_messages(
+                session_id,
+                3,
+                Some(later_frontier),
+                Vec::new(),
+                Vec::new(),
+                0,
+                0,
+                Some(later_frontier),
+            ),
+        )
+        .await
+    });
+
+    let mut client = ProcessClient::new(socket);
+    let mut snapshot = crate::follow_status::transcript(&mut client, session_id).await?;
+    let mut displayed = SnapshotIdentitySet::new()?;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    {
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        output.followed_snapshot(&mut snapshot, &mut displayed)?;
+        crate::follow_status::refresh_transcript(&mut client, session_id, &mut snapshot).await?;
+        output.terminal_material(
+            &mut snapshot,
+            &mut displayed,
+            SnapshotSelection::Completed {
+                turn_id: first_turn,
+                model_call_id: first_call,
+                terminal_entry_id: first_frontier,
+            },
+        )?;
+        crate::follow_status::refresh_transcript(&mut client, session_id, &mut snapshot).await?;
+        for _ in 0..2 {
+            output.terminal_material(
+                &mut snapshot,
+                &mut displayed,
+                SnapshotSelection::Completed {
+                    turn_id: later_turn,
+                    model_call_id: later_call,
+                    terminal_entry_id: later_frontier,
+                },
+            )?;
+        }
+    }
+
+    let entry_indices = snapshot
+        .replay()?
+        .filter_map(|record| match record {
+            Ok(SnapshotRecord::Entry(entry)) => Some(Ok(entry.entry_index)),
+            Ok(
+                SnapshotRecord::Turn(_)
+                | SnapshotRecord::ModelCallUsage(_)
+                | SnapshotRecord::Content(_),
+            ) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, ClientError>>()?;
+    assert_eq!(entry_indices, vec![0, 1, 2, 3]);
+    let rendered = String::from_utf8(stdout)?;
+    assert_eq!(rendered.matches("cached A output").count(), 1);
+    assert_eq!(rendered.matches("later B output").count(), 1);
+    assert!(stderr.is_empty());
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_suffix_advances_from_ordinary_user_input_to_completed_turn()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(30));
+    let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(31));
+    let accepted_input_id = CanonicalUuid::from_uuid(Uuid::from_u128(32));
+    let user_entry_id = CanonicalUuid::from_uuid(Uuid::from_u128(33));
+    let initial_frontier = user_entry_id;
+    let model_call_id = CanonicalUuid::from_uuid(Uuid::from_u128(34));
+    let reply_entry_id = CanonicalUuid::from_uuid(Uuid::from_u128(35));
+    let completion_entry_id = CanonicalUuid::from_uuid(Uuid::from_u128(36));
+    let server = tokio::spawn(async move {
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
+            transcript_snapshot_messages(
+                session_id,
+                1,
+                None,
+                Vec::new(),
+                vec![ServerMessage::TranscriptUserEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: session_id,
+                    entry_id: user_entry_id,
+                    accepted_input_id,
+                    turn_id,
+                    content: UserInputContent::text(String::from("ordinary input")),
+                }],
+                0,
+                1,
+                Some(initial_frontier),
+            ),
+        )
+        .await?;
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: Some(initial_frontier),
+            },
+            transcript_snapshot_messages(
+                session_id,
+                2,
+                Some(initial_frontier),
+                Vec::new(),
+                vec![
+                    ServerMessage::TranscriptTextEntry {
+                        entry_index: CanonicalU64::new(1),
+                        source_session_id: session_id,
+                        entry_id: reply_entry_id,
+                        entry: TranscriptTextEntry::Assistant {
+                            turn_id,
+                            model_call_id,
+                        },
+                    },
+                    ServerMessage::TranscriptContent {
+                        entry_index: CanonicalU64::new(1),
+                        fragment_index: CanonicalU64::new(0),
+                        final_fragment: true,
+                        content_fragment: ContentFragment::try_new(String::from("completed reply"))
+                            .map_err(io::Error::other)?,
+                    },
+                    ServerMessage::TranscriptEntry {
+                        entry_index: CanonicalU64::new(2),
+                        source_session_id: session_id,
+                        entry_id: completion_entry_id,
+                        entry: TranscriptEntry::TurnCompleted { turn_id },
+                    },
+                ],
+                0,
+                2,
+                Some(completion_entry_id),
+            ),
+        )
+        .await
+    });
+
+    let mut client = ProcessClient::new(socket);
+    let mut snapshot = crate::follow_status::transcript(&mut client, session_id).await?;
+    crate::follow_status::refresh_transcript(&mut client, session_id, &mut snapshot).await?;
+    assert_eq!(
+        snapshot
+            .acknowledgement()
+            .expect("the completion is acknowledged")
+            .frontier(),
+        completion_entry_id
+    );
+    let records = snapshot
+        .replay()?
+        .collect::<Result<Vec<_>, ClientError>>()?;
+    assert!(matches!(
+        &records[0],
+        SnapshotRecord::Entry(entry)
+            if entry.entry_index == 0
+                && matches!(&entry.kind, SnapshotEntryKind::User { turn_id: observed, .. } if *observed == turn_id)
+    ));
+    assert!(matches!(
+        &records[1],
+        SnapshotRecord::Entry(entry)
+            if entry.entry_index == 1
+                && matches!(&entry.kind, SnapshotEntryKind::Text(TranscriptTextEntry::Assistant { turn_id: observed, .. }) if *observed == turn_id)
+    ));
+    assert!(matches!(&records[2], SnapshotRecord::Content(content) if content.entry_index == 1));
+    assert!(matches!(
+        &records[3],
+        SnapshotRecord::Entry(entry)
+            if entry.entry_index == 2
+                && matches!(&entry.kind, SnapshotEntryKind::Marker(TranscriptEntry::TurnCompleted { turn_id: observed }) if *observed == turn_id)
+    ));
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_required_replaces_the_retained_snapshot_with_a_full_read()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(40));
+    let old_turn = CanonicalUuid::from_uuid(Uuid::from_u128(41));
+    let old_entry = CanonicalUuid::from_uuid(Uuid::from_u128(42));
+    let new_turn = CanonicalUuid::from_uuid(Uuid::from_u128(43));
+    let new_entry = CanonicalUuid::from_uuid(Uuid::from_u128(44));
+    let server = tokio::spawn(async move {
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
+            transcript_snapshot_messages(
+                session_id,
+                1,
+                None,
+                Vec::new(),
+                vec![ServerMessage::TranscriptUserEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: session_id,
+                    entry_id: old_entry,
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(45)),
+                    turn_id: old_turn,
+                    content: UserInputContent::text(String::from("stale cached input")),
+                }],
+                0,
+                1,
+                Some(old_entry),
+            ),
+        )
+        .await?;
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: Some(old_entry),
+            },
+            vec![ServerMessage::Error {
+                code: ErrorCode::ResyncRequired,
+                message: String::from("the transcript frontier is no longer retained"),
+                detail: ErrorDetail::none(),
+            }],
+        )
+        .await?;
+        accept_request_and_reply_many(
+            &listener,
+            &ClientRequest::ReadTranscript {
+                session_id,
+                after_frontier: None,
+            },
+            transcript_snapshot_messages(
+                session_id,
+                3,
+                None,
+                Vec::new(),
+                vec![ServerMessage::TranscriptUserEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: session_id,
+                    entry_id: new_entry,
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(46)),
+                    turn_id: new_turn,
+                    content: UserInputContent::text(String::from("authoritative replacement")),
+                }],
+                0,
+                1,
+                Some(new_entry),
+            ),
+        )
+        .await
+    });
+
+    let mut client = ProcessClient::new(socket);
+    let mut snapshot = crate::follow_status::transcript(&mut client, session_id).await?;
+    crate::follow_status::refresh_transcript(&mut client, session_id, &mut snapshot).await?;
+    assert_eq!(snapshot.cursor(), 3);
+    assert_eq!(
+        snapshot
+            .acknowledgement()
+            .expect("the replacement is acknowledged")
+            .frontier(),
+        new_entry
+    );
+    let entries = snapshot
+        .replay()?
+        .filter_map(|record| match record {
+            Ok(SnapshotRecord::Entry(entry)) => Some(Ok(entry.entry_id)),
+            Ok(
+                SnapshotRecord::Turn(_)
+                | SnapshotRecord::ModelCallUsage(_)
+                | SnapshotRecord::Content(_),
+            ) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, ClientError>>()?;
+    assert_eq!(entries, vec![new_entry]);
+    assert!(!entries.contains(&old_entry));
+    server.await??;
+    Ok(())
+}
+
 #[test]
 fn credential_wait_terminal_release_finishes_follow_as_failed() {
     let state = TurnState::FailedAfterCredentialWait {
@@ -5897,10 +6633,14 @@ async fn credential_wait_failure_event_requires_its_terminal_snapshot_frontier()
             let request = decode_client_line(&line).map_err(io::Error::other)?;
             assert_eq!(
                 request.request(),
-                &ClientRequest::ReadTranscript { session_id }
+                &ClientRequest::ReadTranscript {
+                    session_id,
+                    after_frontier: None,
+                }
             );
             for message in [
                 ServerMessage::TranscriptSnapshotStart {
+                    after_frontier: None,
  workspace_root_kind: None, session_id, cursor: CanonicalU64::new(1), runner: None, repository_watch: None },
                 ServerMessage::TranscriptTurn {
                     turn_id, acceptance_position: CanonicalU64::new(1), model_settings: None,
@@ -5913,7 +6653,7 @@ async fn credential_wait_failure_event_requires_its_terminal_snapshot_frontier()
                     },
                 },
                 ServerMessage::TranscriptModelCallsEnd { model_call_count: CanonicalU64::new(0) },
-                ServerMessage::TranscriptSnapshotEnd { session_id, cursor: CanonicalU64::new(1), turn_count: CanonicalU64::new(1), entry_count: CanonicalU64::new(0) },
+                ServerMessage::TranscriptSnapshotEnd { session_id, cursor: CanonicalU64::new(1), turn_count: CanonicalU64::new(1), entry_count: CanonicalU64::new(0), frontier: None },
             ] {
                 let frame = ServerFrame::try_new_for_version(request.version(), request.request_id(), message).map_err(io::Error::other)?;
                 writer.write_all(&encode_server_line(&frame).map_err(io::Error::other)?).await?;
@@ -6184,6 +6924,7 @@ async fn operator_status_counts_and_displays_supervision_and_repository_ingestio
 -> Result<(), Box<dyn Error>> {
     use signalbox_process_protocol::{
         OperatorStatusEndMessage, OperatorStatusMessage, OperatorStatusRepositoryIngestion,
+        OperatorStatusUnavailableComponentMessage,
     };
     let directory = tempfile::tempdir()?;
     let socket = directory.path().join("status.sock");
@@ -6198,6 +6939,12 @@ async fn operator_status_counts_and_displays_supervision_and_repository_ingestio
         assert_eq!(request.request(), &ClientRequest::ReadOperatorStatus {});
         for message in [
             OperatorStatusMessage::Start {},
+            OperatorStatusMessage::UnavailableComponent(Box::new(
+                OperatorStatusUnavailableComponentMessage {
+                    component: "blob_store:primary".to_owned(),
+                    cause: "filesystem_namespace_unavailable".to_owned(),
+                },
+            )),
             OperatorStatusMessage::SessionSupervision(Box::new(signalbox_process_protocol::OperatorStatusSessionSupervisionMessage {
                 session_id: CanonicalUuid::from_uuid(Uuid::from_u128(144)),
                 terminal: true,
@@ -6214,6 +6961,7 @@ async fn operator_status_counts_and_displays_supervision_and_repository_ingestio
                 },
             )),
             OperatorStatusMessage::End(Box::new(OperatorStatusEndMessage {
+                unavailable_component_count: CanonicalU64::new(1),
                 session_supervision_count: CanonicalU64::new(1),
                 repository_ingestion_count: CanonicalU64::new(1),
                 lifecycle_week_count: CanonicalU64::new(0),
@@ -6243,6 +6991,9 @@ async fn operator_status_counts_and_displays_supervision_and_repository_ingestio
     .await?;
     server.await??;
     let rendered = String::from_utf8(stdout)?;
+    assert!(rendered.contains(
+        "unavailable_component component=blob_store:primary cause=filesystem_namespace_unavailable"
+    ));
     let evidence = rendered
         .lines()
         .find_map(|line| line.strip_prefix("repository_ingestion "))

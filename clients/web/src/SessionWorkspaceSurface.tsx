@@ -501,7 +501,13 @@ export function SessionWorkspaceSurface({
           <header className="session-workspace-header">
             <div>
               <h2 id="session-workspace-heading">{sessionId}</h2>
-              <p>{displayedSession.active ? 'Active' : 'Inactive'}</p>
+              <p>
+                {displayedSession.descriptor.supervision?.pending
+                  ? 'Recovery required'
+                  : displayedSession.active
+                    ? 'Active'
+                    : 'Inactive'}
+              </p>
             </div>
             <dl className="session-telemetry" hidden={!showEvents}>
               <div>
@@ -522,6 +528,19 @@ export function SessionWorkspaceSurface({
               </div>
             </dl>
           </header>
+          {displayedSession.descriptor.supervision && (
+            <section className="session-provenance" aria-label="Session supervision">
+              <p>
+                {displayedSession.descriptor.supervision.pending
+                  ? 'Operator reconciliation pending'
+                  : 'Operator reconciliation recorded'}
+              </p>
+              <p>
+                {enumLabel(displayedSession.descriptor.supervision.class)} ·{' '}
+                <code>{displayedSession.descriptor.supervision.cause_code}</code>
+              </p>
+            </section>
+          )}
           {displayedSession.descriptor.repository_watch && (
             <section className="session-provenance" aria-label="Repository watch">
               Repository watch · {displayedSession.descriptor.repository_watch.repository}
@@ -607,6 +626,11 @@ export function SessionWorkspaceSurface({
               'Connecting…'
             )}
           </p>
+          {live?.active?.state.kind === 'awaiting_credential_availability' && (
+            <p role="status" className="availability-tag">
+              Waiting for credentials · {enumLabel(live.active.state.cause)}
+            </p>
+          )}
           {(live?.reconciliation || live?.runner) && (
             <div className="session-live-facts">
               {live.reconciliation && (
@@ -759,6 +783,7 @@ export function SessionWorkspaceSurface({
           sessionId={sessionId ?? ''}
           activeState={live ? (live.active?.state.kind ?? null) : undefined}
           stateUnavailable={followFailed && live === null}
+          supervision={displayedSession?.descriptor.supervision ?? null}
           onAccepted={refetchSession}
           onEscape={() => entryInput.current?.focus()}
         />

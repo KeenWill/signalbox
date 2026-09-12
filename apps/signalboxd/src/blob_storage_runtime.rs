@@ -8,12 +8,15 @@ use std::{
     sync::Arc,
 };
 
-use signalbox_blob_store::{BlobStore, BlobStoreError, BlobStoreName};
+use signalbox_blob_store::{
+    BlobObjectKey, BlobPutOutcome, BlobReader, BlobStore, BlobStoreError, BlobStoreFuture,
+    BlobStoreName, ExpectedBlob, OpenedBlob,
+};
 use signalbox_blob_store_filesystem::{
     FilesystemBlobStaging, FilesystemBlobStore, FilesystemBlobStoreConstructionError,
     FilesystemNamespaceIdentity, NamespaceBindingState, OpenedFilesystemBlobRoot,
 };
-use signalbox_blob_store_s3::{S3BlobStore, S3BlobStoreConstructionError, S3NamespaceBindingState};
+use signalbox_blob_store_s3::{S3BlobStore, S3NamespaceBindingState};
 use signalbox_persistence::blob::{
     BlobCatalogRepository, BlobCatalogRepositoryError, BlobStoreBindingRecord,
 };
@@ -30,6 +33,7 @@ pub(crate) const MAX_CONCURRENT_BLOB_READS: usize = 16;
 pub struct BlobStoreRegistry {
     stores: BTreeMap<BlobStoreName, Arc<dyn BlobStore>>,
     namespace_ids: BTreeMap<BlobStoreName, Uuid>,
+    unavailable: BTreeMap<BlobStoreName, &'static str>,
     routes: BTreeMap<BlobStorageClass, BlobStoreName>,
     staging: FilesystemBlobStaging,
     max_blob_bytes: u64,
@@ -41,6 +45,7 @@ impl fmt::Debug for BlobStoreRegistry {
         formatter
             .debug_struct("BlobStoreRegistry")
             .field("store_count", &self.stores.len())
+            .field("unavailable_store_count", &self.unavailable.len())
             .field("route_count", &self.routes.len())
             .field("max_blob_bytes", &self.max_blob_bytes)
             .finish_non_exhaustive()
@@ -61,7 +66,6 @@ impl BlobStoreRegistry {
             }
             return Err(BlobStoreRegistryError::ConfigurationRequired);
         };
-        validate_recorded_bindings(configuration, &recorded)?;
         validate_s3_locators(configuration)?;
 
         let staging_root =
@@ -69,8 +73,18 @@ impl BlobStoreRegistry {
         let mut opened_stores = Vec::new();
         let mut s3_stores = Vec::new();
         let mut bindings_to_register = BTreeSet::new();
+        let mut unavailable = BTreeMap::new();
+        let recorded_by_name = recorded
+            .iter()
+            .map(|binding| (binding.store().clone(), binding.namespace_id()))
+            .collect::<BTreeMap<_, _>>();
         for (name, configured) in configuration.stores() {
-            let recorded_binding = recorded.iter().any(|binding| binding.store() == name);
+            let recorded_namespace = recorded_by_name.get(name).copied();
+            let recorded_binding = recorded_namespace.is_some();
+            if recorded_namespace.is_some_and(|namespace| namespace != configured.namespace_id()) {
+                unavailable.insert(name.clone(), "recorded_namespace_mismatch");
+                continue;
+            }
             let routed = is_routed(configuration, name);
             if let Some(root) = configured.filesystem_root() {
                 let state = if recorded_binding {
@@ -78,19 +92,36 @@ impl BlobStoreRegistry {
                 } else {
                     NamespaceBindingState::New
                 };
-                let opened = OpenedFilesystemBlobRoot::open(root.to_path_buf())?;
-                opened_stores.push((name.clone(), configured.namespace_id(), state, opened));
+                match OpenedFilesystemBlobRoot::open(root.to_path_buf()) {
+                    Ok(opened) => {
+                        opened_stores.push((
+                            name.clone(),
+                            configured.namespace_id(),
+                            state,
+                            opened,
+                        ));
+                    }
+                    Err(_) => {
+                        unavailable.insert(name.clone(), "filesystem_namespace_unavailable");
+                    }
+                }
             } else {
                 let (endpoint, region, bucket, credentials_file) = configured
                     .s3()
                     .ok_or(BlobStoreRegistryError::InvalidStoreConfiguration)?;
-                let store = S3BlobStore::try_new_bound(
+                let store = match S3BlobStore::try_new_bound(
                     endpoint.clone(),
                     region,
                     bucket,
                     credentials_file.to_path_buf(),
                     format!("{}\n", configured.namespace_id()),
-                )?;
+                ) {
+                    Ok(store) => store,
+                    Err(_) => {
+                        unavailable.insert(name.clone(), "s3_configuration_unavailable");
+                        continue;
+                    }
+                };
                 s3_stores.push((
                     name.clone(),
                     configured.namespace_id(),
@@ -110,10 +141,16 @@ impl BlobStoreRegistry {
         let mut stores = BTreeMap::<BlobStoreName, Arc<dyn BlobStore>>::new();
         let mut namespace_ids = BTreeMap::new();
         for (name, namespace_id, state, opened) in opened_stores {
-            let (store, _) = FilesystemBlobStore::from_opened_bound(opened, namespace_id, state)?;
-            bindings_to_register.insert(name.clone());
+            match FilesystemBlobStore::from_opened_bound(opened, namespace_id, state) {
+                Ok((store, _)) => {
+                    bindings_to_register.insert(name.clone());
+                    stores.insert(name.clone(), Arc::new(store));
+                }
+                Err(_) => {
+                    unavailable.insert(name.clone(), "filesystem_namespace_unavailable");
+                }
+            }
             namespace_ids.insert(name.clone(), namespace_id);
-            stores.insert(name, Arc::new(store));
         }
 
         let s3_deadline = tokio::time::Instant::now() + S3_STARTUP_DEADLINE;
@@ -124,18 +161,46 @@ impl BlobStoreRegistry {
                 } else {
                     S3NamespaceBindingState::New
                 };
-                tokio::time::timeout_at(s3_deadline, Box::pin(store.prepare_namespace(state)))
+                match tokio::time::timeout_at(s3_deadline, Box::pin(store.prepare_namespace(state)))
                     .await
-                    .map_err(|_| BlobStoreRegistryError::S3StartupDeadline)??;
-                tokio::time::timeout_at(s3_deadline, Box::pin(store.verify_multipart_lifecycle()))
-                    .await
-                    .map_err(|_| BlobStoreRegistryError::S3StartupDeadline)??;
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => {
+                        unavailable.insert(name.clone(), "s3_namespace_unavailable");
+                        namespace_ids.insert(name, namespace_id);
+                        continue;
+                    }
+                    Err(_) => {
+                        unavailable.insert(name.clone(), "s3_startup_deadline");
+                        namespace_ids.insert(name, namespace_id);
+                        continue;
+                    }
+                }
             }
             if routed || recorded_binding {
                 bindings_to_register.insert(name.clone());
             }
             namespace_ids.insert(name.clone(), namespace_id);
             stores.insert(name, Arc::new(store));
+        }
+
+        for binding in &recorded {
+            if configuration.namespace_id(binding.store()).is_none() {
+                unavailable.insert(binding.store().clone(), "recorded_store_missing");
+                namespace_ids.insert(binding.store().clone(), binding.namespace_id());
+            }
+        }
+        for (name, cause) in &unavailable {
+            stores.insert(name.clone(), Arc::new(UnavailableBlobStore { cause }));
+            if !namespace_ids.contains_key(name)
+                && let Some(namespace_id) = recorded_by_name
+                    .get(name)
+                    .copied()
+                    .or_else(|| configuration.namespace_id(name))
+            {
+                namespace_ids.insert(name.clone(), namespace_id);
+            }
+            tracing::warn!(store = %name, cause_code = cause, "blob store is unavailable");
         }
 
         for (name, configured) in configuration.stores() {
@@ -167,6 +232,7 @@ impl BlobStoreRegistry {
         Ok(Some(Self {
             stores,
             namespace_ids,
+            unavailable,
             routes,
             staging,
             max_blob_bytes: configuration.max_blob_bytes(),
@@ -188,6 +254,11 @@ impl BlobStoreRegistry {
     /// Resolves one already-recorded durable store identity.
     pub fn recorded_store(&self, name: &BlobStoreName) -> Option<Arc<dyn BlobStore>> {
         self.stores.get(name).cloned()
+    }
+
+    /// Lists stores that startup retained as typed unavailable adapters.
+    pub fn unavailable_stores(&self) -> impl Iterator<Item = (&BlobStoreName, &'static str)> {
+        self.unavailable.iter().map(|(name, cause)| (name, *cause))
     }
 
     /// Replaces one configured adapter in a composed conformance fixture.
@@ -230,11 +301,46 @@ impl BlobStoreRegistry {
     }
 }
 
+#[derive(Debug)]
+struct UnavailableBlobStore {
+    cause: &'static str,
+}
+
+impl BlobStore for UnavailableBlobStore {
+    fn put<'a>(
+        &'a self,
+        _expected: ExpectedBlob,
+        _source: BlobReader,
+    ) -> BlobStoreFuture<'a, BlobPutOutcome> {
+        Box::pin(async move { Err(BlobStoreError::unavailable(self.cause)) })
+    }
+
+    fn open<'a>(&'a self, _key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob> {
+        Box::pin(async move { Err(BlobStoreError::unavailable(self.cause)) })
+    }
+
+    fn open_verified<'a>(
+        &'a self,
+        _expected: ExpectedBlob,
+        _key: &'a BlobObjectKey,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        Box::pin(async move { Err(BlobStoreError::unavailable(self.cause)) })
+    }
+
+    fn open_range<'a>(
+        &'a self,
+        _expected: ExpectedBlob,
+        _key: &'a BlobObjectKey,
+        _offset: u64,
+        _byte_length: std::num::NonZeroU64,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        Box::pin(async move { Err(BlobStoreError::unavailable(self.cause)) })
+    }
+}
 /// Reports whether any semantic write route currently selects this store.
 ///
 /// The parsed route map is the authority, so a store named only by a storage
-/// class added later still authenticates its namespace and proves its
-/// lifecycle at startup.
+/// class added later still authenticates its namespace at startup.
 fn is_routed(configuration: &BlobStorageConfiguration, name: &BlobStoreName) -> bool {
     configuration.routed_stores().any(|routed| routed == name)
 }
@@ -269,20 +375,6 @@ impl From<&FilesystemNamespaceIdentity> for OpenedNamespace {
             physical_path: identity.physical_path().to_path_buf(),
         }
     }
-}
-
-fn validate_recorded_bindings(
-    configuration: &BlobStorageConfiguration,
-    recorded: &[BlobStoreBindingRecord],
-) -> Result<(), BlobStoreRegistryError> {
-    for binding in recorded {
-        match configuration.namespace_id(binding.store()) {
-            Some(namespace_id) if namespace_id == binding.namespace_id() => {}
-            Some(_) => return Err(BlobStoreRegistryError::RecordedNamespaceMismatch),
-            None => return Err(BlobStoreRegistryError::RecordedStoreMissing),
-        }
-    }
-    Ok(())
 }
 
 fn validate_physical_namespaces(
@@ -322,15 +414,11 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
-/// Startup could not prove that configuration resolves durable blob placement.
+/// Startup could not construct the durable blob-store registry.
 #[derive(Debug)]
 pub enum BlobStoreRegistryError {
     /// Durable blob facts exist while the optional configuration is absent.
     ConfigurationRequired,
-    /// A recorded store name is absent from current configuration.
-    RecordedStoreMissing,
-    /// A recorded store name is paired with another namespace UUID.
-    RecordedNamespaceMismatch,
     /// A parsed store entry could not be narrowed to one supported kind.
     InvalidStoreConfiguration,
     /// Two configured names resolve to one physical filesystem namespace.
@@ -343,12 +431,6 @@ pub enum BlobStoreRegistryError {
     Catalog(BlobCatalogRepositoryError),
     /// A filesystem namespace could not be authenticated or prepared.
     Filesystem(FilesystemBlobStoreConstructionError),
-    /// An S3 adapter could not be constructed without backend access.
-    S3Construction(S3BlobStoreConstructionError),
-    /// Routed S3 namespace or lifecycle authentication failed.
-    S3(Box<BlobStoreError>),
-    /// The aggregate routed-S3 startup deadline expired.
-    S3StartupDeadline,
 }
 
 impl fmt::Display for BlobStoreRegistryError {
@@ -356,10 +438,6 @@ impl fmt::Display for BlobStoreRegistryError {
         formatter.write_str(match self {
             Self::ConfigurationRequired => {
                 "blob storage configuration is required by the durable catalog"
-            }
-            Self::RecordedStoreMissing => "blob storage configuration omits a recorded store",
-            Self::RecordedNamespaceMismatch => {
-                "blob storage configuration disagrees with a recorded namespace"
             }
             Self::InvalidStoreConfiguration => {
                 "blob storage configuration has no supported adapter kind"
@@ -369,9 +447,6 @@ impl fmt::Display for BlobStoreRegistryError {
             Self::StagingStoreOverlap => "blob staging and store roots overlap",
             Self::Catalog(_) => "blob catalog startup reconciliation failed",
             Self::Filesystem(_) => "blob filesystem startup reconciliation failed",
-            Self::S3Construction(_) => "blob S3 adapter construction failed",
-            Self::S3(_) => "blob S3 startup reconciliation failed",
-            Self::S3StartupDeadline => "blob S3 startup reconciliation exceeded its deadline",
         })
     }
 }
@@ -381,16 +456,11 @@ impl Error for BlobStoreRegistryError {
         match self {
             Self::Catalog(source) => Some(source),
             Self::Filesystem(source) => Some(source),
-            Self::S3Construction(source) => Some(source),
-            Self::S3(source) => Some(source.as_ref()),
             Self::ConfigurationRequired
-            | Self::RecordedStoreMissing
-            | Self::RecordedNamespaceMismatch
             | Self::InvalidStoreConfiguration
             | Self::PhysicalNamespaceAlias
             | Self::NestedStoreRoots
-            | Self::StagingStoreOverlap
-            | Self::S3StartupDeadline => None,
+            | Self::StagingStoreOverlap => None,
         }
     }
 }
@@ -407,47 +477,16 @@ impl From<FilesystemBlobStoreConstructionError> for BlobStoreRegistryError {
     }
 }
 
-impl From<S3BlobStoreConstructionError> for BlobStoreRegistryError {
-    fn from(source: S3BlobStoreConstructionError) -> Self {
-        Self::S3Construction(source)
-    }
-}
-
-impl From<BlobStoreError> for BlobStoreRegistryError {
-    fn from(source: BlobStoreError) -> Self {
-        Self::S3(Box::new(source))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        BlobStoreRegistryError, OpenedNamespace, paths_overlap, validate_physical_namespaces,
-        validate_recorded_bindings, validate_s3_locators,
+        BlobStoreRegistryError, OpenedNamespace, UnavailableBlobStore, paths_overlap,
+        validate_physical_namespaces, validate_s3_locators,
     };
     use crate::BlobStorageConfiguration;
-    use signalbox_blob_store::BlobStoreName;
-    use signalbox_persistence::blob::BlobStoreBindingRecord;
+    use signalbox_blob_store::{BlobObjectKey, BlobStore, BlobStoreFailureKind};
     use std::{error::Error, io, path::Path, str::FromStr};
     use toml_edit::DocumentMut;
-    use uuid::Uuid;
-
-    const CONFIGURATION: &str = r#"
-[blob_storage]
-version = 1
-staging_directory = "/staging"
-max_blob_bytes = 2
-[[blob_storage.stores]]
-name = "primary"
-namespace_id = "5a100001-0000-4000-8000-000000000001"
-kind = "filesystem"
-root_directory = "/stores/primary"
-[blob_storage.routes]
-user_attachment = "primary"
-tool_artifact = "primary"
-imported_source = "primary"
-generated_artifact = "primary"
-"#;
 
     const ALIASED_S3_CONFIGURATION: &str = r#"
 [blob_storage]
@@ -477,23 +516,10 @@ imported_source = "primary"
 generated_artifact = "primary"
 "#;
 
-    fn configuration() -> Result<BlobStorageConfiguration, Box<dyn Error>> {
-        let document = DocumentMut::from_str(CONFIGURATION)?;
-        BlobStorageConfiguration::parse(document.get("blob_storage"))?
-            .ok_or_else(|| io::Error::other("the fixture enables blob storage").into())
-    }
-
     fn aliased_s3_configuration() -> Result<BlobStorageConfiguration, Box<dyn Error>> {
         let document = DocumentMut::from_str(ALIASED_S3_CONFIGURATION)?;
         BlobStorageConfiguration::parse(document.get("blob_storage"))?
             .ok_or_else(|| io::Error::other("the fixture enables blob storage").into())
-    }
-
-    fn binding(namespace: &str) -> Result<BlobStoreBindingRecord, Box<dyn Error>> {
-        Ok(BlobStoreBindingRecord::new(
-            BlobStoreName::try_new("primary")?,
-            Uuid::parse_str(namespace)?,
-        ))
     }
 
     fn namespace(path: &str, device: u64, inode: u64) -> OpenedNamespace {
@@ -528,6 +554,22 @@ generated_artifact = "primary"
         Ok(())
     }
 
+    #[tokio::test]
+    async fn unavailable_store_returns_the_typed_store_failure() {
+        let store = UnavailableBlobStore {
+            cause: "filesystem_namespace_unavailable",
+        };
+        let key =
+            BlobObjectKey::try_from_recorded("sha256/aa/aa/value").expect("fixture key is safe");
+
+        let error = store
+            .open(&key)
+            .await
+            .expect_err("the placeholder never reaches its backing store");
+
+        assert_eq!(error.kind(), BlobStoreFailureKind::Unavailable);
+    }
+
     #[test]
     fn path_overlap_is_symmetric() {
         assert!(paths_overlap(Path::new("/blob"), Path::new("/blob/child")));
@@ -539,21 +581,6 @@ generated_artifact = "primary"
         assert!(!paths_overlap(
             Path::new("/blob"),
             Path::new("/blob-sibling")
-        ));
-    }
-
-    #[test]
-    fn recorded_binding_requires_the_configured_namespace() {
-        let recorded = binding("5a100001-0000-4000-8000-000000000002")
-            .expect("the recorded binding fixture is valid");
-
-        let configured = configuration().expect("the configuration fixture is valid");
-        let error = validate_recorded_bindings(&configured, &[recorded])
-            .expect_err("a namespace disagreement fails startup");
-
-        assert!(matches!(
-            error,
-            BlobStoreRegistryError::RecordedNamespaceMismatch
         ));
     }
 

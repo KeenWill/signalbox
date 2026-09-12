@@ -192,11 +192,11 @@ test("generated example decoder rejects unknown fields", () => {
   );
 });
 
-test("generated bootstrap decoder rejects another contract version", () => {
+test("generated bootstrap decoder rejects the previous contract version", () => {
   assert.throws(
     () =>
       decodeWebContractBootstrap({
-        contract: { name: "signalbox.web-http", version: "999" },
+        contract: { name: "signalbox.web-http", version: "2" },
         capabilities: {
           bounded_json: true,
           bounded_session_timeline_detail: true,
@@ -236,7 +236,7 @@ test("generated bootstrap decoder rejects a disabled required capability", () =>
   assert.throws(
     () =>
       decodeWebContractBootstrap({
-        contract: { name: "signalbox.web-http", version: "2" },
+        contract: { name: "signalbox.web-http", version: "3" },
         capabilities: {
           bounded_json: true,
           bounded_lexical_search: true,
@@ -1271,7 +1271,7 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
   assert.throws(
     () =>
       decodeWebContractBootstrap({
-        contract: { name: "signalbox.web-http", version: "2" },
+        contract: { name: "signalbox.web-http", version: "3" },
         capabilities: {
           bounded_json: true,
           bounded_lexical_search: true,
@@ -2424,6 +2424,7 @@ test("generated descriptor decoder rejects a fact beyond u64", () => {
       decodeWebSessionTimelineDescriptor({
         workspace_root_kind: null,
         session_id: "00000000-0000-0000-0000-000000000991",
+        supervision: null,
         repository_watch: null,
         sizes: {
           item_count: "18446744073709551616",
@@ -3082,6 +3083,7 @@ test("generated descriptor decoder rejects an invalid session ID", () => {
       decodeWebSessionTimelineDescriptor({
         workspace_root_kind: null,
         session_id: "not-a-uuid",
+        supervision: null,
         repository_watch: null,
         sizes: {
           item_count: "1",
@@ -3237,6 +3239,45 @@ test("tool batches accept only tool-produced goal events", () => {
   }
 });
 
+test("child wait resumptions require the matching attempt to await its child", () => {
+  const page = userInputDetailPage();
+  const attemptId = "00000000-0000-0000-0000-000000000994";
+  page.items[0].kind = "tool_batch_transition";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  page.items[0].body = {
+    type: "tool_batch",
+    turn_id: "00000000-0000-0000-0000-000000000992",
+    producing_model_call_id: "00000000-0000-0000-0000-000000000993",
+    state: { type: "child_wait_resumed", tool_attempt_id: attemptId },
+    projected_member_index: 0,
+    tools: [{
+      request_id: "00000000-0000-0000-0000-000000000995",
+      tool_name: "spawn_agent",
+      arguments: { text: "", offset_bytes: "0", total_bytes: "0", continuation: null },
+      approval_posture: "auto",
+      approval_judge_escalated: false,
+      evidence: {
+        type: "physical_attempt",
+        attempt_id: attemptId,
+        result_present: false,
+        failure_present: false,
+        effect_posture: "external_effect",
+        state: "awaiting_child",
+      },
+    }],
+    goal_events: [],
+  };
+
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  for (const state of ["prepared", "in_flight", "completed", "known_failed", "ambiguous"]) {
+    page.items[0].body.tools[0].evidence.state = state;
+    assert.throws(
+      () => decodeWebSessionTimelineDetailPage(page),
+      /awaiting_child for the resumed target attempt/,
+    );
+  }
+});
+
 test("goal evidence belongs to the enclosing detail session", () => {
   const page = userInputDetailPage();
   page.items[0].kind = "goal_changed";
@@ -3355,6 +3396,7 @@ test("repository watch provenance preserves exact ledger identities and rejects 
   const descriptor = {
     workspace_root_kind: null,
     session_id: "00000000-0000-0000-0000-000000000001",
+    supervision: null,
     repository_watch: {
       dispatch_id: "00000000-0000-0000-0000-000000000063",
       event_id: "00000000-0000-0000-0000-000000000064",
@@ -3436,4 +3478,22 @@ test("goal stop accounting fields require explicit presence", () => {
     delete malformed.items[0].body.event[field];
     assert.throws(() => decodeWebSessionTimelineDetailPage(malformed));
   }
+});
+
+
+test("session supervision preserves retained evidence and rejects unknown classes", () => {
+  const descriptor = {
+    workspace_root_kind: null, repository_watch: null,
+    session_id: "00000000-0000-0000-0000-000000000001",
+    supervision: { class: "corruption", cause_code: "durable_state_corruption", pending: true },
+    sizes: { item_count: "1", projected_text_bytes: "0", projected_structured_bytes: "96", referenced_blob_count: "0", referenced_blob_bytes: "0" },
+    first_address: { event_sequence: "1" }, latest_address: { event_sequence: "1" },
+    work: { active_turn_count: "1", queued_turn_count: "0" }, observed_through: "1",
+  };
+  assert.deepEqual(decodeWebSessionTimelineDescriptor(descriptor).supervision, descriptor.supervision);
+  const reconciled = { ...descriptor.supervision, pending: false };
+  assert.deepEqual(decodeWebSessionTimelineDescriptor({ ...descriptor, supervision: reconciled }).supervision, reconciled);
+  assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, supervision: { ...descriptor.supervision, class: "unknown" } }));
+  const { supervision, ...missing } = descriptor;
+  assert.throws(() => decodeWebSessionTimelineDescriptor(missing));
 });

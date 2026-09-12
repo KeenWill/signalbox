@@ -277,11 +277,16 @@ state it does not recognize returns an error rather than a guess.
 
 The only way to derive a new transcript snapshot is to append to the old one, so
 every earlier entry stays in order. Two frontiers are equal only if they are the
-same frontier; comparing content is a separate explicit operation. Compaction
-changes which entries are visible to the model, never what is stored. A summary
-cannot hide an unsummarized prefix, and its end boundary must close every tool
-exchange it covers. `ToolInadmissible` closes its request for both explicit and
-automatic compaction boundaries.
+same frontier; comparing content is a separate explicit operation. A transcript
+suffix acknowledgement names one durable semantic frontier, not an outbox event
+cursor or a content-equality token. Persistence admits it only when that
+frontier belongs to the selected session and is a prefix of the current
+frontier, then reads entries after its immutable member count. The process
+protocol requires a full resynchronization for an unknown, foreign-session, or
+non-prefix acknowledgement. Compaction changes which entries are visible to the
+model, never what is stored. A summary cannot hide an unsummarized prefix, and
+its end boundary must close every tool exchange it covers. `ToolInadmissible`
+closes its request for both explicit and automatic compaction boundaries.
 
 An accepted-input turn binds its configuration when its input is accepted, and a
 delegated-task or delegation-wake turn binds the configuration stored with its
@@ -512,15 +517,17 @@ reading the session state and its observed cursor from one repeatable-read
 snapshot, then emits that snapshot as its first item. The live snapshot carries
 the active turn's state, the queued turn count with a bounded preview of the
 earliest queued identities, any pending reconciliation operation, and the runner
-placement and connection health. Provider-text deltas queued when the snapshot
-completes are discarded, and a durable update for the followed session queued
-with a cursor above the snapshot's is emitted after the snapshot. An update for
-another session advances the observed cursor and is not emitted. Lag confined to
-records the snapshot cursor covers is absorbed silently. Falling behind past
-covered records, or saturating the monitor while retained fragment text is
-draining, emits one positive-cursor resync item and ends the response; the
-client then replaces all transient presentation with a fresh live snapshot and
-resumes durable history above its cursor without reloading the historical
+placement and connection health. A credential-availability wait carries its
+wait-attempt identity and typed contended, exhausted, or network-unavailable
+cause; the session page displays that stored reason. Provider-text deltas queued
+when the snapshot completes are discarded, and a durable update for the followed
+session queued with a cursor above the snapshot's is emitted after the snapshot.
+An update for another session advances the observed cursor and is not emitted.
+Lag confined to records the snapshot cursor covers is absorbed silently. Falling
+behind past covered records, or saturating the monitor while retained fragment
+text is draining, emits one positive-cursor resync item and ends the response;
+the client then replaces all transient presentation with a fresh live snapshot
+and resumes durable history above its cursor without reloading the historical
 transcript. The browser permits one immediate resynchronization, then waits one
 second before each subsequent resynchronization; leaving the session cancels the
 wait. The session synchronization service owns the selected stream and publishes
@@ -545,6 +552,12 @@ body continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
+
+The descriptor also includes retained supervision class, sanitized cause, and
+pending reconciliation state, independently of lifecycle reconstruction and
+transcript detail decoding. Pending supervision displays recovery required in
+the session header and composer status. Reconciled evidence remains visible.
+Transcript corruption checks and command admission remain unchanged.
 
 The session timeline descriptor reports the first and latest addresses, the item
 and projected-size facts, the active and queued turn counts, and the observation
@@ -641,7 +654,8 @@ its dedicated prepared call, then changes exactly once to applied or failed; its
 request fields never change. Both compaction paths use the deployment-configured
 compaction prompt and the session's current direct selection, and automatic
 compaction selects a bounded safe prefix so its own summary request does not
-repeat the complete oversized input.
+repeat the complete oversized input. Truncatable source entries prioritize text
+and tool arguments over identity metadata.
 
 Compactions in one session form a forward-only chain, and a successor's source
 retains its predecessor's complete result frontier as a semantic prefix. For
@@ -688,9 +702,11 @@ scope, and parent-alone does not evaluate descendants. Each evaluated edge
 applies its stored relationship policy: a background relationship keeps the
 child running, and a bound relationship takes its `on_parent_stopped` or
 `on_parent_cancelled` action according to the command. If a child already has
-its unique terminal result, the edge records already-terminal with the new
-parent command provenance and an exact check of that prior result, creating no
-second result; traversal still visits that child's outgoing relationships.
+its unique terminal result, or the exact delegated initial turn has
+reconciliation-required terminal lifecycle evidence, the edge records
+already-terminal with the new parent command provenance and an exact check of
+that prior evidence, creating no child result; traversal still visits that
+child's outgoing relationships.
 
 Delegation-message entries refer to message records and do not reclassify
 model-authored content as input from the user. Undelivered messages and
@@ -705,10 +721,12 @@ rejects the operation with typed recipient-sequence exhaustion.
 
 Returned content derives only from the proof-bearing completed call;
 independently supplied text cannot authorize a result. Reconciliation-required
-work is not terminal delegation evidence and produces no outcome while its
-ambiguity stands; automatic reconciliation seals the child as a failed result
-carrying child-result-unavailable and the exact reconciled child turn, in the
-transaction that commits the terminal transition.
+work produces no child result or relationship outcome when its ambiguity first
+terminalizes the turn. Its authenticated terminal lifecycle evidence can later
+satisfy a descendant cascade's already-terminal classification; automatic
+reconciliation seals the child as a failed result carrying
+child-result-unavailable and the exact reconciled child turn, in the transaction
+that commits the terminal transition.
 
 A parent-policy stop or cancellation carries opaque authority from the exact
 applied parent termination result, exposing the parent session, durable user

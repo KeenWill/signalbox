@@ -56,8 +56,13 @@ pub use target::{ReviewTarget, ReviewTargetError, ReviewTargetParentRef, ReviewT
 
 const REVIEW_PRODUCED_FINDINGS_MAXIMUM: usize = 32;
 
+mod judgment;
 mod policy;
 mod value;
+
+pub use judgment::{
+    ReviewBarCategory, ReviewBarVerdict, ReviewDeclineClass, ReviewJudgeConfidence, ReviewJudgment,
+};
 
 pub use policy::{ReviewPolicy, ReviewPolicyError, ReviewPolicyVersion};
 pub use value::{

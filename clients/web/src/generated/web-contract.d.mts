@@ -120,6 +120,8 @@ export type WebContractLimits = {
   readonly min_timeline_detail_bytes: number;
 };
 
+export type WebCredentialAvailabilityWaitCause = "contended" | "exhausted" | "network_unavailable";
+
 export type WebDollarAmount = string;
 
 export type WebImportContinuationReference = {
@@ -293,6 +295,10 @@ export type WebSessionLiveActiveState = {
   readonly kind: "running";
   readonly model_call_id: string | null;
 } | {
+  readonly cause: WebCredentialAvailabilityWaitCause;
+  readonly kind: "awaiting_credential_availability";
+  readonly wait_attempt_id: WebLiveResourceId;
+} | {
   readonly kind: "awaiting_model_call_recovery";
   readonly model_call_id: WebLiveResourceId;
 } | {
@@ -324,6 +330,8 @@ export type WebSessionRate = {
   readonly session_id: WebSessionId;
   readonly turn_count: WebU64;
 };
+
+export type WebSessionSupervisionClass = "infrastructure" | "commit_ambiguous" | "corruption" | "identity_collision" | "bug";
 
 export type WebSessionTimelineDetail = {
   readonly address: WebTimelineAddress;
@@ -840,6 +848,9 @@ export type WebTimelineToolBatchState = {
 } | {
   readonly tool_attempt_id: WebSessionId;
   readonly type: "recovery_required";
+} | {
+  readonly tool_attempt_id: WebSessionId;
+  readonly type: "child_wait_resumed";
 };
 
 export type WebTimelineToolEffectPosture = "effect_free" | "external_effect";
@@ -981,6 +992,11 @@ export type WebSessionTimelineDescriptor = {
 } | null;
   readonly session_id: WebSessionId;
   readonly sizes: WebSessionTimelineSizeFacts;
+  readonly supervision: {
+  readonly cause_code: string;
+  readonly class: WebSessionSupervisionClass;
+  readonly pending: boolean;
+} | null;
   readonly work: WebSessionWorkFacts;
   readonly workspace_root_kind: "derived" | "configured" | "provisioned" | null;
 };

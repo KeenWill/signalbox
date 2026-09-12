@@ -13,22 +13,19 @@ use sqlx::types::time::OffsetDateTime;
 pub(super) struct WaitSnapshot {
     pub(super) members: Vec<Vec<Candidate>>,
     pub(super) target: ResolvedProviderTarget,
+    cause: CredentialAvailabilityWaitCause,
     pub(super) bounded: Vec<crate::credential_invocations::BoundedMember>,
 }
 
 impl WaitSnapshot {
     fn cause(&self) -> CredentialAvailabilityWaitCause {
-        if self.bounded.is_empty() {
-            CredentialAvailabilityWaitCause::Exhausted
-        } else {
-            CredentialAvailabilityWaitCause::Contended
-        }
+        self.cause
     }
     fn cause_name(&self) -> &'static str {
-        if self.bounded.is_empty() {
-            "exhausted"
-        } else {
-            "contended"
+        match self.cause {
+            CredentialAvailabilityWaitCause::Exhausted => "exhausted",
+            CredentialAvailabilityWaitCause::Contended => "contended",
+            CredentialAvailabilityWaitCause::NetworkUnavailable => "network_unavailable",
         }
     }
 }
@@ -43,7 +40,7 @@ fn member_deadline(exclusions: &[Candidate]) -> Option<i64> {
         .max()
 }
 
-fn selects_wait(members: &[Vec<Candidate>]) -> bool {
+fn selects_wait(members: &[Vec<Candidate>], recoverable: &HashSet<Uuid>) -> bool {
     members.iter().all(|exclusions| !exclusions.is_empty())
         && members.iter().any(|exclusions| {
             !exclusions.is_empty()
@@ -51,11 +48,15 @@ fn selects_wait(members: &[Vec<Candidate>]) -> bool {
                     .iter()
                     .all(|exclusion| match &exclusion.exclusion {
                         CredentialPoolExclusion::ProfileQuarantine { record_generation }
-                        | CredentialPoolExclusion::MembershipExclusion { record_generation }
                         | CredentialPoolExclusion::SessionDisplacement { record_generation } => {
                             record_generation.unwrap_or(0) > 0
                         }
-                        CredentialPoolExclusion::ChainExclusion { .. } => false,
+                        CredentialPoolExclusion::MembershipExclusion { record_generation } => {
+                            record_generation.unwrap_or(0) > 0 || exclusion.action.is_none()
+                        }
+                        CredentialPoolExclusion::ChainExclusion {
+                            predecessor_model_call_id,
+                        } => recoverable.contains(predecessor_model_call_id),
                         CredentialPoolExclusion::TransientExclusion { .. }
                         | CredentialPoolExclusion::HeadroomReserve { .. } => true,
                     })
@@ -83,13 +84,69 @@ pub(super) async fn admission_snapshot(
         &excluded.headroom,
     )
     .await?;
+    let recoverable = recoverable_chain_exclusions(connection, session, turn, true).await?;
+    let network = network_exclusions(connection, session, turn).await?;
+    let cause = if !bounded.is_empty() {
+        CredentialAvailabilityWaitCause::Contended
+    } else if members.iter().all(|member| {
+        member.iter().any(|candidate| {
+            matches!(&candidate.exclusion, CredentialPoolExclusion::ChainExclusion {
+            predecessor_model_call_id
+        } if network.contains(predecessor_model_call_id))
+        })
+    }) {
+        CredentialAvailabilityWaitCause::NetworkUnavailable
+    } else {
+        CredentialAvailabilityWaitCause::Exhausted
+    };
     Ok(
-        (!bounded.is_empty() || selects_wait(&members)).then_some(WaitSnapshot {
+        (!bounded.is_empty() || selects_wait(&members, &recoverable)).then_some(WaitSnapshot {
             members,
             target,
+            cause,
             bounded,
         }),
     )
+}
+
+async fn recoverable_chain_exclusions(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    require_registered: bool,
+) -> Result<HashSet<Uuid>, ModelCallRepositoryError> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "SELECT predecessor_model_call_id FROM credential_pool_chain_exclusion chain
+         WHERE session_id = $1 AND turn_id = $2
+           AND (cause_kind = 'provider_internal' OR (cause_kind = 'credential_rejected'
+           AND (NOT $3 OR EXISTS (SELECT 1 FROM credential_invocation_capacity capacity
+               WHERE capacity.profile = chain.credential_reference AND capacity.registered))))",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(require_registered)
+    .fetch_all(connection)
+    .await?
+    .into_iter()
+    .collect())
+}
+
+async fn network_exclusions(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<HashSet<Uuid>, ModelCallRepositoryError> {
+    let network: HashSet<Uuid> = sqlx::query_scalar(
+        "SELECT predecessor_model_call_id FROM credential_pool_chain_exclusion
+         WHERE session_id = $1 AND turn_id = $2 AND cause_kind = 'provider_internal'",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?
+    .into_iter()
+    .collect();
+    Ok(network)
 }
 
 pub(super) async fn park_initial(
@@ -169,6 +226,7 @@ pub(crate) async fn load_phase(
     let cause = match row.try_get::<String, _>("cause")?.as_str() {
         "exhausted" => CredentialAvailabilityWaitCause::Exhausted,
         "contended" => CredentialAvailabilityWaitCause::Contended,
+        "network_unavailable" => CredentialAvailabilityWaitCause::NetworkUnavailable,
         _ => return Err(ModelCallCorruption::Inconsistent("credential wait cause").into()),
     };
     let evidence: Vec<serde_json::Value> = sqlx::query_scalar("SELECT exclusions FROM credential_availability_wait_member WHERE wait_attempt_id = $1 ORDER BY ordinal")
@@ -183,9 +241,24 @@ pub(crate) async fn load_phase(
         .iter()
         .filter_map(|member| member_deadline(member))
         .min();
+    let recoverable = recoverable_chain_exclusions(connection, session, turn, false).await?;
+    let network = network_exclusions(connection, session, turn).await?;
+    let all_network = members.iter().all(|member| {
+        member.iter().any(|candidate| {
+            matches!(&candidate.exclusion, CredentialPoolExclusion::ChainExclusion {
+            predecessor_model_call_id
+        } if network.contains(predecessor_model_call_id))
+        })
+    });
+    if cause != CredentialAvailabilityWaitCause::Contended
+        && (cause == CredentialAvailabilityWaitCause::NetworkUnavailable) != all_network
+    {
+        return Err(ModelCallCorruption::Inconsistent("credential wait network cause").into());
+    }
     if deadline.map(|deadline| deadline.unix_timestamp_nanos() / 1_000_000)
         != expected.map(i128::from)
-        || (cause == CredentialAvailabilityWaitCause::Exhausted && !selects_wait(&members))
+        || (cause != CredentialAvailabilityWaitCause::Contended
+            && !selects_wait(&members, &recoverable))
     {
         return Err(
             ModelCallCorruption::Inconsistent("credential wait evidence and deadline").into(),
@@ -627,13 +700,13 @@ mod tests {
         ]];
         assert_eq!(member_deadline(&members[0]), None);
         assert!(
-            selects_wait(&members),
+            selects_wait(&members, &HashSet::new()),
             "an operator can clear the quarantine"
         );
     }
 
     #[test]
-    fn credential_pool_wait_chain_exclusions_never_qualify_for_park() {
+    fn only_recoverable_chain_exclusions_qualify_for_release_wait() {
         let members = vec![vec![
             transient(30),
             Candidate {
@@ -645,13 +718,17 @@ mod tests {
                 reset: None,
             },
         ]];
-        assert!(!selects_wait(&members));
+        assert!(!selects_wait(&members, &HashSet::new()));
+        assert!(selects_wait(&members, &HashSet::from([Uuid::from_u128(2)])));
         assert_eq!(member_deadline(&members[0]), None);
     }
 
     #[test]
     fn credential_pool_wait_requires_exhaustion_of_every_member() {
-        assert!(!selects_wait(&[vec![transient(30)], vec![]]));
-        assert!(!selects_wait(&[]));
+        assert!(!selects_wait(
+            &[vec![transient(30)], vec![]],
+            &HashSet::new()
+        ));
+        assert!(!selects_wait(&[], &HashSet::new()));
     }
 }

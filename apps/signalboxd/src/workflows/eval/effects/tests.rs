@@ -280,6 +280,95 @@ mod postgres {
     };
     use signalbox_workflow_runtime::{ProgramExecutionOutcome, WorkflowHost};
 
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn evaluation_executor_shutdown_keeps_a_leased_caller_connection_usable() {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4)
+                .await
+                .unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let staging = files.path().join("staging");
+        let store = files.path().join("store");
+        for directory in [&staging, &store] {
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(directory)
+                .unwrap();
+        }
+        let mut document: toml_edit::DocumentMut =
+            include_str!("../../../../../../config/signalboxd.example.toml")
+                .parse()
+                .unwrap();
+        document["blob_storage"]["staging_directory"] = toml_edit::value(staging.to_str().unwrap());
+        document["blob_storage"]["stores"][0]["root_directory"] =
+            toml_edit::value(store.to_str().unwrap());
+        let storage = crate::BlobStorageConfiguration::parse(document.get("blob_storage"))
+            .unwrap()
+            .unwrap();
+        let stores = Arc::new(
+            BlobStoreRegistry::initialize(Some(&storage), pool.clone())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        // One initially empty caller slot makes cross-executor reuse observable.
+        let caller_pool = pool
+            .options()
+            .clone()
+            .min_connections(0)
+            .max_connections(1)
+            .connect_lazy_with(pool.connect_options().as_ref().clone());
+        let defaults = Fixture::lazy().services;
+        let services = EvalServices::new(
+            caller_pool.clone(),
+            stores,
+            defaults.model,
+            defaults.binding,
+            defaults.configuration,
+        );
+        let (ready, opened) = tokio::sync::oneshot::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let worker = std::thread::spawn(move || {
+            let executor = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            executor.block_on(async move {
+                let unregistered_run = ProgramRunId::from_uuid(uuid::Uuid::now_v7());
+                assert!(
+                    services
+                        .registrations
+                        .input_for_run(unregistered_run)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                ready.send(()).unwrap();
+                stopped.await.unwrap();
+            });
+        });
+        opened.await.unwrap();
+        let mut connection = caller_pool.acquire().await.unwrap();
+        stop.send(()).unwrap();
+        tokio::task::spawn_blocking(move || worker.join().unwrap())
+            .await
+            .unwrap();
+        // Bound a broken reactor's read without depending on its wakeup behavior.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sqlx::query("SELECT 1").execute(&mut *connection),
+        )
+        .await
+        .expect("the caller's leased connection remains responsive")
+        .expect("the caller's leased connection survives evaluation executor shutdown");
+        drop(connection);
+        caller_pool.close().await;
+        pool.close().await;
+    }
+
     struct ClockSource;
     impl signalbox_workflow_runtime::LiveDeliverySource for ClockSource {
         fn next_delivery<'a>(

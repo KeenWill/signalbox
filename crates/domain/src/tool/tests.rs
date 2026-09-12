@@ -2,7 +2,6 @@
 
 use super::approval::SUPPRESSED_TOOL_DENIAL_REASON;
 use super::proposal::SUPPRESSED_TOOL_ARGUMENTS;
-use super::result::MAX_TOOL_RESULT_TEXT_BYTES;
 use crate::DurableCommandId;
 
 use super::*;
@@ -588,7 +587,7 @@ fn denial_reason_rejects_posix_edges_and_preserves_nonbreaking_space() {
 /// the admission bound is inclusive, so a result of exactly the bounded size is admitted exactly.
 #[test]
 fn result_text_admits_exactly_the_bounded_size() {
-    let at_bound = "r".repeat(MAX_TOOL_RESULT_TEXT_BYTES);
+    let at_bound = "r".repeat(ToolResultText::MAX_UTF8_BYTES);
 
     let admitted = ToolResultText::try_new(at_bound.clone())
         .expect("the bound itself is an admissible result size");
@@ -599,7 +598,7 @@ fn result_text_admits_exactly_the_bounded_size() {
 /// the rejected text without rewriting it.
 #[test]
 fn result_text_rejects_one_byte_past_the_bound() {
-    let past_bound = "r".repeat(MAX_TOOL_RESULT_TEXT_BYTES + 1);
+    let past_bound = "r".repeat(ToolResultText::MAX_UTF8_BYTES + 1);
 
     let error = ToolResultText::try_new(past_bound.clone())
         .expect_err("one byte past the bound is not an admissible result");

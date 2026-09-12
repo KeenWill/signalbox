@@ -50,9 +50,15 @@ pub struct ResolvedSessionTemplate {
     version: SessionTemplateVersion,
     provenance: SessionTemplateProvenance,
     defaults: SessionConfigurationDefaults,
+    workflow_tools: signalbox_tools_workflows::WorkflowPolicy,
 }
 
 impl ResolvedSessionTemplate {
+    /// Workflow authority selected by this reloadable template.
+    pub fn workflow_tools(&self) -> &signalbox_tools_workflows::WorkflowPolicy {
+        &self.workflow_tools
+    }
+
     /// Returns the operator-assigned bundle version.
     pub const fn version(&self) -> SessionTemplateVersion {
         self.version
@@ -393,7 +399,14 @@ fn parse_review_library(
         &source,
         templates,
     )?;
-    let concern_specs = REVIEW_CONCERNS
+    let enabled_concerns = REVIEW_CONCERNS
+        .iter()
+        .filter(|(key, _)| concerns.contains_key(key))
+        .collect::<Vec<_>>();
+    if enabled_concerns.is_empty() {
+        return Err(SessionTemplateConfigurationError::InvalidConcernInventory);
+    }
+    let concern_specs = enabled_concerns
         .iter()
         .map(|(key, template_name)| {
             let body = required_concern_body(concerns, key)?;
@@ -412,7 +425,7 @@ fn parse_review_library(
             repair: review_template_name(REVIEW_REPAIR_TEMPLATE_NAME)?,
             publication: review_template_name(REVIEW_PUBLICATION_TEMPLATE_NAME)?,
         },
-        concerns: REVIEW_CONCERNS
+        concerns: enabled_concerns
             .iter()
             .map(|(key, template)| {
                 Ok(ReviewConcernTemplateSelection {
@@ -478,6 +491,7 @@ fn insert_review_template(
             version: source.version,
             provenance: SessionTemplateProvenance::new(name, digest),
             defaults,
+            workflow_tools: Default::default(),
         },
     );
     Ok(derive_review_template_digest(
@@ -613,6 +627,7 @@ fn parse_template(
             "system_prompt",
             "system_prompt_file",
             "dangerous_tool_auto_approval",
+            "workflow_tools",
         ],
     )?;
     let name = SessionTemplateName::try_new(required_string(table, "name")?.to_owned())
@@ -688,7 +703,37 @@ fn parse_template(
     .ok_or(SessionTemplateConfigurationError::InvalidModelSettings)?;
     let digest = SessionTemplateContentDigest::derive(version, &defaults)
         .ok_or(SessionTemplateConfigurationError::MissingPrompt)?;
+    let workflow_tools = match table.get("workflow_tools") {
+        Some(item) => {
+            let mut policy = DocumentMut::new();
+            *policy.as_table_mut() = item
+                .clone()
+                .into_table()
+                .map_err(|_| SessionTemplateConfigurationError::InvalidField)?;
+            toml::from_str::<signalbox_tools_workflows::WorkflowPolicy>(&policy.to_string())
+                .map_err(|_| SessionTemplateConfigurationError::InvalidField)?
+        }
+        None => Default::default(),
+    };
+    if !workflow_tools.valid() {
+        return Err(SessionTemplateConfigurationError::InvalidField);
+    }
+    let digest = if workflow_tools == Default::default() {
+        digest
+    } else {
+        let mut content = Sha256::new();
+        update_digest_frame(
+            &mut content,
+            b"signalbox/session-template/workflow-tools/v1",
+        );
+        update_digest_frame(&mut content, digest.as_bytes());
+        let policy = serde_json::to_vec(&workflow_tools)
+            .map_err(|_| SessionTemplateConfigurationError::InvalidField)?;
+        update_digest_frame(&mut content, &policy);
+        SessionTemplateContentDigest::from_bytes(content.finalize().into())
+    };
     Ok(ResolvedSessionTemplate {
+        workflow_tools,
         version,
         provenance: SessionTemplateProvenance::new(name, digest),
         defaults,
@@ -1086,6 +1131,42 @@ documentation-code-drift = "Find documentation drift."
     }
 
     #[test]
+    fn workflow_template_policy_survives_the_reload_snapshot() {
+        use signalbox_tools_workflows::Operation;
+        let configuration = SessionTemplateConfiguration::parse_at(
+            &inline_catalog(
+                r#"
+[templates.workflow_tools.list]
+enabled = true
+[templates.workflow_tools.start]
+names = ["build"]
+posture = "human"
+[templates.workflow_tools.register]
+names = "*"
+"#,
+            ),
+            Path::new("deployment/templates.toml"),
+            None,
+            &models(),
+        )
+        .expect("workflow template");
+        let restored =
+            SessionTemplateConfiguration::parse_snapshot(configuration.source(), &models())
+                .expect("retained template");
+        let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned()).expect("template name");
+        let policy = restored.resolve(&name).expect("template").workflow_tools();
+        assert!(policy.permits(Operation::List, None));
+        assert!(policy.permits(Operation::Start, Some("build")));
+        assert!(!policy.permits(Operation::Start, Some("release")));
+        assert!(!policy.permits(Operation::Stop, None));
+        assert!(policy.permits(Operation::Register, Some("release")));
+        assert_eq!(
+            policy.posture(Operation::Start),
+            signalbox_domain::ToolApprovalPosture::Human
+        );
+    }
+
+    #[test]
     fn inline_template_resolves_a_complete_digest_bound_bundle() {
         let configuration = SessionTemplateConfiguration::parse_at(
             &inline_catalog(""),
@@ -1187,6 +1268,32 @@ documentation-code-drift = "Find documentation drift."
             .content_digest();
 
         assert_ne!(provider_default_digest, configured_digest);
+    }
+
+    #[test]
+    fn template_digest_binds_workflow_grants_and_postures() {
+        let resolve = |policy: &str| {
+            let catalog = SessionTemplateConfiguration::parse_at(
+                &inline_catalog(policy),
+                Path::new("deployment/session-templates.toml"),
+                None,
+                &models(),
+            )
+            .expect("workflow template loads");
+            let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned()).unwrap();
+            catalog
+                .resolve(&name)
+                .unwrap()
+                .provenance()
+                .content_digest()
+        };
+        let initial = "[templates.workflow_tools.start]\nnames = [\"build\"]\nposture = \"human\"";
+        assert_ne!(
+            resolve(initial),
+            resolve(&initial.replace("build", "deploy"))
+        );
+        assert_ne!(resolve(initial), resolve(&initial.replace("human", "auto")));
+        assert_ne!(resolve(initial), resolve(""));
     }
 
     #[test]
@@ -1666,19 +1773,33 @@ dangerous_tool_auto_approval = false
     }
 
     #[test]
-    fn review_library_rejects_a_missing_concern() {
+    fn review_library_accepts_a_nonempty_concern_subset_in_closed_order() {
         let catalog =
             review_catalog("").replace("security = \"Find security boundary failures.\"\n", "");
-        let result = SessionTemplateConfiguration::parse_at(
+        let configuration = SessionTemplateConfiguration::parse_at(
             &catalog,
             Path::new("deployment/session-templates.toml"),
             None,
             &models(),
-        );
+        )
+        .expect("a nonempty concern subset is configured");
+        let selection = configuration
+            .configured_review_selection()
+            .expect("review selection exists");
 
+        assert_eq!(configuration.summaries().len(), REVIEW_CONCERNS.len() + 3);
         assert_eq!(
-            result.expect_err("incomplete concern inventory is rejected"),
-            SessionTemplateConfigurationError::InvalidConcernInventory
+            selection
+                .concerns
+                .iter()
+                .map(|concern| concern.key.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "correctness",
+                "interface-and-type-design",
+                "test-quality",
+                "documentation-code-drift",
+            ]
         );
     }
 
@@ -1784,7 +1905,7 @@ dangerous_tool_auto_approval = false
         )
         .expect("example review library is valid");
 
-        assert_eq!(configuration.summaries().len(), REVIEW_CONCERNS.len() + 5);
+        assert!(configuration.configured_review_selection().is_some());
     }
     #[test]
     fn review_attempt_rejects_a_reordered_concern_selection() {

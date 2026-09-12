@@ -23,7 +23,7 @@ use signalbox_session_ownership::{
     RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule,
     RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, ReviewState,
     SessionCommand, SessionCommandKind, SessionCreationCause, SessionId, SessionLifecycleCommand,
-    SessionLifecycleOperation, SessionOwnership, StartGate, StopStickiness,
+    SessionLifecycleOperation, SessionOwnership, StartGate,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -448,11 +448,11 @@ pub trait DispatchReferenceGenerator {
 /// Why a lifecycle reaction did not fit repo-watch's closed command policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleReactionError {
-    /// Only session terminal and goal change events drive these reactions.
+    /// Only session terminal, turn terminal, and goal change events drive these reactions.
     UnsupportedTrigger,
     /// The reaction command must target the session named by its trigger.
     MismatchedSession,
-    /// Only start release and sticky stop are repo-watch lifecycle reactions.
+    /// Only start release and admitted stop commands are repo-watch lifecycle reactions.
     UnsupportedCommand,
 }
 
@@ -682,6 +682,7 @@ impl From<sqlx::Error> for StoreError {
 #[derive(Clone, Debug)]
 pub struct RepoWatchStore {
     pool: PgPool,
+    observation_locks: PgPool,
     measurements: measurements::Measurements,
     observation_invocation: Option<std::sync::Arc<observation_workflow::ObservationInvocation>>,
 }
@@ -695,7 +696,14 @@ struct WebhookReplayRecord {
 impl RepoWatchStore {
     /// Uses a pool already confined to the repository-watch role and schema.
     pub fn new(module_pool: PgPool) -> Self {
+        let observation_locks = module_pool
+            .options()
+            .clone()
+            .min_connections(0)
+            .max_connections(1)
+            .connect_lazy_with(module_pool.connect_options().as_ref().clone());
         Self {
+            observation_locks,
             pool: module_pool,
             measurements: measurements::Measurements::default(),
             observation_invocation: None,
@@ -1954,13 +1962,15 @@ fn normalized_event_payload(event: &RepoWatchEvent) -> Value {
             "state": review_state_storage(*state),
             "commit": commit.as_str(),
         }),
-        RepoWatchEventKindV1::ThreadOpened { thread } => json!({
+        RepoWatchEventKindV1::ThreadOpened { thread, author } => json!({
             "name": "thread_opened",
             "thread": thread.as_str(),
+            "author": author.as_ref().map(RepoWatchAuthorLogin::as_str),
         }),
-        RepoWatchEventKindV1::ThreadResolved { thread } => json!({
+        RepoWatchEventKindV1::ThreadResolved { thread, author } => json!({
             "name": "thread_resolved",
             "thread": thread.as_str(),
+            "author": author.as_ref().map(RepoWatchAuthorLogin::as_str),
         }),
         RepoWatchEventKindV1::Labeled { label } => json!({
             "name": "labeled",
@@ -2267,7 +2277,7 @@ impl RepoWatchStore {
                      ON revision.repository = active.repository
                     AND revision.rule_id = active.rule_id
                     AND revision.revision = active.active_revision
-                   JOIN gh_event AS event
+                   JOIN gh_readable_event AS event
                      ON event.event_id = $3
                   WHERE active.repository = $1 AND active.rule_id = $2
                     AND event.repository_event_ordinal
@@ -2315,7 +2325,7 @@ impl RepoWatchStore {
             let kickoff = if command.command().kind() == SessionCommandKind::CreateSession {
                 let (event_payload, baseline): (Vec<u8>, Option<Value>) = sqlx::query_as(
                     "SELECT event.normalized_payload, repository.comparison_baseline
-                     FROM gh_event AS event LEFT JOIN repository_state AS repository
+                     FROM gh_readable_event AS event LEFT JOIN repository_state AS repository
                        ON repository.repository = event.repository WHERE event.event_id = $1",
                 )
                 .bind(command.event_id().into_uuid())
@@ -2720,7 +2730,7 @@ where
     Ok(batches)
 }
 
-/// Admits a start release or sticky stop driven by a lifecycle event.
+/// Admits a start release or stop driven by a lifecycle event.
 pub fn plan_lifecycle_reaction(
     trigger: &LifecycleEvent,
     dispatch: RepoWatchDispatchId,
@@ -2731,7 +2741,9 @@ pub fn plan_lifecycle_reaction(
 ) -> Result<PlannedCommand, LifecycleReactionError> {
     if !matches!(
         trigger.kind(),
-        LifecycleEventKind::SessionTerminal(_) | LifecycleEventKind::GoalChanged(_)
+        LifecycleEventKind::SessionTerminal(_)
+            | LifecycleEventKind::GoalChanged(_)
+            | LifecycleEventKind::TurnTerminal { .. }
     ) {
         return Err(LifecycleReactionError::UnsupportedTrigger);
     }
@@ -2759,13 +2771,7 @@ fn plan_lifecycle_reaction_at_sequence(
         return Err(LifecycleReactionError::MismatchedSession);
     }
     let admitted = matches!(command.operation(), SessionLifecycleOperation::ReleaseStart)
-        || matches!(
-            command.operation(),
-            SessionLifecycleOperation::Stop {
-                sticky: StopStickiness::Sticky,
-                ..
-            }
-        );
+        || matches!(command.operation(), SessionLifecycleOperation::Stop { .. });
     if !admitted {
         return Err(LifecycleReactionError::UnsupportedCommand);
     }
@@ -2789,7 +2795,9 @@ pub fn plan_retained_lifecycle_reaction(
 ) -> Result<PlannedCommand, LifecycleReactionError> {
     if !matches!(
         trigger.kind(),
-        LifecycleEventKind::SessionTerminal(_) | LifecycleEventKind::GoalChanged(_)
+        LifecycleEventKind::SessionTerminal(_)
+            | LifecycleEventKind::GoalChanged(_)
+            | LifecycleEventKind::TurnTerminal { .. }
     ) {
         return Err(LifecycleReactionError::UnsupportedTrigger);
     }
@@ -2811,13 +2819,7 @@ fn plan_retained_lifecycle_reaction_at_sequence(
         return Err(LifecycleReactionError::MismatchedSession);
     }
     let admitted = matches!(command.operation(), SessionLifecycleOperation::ReleaseStart)
-        || matches!(
-            command.operation(),
-            SessionLifecycleOperation::Stop {
-                sticky: StopStickiness::Sticky,
-                ..
-            }
-        );
+        || matches!(command.operation(), SessionLifecycleOperation::Stop { .. });
     if !admitted {
         return Err(LifecycleReactionError::UnsupportedCommand);
     }
@@ -2932,7 +2934,7 @@ async fn advance_evaluation(
 ) -> Result<(), StoreError> {
     sqlx::query(
         "INSERT INTO rule_evaluation_cursor(repository, rule_id, rule_revision, event_ordinal)
-        SELECT $1,$2,$3,repository_event_ordinal FROM gh_event WHERE event_id = $4
+        SELECT $1,$2,$3,repository_event_ordinal FROM gh_readable_event WHERE event_id = $4
         ON CONFLICT (repository, rule_id, rule_revision) DO UPDATE
         SET event_ordinal = GREATEST(rule_evaluation_cursor.event_ordinal, EXCLUDED.event_ordinal)",
     )

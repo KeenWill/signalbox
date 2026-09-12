@@ -129,11 +129,11 @@ failures admit successors whether received before or during a stream;
 non-acceptance proof is not required. OAuth access-token recovery admits a
 same-profile retry after refresh, independent of the transient attempt bound; a
 failed refresh or rejection of the refreshed token rotates. Other credential
-rejections never admit same-credential retry. The turn stays active and keeps
-its slot; the predecessor attempt ends KnownFailure without terminalizing, and
-the same commit prepares a successor attempt. That commit appends no
-`TurnFailed`: one commit never both terminalizes the turn and authorizes a
-successor. The rotation and transient retry tests pin this ending.
+rejections require a changed Codex-home profile to readmit a parked member. The
+turn stays active and keeps its slot; the predecessor attempt ends KnownFailure
+without terminalizing, and the same commit prepares a successor attempt. That
+commit appends no `TurnFailed`: one commit never both terminalizes the turn and
+authorizes a successor. The rotation and transient retry tests pin this ending.
 
 A timeout, connection loss, lost body or incomplete stream before observed
 response content follows the provider-internal transient retry path. The durable
@@ -149,14 +149,15 @@ A transient successor commit writes a credential-scoped durable exclusion whose
 reset equals the successor's durable retry deadline. Every session's call
 preparation skips that credential until the reset passes; after it passes, the
 member is admitted again. A chain exclusion is written when a failure rotates
-the pool and removes that member for the remainder of the turn. A quota rotation
-uses the current headroom exclusion instead when the reported capacity already
-excludes that member, allowing a parked turn to resume after capacity returns.
-Rotation prefers another admissible member over the restored predecessor. If
-another durable action excludes a retry successor's credential before
-preparation, that successor fails instead of selecting another member; when a
-fallback member remains admissible, the failure keeps the generic failed
-projection and records no pool exhaustion.
+the pool and removes that member until a recoverable exclusion is released as
+described below, or the turn ends. A quota rotation uses the current headroom
+exclusion instead when the reported capacity already excludes that member,
+allowing a parked turn to resume after capacity returns. Rotation prefers
+another admissible member over the restored predecessor. If another durable
+action excludes a retry successor's credential before preparation, that
+successor fails instead of selecting another member; when a fallback member
+remains admissible, the failure keeps the generic failed projection and records
+no pool exhaustion.
 
 A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially
@@ -174,19 +175,27 @@ expires.
 The required `numeric_bounds.max_same_credential_attempts_per_turn` is a
 positive integer bounding recorded calls on one credential in one turn, or
 `"none"` for unbounded attempts. At the bound a transient failure applies its
-pinned action instead of readmitting that credential.
+pinned action instead of readmitting that credential. Provider-internal failures
+in a park pool instead exclude that member and rotate to another admissible
+member at the bound.
 
 Terminal: a known failure no successor is authorized to follow terminalizes the
-turn Failed exactly as it would with no pool. A stop request, non-transient
-cause without `switch_now`, or transient cause at its bound without `switch_now`
-authorizes no successor.
+turn Failed exactly as it would with no pool. A stop request or non-transient
+cause without `switch_now` authorizes no successor. A transient cause at its
+bound without `switch_now` also authorizes no successor, except for
+provider-internal failures in a park pool. When every member of a park pool
+exhausts provider-internal retries, the turn waits with the network-unavailable
+cause; existing quota re-observation and changed-profile reload can release the
+wait.
 
 Exhausted-wait: no member is admissible and the frozen policy selects a wait.
 Exhaustion under `fail` never selects a wait; `park` selects one only when some
-member's every active exclusion can be cleared by a wake. A chain exclusion
-never qualifies. The attempt ends call-free WithoutStop(YieldedToDurableWait),
-the active turn keeps its session slot, and the transaction appends no
-transcript entry.
+member's every active exclusion can be cleared by a wake. An authentication
+chain exclusion for a registered Codex-home member qualifies for a
+changed-profile wake. A provider-internal chain exclusion qualifies for a fresh
+capacity observation or changed-profile wake; other chain exclusions do not. The
+attempt ends call-free WithoutStop(YieldedToDurableWait), the active turn keeps
+its session slot, and the transaction appends no transcript entry.
 
 A fresh availability chain resolves the current catalog; calls and waits retain
 the policy identity governing their chain. The wait retains its latest frontier,
@@ -202,7 +211,20 @@ lock. Re-parking rewrites the same wait's evidence and deadline without another
 attempt. Successful release consumes the wait and prepares the selected call on
 a fresh immediate-successor attempt in one transaction. Its wait-release origin
 retains any predecessor call and non-acceptance proof; release never readmits a
-chain-excluded member.
+member with an unreleased chain exclusion.
+
+A successful reload that changes a member's Codex-home path releases its
+authentication and provider-internal exclusions for already parked turns and
+grants their waits eligibility in the receipt transaction. Replay releases
+nothing again. The prior home directory need not remain available for delivery.
+Unchanged profiles, time passage, and restart do not release authentication
+exclusions. A successful nonempty capacity observation newer than a
+provider-internal exclusion releases that exclusion and grants the parked wait
+eligibility in the same transaction. Empty or stale observations do not release
+it. The existing capacity reconciliation loop reads the current profile catalog
+and also probes network-excluded members; it introduces no separate timer or
+scheduler. The predecessor failure and the turn's input, frontier, target, and
+policy remain retained; a terminal turn is never revived.
 
 A release that selects neither a member nor another wait consumes the wait,
 opens a fresh call-free attempt, ends it KnownFailure, reclassifies pending
@@ -226,15 +248,15 @@ observations and wait admission acquire the model-call order guard, profile
 action locks and invocation-capacity locks before updating waits.
 
 The daemon re-reads Codex account capacity for configured `codex_home` members
-whose live waits retain a headroom exclusion, using the reconciliation-sweep
-interval (or the invocation-recovery interval when absent) and the Codex CLI
-probe bound. This read starts no model thread or turn. A successful out-of-call
-observation has no model-call provenance and follows the same newest-observation
-and transactional wake rules. Nonempty capacity notifications merge sparse
-windows and supersede a pending read response; probes without usable evidence
-retain the prior observation and retry on the next pass. An external quota reset
-can therefore release a parked wait before its previously observed reset
-deadline.
+whose live waits retain a headroom or unreleased provider-internal exclusion,
+using the reconciliation-sweep interval (or the invocation-recovery interval
+when absent) and the Codex CLI probe bound. This read starts no model thread or
+turn. A successful out-of-call observation has no model-call provenance and
+follows the same newest-observation and transactional wake rules. Nonempty
+capacity notifications merge sparse windows and supersede a pending read
+response; probes without usable evidence retain the prior observation and retry
+on the next pass. An external quota reset can therefore release a parked wait
+before its previously observed reset deadline.
 
 Contended-wait: no member is admitted and at least one otherwise-admissible
 member is skipped only for its configured invocation bound. Either exhaustion

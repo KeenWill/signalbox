@@ -20,7 +20,13 @@ use crate::{HubModelConfiguration, SessionTemplateConfiguration};
 use signalbox_persistence::convergence_sweep::PostgresConvergenceSweepStore;
 
 // The design admits these catalog sections; all other model-document keys are startup-only.
-const RELOADABLE_KEYS: [&str; 4] = ["models", "serving_targets", "aliases", "repository_watch"];
+const RELOADABLE_KEYS: [&str; 5] = [
+    "models",
+    "serving_targets",
+    "aliases",
+    "repository_watch",
+    "credential_profiles",
+];
 
 /// Complete immutable pair observed by one admitted request.
 #[derive(Clone, Debug)]
@@ -92,6 +98,7 @@ pub struct ConfigurationReload {
     current: Arc<RwLock<ConfigurationCatalogs>>,
     serial: Arc<Mutex<()>>,
     repository: ReloadConfigurationRepository,
+    pool: sqlx::PgPool,
     model_path: PathBuf,
     template_path: PathBuf,
     home: Option<PathBuf>,
@@ -201,7 +208,7 @@ impl ConfigurationReload {
         signalbox_module_repo_watch_v2::StoreError,
     > {
         match &self.watch {
-            Some(watch) => watch.session_origin(session).await,
+            Some(watch) => watch.session_origin(session, &self.pool).await,
             None => Ok(None),
         }
     }
@@ -215,7 +222,7 @@ impl ConfigurationReload {
         template_path: PathBuf,
         home: Option<PathBuf>,
     ) -> Result<Self, ReloadResult> {
-        let startup = startup_sections(&models)?;
+        let startup = startup_sections(models.source())?;
         Ok(Self {
             current: Arc::new(RwLock::new(ConfigurationCatalogs {
                 models: Arc::new(models),
@@ -223,7 +230,8 @@ impl ConfigurationReload {
             })),
             serial: Arc::new(Mutex::new(())),
             repository: ReloadConfigurationRepository::new(pool.clone()),
-            convergence: PostgresConvergenceSweepStore::new(pool),
+            convergence: PostgresConvergenceSweepStore::new(pool.clone()),
+            pool,
             watch: None,
             runtime_factory: None,
             github_tool_credential: None,
@@ -320,9 +328,31 @@ impl ConfigurationReload {
         self
     }
 
+    async fn retain_template_policies(
+        &self,
+        catalogs: &ConfigurationCatalogs,
+    ) -> Result<(), ReloadRepositoryError> {
+        for (name, _) in catalogs.templates.summaries() {
+            let template =
+                catalogs
+                    .templates
+                    .resolve(name)
+                    .ok_or(ReloadRepositoryError::Corruption(
+                        "template summary has no resolved snapshot",
+                    ))?;
+            sqlx::query("INSERT INTO session_workflow_template_snapshot (template_name, template_content_digest, workflow_tools) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
+                .bind(name.as_str())
+                .bind(template.provenance().content_digest().as_bytes().as_slice())
+                .bind(sqlx::types::Json(template.workflow_tools()))
+                .execute(&self.pool).await?;
+        }
+        Ok(())
+    }
+
     /// Delivers pending snapshots before ordinary on-disk rule activation or client admission.
     pub async fn recover(&self) -> Result<(), ReloadRepositoryError> {
         let _serial = self.serial.lock().await;
+        self.retain_template_policies(&self.catalogs()).await?;
         let pending = self.repository.pending().await?;
         if pending.is_empty() {
             if let Some(watch) = &self.watch {
@@ -366,6 +396,7 @@ impl ConfigurationReload {
         on_disk: &str,
         snapshot: &str,
     ) -> Result<ConfigurationCatalogs, ReloadResult> {
+        let startup = startup_sections(on_disk)?;
         let snapshot: RetainedSnapshot = serde_json::from_str(snapshot)
             .map_err(|_| failure(ReloadPhase::Validate, "retained snapshot cannot be decoded"))?;
         let mut source = on_disk
@@ -389,6 +420,12 @@ impl ConfigurationReload {
         }
         let models = HubModelConfiguration::parse(&source.to_string())
             .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
+        if startup_sections(models.source())? != startup {
+            return Err(failure(
+                ReloadPhase::Validate,
+                "startup-only configuration differs",
+            ));
+        }
         let templates =
             SessionTemplateConfiguration::parse_snapshot(&snapshot.session_templates, &models)
                 .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
@@ -432,6 +469,15 @@ impl ConfigurationReload {
         mut replacement: ConfigurationCatalogs,
         recovering: bool,
     ) -> Result<ReloadLookup, ReloadRepositoryError> {
+        let prior: RetainedSnapshot =
+            serde_json::from_str(&intent.prior_snapshot).map_err(|_| {
+                ReloadRepositoryError::Corruption("prior reload snapshot cannot be decoded")
+            })?;
+        let changed_profiles = changed_codex_homes(&prior.model_catalog, &replacement.models)
+            .map_err(|_| {
+                ReloadRepositoryError::Corruption("prior reload credential homes cannot be decoded")
+            })?;
+        self.retain_template_policies(&replacement).await?;
         Arc::make_mut(&mut replacement.models).reuse_github_credentials(&self.catalogs().models);
         let prepared_watch = if let Some(watch) = &self.watch {
             let prepared = match watch.prepare_reload(replacement.clone()).await {
@@ -485,6 +531,7 @@ impl ConfigurationReload {
                         ));
                     }
                 };
+                self.retain_template_policies(&prior).await?;
                 let prepared = watch.prepare_reload(prior.clone()).await.map_err(|_| {
                     ReloadRepositoryError::Corruption("prior reload worker preparation failed")
                 })?;
@@ -516,7 +563,7 @@ impl ConfigurationReload {
             watch.nudge_restored(restored).await;
         }
         self.repository
-            .finish(request, &ReloadResult::Reloaded)
+            .finish_profile_reload(request, &changed_profiles)
             .await?;
         Ok(ReloadLookup::Recorded(ReloadResult::Reloaded))
     }
@@ -617,7 +664,7 @@ impl ConfigurationReload {
             };
             failure(phase, &error.to_string())
         })?;
-        if startup_sections(&models)? != self.startup {
+        if startup_sections(models.source())? != self.startup {
             return Err(failure(
                 ReloadPhase::Validate,
                 "startup-only configuration differs",
@@ -668,7 +715,7 @@ impl ConfigurationReload {
     }
 }
 
-fn validate_catalogs(catalogs: &ConfigurationCatalogs) -> Result<(), ReloadResult> {
+pub(crate) fn validate_catalogs(catalogs: &ConfigurationCatalogs) -> Result<(), ReloadResult> {
     let models = &catalogs.models;
     let templates = &catalogs.templates;
     if let Some(watch) = models.repository_watch() {
@@ -691,11 +738,63 @@ fn validate_catalogs(catalogs: &ConfigurationCatalogs) -> Result<(), ReloadResul
     Ok(())
 }
 
-fn startup_sections(models: &HubModelConfiguration) -> Result<toml::Table, ReloadResult> {
-    let mut source: toml::Table = toml::from_str(models.source())
+fn startup_sections(source: &str) -> Result<toml::Table, ReloadResult> {
+    let mut source: toml::Table = toml::from_str(source)
         .map_err(|_| failure(ReloadPhase::Validate, "model source is invalid"))?;
-    source.retain(|key, _| !RELOADABLE_KEYS.contains(&key));
+    source.retain(|key, _| key == "credential_profiles" || !RELOADABLE_KEYS.contains(&key));
+    if let Some(profiles) = source
+        .get_mut("credential_profiles")
+        .and_then(toml::Value::as_array_mut)
+    {
+        for profile in profiles {
+            if profile.get("delivery").and_then(toml::Value::as_str) == Some("codex_home")
+                && let Some(profile) = profile.as_table_mut()
+            {
+                profile.remove("codex_home");
+            }
+        }
+    }
     Ok(source)
+}
+
+fn changed_codex_homes(
+    prior: &str,
+    replacement: &HubModelConfiguration,
+) -> Result<Vec<String>, ReloadResult> {
+    let prior = prior
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| failure(ReloadPhase::Validate, "prior model source is invalid"))?;
+    let profiles = prior
+        .get("credential_profiles")
+        .and_then(toml_edit::Item::as_array_of_tables)
+        .ok_or_else(|| {
+            failure(
+                ReloadPhase::Validate,
+                "prior credential profiles are missing",
+            )
+        })?;
+    let mut changed = Vec::new();
+    for (name, _) in replacement.credential_invocation_registrations() {
+        let Some(crate::credential_pools::CredentialDelivery::CodexHome { path: new, .. }) =
+            replacement
+                .credential_profile(&name)
+                .map(|profile| profile.delivery())
+        else {
+            continue;
+        };
+        let old = profiles
+            .iter()
+            .find(|profile| profile.get("name").and_then(toml_edit::Item::as_str) == Some(&name))
+            .and_then(|profile| profile.get("codex_home"))
+            .and_then(toml_edit::Item::as_str)
+            .ok_or_else(|| failure(ReloadPhase::Validate, "prior credential home is missing"))?;
+        let old = crate::credential_pools::normalize_absolute_path(old)
+            .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
+        if &old != new {
+            changed.push(name);
+        }
+    }
+    Ok(changed)
 }
 
 fn failure(phase: ReloadPhase, reason: &str) -> ReloadResult {
@@ -725,6 +824,128 @@ fn failure(phase: ReloadPhase, reason: &str) -> ReloadResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_home_replacement_survives_retained_reload_without_reloading_other_profile_fields() {
+        let homes = tempfile::tempdir().expect("synthetic profile homes");
+        let before_home = homes.path().join("before");
+        let after_home = homes.path().join("after");
+        std::fs::create_dir(&before_home).expect("initial home directory");
+        std::fs::create_dir(&after_home).expect("replacement home directory");
+        let before_path = before_home.to_str().expect("UTF-8 fixture path");
+        let after_path = after_home.to_str().expect("UTF-8 fixture path");
+        let source = crate::configuration::checked_in_example_configuration()
+            .expect("checked example")
+            .source()
+            .replace(
+                "\ndelivery = \"ambient\"\n",
+                &format!("\ndelivery = \"codex_home\"\ncodex_home = {before_path:?}\n"),
+            );
+        let replacement = source.replace(before_path, after_path);
+        let before = HubModelConfiguration::parse(&source).expect("initial home catalog");
+        let after = HubModelConfiguration::parse(&replacement).expect("replacement home catalog");
+        assert_eq!(
+            startup_sections(before.source()),
+            startup_sections(after.source())
+        );
+        assert_eq!(
+            changed_codex_homes(before.source(), &after).expect("changed homes"),
+            ["codex-ambient"]
+        );
+        assert!(
+            changed_codex_homes(after.source(), &after)
+                .expect("unchanged homes")
+                .is_empty()
+        );
+        let equivalent_path = homes.path().join("unused/../before");
+        let equivalent = source.replace(before_path, equivalent_path.to_str().unwrap());
+        let equivalent =
+            HubModelConfiguration::parse(&equivalent).expect("equivalent normalized home");
+        assert!(
+            changed_codex_homes(before.source(), &equivalent)
+                .expect("equivalent homes")
+                .is_empty()
+        );
+        let identity_change = replacement.replace("codex-ambient", "another-codex-profile");
+        let identity_change =
+            HubModelConfiguration::parse(&identity_change).expect("other profile");
+        assert_ne!(
+            startup_sections(before.source()),
+            startup_sections(identity_change.source())
+        );
+        let snapshot = ConfigurationCatalogs {
+            models: Arc::new(after),
+            templates: Arc::new(
+                SessionTemplateConfiguration::parse_snapshot("version = 1", &before)
+                    .expect("empty templates"),
+            ),
+        }
+        .retained()
+        .expect("retained replacement");
+        let restored = ConfigurationReload::startup_snapshot(
+            &source,
+            &serde_json::to_string(&snapshot).unwrap(),
+        )
+        .expect("home change restores from durable intent");
+        assert_eq!(
+            changed_codex_homes(before.source(), &restored.models).expect("restored homes"),
+            ["codex-ambient"]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL"]
+    async fn changed_home_reload_installs_after_prior_directory_is_removed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let (directory, fixture) = fixture();
+        let before_home = directory.path().join("before");
+        let after_home = directory.path().join("after");
+        std::fs::create_dir(&before_home)?;
+        std::fs::create_dir(&after_home)?;
+        let before_path = before_home.to_str().expect("UTF-8 fixture path");
+        let after_path = after_home.to_str().expect("UTF-8 fixture path");
+        let source = fixture.catalogs().models.source().replace(
+            "\ndelivery = \"ambient\"\n",
+            &format!("\ndelivery = \"codex_home\"\ncodex_home = {before_path:?}\n"),
+        );
+        let models = HubModelConfiguration::parse(&source)?;
+        let reload = ConfigurationReload::new(
+            pool.clone(),
+            models,
+            SessionTemplateConfiguration::default(),
+            fixture.model_path.clone(),
+            fixture.template_path.clone(),
+            None,
+        )
+        .expect("reload composition");
+        std::fs::write(&reload.model_path, source.replace(before_path, after_path))?;
+        std::fs::remove_dir(&before_home)?;
+        let request = ReloadConfiguration {
+            command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+        };
+        assert_eq!(
+            reload.reload(request).await?,
+            ReloadLookup::Recorded(ReloadResult::Reloaded)
+        );
+        assert_eq!(
+            reload
+                .catalogs()
+                .models
+                .credential_profile("codex-ambient")
+                .expect("installed profile")
+                .delivery()
+                .path(),
+            Some(&after_home),
+        );
+        assert_eq!(
+            reload.reload(request).await?,
+            ReloadLookup::Recorded(ReloadResult::Reloaded)
+        );
+        pool.close().await;
+        Ok(())
+    }
 
     #[test]
     fn failure_reasons_are_bounded_utf8_without_control_characters() {
@@ -785,7 +1006,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_rechecks_model_credential_permissions() {
+    async fn reload_accepts_a_model_credential_with_permissive_mode() {
         let (directory, reload) = fixture();
         reload
             .read_replacement()
@@ -795,15 +1016,9 @@ mod tests {
             std::os::unix::fs::PermissionsExt::from_mode(0o644),
         )
         .expect("make unused profile public");
-        assert_eq!(
-            reload
-                .read_replacement()
-                .expect_err("reload rejects public profile"),
-            failure(
-                ReloadPhase::Validate,
-                "credential reference `anthropic-overflow` could not be resolved: InsecurePermissions"
-            )
-        );
+        reload
+            .read_replacement()
+            .expect("reload warns and reads the permissive credential");
     }
 
     #[tokio::test]
@@ -856,15 +1071,9 @@ mod tests {
             std::os::unix::fs::PermissionsExt::from_mode(0o644),
         )
         .expect("weaken permissions");
-        assert_eq!(
-            reload
-                .read_replacement()
-                .expect_err("public fallback rejected"),
-            failure(
-                ReloadPhase::Validate,
-                "credential reference `github-primary` could not be resolved: InsecurePermissions"
-            )
-        );
+        reload
+            .read_replacement()
+            .expect("reload warns and reads the permissive fallback credential");
         credential.close().expect("remove fallback");
         assert_eq!(
             reload

@@ -34,7 +34,8 @@ const SESSION_WORKSPACE_DIRECTORY_SUFFIX: &str = ".sessions";
 /// recently used entry is dropped when a further session arrives.
 pub(super) const MAX_RETAINED_SESSION_WORKSPACES: usize = 8;
 
-/// Administration directory the Git family requires immediately inside a root.
+/// Direct administration entry used by repository fixtures.
+#[cfg(test)]
 pub(super) const GIT_ADMINISTRATION_DIRECTORY: &str = ".git";
 
 pub(super) const SESSION_WORKSPACE_BINDING_EVIDENCE_DETAIL: &str =
@@ -259,7 +260,7 @@ pub enum SessionWorkspaceRoot {
 /// identity and one discriminant per session that used a workspace-bound tool —
 /// no descriptor, and no path, because the path is re-derivable — so it is kept
 /// outside the descriptor-bounded retained set and is never evicted.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum RecordedSessionBinding {
     /// The session bound the configured root.
     ConfiguredRoot,
@@ -281,19 +282,19 @@ pub(super) enum RecordedSessionBinding {
 
 impl RecordedSessionBinding {
     /// Returns the identity this binding pinned, if it pinned a derived root.
-    pub(super) const fn derived_identity(self) -> Option<ComposedWorkspaceIdentity> {
+    pub(super) fn derived_identity(&self) -> Option<ComposedWorkspaceIdentity> {
         match self {
             Self::ConfiguredRoot => None,
-            Self::DerivedRoot { identity, .. } => Some(identity),
+            Self::DerivedRoot { identity, .. } => Some(identity.clone()),
         }
     }
 
     /// Returns the parent this binding walked through, if it pinned a derived
     /// root.
-    pub(super) const fn derived_parent(self) -> Option<ComposedRootIdentity> {
+    pub(super) const fn derived_parent(&self) -> Option<ComposedRootIdentity> {
         match self {
             Self::ConfiguredRoot => None,
-            Self::DerivedRoot { parent, .. } => Some(parent),
+            Self::DerivedRoot { parent, .. } => Some(*parent),
         }
     }
 }
@@ -308,7 +309,7 @@ impl RecordedSessionBinding {
 /// contract has them converge on the first record written. A genuinely removed
 /// directory reads the same way, so the answer is to look again rather than to
 /// guess: the retaken probe distinguishes them.
-pub(super) const fn probe_is_stale(
+pub(super) fn probe_is_stale(
     recorded: Option<RecordedSessionBinding>,
     derived: &SessionWorkspaceRoot,
 ) -> bool {
@@ -345,7 +346,7 @@ pub(super) enum SessionRootDecision {
 /// spelling of provisioning that arrived too late while a correct one arriving
 /// equally late is ignored. The misprovisioning classification decides the
 /// sessions whose binding is still open, which is where it decides anything.
-pub(super) const fn decide_session_root(
+pub(super) fn decide_session_root(
     recorded: Option<RecordedSessionBinding>,
     derived: &SessionWorkspaceRoot,
 ) -> SessionRootDecision {
@@ -380,12 +381,12 @@ pub(super) const fn decide_session_root(
 /// failed capture is a reason to refuse rather than a reason to compare against
 /// `pinned` alone. Making the unknown unrepresentable here is what stops that
 /// degradation being reintroduced at a call site.
-pub(super) const fn shares_a_directory_with_the_configured_root(
+pub(super) fn shares_a_directory_with_the_configured_root(
     composed: ComposedWorkspaceIdentity,
     pinned: ComposedWorkspaceIdentity,
     standing: ComposedWorkspaceIdentity,
 ) -> bool {
-    composed.shares_a_directory_with(pinned) || composed.shares_a_directory_with(standing)
+    composed.shares_a_directory_with(&pinned) || composed.shares_a_directory_with(&standing)
 }
 
 /// Whether a session other than `session` already bound the directory a
@@ -397,12 +398,14 @@ pub(super) fn another_session_bound(
     bindings: &BTreeMap<SessionId, RecordedSessionBinding>,
     session: SessionId,
     composed: ComposedWorkspaceIdentity,
+    still_reachable: impl Fn(SessionId) -> bool,
 ) -> bool {
     bindings.iter().any(|(bound, binding)| {
         *bound != session
             && binding
                 .derived_identity()
-                .is_some_and(|bound_identity| bound_identity.shares_a_directory_with(composed))
+                .is_some_and(|bound_identity| bound_identity.shares_a_directory_with(&composed))
+            && still_reachable(*bound)
     })
 }
 
@@ -421,15 +424,12 @@ pub(super) fn another_session_bound(
 ///
 /// Both the pinned and the standing configured pairs are compared, for the same
 /// reason [`shares_a_directory_with_the_configured_root`] compares both.
-pub(super) const fn parent_aliases_the_configured_root(
+pub(super) fn parent_aliases_the_configured_root(
     parent: ComposedRootIdentity,
     pinned: ComposedWorkspaceIdentity,
     standing: ComposedWorkspaceIdentity,
 ) -> bool {
-    parent.is_the_same_directory_as(pinned.root)
-        || parent.is_the_same_directory_as(pinned.administration)
-        || parent.is_the_same_directory_as(standing.root)
-        || parent.is_the_same_directory_as(standing.administration)
+    pinned.contains_directory(parent) || standing.contains_directory(parent)
 }
 
 /// Whether a composed workspace is the very directory its pathname was reached
@@ -451,12 +451,11 @@ pub(super) const fn parent_aliases_the_configured_root(
 /// Both composed directories are compared: a `.git` standing on the parent
 /// nests the siblings inside this session's administration directory just as a
 /// root standing on it nests them inside its worktree.
-pub(super) const fn composition_aliases_its_own_parent(
+pub(super) fn composition_aliases_its_own_parent(
     composed: ComposedWorkspaceIdentity,
     parent: ComposedRootIdentity,
 ) -> bool {
-    composed.root.is_the_same_directory_as(parent)
-        || composed.administration.is_the_same_directory_as(parent)
+    composed.contains_directory(parent)
 }
 
 /// Whether any session other than `session` holds a derived binding at all.
@@ -471,30 +470,6 @@ pub(super) fn a_derived_binding_exists(
     bindings
         .iter()
         .any(|(bound, binding)| *bound != session && binding.derived_identity().is_some())
-}
-
-/// Whether any other session's derived binding shares a directory with the
-/// configured composition as its pathname stands now.
-///
-/// The mirror of the comparison a derived dispatch makes against the configured
-/// root. A configured-root request has to make it too: the configured
-/// composition is never re-resolved, so a `.git` bind-mounted from a derived
-/// session's workspace over the configured root's own leaves the configured
-/// executors reaching that workspace while the session that bound it keeps a
-/// separate serialization domain. Checking only on the derived branch would
-/// protect only the sessions that take it.
-pub(super) fn a_derived_binding_shares_the_configured_root(
-    bindings: &BTreeMap<SessionId, RecordedSessionBinding>,
-    session: SessionId,
-    pinned: ComposedWorkspaceIdentity,
-    standing: ComposedWorkspaceIdentity,
-) -> bool {
-    bindings.iter().any(|(bound, binding)| {
-        *bound != session
-            && binding.derived_identity().is_some_and(|identity| {
-                shares_a_directory_with_the_configured_root(identity, pinned, standing)
-            })
-    })
 }
 
 /// Filesystem identity of one directory.

@@ -631,6 +631,7 @@ private actor MockProcessProtocolState {
     var messages: [[String: Any]] = [
       [
         "type": "transcript_snapshot_start",
+        "after_frontier": NSNull(),
         "workspace_root_kind": NSNull(),
         "repository_watch": NSNull(),
         "session_id": session.id,
@@ -647,6 +648,7 @@ private actor MockProcessProtocolState {
     messages.append(contentsOf: fixture.records.dropFirst())
     messages.append([
       "type": "transcript_snapshot_end",
+      "frontier": NSNull(),
       "session_id": session.id,
       "cursor": cursor,
       "turn_count": fixture.turnCount,

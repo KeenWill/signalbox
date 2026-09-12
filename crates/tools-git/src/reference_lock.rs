@@ -63,6 +63,7 @@ struct ReferenceSnapshotIdentity {
 pub(super) struct ReferenceParent {
     pub(super) directory: OwnedFd,
     pub(super) leaf: OsString,
+    name: String,
     hierarchy: Vec<(PathBuf, FileIdentity)>,
     created_directories: CreatedReferenceDirectories,
     creation_file_mode: Option<Mode>,
@@ -192,7 +193,7 @@ impl ReferenceLock {
 
     pub(super) fn hierarchy_is_current(&self, authority: &PinnedRepository) -> bool {
         self.hierarchy.iter().all(|(relative, expected)| {
-            open_git_directory_path(authority, relative)
+            open_git_directory_path(authority, relative, &self.name)
                 .and_then(|directory| {
                     let metadata = fs::File::from(directory)
                         .metadata()
@@ -695,7 +696,7 @@ impl Drop for CreatedReferenceDirectories {
 impl ReferenceParent {
     pub(super) fn hierarchy_is_current(&self, authority: &PinnedRepository) -> bool {
         self.hierarchy.iter().all(|(relative, expected)| {
-            open_git_directory_path(authority, relative)
+            open_git_directory_path(authority, relative, &self.name)
                 .and_then(|directory| {
                     let metadata = fs::File::from(directory)
                         .metadata()
@@ -1061,7 +1062,8 @@ pub(super) fn open_reference_parent(
         }
         ReferenceParentMode::CreateMissing | ReferenceParentMode::ExistingOnly => None,
     };
-    let mut directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+    let mut directory =
+        dup(authority.administration_for(name)).map_err(|_| LocalGitFailure::Operation)?;
     let mut created_directories = CreatedReferenceDirectories::default();
     let mut relative = PathBuf::new();
     let mut hierarchy = vec![(
@@ -1113,6 +1115,7 @@ pub(super) fn open_reference_parent(
         hierarchy.push((relative.clone(), identity));
     }
     Ok(ReferenceParent {
+        name: name.to_owned(),
         directory,
         leaf,
         hierarchy,

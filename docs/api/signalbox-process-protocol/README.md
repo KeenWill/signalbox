@@ -13,10 +13,10 @@
 | event | 2 | 0 | 0 | [event](event.md) |
 | frame | 2 | 0 | 4 | [frame](frame.md) |
 | goal | 16 | 0 | 0 | [goal](goal.md) |
-| operator_status | 10 | 0 | 0 | [operator_status](operator_status.md) |
+| operator_status | 11 | 0 | 0 | [operator_status](operator_status.md) |
 | request | 2 | 0 | 0 | [request](request.md) |
 | response | 6 | 0 | 1 | [response](response.md) |
-| review | 32 | 0 | 0 | [review](review.md) |
+| review | 33 | 0 | 0 | [review](review.md) |
 | runner | 15 | 0 | 0 | [runner](runner.md) |
 | runner_status | 9 | 0 | 0 | [runner_status](runner_status.md) |
 | scalars | 28 | 0 | 3 | [scalars](scalars.md) |

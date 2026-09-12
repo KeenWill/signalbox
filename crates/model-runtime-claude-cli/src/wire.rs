@@ -18,6 +18,25 @@ pub(crate) struct SystemInit {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct CompactBoundary {
+    pub(crate) session_id: String,
+    pub(crate) compact_metadata: CompactMetadata,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CompactMetadata {
+    pub(crate) trigger: CompactTrigger,
+    pub(crate) pre_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CompactTrigger {
+    Manual,
+    Auto,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct McpServerStatus {
     pub(crate) name: String,
     pub(crate) status: String,
@@ -26,6 +45,10 @@ pub(crate) struct McpServerStatus {
 #[derive(Debug, Deserialize)]
 pub(crate) struct AssistantEvent {
     pub(crate) message: AssistantMessage,
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) is_api_error_message: bool,
     #[serde(default)]
     pub(crate) parent_tool_use_id: Option<String>,
 }
@@ -81,6 +104,10 @@ pub(crate) enum AssistantContent {
 #[derive(Debug, Deserialize)]
 pub(crate) struct UserEvent {
     pub(crate) message: UserMessage,
+    #[serde(default, rename = "isSynthetic")]
+    pub(crate) is_synthetic: bool,
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,16 +117,60 @@ pub(crate) struct UserMessage {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct UserContent {
-    #[serde(rename = "type")]
-    pub(crate) content_type: String,
-    pub(crate) tool_use_id: String,
-    pub(crate) content: serde_json::Value,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum UserContent {
+    Text {
+        text: String,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: serde_json::Value,
+    },
+}
+
+// Native result vocabulary: https://code.claude.com/docs/en/agent-sdk/typescript#sdkresultmessage
+#[derive(Debug, Deserialize)]
+#[serde(from = "String")]
+pub(crate) enum ResultSubtype {
+    Success,
+    ErrorDuringExecution,
+    ErrorMaxTurns,
+    ErrorMaxBudgetUsd,
+    ErrorMaxStructuredOutputRetries,
+    Unknown(String),
+}
+
+impl From<String> for ResultSubtype {
+    fn from(token: String) -> Self {
+        match token.as_str() {
+            "success" => Self::Success,
+            "error_during_execution" => Self::ErrorDuringExecution,
+            "error_max_turns" => Self::ErrorMaxTurns,
+            "error_max_budget_usd" => Self::ErrorMaxBudgetUsd,
+            "error_max_structured_output_retries" => Self::ErrorMaxStructuredOutputRetries,
+            _ => Self::Unknown(token),
+        }
+    }
+}
+
+impl ResultSubtype {
+    pub(crate) fn into_token(self) -> String {
+        match self {
+            Self::Success => "success".to_string(),
+            Self::ErrorDuringExecution => "error_during_execution".to_string(),
+            Self::ErrorMaxTurns => "error_max_turns".to_string(),
+            Self::ErrorMaxBudgetUsd => "error_max_budget_usd".to_string(),
+            Self::ErrorMaxStructuredOutputRetries => {
+                "error_max_structured_output_retries".to_string()
+            }
+            Self::Unknown(token) => token,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ResultEvent {
-    pub(crate) subtype: String,
+    pub(crate) subtype: ResultSubtype,
     pub(crate) is_error: bool,
     pub(crate) session_id: String,
     #[serde(default)]

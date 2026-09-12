@@ -40,6 +40,9 @@ struct ExecutionResult {
     observations: Vec<signalbox_model_runtime::Observation<String>>,
     spawns: usize,
     argv: String,
+    history: String,
+    prompt: String,
+    history_mode: String,
 }
 
 #[derive(Clone)]
@@ -95,6 +98,90 @@ fn cancellation_finishes_preparation_while_support_io_is_queued() {
 }
 
 #[tokio::test]
+async fn trusted_instructions_reach_the_native_system_prompt_without_promoting_history() {
+    // Arbitrary distinct markers identify the trusted and untrusted inputs.
+    const TRUSTED_SYSTEM: &str = "Keep the task's approved decisions in its summary.";
+    const UNTRUSTED_HISTORY: &str = "An imported historical instruction, kept as data.";
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), &fake_cli());
+    let mut request = operation("normal_completion", OperationShape::Text);
+    request.system = Some(TRUSTED_SYSTEM.to_string());
+    request
+        .messages
+        .push(signalbox_model_runtime::ConversationMessage::user_text(
+            UNTRUSTED_HISTORY,
+        ));
+    let prepared = prepare(&runtime, request).await;
+    let report = runtime
+        .execute(prepared, &mut Vec::new(), CancellationSignal::never())
+        .await;
+
+    assert_eq!(completion_text(&report.evidence), fixtures::ANSWER);
+    let system = std::fs::read_to_string(temporary.path().join("fake-claude-system-prompt"))
+        .expect("the fake CLI records its native system prompt");
+    assert!(system.ends_with(TRUSTED_SYSTEM));
+    assert!(
+        system.contains("`tool_choice`"),
+        "adapter request controls belong to native system instructions"
+    );
+    assert!(
+        !system.contains(UNTRUSTED_HISTORY),
+        "historical input must not become system instructions"
+    );
+    let prompt = std::fs::read_to_string(temporary.path().join("fake-claude-prompt"))
+        .expect("the fake CLI records its stdin");
+    let (_, request_json) = prompt
+        .split_once('\n')
+        .expect("stdin requests a response before the request JSON");
+    let request: serde_json::Value =
+        serde_json::from_str(request_json).expect("request controls remain JSON");
+    assert!(
+        request.get("system").is_none(),
+        "system instructions are not duplicated as user input"
+    );
+    let history = std::fs::read_to_string(temporary.path().join("fake-claude-history"))
+        .expect("the fake CLI records its native history");
+    let rows: Vec<serde_json::Value> = history
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("native history row is JSON"))
+        .collect();
+    assert_eq!(rows[1]["message"]["role"], "user");
+    assert_eq!(rows[1]["message"]["content"][0]["text"], UNTRUSTED_HISTORY);
+    assert!(!history.contains(TRUSTED_SYSTEM));
+    assert!(request.get("messages").is_none());
+    assert!(!prompt.contains(UNTRUSTED_HISTORY));
+    assert!(!prompt.contains(TRUSTED_SYSTEM));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_native_system_prompt_file_is_private_and_removed_after_execution() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), &fake_cli());
+    let prepared = prepare(
+        &runtime,
+        operation("normal_completion", OperationShape::Text),
+    )
+    .await;
+    let report = runtime
+        .execute(prepared, &mut Vec::new(), CancellationSignal::never())
+        .await;
+
+    assert_eq!(completion_text(&report.evidence), fixtures::ANSWER);
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("fake-claude-system-prompt-mode"))
+            .expect("native file permissions recorded"),
+        "600"
+    );
+    let argv = std::fs::read_to_string(temporary.path().join("fake-claude-argv"))
+        .expect("arguments recorded");
+    assert!(
+        !Path::new(recorded_argument(&argv, "--append-system-prompt-file")).exists(),
+        "the native system file belongs to the completed process lifetime"
+    );
+}
+
+#[tokio::test]
 async fn normal_completion_requires_typed_terminal_result() {
     let result = execute_scenario("normal_completion", OperationShape::Text).await;
     let completion = completed(&result.evidence);
@@ -114,6 +201,249 @@ async fn normal_completion_requires_typed_terminal_result() {
     assert!(result.argv.contains("--setting-sources\n\n--settings"));
     assert!(result.argv.contains("--tools\n\n--allowedTools\n"));
     assert!(result.argv.contains(&disabled_tools_argument()));
+}
+
+#[tokio::test]
+async fn native_history_restores_distinct_assistant_groups_without_replaying_tools() {
+    use signalbox_model_runtime::{
+        ConversationMessage, ConversationRole, MessagePart, ToolCallId, ToolCallProposal,
+        ToolResultRecord,
+    };
+    let mut request = operation("normal_completion", OperationShape::Text);
+    request.messages.extend([
+        ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new(fixtures::TOOL_ID),
+                name: ToolName::new(fixtures::TOOL_NAME),
+                arguments_json: fixtures::NONCANONICAL_TOOL_ARGUMENTS.into(),
+            })],
+        },
+        ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new(fixtures::TOOL_ID),
+                content: fixtures::ANSWER.into(),
+                is_error: false,
+            })],
+        },
+        ConversationMessage::assistant_text(fixtures::ANSWER),
+        ConversationMessage::user_text(fixtures::OTHER_MESSAGE_ID),
+    ]);
+    let expected_messages = request.messages.len();
+    let result = execute_operation(request).await;
+    assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
+    let rows: Vec<serde_json::Value> = result
+        .history
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("native history row is JSON"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        expected_messages,
+        "all canonical messages reach native history"
+    );
+    assert_eq!(rows[0]["parentUuid"], serde_json::Value::Null);
+    for pair in rows.windows(2) {
+        assert_eq!(
+            pair[1]["parentUuid"], pair[0]["uuid"],
+            "the parent chain preserves canonical order"
+        );
+    }
+    assert_eq!(rows[1]["type"], "assistant");
+    assert_eq!(rows[1]["message"]["role"], "assistant");
+    assert_eq!(rows[3]["type"], "assistant");
+    assert_eq!(rows[3]["message"]["role"], "assistant");
+    assert_ne!(
+        rows[1]["message"]["id"], rows[3]["message"]["id"],
+        "distinct assistant messages form native compaction groups"
+    );
+    assert_eq!(
+        rows[1]["message"]["content"][0]["type"], "text",
+        "historical tool calls are context, not native tool invocations"
+    );
+    assert_eq!(
+        rows[2]["message"]["content"][0]["type"], "text",
+        "historical results are canonical context"
+    );
+    let call_text = rows[1]["message"]["content"][0]["text"]
+        .as_str()
+        .expect("canonical call text");
+    assert!(
+        call_text.contains(fixtures::NONCANONICAL_TOOL_ARGUMENTS),
+        "raw historical arguments retain their exact JSON text"
+    );
+    let prior_result: serde_json::Value = serde_json::from_str(
+        rows[2]["message"]["content"][0]["text"]
+            .as_str()
+            .expect("canonical result text"),
+    )
+    .expect("canonical result is JSON");
+    assert_eq!(prior_result["tool_call_id"], fixtures::TOOL_ID);
+    assert_eq!(prior_result["content"], fixtures::ANSWER);
+    let controls: serde_json::Value = serde_json::from_str(
+        result
+            .prompt
+            .split_once('\n')
+            .expect("request controls follow the response request")
+            .1,
+    )
+    .expect("controls are JSON");
+    assert!(
+        controls.get("messages").is_none(),
+        "history is not duplicated in the control prompt"
+    );
+}
+
+#[tokio::test]
+async fn native_history_keeps_current_request_text_after_prior_completion() {
+    use signalbox_model_runtime::ConversationMessage;
+    // Arbitrary, distinct text separates the next request from completed work.
+    const CURRENT_REQUEST: &str = "Write the next report.";
+    let mut request = operation("normal_completion", OperationShape::Text);
+    request.messages.extend([
+        ConversationMessage::assistant_text(fixtures::ANSWER),
+        ConversationMessage::user_text(CURRENT_REQUEST),
+    ]);
+    let result = execute_operation(request).await;
+    let rows: Vec<serde_json::Value> = result
+        .history
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("native history row is JSON"))
+        .collect();
+    assert_eq!(
+        rows[1]["message"]["content"],
+        serde_json::json!([{"type": "text", "text": fixtures::ANSWER}]),
+        "prior completion retains its native assistant text"
+    );
+    assert_eq!(rows[2]["message"]["role"], "user");
+    assert_eq!(
+        rows[2]["message"]["content"],
+        serde_json::json!([{"type": "text", "text": CURRENT_REQUEST}]),
+        "the current request reaches the CLI as native text, not a quoted JSON message"
+    );
+}
+
+#[tokio::test]
+async fn system_only_request_starts_without_an_empty_resume_file() {
+    let mut request = operation("normal_completion", OperationShape::Text);
+    request.messages.clear();
+    request.system = Some("normal_completion".into());
+    let result = execute_operation(request).await;
+    assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
+    assert!(!result.argv.lines().any(|argument| argument == "--resume"));
+    let controls: serde_json::Value =
+        serde_json::from_str(result.prompt.split_once('\n').expect("request controls").1)
+            .expect("controls are JSON");
+    assert!(controls.get("system").is_none());
+    assert!(!result.prompt.contains("normal_completion"));
+}
+
+#[tokio::test]
+async fn native_history_is_private_and_removed_after_execution() {
+    let result = execute_scenario("normal_completion", OperationShape::Text).await;
+    assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
+    let arguments: Vec<_> = result.argv.lines().collect();
+    let history_path = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--resume")
+        .expect("native resume is explicit")[1];
+    assert!(arguments.contains(&"--fork-session"));
+    assert!(arguments.contains(&"--no-session-persistence"));
+    #[cfg(unix)]
+    assert_eq!(
+        result.history_mode, "600",
+        "native context is private to the daemon user"
+    );
+    assert!(
+        !Path::new(history_path).exists(),
+        "the disposable context is removed when execution ends"
+    );
+}
+
+#[tokio::test]
+async fn native_compaction_boundary_preserves_the_completion() {
+    let result = execute_scenario("native_compaction", OperationShape::Text).await;
+
+    assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn native_compaction_summary_preserves_only_the_assistant_completion() {
+    let result = execute_scenario("native_compaction_summary", OperationShape::Text).await;
+
+    assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
+    assert_eq!(
+        completed(&result.evidence).finish,
+        CompletionFinish::EndTurn
+    );
+}
+
+#[tokio::test]
+async fn native_compaction_summary_requires_the_initialized_session() {
+    let result = execute_scenario(
+        "native_compaction_summary_wrong_session",
+        OperationShape::Text,
+    )
+    .await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn ordinary_user_text_is_not_a_native_compaction_summary() {
+    let result = execute_scenario(
+        "native_compaction_summary_not_synthetic",
+        OperationShape::Text,
+    )
+    .await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn synthetic_tool_results_are_not_native_context_text() {
+    let result = execute_scenario(
+        "native_compaction_summary_tool_result",
+        OperationShape::Tool,
+    )
+    .await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn native_compaction_summary_does_not_establish_completion() {
+    let result = execute_scenario(
+        "native_compaction_summary_without_result",
+        OperationShape::Text,
+    )
+    .await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker { .. }
+    ));
+}
+
+#[tokio::test]
+async fn native_compaction_boundary_rejects_a_different_session() {
+    let result = execute_scenario("native_compaction_wrong_session", OperationShape::Text).await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
 }
 
 #[tokio::test]
@@ -408,9 +738,38 @@ async fn tool_acknowledgement_discards_thinking_before_its_text() {
 }
 
 #[tokio::test]
+async fn tool_acknowledgement_retries_thinking_only_messages_before_text() {
+    let result = execute_scenario(
+        "tool_acknowledgement_retries_thinking_only",
+        OperationShape::Tool,
+    )
+    .await;
+    let completion = completed(&result.evidence);
+    assert_eq!(completion.finish, CompletionFinish::ToolUse);
+    assert_eq!(completion.content.len(), 1);
+    assert_eq!(
+        tool_call(&completion.content).id.as_str(),
+        fixtures::TOOL_ID
+    );
+    assert_eq!(
+        completion.message_id.as_ref().map(|id| id.as_str()),
+        Some(fixtures::MESSAGE_ID)
+    );
+    assert!(!result.observations.iter().any(|observation| matches!(
+        observation.fact,
+        signalbox_model_runtime::ObservationFact::ThinkingDelta { .. }
+            | signalbox_model_runtime::ObservationFact::TextDelta { .. }
+    )));
+    assert_eq!(completion.usage, expected_usage());
+}
+
+#[tokio::test]
 async fn tool_acknowledgement_tail_rejects_incomplete_or_conflicting_evidence() {
     for scenario in [
         "tool_acknowledgement_thinking_only",
+        "tool_acknowledgement_retry_without_text",
+        "tool_acknowledgement_retry_reports_tool_use",
+        "tool_acknowledgement_changes_id_after_text",
         "tool_acknowledgement_tail_without_result",
         "tool_acknowledgement_tail_reports_tool_use",
         "tool_acknowledgement_tail_is_empty",
@@ -462,6 +821,88 @@ async fn named_tool_choice_rejects_an_extra_declared_proposal() {
 }
 
 #[tokio::test]
+async fn a_native_api_error_diagnostic_preserves_the_terminal_refusal() {
+    let result = execute_scenario("api_error_diagnostic", OperationShape::Text).await;
+    let refusal = refused(&result.evidence);
+
+    assert_eq!(
+        refusal.content,
+        vec![AssistantPart::Text(fixtures::REFUSAL.to_string())]
+    );
+    assert_eq!(refusal.usage, expected_usage());
+}
+
+#[tokio::test]
+async fn a_native_api_error_diagnostic_without_a_result_is_incomplete() {
+    let result =
+        execute_scenario("api_error_diagnostic_without_result", OperationShape::Text).await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_native_api_error_diagnostic_rejects_a_different_session() {
+    let result = execute_scenario("api_error_diagnostic_wrong_session", OperationShape::Text).await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_native_refusal_notice_requires_prior_initialization() {
+    let result = execute_scenario("refusal_notice_before_init", OperationShape::Text).await;
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_native_refusal_notice_requires_its_session_id() {
+    let result = execute_scenario("refusal_notice_missing_session", OperationShape::Text).await;
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_native_refusal_notice_allows_the_terminal_refusal() {
+    let result = execute_scenario("refusal_notice", OperationShape::Text).await;
+    let refusal = refused(&result.evidence);
+
+    assert_eq!(
+        refusal.content,
+        vec![AssistantPart::Text(fixtures::REFUSAL.to_string())]
+    );
+    assert_eq!(refusal.usage, expected_usage());
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn a_native_refusal_notice_without_a_result_is_incomplete() {
+    let result = execute_scenario("refusal_notice_without_result", OperationShape::Text).await;
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamEndedWithoutTerminalMarker { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_native_refusal_notice_must_match_the_initialized_session() {
+    let result = execute_scenario("refusal_notice_wrong_session", OperationShape::Text).await;
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
 async fn refusal_requires_the_typed_refusal_stop_reason() {
     let result = execute_scenario("refusal", OperationShape::Text).await;
     let refusal = refused(&result.evidence);
@@ -478,12 +919,9 @@ async fn refusal_requires_the_typed_refusal_stop_reason() {
     assert_eq!(result.spawns, 1);
 }
 
-/// A generic structured error determines no kind, so the definitive stderr the
-/// nonzero exit carries decides instead of the evidence reporting
-/// `Unrecognized` beside a stderr that names the cause. The usage the result
-/// stated still reaches the observation stream on this path.
+/// Generic structured errors retain usage without classifying stderr prose.
 #[tokio::test]
-async fn definitive_exit_stderr_classifies_a_generic_structured_error() {
+async fn generic_terminal_error_retains_usage_without_classifying_stderr() {
     let result = execute_scenario(
         "generic_error_then_definitive_stderr_exit",
         OperationShape::Text,
@@ -491,7 +929,7 @@ async fn definitive_exit_stderr_classifies_a_generic_structured_error() {
     .await;
     let failure = provider_error(&result.evidence);
 
-    assert_eq!(failure.kind, ProviderErrorKind::CredentialRejected);
+    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
     assert_eq!(reported_usage(&result.observations), vec![failure.usage]);
     assert_eq!(result.spawns, 1);
 }
@@ -570,22 +1008,22 @@ async fn success_rejects_every_contradictory_error_field_shape() {
 }
 
 #[tokio::test]
-async fn native_stdin_size_rejection_preserves_request_too_large() {
+async fn native_stdin_error_without_a_status_stays_unrecognized() {
     let result = execute_scenario("piped_stdin_too_large", OperationShape::Text).await;
     let TerminalEvidence::ProviderError(failure) = result.evidence else {
         panic!("native stdin rejection must be a typed provider failure");
     };
-    assert_eq!(failure.kind, ProviderErrorKind::RequestTooLarge);
+    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
     assert_eq!(failure.usage, TokenUsage::unreported());
     assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
-async fn native_prompt_size_rejection_preserves_request_too_large() {
+async fn generic_native_prompt_error_stays_unrecognized() {
     let result = execute_scenario("native_prompt_too_large", OperationShape::Text).await;
     let failure = provider_error(&result.evidence);
 
-    assert_eq!(failure.kind, ProviderErrorKind::RequestTooLarge);
+    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
     assert_eq!(result.spawns, 1);
 }
 
@@ -594,8 +1032,49 @@ async fn nonzero_exit_is_a_typed_provider_failure() {
     let result = execute_scenario("process_nonzero", OperationShape::Text).await;
     let failure = provider_error(&result.evidence);
 
-    assert_eq!(failure.kind, ProviderErrorKind::CredentialRejected);
+    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
     assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn terminal_classification_uses_native_subtypes_and_status_without_prose() {
+    for (scenario, expected, token) in [
+        (
+            "session_window_status",
+            ProviderErrorKind::RateLimited,
+            "success",
+        ),
+        (
+            "session_window_without_status",
+            ProviderErrorKind::Unrecognized,
+            "success",
+        ),
+        (
+            "request_size_status",
+            ProviderErrorKind::RequestTooLarge,
+            "success",
+        ),
+        (
+            "native_budget_subtype",
+            ProviderErrorKind::QuotaExhausted,
+            "error_max_budget_usd",
+        ),
+        (
+            "unknown_error_subtype",
+            ProviderErrorKind::Unrecognized,
+            "synthetic_unknown_error",
+        ),
+    ] {
+        let result = execute_scenario(scenario, OperationShape::Text).await;
+        let failure = provider_error(&result.evidence);
+        assert_eq!(failure.kind, expected, "{scenario}");
+        assert_eq!(
+            failure.native.error_token.as_deref(),
+            Some(token),
+            "{scenario}"
+        );
+        assert_eq!(result.spawns, 1);
+    }
 }
 
 #[tokio::test]
@@ -934,9 +1413,13 @@ async fn execute_hanging_scenario(scenario: &str) -> TerminalEvidence {
 }
 
 async fn execute_scenario(scenario: &str, shape: OperationShape) -> ExecutionResult {
+    execute_operation(operation(scenario, shape)).await
+}
+
+async fn execute_operation(operation: ModelOperation<String>) -> ExecutionResult {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = runtime(temporary.path(), &fake_cli());
-    let prepared = prepare(&runtime, operation(scenario, shape)).await;
+    let prepared = prepare(&runtime, operation).await;
     let mut observations = Vec::new();
     let report = runtime
         .execute(prepared, &mut observations, CancellationSignal::never())
@@ -946,6 +1429,12 @@ async fn execute_scenario(scenario: &str, shape: OperationShape) -> ExecutionRes
         observations,
         spawns: spawn_count(temporary.path()),
         argv: std::fs::read_to_string(temporary.path().join("fake-claude-argv"))
+            .unwrap_or_default(),
+        history: std::fs::read_to_string(temporary.path().join("fake-claude-history"))
+            .unwrap_or_default(),
+        prompt: std::fs::read_to_string(temporary.path().join("fake-claude-prompt"))
+            .unwrap_or_default(),
+        history_mode: std::fs::read_to_string(temporary.path().join("fake-claude-history-mode"))
             .unwrap_or_default(),
     }
 }

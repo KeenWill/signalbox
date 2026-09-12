@@ -55,6 +55,7 @@ mod session_live;
 mod session_ownership_grants;
 mod session_plan;
 mod session_timeline;
+mod terminal_boundary_scan;
 mod tool_round_lifecycle;
 mod turn_activation;
 mod turn_liveness;
@@ -175,8 +176,8 @@ use signalbox_persistence::{
         DispatchedDelegationWake, DispatchedInjectionOutcome, DispatchedModelCallState,
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
         DispatchedSessionCreation, DispatchedToolBatchState, DispatchedTurnTerminalDisposition,
-        OutboxConsumer, OutboxConsumerReader, OutboxCorruption, OutboxDeliveryDecision,
-        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        OutboxConsumer, OutboxConsumerReader, OutboxCursorCorruption, OutboxDeliveryDecision,
+        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher, OutboxRowCorruption,
     },
     plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{

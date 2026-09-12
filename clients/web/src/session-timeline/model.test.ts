@@ -540,7 +540,7 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '2' },
+          contract: { name: 'signalbox.web-http', version: '3' },
           capabilities: {
             bounded_json: true,
             bounded_lexical_search: true,
@@ -584,7 +584,7 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '2' },
+          contract: { name: 'signalbox.web-http', version: '3' },
           capabilities: {
             bounded_json: false,
             bounded_lexical_search: true,
@@ -628,7 +628,7 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '2' },
+          contract: { name: 'signalbox.web-http', version: '3' },
           capabilities: {
             bounded_json: true,
             bounded_lexical_search: true,
@@ -672,7 +672,7 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '2' },
+          contract: { name: 'signalbox.web-http', version: '3' },
           capabilities: {
             bounded_json: true,
             bounded_lexical_search: true,
@@ -718,7 +718,7 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '2' },
+            contract: { name: 'signalbox.web-http', version: '3' },
             capabilities: {
               bounded_json: true,
               bounded_lexical_search: true,
@@ -787,7 +787,7 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '2' },
+            contract: { name: 'signalbox.web-http', version: '3' },
             capabilities: {
               bounded_json: true,
               bounded_lexical_search: true,
@@ -1303,7 +1303,7 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '2' },
+            contract: { name: 'signalbox.web-http', version: '3' },
             capabilities: {
               bounded_json: true,
               bounded_lexical_search: true,
@@ -1376,7 +1376,7 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '2' },
+            contract: { name: 'signalbox.web-http', version: '3' },
             capabilities: {
               bounded_json: true,
               bounded_lexical_search: true,
