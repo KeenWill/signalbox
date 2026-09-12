@@ -121,11 +121,17 @@ function TranscriptWindow({
     queryFn: ({ pageParam, signal }) => readTranscriptWindow(sessionId, pageParam, limits, signal),
     getPreviousPageParam: (page): SessionWindowAnchor | undefined =>
       page.window.continuation_before
-        ? { kind: 'before', eventSequence: page.window.continuation_before.event_sequence }
+        ? {
+            kind: 'before',
+            eventSequence: page.window.continuation_before.event_sequence,
+          }
         : undefined,
     getNextPageParam: (page): SessionWindowAnchor | undefined =>
       page.window.continuation_after
-        ? { kind: 'after', eventSequence: page.window.continuation_after.event_sequence }
+        ? {
+            kind: 'after',
+            eventSequence: page.window.continuation_after.event_sequence,
+          }
         : undefined,
     maxPages: TRANSCRIPT_RETAINED_WINDOWS,
     gcTime: 0,
@@ -159,10 +165,40 @@ function TranscriptWindow({
       ),
     [entries, pages],
   )
-  const ids = useMemo(() => visible.map(conversationEntryKey), [visible])
+  const pending = useMemo(
+    () =>
+      pages?.flatMap((page) =>
+        page.details.filter((detail) => detail.items.length === 0 && detail.continuation),
+      ) ?? [],
+    [pages],
+  )
+  const rows = useMemo(
+    () =>
+      [
+        ...visible.map((item) => ({
+          id: conversationEntryKey(item),
+          sequence: item.address.event_sequence,
+          item,
+          pending: undefined,
+        })),
+        ...pending.map((page) => ({
+          id: `pending-${continuationSequence(page)}`,
+          sequence: continuationSequence(page),
+          item: undefined,
+          pending: page,
+        })),
+      ].sort((a, b) => (BigInt(a.sequence) < BigInt(b.sequence) ? -1 : 1)),
+    [visible, pending],
+  )
+  const ids = useMemo(() => rows.map((row) => row.id), [rows])
   const emptyScanned = useRef({ count: 0, first: '' })
   useEffect(() => {
-    if (visible.length > 0) {
+    const oldest = pages?.[0]
+    if (
+      oldest?.details.some(
+        (page) => page.continuation || page.items.some((item) => visible.includes(item)),
+      )
+    ) {
       emptyScanned.current = { count: 0, first: '' }
       return
     }
@@ -178,7 +214,7 @@ function TranscriptWindow({
     if (emptyScanned.current.count >= SESSION_WINDOW_ITEMS) return
     void transcript.fetchPreviousPage()
   }, [
-    visible.length,
+    visible,
     pages,
     transcript.isFetching,
     transcript.isError,
@@ -196,7 +232,7 @@ function TranscriptWindow({
           </button>
         </p>
       )}
-      {!transcript.isPending && !transcript.isFetching && visible.length === 0 && (
+      {!transcript.isPending && !transcript.isFetching && rows.length === 0 && (
         <p>No messages in this part of the conversation. Scroll up to keep looking.</p>
       )}
       <VirtualTranscript
@@ -211,8 +247,22 @@ function TranscriptWindow({
           if (direction === 'after' && transcript.hasNextPage) void transcript.fetchNextPage()
         }}
         renderRow={(index, measure, style) => {
-          const item = visible[index]
-          if (!item) return null
+          const row = rows[index]
+          if (!row) return null
+          if (row.pending)
+            return (
+              <div
+                key={row.id}
+                ref={measure}
+                data-index={index}
+                style={style}
+                className="session-message-entry"
+                data-event-sequence={row.sequence}
+              >
+                <ContinuedEvent sessionId={sessionId} page={row.pending} limits={limits} />
+              </div>
+            )
+          const item = row.item
           const detailPage = pages
             ?.flatMap((page) => page.details)
             .find((page) => page.items.at(-1) === item)
@@ -242,6 +292,13 @@ function TranscriptWindow({
   )
 }
 
+function continuationSequence(page: WebSessionTimelineDetailPage): string {
+  const cursor = page.continuation
+  return cursor?.type === 'more_at'
+    ? cursor.address.event_sequence
+    : (cursor?.body.address.event_sequence ?? '')
+}
+
 function ContinuedEvent({
   sessionId,
   page,
@@ -254,7 +311,7 @@ function ContinuedEvent({
   const [open, setOpen] = useState(false)
   const [cursor, setCursor] = useState(page.continuation ?? null)
   const previous = useRef(page)
-  const sequence = page.items.at(-1)?.address.event_sequence ?? ''
+  const sequence = page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)
   const detail = useQuery({
     queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
     enabled: open,
