@@ -131,7 +131,8 @@ pub struct StartupScanOutcome {
 }
 
 impl StartupScanOutcome {
-    /// Returns sessions excluded with durable reconstitution-failure evidence.
+    /// Returns sessions excluded with durable reconstitution-failure evidence
+    /// or a pending operator park.
     pub fn skipped_corrupt_sessions(&self) -> &[SessionId] {
         &self.skipped_corrupt_sessions
     }

@@ -799,7 +799,7 @@ pub struct FatalExecutionSignal {
 }
 
 impl FatalExecutionSignal {
-    /// Waits until an activated-turn execution reports failure.
+    /// Waits until activated-turn execution or a startup-scan session reports failure.
     pub async fn wait(&self) {
         let mut triggered = self.triggered.clone();
         while !triggered.borrow_and_update().is_triggered() {
@@ -819,7 +819,7 @@ impl FatalExecutionSignal {
         }
     }
 
-    /// Reports whether activated-turn execution has failed.
+    /// Reports whether activated-turn execution or a startup-scan session has failed.
     pub fn is_triggered(&self) -> bool {
         self.triggered.borrow().is_triggered()
     }
