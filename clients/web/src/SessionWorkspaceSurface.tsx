@@ -10,13 +10,14 @@ import {
   useState,
 } from 'react'
 import { invokeCommand } from './commands'
-import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
+import type { WebSessionTimelineWindow, WebUsageSummary } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import './session-header.css'
 import type { SessionTranscriptLimits } from './product'
 import { SessionComposer } from './SessionComposer'
 import { SessionItemDetail } from './SessionItemDetail'
 import { SessionTranscriptText } from './SessionTranscriptText'
+import { HttpSearchUsageSource } from './search-usage/model'
 import {
   BoundedSessionHistory,
   HttpSessionTimelineSource,
@@ -109,6 +110,27 @@ export const pruneExpandedSessionItems = (
   const loadedIds = new Set(items.map((item) => item.address.event_sequence))
   const next = new Set([...expanded].filter((id) => loadedIds.has(id)))
   return next.size === expanded.size ? expanded : next
+}
+
+const sessionCostLabel = (summary: WebUsageSummary): string => {
+  if (summary.truncated) return 'Cost incomplete'
+  let total = 0n
+  let scale = 0
+  let equivalent = false
+  for (const group of summary.groups) {
+    if (group.cost.status === 'unavailable') return 'Cost unavailable'
+    const [whole, fraction = ''] = group.cost.amount_usd.split('.')
+    if (fraction.length > scale) {
+      total *= 10n ** BigInt(fraction.length - scale)
+      scale = fraction.length
+    }
+    total += BigInt(`${whole}${fraction}`) * 10n ** BigInt(scale - fraction.length)
+    equivalent ||= group.cost.label === 'metered_equivalent'
+  }
+  const divisor = 10n ** BigInt(Math.max(scale - 2, 0))
+  const cents = scale > 2 ? (total + divisor / 2n) / divisor : total * 10n ** BigInt(2 - scale)
+  const dollars = `$${new Intl.NumberFormat('en-US').format(cents / 100n)}.${(cents % 100n).toString().padStart(2, '0')}`
+  return equivalent ? `${dollars} equivalent` : dollars
 }
 
 export function SessionWorkspaceSurface({
@@ -226,6 +248,23 @@ export function SessionWorkspaceSurface({
   }, [dispatch, sessionId, timelineCapability])
   const displayedSession =
     session.isSuccess && awaitingSessionId !== sessionId ? session.data : undefined
+  const cost = useQuery({
+    queryKey: [
+      'production',
+      'session-cost',
+      sessionId,
+      displayedSession?.descriptor.observed_through,
+    ],
+    queryFn: async ({ signal }) => {
+      const source = await HttpSearchUsageSource.connect((input, init) =>
+        window.fetch(input, { ...init, signal }),
+      )
+      return source.usageSummary({ sessionId: sessionId ?? '' }, signal)
+    },
+    enabled: displayedSession !== undefined,
+    gcTime: 0,
+  })
+  const origin = displayedSession?.descriptor.repository_watch
   const items = useMemo(
     () => visibleSessionItems(displayedSession?.window.items ?? [], app.detail),
     [app.detail, displayedSession?.window.items],
@@ -426,6 +465,13 @@ export function SessionWorkspaceSurface({
                     ? 'Active'
                     : 'Inactive'}
               </p>
+              <span className="session-header-cost" title="Session cost">
+                {cost.data
+                  ? sessionCostLabel(cost.data)
+                  : cost.isError
+                    ? 'Cost unavailable'
+                    : 'Cost loading…'}
+              </span>
               <div
                 className="session-header-actions"
                 role="toolbar"
@@ -450,6 +496,25 @@ export function SessionWorkspaceSurface({
               </div>
             </div>
             <div className="session-header-line session-header-secondary">
+              {origin && (
+                <div className="session-header-context">
+                  <a
+                    href={`https://github.com/${origin.repository.split('/').map(encodeURIComponent).join('/')}`}
+                  >
+                    {origin.repository}
+                  </a>
+                  {origin.pull_request !== null && (
+                    <a
+                      href={`https://github.com/${origin.repository.split('/').map(encodeURIComponent).join('/')}/pull/${encodeURIComponent(origin.pull_request)}`}
+                    >
+                      #{origin.pull_request}
+                    </a>
+                  )}
+                  <span title={`Rule ${origin.rule_id} · ${enumLabel(origin.event_kind)}`}>
+                    Rule {origin.rule_id} · {enumLabel(origin.event_kind)}
+                  </span>
+                </div>
+              )}
               <span role="status">
                 {followFailed
                   ? 'Live updates unavailable.'

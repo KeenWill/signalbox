@@ -126,3 +126,41 @@
     flex-basis: 100%;
   }
 }
+
+.session-header-cost {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.session-header-context {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.session-header-context a {
+  color: var(--accent);
+  white-space: nowrap;
+}
+.session-header-context a:first-child,
+.session-header-context > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-header-secondary > [role="status"] {
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .session-header-secondary {
+    flex-wrap: wrap;
+  }
+  .session-header-context {
+    flex-basis: 100%;
+  }
+}
+
+.surface-body .session-workspace {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
