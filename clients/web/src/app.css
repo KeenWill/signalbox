@@ -3245,3 +3245,12 @@ kbd {
   display: block;
   color: var(--text-muted);
 }
+
+.surface-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.surface-header-actions:empty {
+  display: none;
+}

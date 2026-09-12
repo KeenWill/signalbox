@@ -14,13 +14,17 @@ import {
 } from 'lucide-react'
 import {
   type CSSProperties,
+  createContext,
+  type ReactNode,
   type RefObject,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ArtifactInspector,
   artifactResolutionId,
@@ -458,6 +462,13 @@ function useNarrowInspector(): boolean {
   return narrow
 }
 
+const SurfaceHeaderTarget = createContext<HTMLDivElement | null>(null)
+
+export function SurfaceHeaderActions({ headerActions }: { headerActions?: ReactNode }) {
+  const target = useContext(SurfaceHeaderTarget)
+  return target && headerActions ? createPortal(headerActions, target) : null
+}
+
 export function ProductApp({
   surface,
   search,
@@ -465,6 +476,7 @@ export function ProductApp({
   surface: ProductRouteId
   search: ProductRouteState
 }) {
+  const [headerTarget, setHeaderTarget] = useState<HTMLDivElement | null>(null)
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
@@ -927,6 +939,7 @@ export function ProductApp({
         <header className="product-header">
           <h1>{title}</h1>
           <div className="product-header-actions">
+            <div className="surface-header-actions" ref={setHeaderTarget} />
             {surface !== 'settings' && !bootstrap.isSuccess && (
               <div className="product-connection">
                 <span
@@ -985,7 +998,7 @@ export function ProductApp({
             />
           </div>
         </header>
-        {content}
+        <SurfaceHeaderTarget value={headerTarget}>{content}</SurfaceHeaderTarget>
       </main>
       {artifactOpen && !inspectorInSheet && (
         <aside className="product-inspector" aria-label="Inspector">
