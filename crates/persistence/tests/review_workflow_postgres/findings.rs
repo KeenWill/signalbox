@@ -163,7 +163,10 @@ async fn finding_event_uses_held_transaction_connection() -> Result<(), Box<dyn 
             finding_ref,
             ReviewEventOrdinal::one(),
             evidence[1].clone(),
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                    .expect("judge confidence"),
+            },
         ),
     );
     let appended = tokio::time::timeout(std::time::Duration::from_secs(5), append)
@@ -207,7 +210,10 @@ async fn finding_event_rejects_foreign_owner() -> Result<(), Box<dyn Error>> {
                 second,
                 ReviewEventOrdinal::one(),
                 succeeded_pass(fixture.pass, ReviewPassKind::Judge),
-                ReviewFindingEventKind::Accepted,
+                ReviewFindingEventKind::Accepted {
+                    confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                        .expect("judge confidence"),
+                },
             ),
         )
         .await
@@ -1355,7 +1361,8 @@ async fn finding_event_requires_exact_pass_result() -> Result<(), Box<dyn Error>
                 result_finding_run_id = $2,
                 result_finding_pass_id = $3,
                 result_event_ordinal = 1,
-                result_event_kind = 'accepted'
+                result_event_kind = 'accepted',
+                result_judge_confidence = 5
           WHERE pass_id = $4",
     )
     .bind(finding_ref.finding().into_uuid())
@@ -1466,7 +1473,10 @@ async fn finding_insert_requires_open_state() -> Result<(), Box<dyn Error>> {
             finding_ref,
             ReviewEventOrdinal::one(),
             evidence[1].clone(),
-            ReviewFindingEventKind::Accepted,
+            ReviewFindingEventKind::Accepted {
+                confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                    .expect("judge confidence"),
+            },
         ))
         .expect("open finding accepts judgment");
     assert!(matches!(
@@ -1568,7 +1578,8 @@ async fn finding_event_serialization_is_fk_compatible() -> Result<(), Box<dyn Er
                 result_finding_run_id = $2,
                 result_finding_pass_id = $3,
                 result_event_ordinal = 1,
-                result_event_kind = 'accepted'
+                result_event_kind = 'accepted',
+                result_judge_confidence = 5
           WHERE pass_id = $4",
     )
     .bind(finding_ref.finding().into_uuid())
@@ -1582,8 +1593,8 @@ async fn finding_event_serialization_is_fk_compatible() -> Result<(), Box<dyn Er
             (finding_id, event_ordinal, finding_run_id, target_id,
              event_pass_id, event_pass_run_id, event_kind, reason,
              referenced_finding_id, external_link_id,
-             external_link_association_kind)
-         VALUES ($1, 1, $2, $3, $4, $5, 'accepted', NULL, NULL, NULL, NULL)",
+             external_link_association_kind, judge_confidence)
+         VALUES ($1, 1, $2, $3, $4, $5, 'accepted', NULL, NULL, NULL, NULL, 5)",
     )
     .bind(finding_ref.finding().into_uuid())
     .bind(fixture.run.run().into_uuid())
@@ -1623,8 +1634,8 @@ async fn gapped_finding_history_is_rejected() -> Result<(), Box<dyn Error>> {
             (finding_id, event_ordinal, finding_run_id, target_id,
              event_pass_id, event_pass_run_id, event_kind, reason,
              referenced_finding_id, external_link_id,
-             external_link_association_kind)
-         VALUES ($1, 2, $2, $3, $4, $5, 'accepted', NULL, NULL, NULL, NULL)",
+             external_link_association_kind, judge_confidence)
+         VALUES ($1, 2, $2, $3, $4, $5, 'accepted', NULL, NULL, NULL, NULL, 5)",
     )
     .bind(second_finding_ref.finding().into_uuid())
     .bind(fixture.run.run().into_uuid())
@@ -1731,7 +1742,10 @@ async fn finding_load_rejects_missing_event_pass() -> Result<(), Box<dyn Error>>
                 finding_ref,
                 ReviewEventOrdinal::one(),
                 evidence[1].clone(),
-                ReviewFindingEventKind::Accepted,
+                ReviewFindingEventKind::Accepted {
+                    confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                        .expect("judge confidence"),
+                },
             ),
         )
         .await?;
@@ -1848,8 +1862,8 @@ async fn finding_event_rejects_failed_pass() -> Result<(), Box<dyn Error>> {
             (finding_id, event_ordinal, finding_run_id, target_id,
              event_pass_id, event_pass_run_id, event_kind, reason,
              referenced_finding_id, external_link_id,
-             external_link_association_kind)
-         VALUES ($1, 1, $2, $3, $4, $5, 'accepted', NULL, NULL, NULL, NULL)",
+             external_link_association_kind, judge_confidence)
+         VALUES ($1, 1, $2, $3, $4, $5, 'accepted', NULL, NULL, NULL, NULL, 5)",
     )
     .bind(finding_ref.finding().into_uuid())
     .bind(fixture.run.run().into_uuid())
@@ -1926,7 +1940,10 @@ async fn findings_receipt_recovers_after_later_disposition() -> Result<(), Box<d
                 finding_ref,
                 ReviewEventOrdinal::one(),
                 evidence[1].clone(),
-                ReviewFindingEventKind::Accepted,
+                ReviewFindingEventKind::Accepted {
+                    confidence: signalbox_domain::ReviewJudgeConfidence::try_new(5)
+                        .expect("judge confidence"),
+                },
             ),
         )
         .await?

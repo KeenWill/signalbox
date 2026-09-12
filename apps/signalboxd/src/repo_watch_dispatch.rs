@@ -616,6 +616,28 @@ impl RepositoryWatchCommandSink {
                     .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
                 Ok(CommandSubmission::Creation(outcome))
             }
+            SessionCommandPayload::Lifecycle(command)
+                if matches!(
+                    command.operation(),
+                    SessionLifecycleOperation::Stop {
+                        sticky: signalbox_domain::StopStickiness::Redispatchable,
+                        descendant_scope: signalbox_domain::DescendantTerminationScope::ParentAlone,
+                    }
+                ) =>
+            {
+                let outcome = SessionLifecycleCommandRepository::new(self.pool.clone())
+                    .close_completed_ordinary_dispatch(command.command_id(), command.session())
+                    .await
+                    .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+                Ok(match outcome {
+                    SessionLifecycleCommandHandlingOutcome::ConflictingReuse { .. } => {
+                        CommandSubmission::ConflictingReuse
+                    }
+                    SessionLifecycleCommandHandlingOutcome::Recorded(_) => {
+                        CommandSubmission::Accepted
+                    }
+                })
+            }
             SessionCommandPayload::Lifecycle(command) => self.submit_lifecycle(command).await,
             _ => Err(RepositoryWatchCommandError::UnsupportedCommand),
         }

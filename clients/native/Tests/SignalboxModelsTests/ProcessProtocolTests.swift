@@ -293,7 +293,7 @@ final class ProcessProtocolTests: XCTestCase {
 
     XCTAssertEqual(
       String(decoding: encoded, as: UTF8.self),
-      #"{"request":{"session_id":"\#(sessionID)","type":"read_transcript"},"request_id":"7","version":1}"#
+      #"{"request":{"after_frontier":null,"session_id":"\#(sessionID)","type":"read_transcript"},"request_id":"7","version":1}"#
     )
   }
 
@@ -2363,6 +2363,7 @@ final class ProcessProtocolTests: XCTestCase {
         "request_id":"9",
         "message":{
           "type":"transcript_snapshot_start",
+          "after_frontier":null,
           "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(sessionID)",
@@ -2381,11 +2382,58 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// a daemon-only transcript snapshot carries its nullable
-  /// runner member without becoming an unknown message.
-  func testTranscriptSnapshotStartDecodesAbsentRunnerProjection() throws {
-    let frame = try SignalboxProcessServerFrame.decode(
+  func testTranscriptSnapshotBoundariesDecodeExplicitNullFrontiers() throws {
+    let start = try SignalboxProcessServerFrame.decode(
       from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"9",
+          "message":{
+            "type":"transcript_snapshot_start",
+            "after_frontier":null,
+            "workspace_root_kind":null,
+            "repository_watch":null,
+            "session_id":"\(sessionID)",
+            "cursor":"12",
+            "runner":null
+          }
+        }
+        """.utf8
+      )
+    )
+    let end = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"9",
+          "message":{
+            "type":"transcript_snapshot_end",
+            "session_id":"\(sessionID)",
+            "cursor":"12",
+            "frontier":null,
+            "turn_count":"0",
+            "entry_count":"0"
+          }
+        }
+        """.utf8
+      )
+    )
+
+    guard case .transcriptSnapshotStart(let boundary) = start.message else {
+      return XCTFail("Expected a typed snapshot start, got \(start.message).")
+    }
+    guard case .transcriptSnapshotEnd(let boundaryEnd) = end.message else {
+      return XCTFail("Expected a typed snapshot end, got \(end.message).")
+    }
+    XCTAssertNil(boundary.afterFrontier)
+    XCTAssertNil(boundaryEnd.frontier)
+  }
+
+  func testTranscriptSnapshotBoundariesRequireNullableFrontiers() throws {
+    let frames = [
+      Data(
         """
         {
           "version":1,
@@ -2400,11 +2448,56 @@ final class ProcessProtocolTests: XCTestCase {
           }
         }
         """.utf8
+      ),
+      Data(
+        """
+        {
+          "version":1,
+          "request_id":"9",
+          "message":{
+            "type":"transcript_snapshot_end",
+            "session_id":"\(sessionID)",
+            "cursor":"12",
+            "turn_count":"0",
+            "entry_count":"0"
+          }
+        }
+        """.utf8
+      ),
+    ]
+
+    for encoded in frames {
+      let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+      XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+    }
+  }
+
+  /// a daemon-only transcript snapshot carries its nullable
+  /// runner member without becoming an unknown message.
+  func testTranscriptSnapshotStartDecodesAbsentRunnerProjection() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"9",
+          "message":{
+            "type":"transcript_snapshot_start",
+            "after_frontier":null,
+            "workspace_root_kind":null,
+            "repository_watch":null,
+            "session_id":"\(sessionID)",
+            "cursor":"12",
+            "runner":null
+          }
+        }
+        """.utf8
       )
     )
     let expected = SignalboxTranscriptSnapshotBoundary(
       sessionID: try SignalboxCanonicalUUID(validating: sessionID),
       cursor: SignalboxCanonicalUInt64(rawValue: 12),
+      afterFrontier: nil,
       runner: nil,
       repositoryWatch: nil,
       workspaceRootKind: nil
@@ -2422,6 +2515,7 @@ final class ProcessProtocolTests: XCTestCase {
           "request_id":"9",
           "message":{
             "type":"transcript_snapshot_start",
+            "after_frontier":null,
             "workspace_root_kind":"derived",
             "repository_watch":null,
             "session_id":"\(sessionID)",
@@ -2509,6 +2603,7 @@ final class ProcessProtocolTests: XCTestCase {
           "request_id":"9",
           "message":{
             "type":"transcript_snapshot_start",
+            "after_frontier":null,
             "workspace_root_kind":null,
             "session_id":"\(sessionID)",
             "cursor":"12",
@@ -2534,6 +2629,7 @@ final class ProcessProtocolTests: XCTestCase {
           "request_id":"9",
           "message":{
             "type":"transcript_snapshot_start",
+            "after_frontier":null,
             "workspace_root_kind":null,
             "repository_watch":null,
             "session_id":"\(sessionID)",
@@ -2570,6 +2666,7 @@ final class ProcessProtocolTests: XCTestCase {
     let expected = SignalboxTranscriptSnapshotBoundary(
       sessionID: try SignalboxCanonicalUUID(validating: sessionID),
       cursor: SignalboxCanonicalUInt64(rawValue: 12),
+      afterFrontier: nil,
       runner: expectedProjection,
       repositoryWatch: nil,
       workspaceRootKind: nil
@@ -2588,6 +2685,7 @@ final class ProcessProtocolTests: XCTestCase {
         "request_id":"9",
         "message":{
           "type":"transcript_snapshot_start",
+          "after_frontier":null,
           "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(sessionID)",
@@ -3258,6 +3356,7 @@ private enum ProcessProtocolFixture {
       kind: "transcript_snapshot_start",
       payload: [
         "type": .string("transcript_snapshot_start"),
+        "after_frontier": .null,
         "workspace_root_kind": .null,
         "repository_watch": .null,
         "session_id": .string(sessionID),
@@ -3283,6 +3382,7 @@ private enum ProcessProtocolFixture {
         "request_id":"9",
         "message":{
           "type":"transcript_snapshot_start",
+          "after_frontier":null,
           "workspace_root_kind":null,
           "session_id":"\(sessionID)",
           "cursor":"12",
@@ -3317,6 +3417,7 @@ private enum ProcessProtocolFixture {
         "request_id":"9",
         "message":{
           "type":"transcript_snapshot_start",
+          "after_frontier":null,
           "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(sessionID)",

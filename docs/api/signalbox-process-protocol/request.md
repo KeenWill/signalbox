@@ -196,6 +196,7 @@ pub enum ClientRequest {
     },
     ReadTranscript {
         session_id: CanonicalUuid,
+        after_frontier: option::Option<CanonicalUuid>,
     },
     FollowSession {
         session_id: CanonicalUuid,

@@ -2,6 +2,38 @@
 
 # root: types-2
 
+## WebDollarAmount
+
+```rust
+pub struct WebDollarAmount(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl WebDollarAmount {
+    #[must_use]
+    pub fn from_derived(value: string::String) -> Self;
+}
+impl<'de> de::Deserialize<'de> for WebDollarAmount {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
+    where
+        D: de::Deserializer<'de>;
+}
+```
+
+## WebUsageRateVersion
+
+```rust
+pub struct WebUsageRateVersion(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl WebUsageRateVersion {
+    #[must_use]
+    pub fn from_configured(value: string::String) -> Self;
+}
+impl<'de> de::Deserialize<'de> for WebUsageRateVersion {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
+    where
+        D: de::Deserializer<'de>;
+}
+```
+
 ## WebUsageCost
 
 ```rust

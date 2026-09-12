@@ -8,6 +8,7 @@
 pub enum CredentialAvailabilityWaitCause {
     Contended,
     Exhausted,
+    NetworkUnavailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

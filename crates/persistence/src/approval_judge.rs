@@ -388,6 +388,13 @@ impl PostgresApprovalJudgeRepository {
             .await
             .map_err(map_model_error)?;
         let state = require_exact_judge(&mut transaction, prepared).await?;
+        if cancel_logically_terminal_judge(&mut transaction, prepared).await? {
+            transaction
+                .commit()
+                .await
+                .map_err(ApprovalJudgeRepositoryError::commit)?;
+            return Ok(AuthorizeApprovalJudgeOutcome::NoSend);
+        }
         if matches!(
             state,
             ApprovalJudgeStateStorageKind::InFlight | ApprovalJudgeStateStorageKind::Terminal
@@ -455,6 +462,13 @@ impl PostgresApprovalJudgeRepository {
             .await
             .map_err(map_model_error)?;
         let state = require_exact_judge(&mut transaction, prepared).await?;
+        if cancel_logically_terminal_judge(&mut transaction, prepared).await? {
+            transaction
+                .commit()
+                .await
+                .map_err(ApprovalJudgeRepositoryError::commit)?;
+            return Ok(CompleteApprovalJudgeOutcome::Cancelled);
+        }
         if state == ApprovalJudgeStateStorageKind::Terminal {
             let outcome = exact_completed(
                 &mut transaction,
@@ -656,6 +670,13 @@ impl PostgresApprovalJudgeRepository {
             .await
             .map_err(map_model_error)?;
         let state = require_exact_judge(&mut transaction, prepared).await?;
+        if cancel_logically_terminal_judge(&mut transaction, prepared).await? {
+            transaction
+                .commit()
+                .await
+                .map_err(ApprovalJudgeRepositoryError::commit)?;
+            return Ok(());
+        }
         let encoded = encode_usage(usage);
         if state == ApprovalJudgeStateStorageKind::Terminal {
             let exact: bool = sqlx::query_scalar(
@@ -1578,6 +1599,26 @@ async fn load_producing_model(
             "credential_reference",
         )?),
     })
+}
+
+async fn cancel_logically_terminal_judge(
+    connection: &mut PgConnection,
+    prepared: &PreparedApprovalJudge,
+) -> Result<bool, ApprovalJudgeRepositoryError> {
+    let cancelled = sqlx::query(
+        "UPDATE tool_approval_judge_model_call AS judge
+            SET state_kind = 'terminal', terminal_disposition_kind = 'cancelled'
+           FROM turn_lifecycle AS turn
+          WHERE judge.model_call_id = $1
+            AND judge.session_id = turn.session_id AND judge.turn_id = turn.turn_id
+            AND turn.delegation_runtime_terminal
+            AND judge.state_kind IN ('prepared', 'in_flight')",
+    )
+    .bind(prepared.call.into_uuid())
+    .execute(connection)
+    .await?
+    .rows_affected();
+    Ok(cancelled != 0)
 }
 
 async fn require_exact_judge(

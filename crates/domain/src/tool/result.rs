@@ -2,8 +2,6 @@
 
 use crate::{ToolAttemptId, ToolRequestId};
 
-pub(super) const MAX_TOOL_RESULT_TEXT_BYTES: usize = 1024 * 1024;
-
 /// The implemented result-content algebra for one terminal tool attempt.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ToolResultContent {
@@ -23,9 +21,12 @@ pub enum ToolResultContent {
 pub struct ToolResultText(String);
 
 impl ToolResultText {
+    /// Existing UTF-8 byte ceiling for one tool result.
+    pub const MAX_UTF8_BYTES: usize = 1024 * 1024;
+
     /// Checks the admission bound and rejects U+0000 without rewriting.
     pub fn try_new(value: String) -> Result<Self, ToolResultTextError> {
-        let failure = if value.len() > MAX_TOOL_RESULT_TEXT_BYTES {
+        let failure = if value.len() > Self::MAX_UTF8_BYTES {
             Some(ToolResultTextFailure::TooLarge { bytes: value.len() })
         } else if value.contains('\0') {
             Some(ToolResultTextFailure::ContainsNull)

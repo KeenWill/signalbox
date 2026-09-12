@@ -55,6 +55,7 @@ mod session_live;
 mod session_ownership_grants;
 mod session_plan;
 mod session_timeline;
+mod terminal_boundary_scan;
 mod tool_round_lifecycle;
 mod turn_activation;
 mod turn_liveness;

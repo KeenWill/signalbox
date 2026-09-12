@@ -924,7 +924,7 @@ pub(crate) const fn review_pass_completion_is_coherent(
 
 pub(crate) const fn review_finding_event_status(event: &ReviewFindingEvent) -> ReviewFindingStatus {
     match event {
-        ReviewFindingEvent::Accepted {} => ReviewFindingStatus::Accepted,
+        ReviewFindingEvent::Accepted { .. } => ReviewFindingStatus::Accepted,
         ReviewFindingEvent::Rejected { .. } => ReviewFindingStatus::Rejected,
         ReviewFindingEvent::Duplicate { .. } => ReviewFindingStatus::Duplicate,
         ReviewFindingEvent::Superseded { .. } => ReviewFindingStatus::Superseded,

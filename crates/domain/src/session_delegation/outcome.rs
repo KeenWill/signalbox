@@ -113,6 +113,19 @@ impl DelegationOutcome {
         Self::failed_child(TerminalChildTurn::from_reconciliation_required(value))
     }
 
+    /// Derives an unavailable child result from terminal tool reconciliation.
+    pub fn from_tool_reconciliation_required_child(
+        value: &crate::ReconciliationRequiredToolTurn,
+    ) -> Self {
+        Self::failed_child(TerminalChildTurn {
+            session: value.session(),
+            turn: value.turn(),
+            kind: TerminalChildTurnKind::Failed,
+            reason: DelegationOutcomeReason::ChildResultUnavailable,
+            result_digest: None,
+        })
+    }
+
     /// Derives a failed delivered outcome from a refused child turn.
     pub fn from_refused_child(value: &crate::RefusedModelCallTurn) -> Self {
         Self::failed_child(TerminalChildTurn::from_refused(value))

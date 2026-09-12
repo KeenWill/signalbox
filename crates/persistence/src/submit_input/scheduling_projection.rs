@@ -1205,72 +1205,103 @@ async fn load_scheduling_projection_inner(
                         }
                     }
                     Some("cancelled") => {
-                        let terminal_attempt = terminal_attempt
-                            .ok_or(SubmitInputCorruption::Missing("terminal_attempt_id"))?;
-                        let stored_attempt_id =
-                            TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?);
-                        let attempt_turn = turn_id_from_uuid(required(&row, "attempt_turn_id")?);
-                        let attempt_session =
-                            session_id_from_uuid(required(&row, "attempt_session_id")?);
-                        let attempt_state: String = required(&row, "attempt_state_kind")?;
-                        let end_variant: Option<String> = row.try_get("end_variant")?;
-                        let end_disposition: Option<String> = row.try_get("end_disposition")?;
-                        if stored_attempt_id.into_uuid() != terminal_attempt
-                            || attempt_turn != lifecycle_turn
-                            || attempt_session != lifecycle_session
-                            || attempt_state != "ended"
-                        {
-                            return Err(SubmitInputCorruption::Inconsistent(
-                                "cancelled terminal attempt",
-                            )
-                            .into());
-                        }
-                        let (attempt_end, interrupt) = match (
-                            end_variant.as_deref(),
-                            end_disposition.as_deref(),
-                        ) {
-                            (Some("after_cancellation"), Some("cancelled")) => {
-                                let interrupt = require_applied_interrupt_from_attempt(
-                                    &row,
-                                    lifecycle_turn,
-                                    &recorded_commands,
-                                )?;
-                                (
-                                    TerminalAttemptEndReconstitutionInput::after_cancellation(
-                                        CancellationStopDisposition::Cancelled,
-                                        interrupt,
-                                    ),
-                                    interrupt,
-                                )
-                            }
-                            (Some("without_stop"), Some("yielded_to_durable_wait")) => {
-                                let interrupted_tool_attempt =
-                                    row.try_get("runner_recovery_interrupted_tool_attempt_id")?;
-                                let interrupt = require_applied_runner_recovery_interrupt(
-                                    &row,
-                                    lifecycle_turn,
-                                    stored_attempt_id,
-                                    interrupted_tool_attempt,
-                                    &recorded_commands,
-                                )?;
-                                (
-                                    TerminalAttemptEndReconstitutionInput::yielded_to_runner_recovery(
-                                        interrupt,
-                                    ),
-                                    interrupt,
-                                )
-                            }
-                            _ => {
+                        let terminal_execution = if let Some(terminal_attempt) = terminal_attempt {
+                            let stored_attempt_id =
+                                TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?);
+                            let attempt_turn =
+                                turn_id_from_uuid(required(&row, "attempt_turn_id")?);
+                            let attempt_session =
+                                session_id_from_uuid(required(&row, "attempt_session_id")?);
+                            let attempt_state: String = required(&row, "attempt_state_kind")?;
+                            let end_variant: Option<String> = row.try_get("end_variant")?;
+                            let end_disposition: Option<String> = row.try_get("end_disposition")?;
+                            if stored_attempt_id.into_uuid() != terminal_attempt
+                                || attempt_turn != lifecycle_turn
+                                || attempt_session != lifecycle_session
+                                || attempt_state != "ended"
+                            {
                                 return Err(SubmitInputCorruption::Inconsistent(
-                                    "cancelled terminal attempt disposition",
+                                    "cancelled terminal attempt",
                                 )
                                 .into());
                             }
+                            let (attempt_end, interrupt) = match (
+                                end_variant.as_deref(),
+                                end_disposition.as_deref(),
+                            ) {
+                                (Some("after_cancellation"), Some("cancelled")) => {
+                                    let interrupt = require_applied_interrupt_from_attempt(
+                                        &row,
+                                        lifecycle_turn,
+                                        &recorded_commands,
+                                    )?;
+                                    (
+                                        TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                            CancellationStopDisposition::Cancelled,
+                                            interrupt,
+                                        ),
+                                        interrupt,
+                                    )
+                                }
+                                (Some("without_stop"), Some("yielded_to_durable_wait")) => {
+                                    let interrupted_tool_attempt =
+                                        row.try_get("runner_recovery_interrupted_tool_attempt_id")?;
+                                    let interrupt = require_applied_runner_recovery_interrupt(
+                                        &row,
+                                        lifecycle_turn,
+                                        stored_attempt_id,
+                                        interrupted_tool_attempt,
+                                        &recorded_commands,
+                                    )?;
+                                    let attempt_end = TerminalAttemptEndReconstitutionInput::yielded_to_runner_recovery(
+                                        interrupt,
+                                    );
+                                    (attempt_end, interrupt)
+                                }
+                                _ => {
+                                    return Err(SubmitInputCorruption::Inconsistent(
+                                        "cancelled terminal attempt disposition",
+                                    )
+                                    .into());
+                                }
+                            };
+                            let ended_call = terminal_model_call.map(ModelCallId::from_uuid);
+                            if let Some(call) = terminal_model_call {
+                                required_model_calls.insert(call);
+                            }
+                            CancelledTurnExecutionReconstitutionInput::new(
+                                lifecycle_turn,
+                                stored_attempt_id,
+                                attempt_end,
+                                ended_call,
+                                interrupt,
+                            )
+                        } else {
+                            if terminal_model_call.is_some() {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "cancelled call without attempt",
+                                )
+                                .into());
+                            }
+                            let wait = crate::tool_loop::load_cancelled_foreground_wait(
+                                connection,
+                                lifecycle_session,
+                                lifecycle_turn,
+                                ContextFrontierId::from_uuid(terminal_frontier),
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?;
+                            let interrupt =
+                                applied_interrupt_for_turn(lifecycle_turn, &recorded_commands)?
+                                    .ok_or(SubmitInputCorruption::Missing(
+                                        "cancelled foreground wait interrupt",
+                                    ))?;
+                            CancelledTurnExecutionReconstitutionInput::foreground_child_wait(
+                                lifecycle_turn,
+                                wait,
+                                interrupt,
+                            )
                         };
-                        let ended_call = terminal_model_call.map(ModelCallId::from_uuid);
-                        if let Some(call) = terminal_model_call {
-                            required_model_calls.insert(call);
-                        }
                         // A cancelled turn's terminal frontier can close a tool
                         // round whether the stored provenance names no call (a
                         // batch interrupt) or the round's completed producing
@@ -1297,15 +1328,9 @@ async fn load_scheduling_projection_inner(
                         AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
                             starting_lineage,
                             starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
-                            terminal_execution: CancelledTurnExecutionReconstitutionInput::new(
-                                lifecycle_turn,
-                                stored_attempt_id,
-                                attempt_end,
-                                ended_call,
-                                interrupt,
-                            )
-                            .with_terminal_tool_attempts(terminal_tool_attempts)
-                            .with_terminal_tool_denials(terminal_tool_denials),
+                            terminal_execution: terminal_execution
+                                .with_terminal_tool_attempts(terminal_tool_attempts)
+                                .with_terminal_tool_denials(terminal_tool_denials),
                             terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                         }
                     }

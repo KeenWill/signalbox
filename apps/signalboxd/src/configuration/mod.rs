@@ -181,7 +181,7 @@ impl HubModelConfiguration {
         let document = content
             .parse::<DocumentMut>()
             .map_err(|_| HubModelConfigurationError::InvalidDocument)?;
-        Ok(startup::parse_startup(content, &document)?.numeric_bounds)
+        Ok(startup::parse_bootstrap(content, &document)?.numeric_bounds)
     }
 
     /// Parses one complete versioned configuration document.

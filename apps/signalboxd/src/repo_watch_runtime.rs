@@ -146,7 +146,7 @@ pub async fn connect_repository_watch_pool(
 /// A reload handle and one serialized command worker for the compiled-in module.
 #[derive(Clone)]
 pub struct RepositoryWatchRuntime {
-    measurements_store: RepoWatchStore,
+    store: RepoWatchStore,
     state: Arc<Mutex<RuntimeState>>,
     observers: observation::Observers,
     workflow_service: Arc<std::sync::OnceLock<crate::workflows::WorkflowService>>,
@@ -256,19 +256,16 @@ impl RepositoryWatchRuntime {
         &self,
         repository: &RepositorySlug,
     ) -> signalbox_module_repo_watch_v2::measurements::IngestionMeasurements {
-        self.measurements_store.ingestion_measurements(repository)
+        self.store.ingestion_measurements(repository)
     }
     pub(crate) async fn session_origin(
         &self,
         session: signalbox_domain::SessionId,
+        core: &PgPool,
     ) -> Result<
         Option<signalbox_module_repo_watch_v2::RetainedDispatchAction>,
         signalbox_module_repo_watch_v2::StoreError,
     > {
-        let (store, core) = {
-            let state = self.state.lock().await;
-            (state.store.clone(), state.core_pool.clone())
-        };
         let origin: Option<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
             "SELECT session.dispatch_ref, creation.command_id
                FROM session
@@ -279,12 +276,12 @@ impl RepositoryWatchRuntime {
                 AND session.dispatching_module = 'repo_watch'",
         )
         .bind(session.into_uuid())
-        .fetch_optional(&core)
+        .fetch_optional(core)
         .await?;
         let Some((dispatch, command)) = origin else {
             return Ok(None);
         };
-        store
+        self.store
             .origin_for_create_command(
                 signalbox_session_ownership::RepoWatchDispatchId::from_uuid(dispatch),
                 signalbox_session_ownership::DurableCommandId::from_uuid(command),
@@ -368,7 +365,7 @@ impl RepositoryWatchRuntime {
         let observers = observation::Observers::default();
         let workflow_service = Arc::new(std::sync::OnceLock::new());
         Self {
-            measurements_store: store.clone(),
+            store: store.clone(),
             observers: observers.clone(),
             workflow_service: workflow_service.clone(),
             state: Arc::new(Mutex::new(RuntimeState {
@@ -665,6 +662,41 @@ impl RepositoryWatchRuntime {
         })
     }
 
+    async fn command_tick(&self) -> Result<(), RepositoryWatchRuntimeError> {
+        let prepared = {
+            let state = self.state.lock().await;
+            if state.paused {
+                return Ok(());
+            }
+            state
+                .configuration
+                .as_ref()
+                .filter(|configuration| configuration.enabled())
+                .map(|_| {
+                    (
+                        state.store.clone(),
+                        state.lifecycle.clone(),
+                        RepositoryWatchCommandFactory(state.factory.0.clone()),
+                    )
+                })
+        };
+        if let Some((store, source, mut factory)) = prepared {
+            store
+                .drain_lifecycle(&mut factory, &mut RepositoryWatchCommandCodec, &source)
+                .await
+                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
+            store
+                .react_to_ordinary_dispatch_completion(
+                    &mut factory,
+                    &mut RepositoryWatchCommandCodec,
+                    &source,
+                )
+                .await
+                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
+        }
+        self.state.lock().await.tick().await
+    }
+
     async fn run_commands(self, mut shutdown: watch::Receiver<bool>) {
         loop {
             if *shutdown.borrow() {
@@ -673,7 +705,7 @@ impl RepositoryWatchRuntime {
             tokio::select! {
                 biased;
                 _ = shutdown.changed() => return,
-                result = async { self.state.lock().await.tick().await } => {
+                result = self.command_tick() => {
                     if let Err(error) = result { tracing::warn!(?error, "repository-watch command attempt failed"); }
                 }
             }
@@ -882,26 +914,6 @@ impl RuntimeState {
             return Ok(());
         };
         let mut codec = RepositoryWatchCommandCodec;
-        if let Some(event) = self
-            .lifecycle
-            .next()
-            .await
-            .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?
-        {
-            self.store
-                .react_to_lifecycle(&event, &mut self.factory, &mut codec, &self.lifecycle)
-                .await
-                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
-            self.lifecycle
-                .acknowledge(&event)
-                .await
-                .map_err(|_| RepositoryWatchRuntimeError::Lifecycle)?;
-        } else {
-            self.store
-                .react_to_pull_request_lifecycle(&mut self.factory, &mut codec, &self.lifecycle)
-                .await
-                .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
-        }
         for repository in configuration.repositories() {
             for rule in configuration.rules() {
                 self.store
@@ -1012,6 +1024,115 @@ mod tests {
             tokio::time::timeout(DELIVERY_TIMEOUT, source.next()).await,
             Ok(Ok(next_restored))
         );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_database_wait_keeps_runtime_control_available() {
+        use std::time::Duration;
+        // A silent local endpoint holds the drain at its first database read.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let pool = PgPoolOptions::new()
+            .connect_lazy(&format!(
+                "postgres://unused:unused@{}/unused",
+                listener.local_addr().expect("local address")
+            ))
+            .expect("lazy pool");
+        let base = crate::configuration::checked_in_example_configuration().expect("models");
+        let credential = tempfile::NamedTempFile::new().expect("fixture credential path");
+        let models = crate::HubModelConfiguration::parse(&format!(
+            "{}\n[repository_watch]\nversion = 1\nenabled = true\nsignal_reviewers = []\n[[repository_watch.repositories]]\nrepository = \"fixture/project\"\npoll_interval_seconds = 60\ncredential_file = \"{}\"\n",
+            base.source(), credential.path().display()
+        ))
+        .expect("enabled watch fixture");
+        let (nudge, _work) = signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let runtime = RepositoryWatchRuntime::unstarted(
+            pool.clone(),
+            RepositoryWatchServices {
+                goal_resumption: crate::PostgresGoalPassDisposition::new(
+                    pool.clone(),
+                    models.clone(),
+                    nudge.clone(),
+                    crate::GoalModeNumericBounds::new(None, None, None, None, None),
+                ),
+                core_pool: pool,
+                checkout_runner: None,
+                models: Arc::new(models.clone()),
+                templates: Arc::new(SessionTemplateConfiguration::default()),
+                eligibility_nudge: nudge,
+                tool_dispatch_gate: InProcessToolDispatchGate::default(),
+            },
+        );
+        {
+            let mut state = runtime.state.lock().await;
+            state.configuration = models.repository_watch().cloned();
+            state.paused = false;
+        }
+        let worker_runtime = runtime.clone();
+        let worker = tokio::spawn(async move { worker_runtime.command_tick().await });
+        let (connection, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("drain reaches its database read")
+            .expect("accept connection");
+        let available = tokio::time::timeout(Duration::from_secs(5), runtime.state.lock()).await;
+        worker.abort();
+        let _ = worker.await;
+        drop(connection);
+        assert!(
+            available.is_ok(),
+            "session reads and reload control remain available during lifecycle IO"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_origin_read_does_not_wait_for_dispatch_processing() {
+        use signalbox_domain::SessionId;
+        use signalbox_module_repo_watch_v2::StoreError;
+        use std::time::Duration;
+
+        // A closed pool gives a definitive read result without a database fixture.
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .expect("lazy pool");
+        pool.close().await;
+        let (eligibility_nudge, _work) = signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let models = crate::configuration::checked_in_example_configuration().expect("models");
+        let runtime = RepositoryWatchRuntime::unstarted(
+            pool.clone(),
+            RepositoryWatchServices {
+                goal_resumption: crate::PostgresGoalPassDisposition::new(
+                    pool.clone(),
+                    models.clone(),
+                    eligibility_nudge.clone(),
+                    crate::GoalModeNumericBounds::new(None, None, None, None, None),
+                ),
+                checkout_runner: None,
+                core_pool: pool.clone(),
+                models: Arc::new(models),
+                templates: Arc::new(SessionTemplateConfiguration::default()),
+                eligibility_nudge,
+                tool_dispatch_gate: InProcessToolDispatchGate::default(),
+            },
+        );
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(0x58_400));
+        let _dispatch_processing = runtime.state.lock().await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.session_origin(session, &pool),
+        )
+        .await
+        .expect(
+            "the descriptor read must reach its database without waiting for dispatch processing",
+        );
+        assert!(matches!(
+            result,
+            Err(StoreError::Database(sqlx::Error::PoolClosed))
+        ));
     }
 
     #[tokio::test]

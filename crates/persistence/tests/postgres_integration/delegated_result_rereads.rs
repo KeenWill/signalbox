@@ -1157,11 +1157,11 @@ async fn delegated_initial_target_failure_materializes_parent_delivery()
     Ok(())
 }
 
-/// reconciliation-required delegated work remains unresolved relationship work and cannot publish a
-/// child result, parent update, or wake.
+/// reconciliation-required delegated work withholds parent delivery and is already terminal to a
+/// descendant cascade.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegated_reconciliation_withholds_result_and_parent_delivery()
+async fn delegated_reconciliation_withholds_result_and_is_already_terminal_to_cascade()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd600;
@@ -1248,6 +1248,127 @@ async fn delegated_reconciliation_withholds_result_and_parent_delivery()
         ModelCallTerminalOutcome::ReconciliationRequired(_)
     ));
     assert_eq!(evidence, (1, 0, 0, 0, 0));
+    let terminal_before: (String, String, Uuid, Uuid, Uuid, bool) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, terminal_frontier_id,
+                terminal_attempt_id, terminal_model_call_id, delegation_runtime_terminal
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal_before.0, "terminal");
+    assert_eq!(terminal_before.1, "reconciliation_required");
+
+    let nested_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x220));
+    let nested_child = SessionId::from_uuid(Uuid::from_u128(seed + 0x221));
+    sqlx::query("ALTER TABLE session_delegation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind, on_parent_stopped, on_parent_cancelled)
+         VALUES ($1, $2, $3, $4, 'bound', 'cancel', 'stop')",
+    )
+    .bind(nested_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(nested_child.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let nested_frontier: (String, String) = sqlx::query_as(
+        "SELECT effective_parent_kind, expected_action
+           FROM delegation_cascade_expected_frontier($1, 'stopped')
+          WHERE spawning_tool_request_id = $2",
+    )
+    .bind(parent.into_uuid())
+    .bind(nested_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(nested_frontier, ("stopped".into(), "cancel".into()));
+
+    sqlx::query("ALTER TABLE session_delegation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM session_delegation
+          WHERE spawning_tool_request_id = $1",
+    )
+    .bind(nested_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    use signalbox_domain::{
+        CommandPrincipal, SessionLifecycleCommand, SessionLifecycleOperation, StopStickiness,
+    };
+    use signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository;
+
+    let cascade_command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 34));
+    SessionLifecycleCommandRepository::new(pool.clone())
+        .handle(
+            SessionLifecycleCommand::new(
+                cascade_command,
+                parent,
+                SessionLifecycleOperation::Stop {
+                    sticky: StopStickiness::Sticky,
+                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                },
+            ),
+            CommandPrincipal::Operator,
+        )
+        .await?;
+    let cascade: (String, i64, i64, String, String, Uuid, Uuid, Uuid, bool) = sqlx::query_as(
+        "SELECT event.outcome_kind,
+                (SELECT count(*) FROM session_delegation_logical_terminal
+                  WHERE spawning_tool_request_id = $1),
+                (SELECT count(*) FROM session_child_result
+                  WHERE spawning_tool_request_id = $1),
+                lifecycle.state_kind, lifecycle.terminal_disposition_kind,
+                lifecycle.terminal_frontier_id, lifecycle.terminal_attempt_id,
+                lifecycle.terminal_model_call_id, lifecycle.delegation_runtime_terminal
+           FROM session_delegation_event AS event
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.session_id = $2 AND lifecycle.turn_id = $3
+          WHERE event.spawning_tool_request_id = $1
+            AND event.provenance_command_id = $4",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(cascade_command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(cascade.0, "already_terminal");
+    assert_eq!(cascade.1, 0);
+    assert_eq!(cascade.2, 0);
+    assert_eq!(
+        (
+            cascade.3.as_str(),
+            cascade.4.as_str(),
+            cascade.5,
+            cascade.6,
+            cascade.7,
+            cascade.8,
+        ),
+        (
+            terminal_before.0.as_str(),
+            terminal_before.1.as_str(),
+            terminal_before.2,
+            terminal_before.3,
+            terminal_before.4,
+            terminal_before.5,
+        )
+    );
 
     pool.close().await;
     drop(container);
@@ -2710,5 +2831,129 @@ async fn delegated_physical_observation_unblocks_staged_runner_replacement()
             0
         )
     );
+    Ok(())
+}
+
+/// Automatic tool recovery applies to delegated origins as well as accepted input.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn automatic_reconciliation_closes_a_delegated_tool_ambiguity() -> Result<(), Box<dyn Error>>
+{
+    const FIXTURE_SEED: u128 = 0xf800;
+    let (container, pool, _) = migrated_postgres().await?;
+    let (fixture, ended) = prepare_delegated_tool_recovery_fixture(&pool, FIXTURE_SEED).await?;
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
+    let batch = repository.claim_due().await?;
+    assert_eq!(batch.claimed().len(), 1);
+    assert_eq!(
+        batch.claimed()[0].operation(),
+        AutomaticReconciliationOperation::ToolAttempt(ended.attempt())
+    );
+
+    assert_eq!(
+        repository.reconcile(batch.claimed()[0]).await?,
+        AutomaticReconciliationOutcome::Reconciled
+    );
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.child)
+        .await?
+        .expect("delegated reconciliation remains readable");
+    assert_eq!(
+        process_tool_reconciliation_operation(snapshot.turns()[0].state()),
+        (ended.issuing_attempt(), ended.attempt())
+    );
+    assert_eq!(closed_tool_request(snapshot.entries()), ended.request());
+    let result: String = sqlx::query_scalar(
+        "SELECT outcome_kind FROM session_child_result WHERE spawning_tool_request_id=$1",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(result, "child_failed");
+    let wakes: i64 = sqlx::query_scalar("SELECT count(*) FROM delegation_wake_outbox_event WHERE session_id=$1 AND result_spawning_request_id=$2")
+        .bind(fixture.parent.into_uuid()).bind(fixture.spawning_request.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(wakes, 1);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stop_closes_a_delegated_tool_ambiguity() -> Result<(), Box<dyn Error>> {
+    const FIXTURE_SEED: u128 = 0xf900;
+    let (container, pool, _) = migrated_postgres().await?;
+    let (fixture, ended) = prepare_delegated_tool_recovery_fixture(&pool, FIXTURE_SEED).await?;
+    let command = signalbox_domain::SessionLifecycleCommand::new(
+        DurableCommandId::from_uuid(Uuid::now_v7()),
+        fixture.child,
+        signalbox_domain::SessionLifecycleOperation::Stop {
+            sticky: signalbox_domain::StopStickiness::Redispatchable,
+            descendant_scope: signalbox_domain::DescendantTerminationScope::ParentAlone,
+        },
+    );
+    let outcome =
+        signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository::new(
+            pool.clone(),
+        )
+        .handle(command, signalbox_domain::CommandPrincipal::Operator)
+        .await?;
+    assert!(matches!(outcome, signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandHandlingOutcome::Recorded(
+        signalbox_domain::SessionLifecycleCommandResult::Applied(signalbox_domain::SessionLifecycleApplication::ClosurePending { .. }))));
+    let successor = TurnId::from_uuid(Uuid::now_v7());
+    let interrupted = SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates_alias_resolver_as(
+            SubmitInput::new_core_interrupt(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                fixture.child,
+                UserContent::try_text("settle the stopped ambiguous tool".into())
+                    .expect("fixture content"),
+                fixture.turn,
+                signalbox_domain::DescendantTerminationScope::ParentAlone,
+                input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            ),
+            signalbox_domain::CommandPrincipal::Core,
+            signalbox_domain::ParentTerminationKind::Stopped,
+            AcceptedInputId::from_uuid(Uuid::now_v7()),
+            Some(successor),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| successor,
+            |requests| {
+                assert_eq!(requests, [ended.request()]);
+                (
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                )
+            },
+            || panic!("the recovery has no approval decision"),
+            || panic!("the recovery has no approval attempt"),
+            |_| None,
+        )
+        .await?;
+    assert!(matches!(
+        interrupted,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    let state: (String, Option<bool>) = sqlx::query_as(
+        "SELECT state_kind, terminal_stop_sticky FROM session_lifecycle WHERE session_id=$1",
+    )
+    .bind(fixture.child.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(state, (String::from("terminal"), Some(false)));
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.child)
+        .await?
+        .expect("stopped delegated recovery remains readable");
+    assert_eq!(
+        process_tool_reconciliation_operation(snapshot.turns()[0].state()),
+        (ended.issuing_attempt(), ended.attempt()),
+    );
+    assert_eq!(closed_tool_request(snapshot.entries()), ended.request());
+    pool.close().await;
+    drop(container);
     Ok(())
 }

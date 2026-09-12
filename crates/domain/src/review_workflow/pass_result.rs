@@ -57,7 +57,10 @@ pub enum ReviewFindingEventType {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewFindingEventResultKind {
     /// Accepted judgment.
-    Accepted,
+    Accepted {
+        /// Independent confidence in the accepted judgment.
+        confidence: super::ReviewJudgeConfidence,
+    },
     /// Rejected judgment with its exact reason.
     Rejected {
         /// Exact rejection reason.
@@ -95,7 +98,7 @@ impl ReviewFindingEventResultKind {
     /// Returns the closed event discriminator.
     pub const fn event_type(&self) -> ReviewFindingEventType {
         match self {
-            Self::Accepted => ReviewFindingEventType::Accepted,
+            Self::Accepted { .. } => ReviewFindingEventType::Accepted,
             Self::Rejected { .. } => ReviewFindingEventType::Rejected,
             Self::Duplicate { .. } => ReviewFindingEventType::Duplicate,
             Self::Superseded { .. } => ReviewFindingEventType::Superseded,
