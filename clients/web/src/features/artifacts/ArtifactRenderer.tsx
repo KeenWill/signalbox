@@ -598,7 +598,7 @@ function RendererBoundary({
     )
   }
   const Renderer = rendererRegistry[artifact.kind] as ComponentType<RendererProps<typeof artifact>>
-  return <Renderer artifact={artifact} commandContext={commandContext} />
+  return <Renderer key={artifact.id} artifact={artifact} commandContext={commandContext} />
 }
 
 const artifactIcon = (artifact: ArtifactItem) => {

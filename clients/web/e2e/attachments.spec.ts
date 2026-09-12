@@ -37,6 +37,47 @@ test.beforeEach(async ({ page }) => {
   )
 })
 
+test('attachment selection reaches the shared renderer projection', async ({ page }) => {
+  await page.goto('/scenario/attachments')
+  const transcript = page.getByRole('region', { name: 'Transcript attachments' })
+  const preview = page.getByRole('region', { name: 'Selected attachment preview' })
+  await transcript.getByRole('button', { name: /operator-note\.ogg/ }).click()
+  await expect(preview.getByRole('button', { name: /operator-note\.ogg/ })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+  const diagnostics = await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__?.())
+  expect(diagnostics?.recentActions).toContain('app/artifactSelected')
+})
+
+for (const scenario of ['blobs', 'attachments']) {
+  test(`timeline commands are unavailable in the ${scenario} workbench`, async ({ page }) => {
+    await page.goto(`/scenario/${scenario}`)
+    await page.getByRole('button', { name: 'Open command palette' }).click()
+    await expect(page.getByRole('button', { name: /Select next timeline item/ })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Go to first timeline item/ })).toHaveCount(0)
+  })
+}
+
+test('a derivative decoder failure does not transfer to another attachment identity', async ({
+  page,
+}) => {
+  await page.goto('/scenario/attachments')
+  await page
+    .getByRole('region', { name: 'Transcript attachments' })
+    .getByRole('button', { name: /^orbital-map\.preview\.png/ })
+    .click()
+  const image = page.getByRole('img', { name: 'Preview of orbital-map.preview.png' })
+  await expect(image).toBeVisible()
+  await image.evaluate((element) => element.dispatchEvent(new Event('error')))
+  await expect(page.getByText('Preview unavailable', { exact: true })).toBeVisible()
+  await page
+    .getByRole('region', { name: 'Composer attachments' })
+    .getByRole('button', { name: /^orbital-map\.preview\.png/ })
+    .click()
+  await expect(image).toBeVisible()
+})
+
 for (const width of [790, 1440]) {
   test(`stacks attachments within the available pane at viewport ${width}`, async ({ page }) => {
     const problems = watchBrowser(page)
