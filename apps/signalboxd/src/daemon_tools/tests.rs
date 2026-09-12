@@ -437,6 +437,7 @@ fn production_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
             None, None, None, None, None, None,
         ))
         .expect("offline code-host transport constructs"),
+        None,
         GitHubEgressPolicy::github_api_only(),
         workspace,
         git_identity(),

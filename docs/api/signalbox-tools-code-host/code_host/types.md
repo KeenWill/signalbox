@@ -304,6 +304,10 @@ impl ConvergenceReadResult {
 pub struct GitHubCodeHostTransport {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl GitHubCodeHostTransport {
+    pub fn with_review_writes(
+        self,
+        recorder: option::Option<sync::Arc<dyn signalbox_github_transport::ReviewWriteRecorder>>,
+    ) -> Self;
     pub fn try_new(
         configured_bounds: CodeHostNumericBounds,
     ) -> result::Result<Self, GitHubCodeHostConstructionError>;

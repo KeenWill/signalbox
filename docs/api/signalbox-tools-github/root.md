@@ -453,6 +453,10 @@ impl signalbox_application::ClassifyOperatorFailure for GitHubExecutorError {
 pub struct GitHubApiTransport {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl GitHubApiTransport {
+    pub fn with_review_writes(
+        self,
+        recorder: option::Option<sync::Arc<dyn signalbox_github_transport::ReviewWriteRecorder>>,
+    ) -> Self;
     pub fn try_new() -> result::Result<Self, GitHubApiTransportConstructionError>;
     pub const fn request_timeout(&self) -> time::Duration;
     pub fn with_app(

@@ -78,6 +78,7 @@ mod repo_watch_checkout;
 mod repo_watch_credentials;
 pub use repo_watch_credentials::credential_files_conflict;
 pub mod repo_watch_dispatch;
+pub mod repo_watch_review_writes;
 pub mod repo_watch_runtime;
 mod repo_watch_webhook;
 mod review_orchestration_runtime;
