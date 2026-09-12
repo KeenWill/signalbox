@@ -48,7 +48,7 @@ query RepositoryWatchReviewThreads($owner: String!, $name: String!, $number: Int
           id
           isResolved
           resolvedBy { login }
-          comments(first: 1) { nodes { author { login } } }
+          comments(first: 1) { nodes { author { login } pullRequestReview { fullDatabaseId } } }
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -1036,23 +1036,39 @@ async fn fetch_threads(
                     RepoWatchAuthorLogin::try_new(value.text(&comment["author"]["login"])?).ok(),
                 )?)
             };
-            threads.push(if value.admit(thread["isResolved"].as_bool())? {
-                let resolver = if thread["resolvedBy"].is_null() {
-                    None
-                } else {
-                    Some(
-                        value.admit(
-                            RepoWatchAuthorLogin::try_new(
-                                value.text(&thread["resolvedBy"]["login"])?,
-                            )
-                            .ok(),
-                        )?,
-                    )
-                };
-                RepoWatchThreadObservation::resolved(id, author, resolver)
+            let source_review = if comment["pullRequestReview"]["fullDatabaseId"].is_null() {
+                None
             } else {
-                RepoWatchThreadObservation::open(id, author)
-            });
+                Some(signalbox_session_ownership::GitHubObjectId::new(
+                    value.admit(
+                        value
+                            .text(&comment["pullRequestReview"]["fullDatabaseId"])?
+                            .parse::<u64>()
+                            .ok()
+                            .and_then(std::num::NonZeroU64::new),
+                    )?,
+                ))
+            };
+            threads.push(
+                (if value.admit(thread["isResolved"].as_bool())? {
+                    let resolver = if thread["resolvedBy"].is_null() {
+                        None
+                    } else {
+                        Some(
+                            value.admit(
+                                RepoWatchAuthorLogin::try_new(
+                                    value.text(&thread["resolvedBy"]["login"])?,
+                                )
+                                .ok(),
+                            )?,
+                        )
+                    };
+                    RepoWatchThreadObservation::resolved(id, author, resolver)
+                } else {
+                    RepoWatchThreadObservation::open(id, author)
+                })
+                .with_source_review(source_review),
+            );
         }
         if !value.admit(connection["pageInfo"]["hasNextPage"].as_bool())? {
             return Ok(threads);
@@ -1641,6 +1657,31 @@ mod tests {
                 .workflow()
                 .as_str(),
             "CI"
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_creation_retains_its_provider_review_identity() {
+        let mut io = fixture();
+        // Provider review identity beyond 32 bits, associated with this opening comment.
+        let review = signalbox_session_ownership::GitHubObjectId::new(
+            std::num::NonZeroU64::new(4_294_967_297).expect("review"),
+        );
+        io.threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]
+            ["nodes"][0]["pullRequestReview"] = json!({"fullDatabaseId": review.get().to_string()});
+        let repository = RepositorySlug::try_new("example/project".to_owned()).expect("repository");
+        let observed = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect("observation");
+        let expected = RepoWatchThreadObservation::resolved(
+            ReviewThreadId::try_new("thread-one".to_owned()).expect("thread"),
+            Some(RepoWatchAuthorLogin::try_new("thread-author".to_owned()).expect("author")),
+            Some(RepoWatchAuthorLogin::try_new("resolver".to_owned()).expect("resolver")),
+        )
+        .with_source_review(Some(review));
+        assert_eq!(
+            observed.observation.state().pull_requests()[0].threads(),
+            &[expected]
         );
     }
 

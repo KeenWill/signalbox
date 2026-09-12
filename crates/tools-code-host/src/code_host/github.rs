@@ -165,7 +165,7 @@ query StackChildren(
 const THREAD_REPLY_MUTATION: &str = r#"
 mutation ThreadReply($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $thread, body: $body}) {
-    comment { id url }
+    comment { id url pullRequestReview { fullDatabaseId } }
   }
 }
 "#;
@@ -221,6 +221,7 @@ impl Drop for CensusHistory {
 /// Production GitHub transport with fixed endpoints and deployment-supplied policy.
 #[derive(Clone, Debug)]
 pub struct GitHubCodeHostTransport {
+    review_writes: Option<std::sync::Arc<dyn signalbox_github_transport::ReviewWriteRecorder>>,
     app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
     convergence_policy: Option<signalbox_convergence::ConvergencePolicy>,
     convergence_history: ConvergenceHistory,
@@ -231,6 +232,15 @@ pub struct GitHubCodeHostTransport {
 }
 
 impl GitHubCodeHostTransport {
+    /// Records native review-write identities before repository ingestion continues.
+    pub fn with_review_writes(
+        mut self,
+        recorder: Option<std::sync::Arc<dyn signalbox_github_transport::ReviewWriteRecorder>>,
+    ) -> Self {
+        self.review_writes = recorder;
+        self
+    }
+
     /// Builds the fixed production GitHub transport.
     pub fn try_new(
         configured_bounds: CodeHostNumericBounds,
@@ -268,6 +278,7 @@ impl GitHubCodeHostTransport {
         let graphql_url = Url::parse(GRAPHQL_URL).map_err(|_| GitHubCodeHostConstructionError)?;
         Ok(Self {
             app: None,
+            review_writes: None,
             convergence_policy: None,
             convergence_history: Default::default(),
             client,
@@ -1439,11 +1450,27 @@ impl GitHubCodeHostTransport {
             credential,
         )
         .await?;
+        let receipt = match &self.review_writes {
+            Some(recorder) => Some(
+                with_read_operation_timeout(
+                    remaining_mutation_budget(self.bounds.request_timeout(), started.elapsed())?,
+                    async {
+                        recorder
+                            .begin(arguments.repository().as_str())
+                            .await
+                            .map_err(|_| CodeHostTransportFailure::MutationNotDispatched)
+                    },
+                )
+                .await
+                .map_err(|_| CodeHostTransportFailure::MutationNotDispatched)?,
+            ),
+            None => None,
+        };
         let remaining =
             remaining_mutation_budget(self.bounds.request_timeout(), started.elapsed())?;
         with_mutation_operation_timeout(
             remaining,
-            self.dispatch_thread_reply(arguments, credential),
+            self.dispatch_thread_reply(arguments, credential, receipt),
         )
         .await
     }
@@ -1452,6 +1479,7 @@ impl GitHubCodeHostTransport {
         &self,
         arguments: super::ThreadReplyArguments,
         credential: &CredentialValue,
+        receipt: Option<Box<dyn signalbox_github_transport::PendingReviewWrite>>,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         let body = serde_json::to_vec(&serde_json::json!({
             "query": THREAD_REPLY_MUTATION,
@@ -1486,6 +1514,22 @@ impl GitHubCodeHostTransport {
             .ok_or(CodeHostTransportFailure::InvalidResponse)
         })()
         .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
+        if let Some(receipt) = receipt {
+            let comment = &value["data"]["addPullRequestReviewThreadReply"]["comment"];
+            let review = comment["pullRequestReview"]["fullDatabaseId"]
+                .as_str()
+                .and_then(|id| id.parse::<u64>().ok())
+                .and_then(std::num::NonZeroU64::new)
+                .ok_or(CodeHostTransportFailure::DispatchUnknown)?;
+            let comment_id = comment["id"]
+                .as_str()
+                .ok_or(CodeHostTransportFailure::DispatchUnknown)?
+                .to_owned();
+            receipt
+                .record(review, Some(comment_id))
+                .await
+                .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
+        }
         Ok(CodeHostResult::ThreadReply(result))
     }
 
@@ -6289,6 +6333,130 @@ mod tests {
             .await
             .expect("response body is writable");
         String::from_utf8(request_body).expect("request body is UTF-8")
+    }
+
+    #[derive(Debug, Default)]
+    struct StalledReviewWrites(std::sync::atomic::AtomicBool);
+
+    impl signalbox_github_transport::ReviewWriteRecorder for StalledReviewWrites {
+        fn begin<'a>(
+            &'a self,
+            _repository: &'a str,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Box<dyn signalbox_github_transport::PendingReviewWrite>,
+                signalbox_github_transport::ReviewWriteError,
+            >,
+        > {
+            Box::pin(async {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Ownership is established over loopback before virtual time starts.
+                tokio::time::pause();
+                std::future::pending().await
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn native_review_write_lock_timeout_is_known_not_dispatched() {
+        let (mut transport, listener) = graphql_test_transport().await;
+        let receipts = std::sync::Arc::new(StalledReviewWrites::default());
+        transport = transport.with_review_writes(Some(receipts.clone()));
+        // Existing request budget; lock acquisition must not become an ambiguous mutation.
+        transport.bounds.request_timeout = Some(Duration::from_secs(30));
+        let server = tokio::spawn(async move {
+            serve_graphql_response(&listener, &owned_thread_ownership_response()).await;
+        });
+        let result = transport
+            .thread_reply(thread_reply_test_arguments(), &test_credential())
+            .await;
+        server.await.expect("ownership response");
+        assert!(receipts.0.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(result, Err(CodeHostTransportFailure::MutationNotDispatched));
+    }
+
+    type ReplyReceipt = (String, u64, Option<String>);
+
+    #[derive(Debug, Clone, Default)]
+    struct CapturedReviewWrites(std::sync::Arc<std::sync::Mutex<Vec<ReplyReceipt>>>);
+
+    struct CapturedPendingReview {
+        recorder: CapturedReviewWrites,
+        repository: String,
+    }
+
+    impl signalbox_github_transport::ReviewWriteRecorder for CapturedReviewWrites {
+        fn begin<'a>(
+            &'a self,
+            repository: &'a str,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Box<dyn signalbox_github_transport::PendingReviewWrite>,
+                signalbox_github_transport::ReviewWriteError,
+            >,
+        > {
+            Box::pin(async move {
+                Ok(Box::new(CapturedPendingReview {
+                    recorder: self.clone(),
+                    repository: repository.to_owned(),
+                })
+                    as Box<dyn signalbox_github_transport::PendingReviewWrite>)
+            })
+        }
+    }
+
+    impl signalbox_github_transport::PendingReviewWrite for CapturedPendingReview {
+        fn record(
+            self: Box<Self>,
+            review: std::num::NonZeroU64,
+            comment: Option<String>,
+        ) -> futures_util::future::BoxFuture<
+            'static,
+            Result<(), signalbox_github_transport::ReviewWriteError>,
+        > {
+            Box::pin(async move {
+                self.recorder.0.lock().expect("receipt lock").push((
+                    self.repository,
+                    review.get(),
+                    comment,
+                ));
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn native_review_write_retains_the_exact_reply_ids() {
+        let (transport, listener) = graphql_test_transport().await;
+        let receipts = CapturedReviewWrites::default();
+        let transport = transport.with_review_writes(Some(std::sync::Arc::new(receipts.clone())));
+        // Provider ID beyond 32 bits, distinct from the reply comment's node ID.
+        let review_id = 4_294_967_297_u64;
+        let ownership_response = owned_thread_ownership_response();
+        let mut response: serde_json::Value =
+            serde_json::from_slice(&thread_reply_acknowledgement()).expect("fixture JSON");
+        response["data"]["addPullRequestReviewThreadReply"]["comment"]["pullRequestReview"] =
+            serde_json::json!({"fullDatabaseId": review_id.to_string()});
+        let response = serde_json::to_vec(&response).expect("fixture JSON");
+        let server = tokio::spawn(async move {
+            serve_graphql_response(&listener, &ownership_response).await;
+            serve_graphql_response(&listener, &response).await;
+        });
+        transport
+            .thread_reply(thread_reply_test_arguments(), &test_credential())
+            .await
+            .expect("reply succeeds");
+        server.await.expect("server completes");
+        assert_eq!(
+            *receipts.0.lock().expect("receipt lock"),
+            vec![(
+                FILE_PATCH_REPOSITORY.to_owned(),
+                review_id,
+                Some(REPLY_COMMENT_ID.to_owned())
+            )]
+        );
     }
 
     /// A thread reply is dispatched only after the code host places the named

@@ -37,6 +37,9 @@ enum Reevaluation<'a> {
     Activation(&'a [u8]),
 }
 pub mod checkout;
+mod review_writes;
+pub use review_writes::PendingReviewWrite;
+
 pub mod dispatch;
 mod event_decode;
 pub mod github;
@@ -191,6 +194,8 @@ pub struct EventCandidate<'a> {
     pub event: &'a RepoWatchEvent,
     /// Source-independent identity assigned to the fact.
     pub content_identity: RepoWatchEventContentIdentityV1,
+    /// Provider review ID for review submission or newly created thread provenance.
+    pub source_review: Option<signalbox_session_ownership::GitHubObjectId>,
 }
 
 /// Closed producer recorded with every durable repository-watch fact.
@@ -1791,8 +1796,8 @@ async fn append_event(
         "INSERT INTO gh_event
             (event_id, content_identity, repository, event_kind, target_kind,
              pull_request_number, normalized_payload, producer,
-             repository_event_ordinal, frontier_generation, event_ordinal, recorded_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             repository_event_ordinal, frontier_generation, event_ordinal, recorded_at, source_review_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT DO NOTHING",
     )
     .bind(event.id().into_uuid())
@@ -1807,6 +1812,7 @@ async fn append_event(
     .bind(Decimal::from(frontier_generation))
     .bind(Decimal::from(event_ordinal))
     .bind(recorded_at)
+    .bind(candidate.source_review.map(|review| Decimal::from(review.get())))
     .execute(&mut **transaction)
     .await?
     .rows_affected()

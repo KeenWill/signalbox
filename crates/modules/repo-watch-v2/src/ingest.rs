@@ -279,6 +279,7 @@ impl RepoWatchStore {
             .map(|occurrence| EventCandidate {
                 event: occurrence.event(),
                 content_identity: occurrence.content_identity(),
+                source_review: occurrence.source_review(),
             })
             .collect::<Vec<_>>();
         let admission = self

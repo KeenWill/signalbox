@@ -148,6 +148,7 @@ impl<Clock>
         eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
         credentials: MappedDaemonCredentialInputs<FileCredentialAccess>,
         code_host_transport: GitHubCodeHostTransport,
+        review_writes: Option<std::sync::Arc<dyn signalbox_github_transport::ReviewWriteRecorder>>,
         github_egress_policy: GitHubEgressPolicy,
         workspace_root: &Path,
         git_identity: GitIdentity,
@@ -172,11 +173,15 @@ impl<Clock>
         .map_err(|_| DaemonToolsConstructionError::WebSearch)?;
         let status = SessionStatusTool::try_new(PostgresSessionStatusWriter::new(pool.clone()))
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
-        let code_host = CodeHostTools::try_new(code_host, code_host_transport)
-            .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
+        let code_host = CodeHostTools::try_new(
+            code_host,
+            code_host_transport.with_review_writes(review_writes.clone()),
+        )
+        .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
         let github_transport = GitHubApiTransport::try_new()
             .map_err(|_| DaemonToolsConstructionError::GitHub)?
-            .with_app(github.github_app());
+            .with_app(github.github_app())
+            .with_review_writes(review_writes);
         let github = github.with_request_timeout(Some(github_transport.request_timeout()));
         let github = GitHubTools::try_new(github, github_transport, github_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::GitHub)?;

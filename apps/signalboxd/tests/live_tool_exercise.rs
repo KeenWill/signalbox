@@ -285,6 +285,7 @@ async fn run_live_smoke() -> SmokeResult {
             github: credentials,
         },
         GitHubCodeHostTransport::try_new(code_host_numeric_bounds)?,
+        None,
         github_egress_policy,
         &configured_workspace,
         git_identity,

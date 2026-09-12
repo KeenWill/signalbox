@@ -4,5 +4,6 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| review_writes | 1 | 2 | 0 | [review_writes](review_writes.md) |
 | root | 2 | 0 | 8 | [root](root.md) |
 | app | 5 | 0 | 1 | [app](app.md) |

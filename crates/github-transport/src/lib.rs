@@ -1,5 +1,9 @@
 //! Shared GitHub HTTP mechanics; tool suites retain their own result contracts.
 
+mod review_writes;
+
+pub use review_writes::{PendingReviewWrite, ReviewWriteError, ReviewWriteRecorder};
+
 use std::time::Duration;
 
 use futures_util::StreamExt;

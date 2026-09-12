@@ -1959,6 +1959,8 @@ async fn run_hub_incarnation(
         configuration.brave_api_key_file(),
         CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
     );
+    let review_writes =
+        Arc::new(signalboxd::repo_watch_review_writes::RepositoryReviewWriteRecorder::default());
     let code_host_transport = GitHubCodeHostTransport::try_new(code_host_numeric_bounds)
         .map_err(|_| {
             erase_startup_cause(
@@ -2038,6 +2040,7 @@ async fn run_hub_incarnation(
                 github: code_host_credentials,
             },
             code_host_transport,
+            Some(review_writes.clone()),
             tool_configuration.github_egress_policy(),
             tool_configuration.workspace_root(),
             tool_configuration.git_identity().clone(),
@@ -2460,6 +2463,11 @@ async fn run_hub_incarnation(
     let repository_watch_runtime = {
         let start = async {
             let module_pool = connect_repository_watch_pool(&pool).await?;
+            review_writes
+                .initialize(signalbox_module_repo_watch_v2::RepoWatchStore::new(
+                    module_pool.clone(),
+                ))
+                .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
             signalboxd::repo_watch_dispatch::scavenge_checkouts(
                 &signalbox_module_repo_watch_v2::RepoWatchStore::new(module_pool.clone()),
                 &pool,

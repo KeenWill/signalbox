@@ -2213,6 +2213,7 @@ async fn assert_checkout_keeps_composed_runner(
         GitHubCodeHostTransport::try_new(CodeHostNumericBounds::new(
             None, None, None, None, None, None,
         ))?,
+        None,
         GitHubEgressPolicy::github_api_only(),
         configuration.workspace_root(),
         configuration.git_identity().clone(),
@@ -3661,6 +3662,7 @@ impl CheckoutFixture {
             GitHubCodeHostTransport::try_new(CodeHostNumericBounds::new(
                 None, None, None, None, None, None,
             ))?,
+            None,
             configuration.github_egress_policy(),
             configuration.workspace_root(),
             configuration.git_identity().clone(),
