@@ -14,10 +14,16 @@ py_library(
 )
 
 py_library(
+    name = "review_judge_context",
+    srcs = ["review_judge_context.py"],
+    imports = ["."],
+)
+
+py_library(
     name = "review_judge_eval",
     srcs = ["review_judge_eval.py"],
     imports = ["."],
-    deps = [":review_citations", ":review_judge_agentic"],
+    deps = [":review_citations", ":review_judge_agentic", ":review_judge_context"],
 )
 
 [
@@ -28,7 +34,7 @@ py_library(
         tags = ["external"],
         deps = [":" + module],
     )
-    for module in ["review_citations", "review_judge_eval", "review_judge_agentic"]
+    for module in ["review_citations", "review_judge_agentic", "review_judge_context", "review_judge_eval"]
 ]
 
 [

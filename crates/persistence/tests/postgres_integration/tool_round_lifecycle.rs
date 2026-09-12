@@ -7012,6 +7012,19 @@ async fn file_use_resolution_requires_the_selector_for_repeated_visible_attachme
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn image_result_commit_is_atomic_and_terminal_reference_is_immutable()
 -> Result<(), Box<dyn Error>> {
+    media_result_commit_is_atomic_and_terminal_reference_is_immutable(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn document_result_commit_preserves_its_kind_and_immutable_evidence()
+-> Result<(), Box<dyn Error>> {
+    media_result_commit_is_atomic_and_terminal_reference_is_immutable(true).await
+}
+
+async fn media_result_commit_is_atomic_and_terminal_reference_is_immutable(
+    document: bool,
+) -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{
         BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
     };
@@ -7044,7 +7057,11 @@ async fn image_result_commit_is_atomic_and_terminal_reference_is_immutable()
     let identity = |seed| {
         MediaValidationIdentity::try_new(
             BlobDigest::from_bytes([seed; 32]),
-            "image/png".into(),
+            if document {
+                "application/pdf".into()
+            } else {
+                "image/png".into()
+            },
             "fixture".into(),
             "png".into(),
             "v1".into(),
@@ -7052,11 +7069,15 @@ async fn image_result_commit_is_atomic_and_terminal_reference_is_immutable()
         )
         .unwrap()
     };
-    let reference = ToolMediaReference::image(
-        identity(1),
-        identity(2),
-        std::num::NonZeroU64::new(64).unwrap(),
-    )
+    let reference = if document {
+        ToolMediaReference::direct_document(identity(1), std::num::NonZeroU64::new(64).unwrap())
+    } else {
+        ToolMediaReference::image(
+            identity(1),
+            identity(2),
+            std::num::NonZeroU64::new(64).unwrap(),
+        )
+    }
     .unwrap();
     assert!(
         sqlx::query(
