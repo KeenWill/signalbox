@@ -406,6 +406,11 @@ impl super::HubModelConfiguration {
 
     /// Admits model-provider, token, and webhook files; App keys are admitted at use.
     pub fn validate_credential_files(&self) -> Result<(), CredentialAccessError> {
+        for (name, delivery) in &self.ambient_task_profiles {
+            if let crate::credential_pools::CredentialDelivery::AmbientTask(source) = delivery {
+                validate_ambient_source(source, CredentialReference::new(name.as_ref()))?;
+            }
+        }
         for profile in self.credential_profiles.values() {
             use crate::credential_pools::CredentialDelivery;
             match profile.delivery() {
@@ -413,6 +418,7 @@ impl super::HubModelConfiguration {
                     validate_credential_file(path, CredentialReference::new(profile.name()))?
                 }
                 CredentialDelivery::Ambient
+                | CredentialDelivery::AmbientTask(_)
                 | CredentialDelivery::Oauth(_)
                 | CredentialDelivery::CodexHome { .. } => {}
             }
@@ -438,6 +444,37 @@ impl super::HubModelConfiguration {
             }
         }
         Ok(())
+    }
+}
+
+fn ambient_environment(variable: &str) -> Result<Vec<u8>, CredentialAccessFailure> {
+    let value = std::env::var_os(variable).ok_or(CredentialAccessFailure::Unavailable)?;
+    let bytes = value.as_encoded_bytes();
+    if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
+        return Err(CredentialAccessFailure::TooLarge);
+    }
+    Ok(bytes.to_vec())
+}
+
+fn validate_ambient_source(source: &crate::credential_pools::AmbientCredentialSource, reference: CredentialReference) -> Result<(), CredentialAccessError> {
+    match source {
+        crate::credential_pools::AmbientCredentialSource::File(path) => validate_credential_file(path, reference),
+        crate::credential_pools::AmbientCredentialSource::Environment(variable) => ambient_environment(variable).map(|_| ()).map_err(|failure| CredentialAccessError::new(reference, failure)),
+    }
+}
+
+impl super::HubModelConfiguration {
+    pub(crate) async fn resolve_ambient_task_credential(&self, purpose: &str) -> Result<(crate::credential_pools::AmbientCredentialSource, CredentialValue), CredentialAccessError> {
+        use crate::credential_pools::{AmbientCredentialSource, CredentialDelivery};
+        let reference = CredentialReference::new(purpose);
+        let Some(CredentialDelivery::AmbientTask(source)) = self.ambient_task_profiles.get(purpose) else {
+            return Err(CredentialAccessError::new(reference, CredentialAccessFailure::Unmapped));
+        };
+        let value = match source {
+            AmbientCredentialSource::File(path) => FileCredentialAccess::new(path.clone(), reference.clone()).resolve(&reference).await?,
+            AmbientCredentialSource::Environment(variable) => CredentialValue::new(ambient_environment(variable).map_err(|failure| CredentialAccessError::new(reference, failure))?),
+        };
+        Ok((source.clone(), value))
     }
 }
 

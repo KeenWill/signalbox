@@ -3108,6 +3108,10 @@ fn render_judge_request_payload(
         "tool": request.tool,
         "arguments_kind": arguments_kind,
         "arguments": request.arguments,
+        "credential_purpose": if request.tool == signalbox_tools_exec::SANDBOXED_EXEC_NAME {
+            serde_json::from_str::<serde_json::Value>(request.arguments).ok()
+                .and_then(|arguments| arguments.get("credential_purpose").cloned())
+        } else { None },
         "session_context": render_session_authority_context(context),
     })
     .to_string()

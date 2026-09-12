@@ -746,6 +746,7 @@ fn startup_sections(source: &str) -> Result<toml::Table, ReloadResult> {
         .get_mut("credential_profiles")
         .and_then(toml::Value::as_array_mut)
     {
+        profiles.retain(|profile| profile.get("adapter").and_then(toml::Value::as_str) != Some("sandboxed_exec"));
         for profile in profiles {
             if profile.get("delivery").and_then(toml::Value::as_str) == Some("codex_home")
                 && let Some(profile) = profile.as_table_mut()

@@ -57,6 +57,8 @@ pub enum CredentialDelivery {
     /// The adapter's own client resolves its login and the daemon supplies no
     /// credential material. The Codex CLI owns its external login this way.
     Ambient,
+    /// Ambient authority exposed to one judged sandboxed task.
+    AmbientTask(AmbientCredentialSource),
     /// Daemon-owned device authorization; configuration admission requires dispatch support.
     Oauth(Box<OauthDelivery>),
     /// An absolute deployment-owned file read per preparation and never cached.
@@ -75,6 +77,48 @@ pub enum CredentialDelivery {
         /// Optional per-home process concurrency declaration.
         max_concurrent_invocations: Option<NonZeroU32>,
     },
+}
+
+/// One ambient credential source selected by a sandboxed task's purpose.
+#[derive(Clone, Eq, PartialEq)]
+pub enum AmbientCredentialSource {
+    /// One regular credential file mounted read-only at its configured path.
+    File(PathBuf),
+    /// One process variable supplied under the same name inside bubblewrap.
+    Environment(Arc<str>),
+}
+
+impl fmt::Debug for AmbientCredentialSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AmbientCredentialSource([REDACTED])")
+    }
+}
+
+pub(crate) fn parse_ambient_task_profiles(item: Option<&Item>) -> Result<HashMap<Arc<str>, CredentialDelivery>, HubModelConfigurationError> {
+    let mut profiles = HashMap::new();
+    for profile in item.and_then(Item::as_array_of_tables).into_iter().flatten() {
+        if profile.get("adapter").and_then(Item::as_str) != Some("sandboxed_exec") {
+            continue;
+        }
+        reject_unknown_fields(profile, &["name", "adapter", "delivery", "file", "variable"])?;
+        if required_string(profile, "delivery")? != "ambient" {
+            return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+        }
+        let name = validated_credential_catalog_name(required_string(profile, "name")?)?;
+        let source = match (profile.get("file"), profile.get("variable")) {
+            (Some(_), None) => AmbientCredentialSource::File(normalize_absolute_path(required_string(profile, "file")?)?),
+            (None, Some(_)) => {
+                let variable = required_string(profile, "variable")?;
+                if variable.is_empty() || variable.contains(['=', '\0']) {
+                    return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+                }
+                AmbientCredentialSource::Environment(Arc::from(variable))
+            }
+            _ => return Err(HubModelConfigurationError::InvalidCredentialDelivery),
+        };
+        profiles.insert(name, CredentialDelivery::AmbientTask(source));
+    }
+    Ok(profiles)
 }
 
 /// Validated OAuth configuration, separate from its durable registration record.
@@ -134,6 +178,7 @@ impl fmt::Debug for CredentialDelivery {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ambient => formatter.write_str("Ambient"),
+            Self::AmbientTask(_) => formatter.write_str("AmbientTask([REDACTED])"),
             Self::Oauth(_) => formatter.write_str("Oauth"),
             Self::File { env_key, .. } => formatter
                 .debug_struct("File")
@@ -157,6 +202,7 @@ impl CredentialDelivery {
     pub const fn key(&self) -> &'static str {
         match self {
             Self::Ambient => "ambient",
+            Self::AmbientTask(_) => "ambient",
             Self::Oauth(_) => "oauth",
             Self::File { .. } => "file",
             Self::CodexHome { .. } => "codex_home",
@@ -166,7 +212,7 @@ impl CredentialDelivery {
     /// Absolute deployment path this delivery references, where it has one.
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Ambient | Self::Oauth(_) => None,
+            Self::Ambient | Self::Oauth(_) | Self::AmbientTask(_) => None,
             Self::File { path, .. } => Some(path),
             Self::CodexHome { path, .. } => Some(path),
         }
@@ -175,7 +221,7 @@ impl CredentialDelivery {
     /// Process environment key a spawned adapter supplies the value under.
     pub fn env_key(&self) -> Option<&str> {
         match self {
-            Self::Ambient | Self::Oauth(_) => None,
+            Self::Ambient | Self::Oauth(_) | Self::AmbientTask(_) => None,
             Self::File { env_key, .. } => env_key.as_deref(),
             Self::CodexHome { .. } => None,
         }
@@ -770,7 +816,7 @@ fn parse_credential_profiles_with_home_admission(
     let mut ambient_adapters = HashSet::new();
     let mut file_paths = HashSet::new();
     for profile in tables {
-        if profile.get("adapter").and_then(Item::as_str) == Some("github") {
+        if matches!(profile.get("adapter").and_then(Item::as_str), Some("github" | "sandboxed_exec")) {
             continue;
         }
         let name = validated_credential_catalog_name(required_string(profile, "name")?)?;
@@ -811,6 +857,7 @@ fn parse_credential_profiles_with_home_admission(
             CredentialDelivery::File { path, .. } => Some(path),
             CredentialDelivery::CodexHome { path, .. } if admit_credential_homes => Some(path),
             CredentialDelivery::Ambient
+            | CredentialDelivery::AmbientTask(_)
             | CredentialDelivery::Oauth(_)
             | CredentialDelivery::CodexHome { .. } => None,
         };

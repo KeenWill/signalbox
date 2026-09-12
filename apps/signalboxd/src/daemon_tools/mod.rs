@@ -6,6 +6,7 @@
 //! `docs/spec/git-authority-threat-model.md`.
 
 mod catalog;
+mod ambient_credentials;
 mod composed_identity;
 mod executor;
 mod families;

@@ -132,9 +132,21 @@ pub struct ExecArguments {
 struct SandboxedExecContract;
 
 impl ToolContract for SandboxedExecContract {
-    type Arguments = ExecArguments;
+    type Arguments = SandboxedExecArguments;
     const NAME: &'static str = SANDBOXED_EXEC_NAME;
     const DESCRIPTION: &'static str = "Runs one bounded direct command in a bwrap-confined injected workspace whose network namespace holds only a loopback interface.";
+}
+
+/// One sandboxed task, optionally requesting a configured ambient credential purpose.
+#[derive(Clone, Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SandboxedExecArguments {
+    /// Direct command and ordinary sandbox limits.
+    #[serde(flatten)]
+    pub command: ExecArguments,
+    /// Non-secret ambient profile name, requiring a fresh approval-judge decision.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub credential_purpose: Option<String>,
 }
 
 struct UnsandboxedExecContract;
@@ -369,7 +381,7 @@ fn build_tool<Contract, CommandRunner>(
     timeout_bound: Option<Duration>,
 ) -> Result<(CompiledToolCatalog, ExecExecutor<CommandRunner>), ExecToolConstructionError>
 where
-    Contract: ToolContract<Arguments = ExecArguments>,
+    Contract: ToolContract,
     CommandRunner: CommandExecution,
 {
     let detail = ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS_DETAIL))
@@ -384,6 +396,7 @@ where
         ExecArgumentValidator {
             detail: detail.clone(),
             timeout_bound,
+            sandboxed: Contract::NAME == SANDBOXED_EXEC_NAME,
         },
     );
     let catalog = CompiledToolCatalog::try_new([compiled])
@@ -397,7 +410,7 @@ where
     ))
 }
 
-fn compile_exec_contract_definition<Contract: ToolContract<Arguments = ExecArguments>>(
+fn compile_exec_contract_definition<Contract: ToolContract>(
     permission: ToolPermissionDefault,
     timeout_bound: Option<Duration>,
 ) -> Result<ToolDefinition, ToolContractCompileError> {
@@ -424,19 +437,25 @@ fn compile_exec_contract_definition<Contract: ToolContract<Arguments = ExecArgum
     }
     let schema = ToolInputSchema::try_new(schema.to_string())
         .map_err(|_| ToolContractCompileError::Schema)?;
-    Ok(ToolDefinition::new(
+    let definition = ToolDefinition::new(
         name,
         String::from(Contract::DESCRIPTION),
         schema,
         permission,
         ToolEffectClass::ExternalEffect,
-    ))
+    );
+    Ok(if Contract::NAME == SANDBOXED_EXEC_NAME {
+        definition.with_judge_required_argument("credential_purpose".to_owned())
+    } else {
+        definition
+    })
 }
 
 #[derive(Clone, Debug)]
 struct ExecArgumentValidator {
     detail: ToolExecutionErrorDetail,
     timeout_bound: Option<Duration>,
+    sandboxed: bool,
 }
 
 impl ToolArgumentValidator for ExecArgumentValidator {
@@ -444,7 +463,17 @@ impl ToolArgumentValidator for ExecArgumentValidator {
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolExecutionErrorDetail> {
-        decode_arguments(arguments, self.timeout_bound)
+        let arguments = if self.sandboxed {
+            let mut value: serde_json::Value = serde_json::from_str(arguments.as_str()).map_err(|_| self.detail.clone())?;
+            if let Some(purpose) = value.as_object_mut().and_then(|value| value.remove("credential_purpose"))
+                && !purpose.is_null() && !purpose.as_str().is_some_and(|purpose| !purpose.is_empty() && !purpose.contains('\0')) {
+                return Err(self.detail.clone());
+            }
+            NormalizedToolArguments::try_from_provider_text(value.to_string()).map_err(|_| self.detail.clone())?
+        } else {
+            arguments.clone()
+        };
+        decode_arguments(&arguments, self.timeout_bound)
             .map(drop)
             .map_err(|_| self.detail.clone())
     }
@@ -520,6 +549,15 @@ fn invalid_relative_directory(value: &str) -> bool {
 pub struct ExecExecutor<CommandRunner> {
     command_runner: CommandRunner,
     timeout_bound: Option<Duration>,
+}
+
+impl<Runner: ProcessRunner> ExecExecutor<SandboxedCommandRunner<Runner>> {
+    /// Runs one authorized task with an operation-local sandbox configuration.
+    pub async fn run_with_configuration(&self, arguments: ExecArguments, configuration: SandboxConfiguration) -> Result<ExecResult, ExecExecutorError> {
+        validate_arguments(&arguments, self.timeout_bound).map_err(|_| ExecExecutorError::ArgumentValidationDrift)?;
+        let mut runner = self.command_runner.clone().with_sandbox_configuration(configuration);
+        Ok(runner.run_with_capture(arguments, EXEC_CAPTURE_BYTES).await)
+    }
 }
 
 #[derive(signalbox_derive::OperatorError)]
@@ -838,7 +876,7 @@ pub enum SandboxNetwork {
 }
 
 /// Explicit host runtime inputs for sandboxed execution.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct SandboxConfiguration {
     /// Network namespace policy; isolated by default.
     pub network: SandboxNetwork,
@@ -853,6 +891,21 @@ pub struct SandboxConfiguration {
     pub rustup_home: Option<PathBuf>,
     /// Installed rustup toolchain selected without automatic installation.
     pub rustup_toolchain: Option<String>,
+    /// Explicit operation-local environment, inherited only by this bubblewrap process.
+    pub environment: BTreeMap<OsString, OsString>,
+}
+
+impl fmt::Debug for SandboxConfiguration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("SandboxConfiguration")
+            .field("network", &self.network)
+            .field("read_only_binds", &self.read_only_binds)
+            .field("read_only_mounts", &self.read_only_mounts)
+            .field("path_prepend", &self.path_prepend)
+            .field("rustup_home", &self.rustup_home)
+            .field("rustup_toolchain", &self.rustup_toolchain)
+            .field("environment", &"[REDACTED]").finish()
+    }
 }
 
 /// One host input exposed at a distinct sandbox path.
@@ -2221,7 +2274,7 @@ fn bwrap_request(
             (OsString::from("LANG"), OsString::from("C.UTF-8")),
             (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
             (OsString::from("PATH"), sandbox_path),
-        ]),
+        ]).into_iter().chain(context.configuration.environment.clone()).collect(),
         environment_inheritance: ProcessEnvironment::Clear,
         status_protocol: ProcessStatusProtocol::SandboxDispatch,
     }
