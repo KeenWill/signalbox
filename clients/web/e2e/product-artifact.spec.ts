@@ -1,8 +1,24 @@
 import { readFileSync } from 'node:fs'
-import { imageArtifact, jpegDescriptor } from '../src/features/artifacts/artifactScenario'
-import { decodeWebBlobDescriptor } from '../src/generated/web-contract.mjs'
+import {
+  imageArtifact as namedImageArtifact,
+  jpegDescriptor as namedJpegDescriptor,
+} from '../src/features/artifacts/artifactScenario'
+import { decodeWebBlobDescriptor, type WebBlobDescriptor } from '../src/generated/web-contract.mjs'
 import { webContractBootstrapFixture } from '../src/product.fixture'
-import { expect, type Page, type TestInfo, test } from './fontTest'
+import { openAttachmentConversation } from './attachment-api-fixture'
+import { expect, type Page, test } from './fontTest'
+
+// Timeline attachment references do not carry filenames; descriptor URLs echo that input.
+const withoutFilename = (descriptor: WebBlobDescriptor): WebBlobDescriptor => ({
+  ...descriptor,
+  display_filename: [],
+  available_views: descriptor.available_views.map((view) => ({
+    ...view,
+    content_url: view.content_url.replace(/&display_filename=[^&]*/u, ''),
+  })),
+})
+const imageArtifact = withoutFilename(namedImageArtifact)
+const jpegDescriptor = withoutFilename(namedJpegDescriptor)
 
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
 const thumbnailFixture = readFileSync(new URL('./fixtures/thumbnail.png', import.meta.url))
@@ -34,9 +50,6 @@ const watchBrowser = (page: Page) => {
   return problems
 }
 
-const platformModifier = (page: Page) =>
-  page.evaluate(() => (/Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control'))
-
 const useArtifactScenario = async (page: Page, descriptor = imageArtifact) => {
   await page.route('**/api/bootstrap', (route) =>
     route.fulfill({ json: webContractBootstrapFixture }),
@@ -66,32 +79,24 @@ const useRecoveringArtifactScenario = async (page: Page) => {
   return { recover: () => (state.unavailable = false) }
 }
 
+const pane = (page: Page) => page.getByRole('dialog', { name: 'Attachment details' })
+const attachment = (page: Page) =>
+  page.getByRole('list', { name: 'Attachments' }).getByRole('button').first()
+
 const submitArtifactWithoutMouse = async (page: Page, descriptor = imageArtifact) => {
-  const openInspector = page.getByRole('button', { name: 'Open artifact inspector' })
-  await openInspector.focus()
+  await openAttachmentConversation(page, descriptor)
+  await attachment(page).focus()
   await page.keyboard.press('Enter')
-  const digest = page.getByRole('textbox', { name: 'Digest' })
-  await expect(digest).toBeFocused()
-  await page.keyboard.type(descriptor.digest)
-  await page.keyboard.press('Tab')
-  await page.keyboard.type(descriptor.declared_media_type)
-  await page.keyboard.press('Tab')
-  await page.keyboard.type(descriptor.display_filename[0] ?? '')
-  await page.keyboard.press('Tab')
-  const descriptorRequest = page.waitForRequest('**/api/blobs/**/descriptor?*')
-  await page.keyboard.press('Enter')
-  const requestUrl = new URL((await descriptorRequest).url())
-  expect(requestUrl.pathname).toBe(`/api/blobs/${encodeURIComponent(descriptor.digest)}/descriptor`)
-  expect(requestUrl.searchParams.get('media_type')).toBe(descriptor.declared_media_type)
-  expect(requestUrl.searchParams.get('display_filename')).toBe(descriptor.display_filename[0])
+  await expect(pane(page)).toBeVisible()
+  await expect(pane(page).getByRole('textbox')).toHaveCount(0)
 }
 
 const resolveArtifactWithoutMouse = async (page: Page, descriptor = imageArtifact) => {
-  const displayName = descriptor.display_filename[0]
   await submitArtifactWithoutMouse(page, descriptor)
-  const artifact = page.getByRole('article', { name: `Artifact ${displayName}` })
+  const displayName = 'Image'
+  const artifact = pane(page).getByRole('article', { name: `Artifact ${displayName}` })
   await expect(artifact).toBeVisible()
-  await expect(page.getByText(`Found ${displayName}`, { exact: true })).toHaveAttribute(
+  await expect(pane(page).getByText(`Found ${displayName}`, { exact: true })).toHaveAttribute(
     'role',
     'status',
   )
@@ -102,198 +107,116 @@ const resolveArtifactWithoutMouse = async (page: Page, descriptor = imageArtifac
     .toBeGreaterThan(0)
 }
 
-const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
-  test.skip(
-    testInfo.project.name !== 'chromium' || process.platform !== 'linux',
-    'Chromium on Linux owns pixel evidence',
-  )
+for (const viewport of [
+  { width: 1440, height: 900 },
+  { width: 390, height: 844 },
+]) {
+  test(`opens conversation attachment details by keyboard at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    const problems = watchBrowser(page)
+    await useArtifactScenario(page)
+    await page.setViewportSize(viewport)
+    await resolveArtifactWithoutMouse(page)
+    await page.screenshot({ path: testInfo.outputPath('attachment-details.png'), fullPage: true })
+    await page.keyboard.press('Escape')
+    await expect(pane(page)).toBeHidden()
+    await expect(attachment(page)).toBeFocused()
+    await expect(page.getByRole('heading', { name: /00000000-0000/ })).toBeVisible()
+    expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+  })
 }
 
-test('resolves a typed artifact in the desktop side inspector without a mouse', async ({
-  page,
-}) => {
+test('preserves the loaded original when attachment details resize', async ({ page }) => {
   const problems = watchBrowser(page)
-  await useArtifactScenario(page)
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions?workspace=true')
-
-  await resolveArtifactWithoutMouse(page)
-  await page.keyboard.press('Escape')
-  await expect(page.getByRole('complementary', { name: 'Inspector' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Open artifact inspector' })).toBeFocused()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('uses a focus-managed artifact sheet on a phone viewport', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useArtifactScenario(page)
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto('/sessions?workspace=true')
-
-  await resolveArtifactWithoutMouse(page)
-  await expect(page.getByRole('dialog', { name: 'Artifact inspector' })).toBeVisible()
-  await page.keyboard.press('Escape')
-  await expect(page.getByRole('dialog', { name: 'Artifact inspector' })).toBeHidden()
-  await expect(page.getByRole('button', { name: 'Open artifact inspector' })).toBeFocused()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('preserves an active artifact when the inspector changes composition', async ({ page }) => {
-  const problems = watchBrowser(page)
-  const displayName = admittedOriginalArtifact.display_filename[0]
   await useArtifactScenario(page, admittedOriginalArtifact)
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions?workspace=true')
-
   await resolveArtifactWithoutMouse(page, admittedOriginalArtifact)
-  await page.getByRole('button', { name: 'Load original' }).click()
-  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeVisible()
-  await page.setViewportSize({ width: 1024, height: 900 })
-  const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
-  await expect(sheet.getByRole('textbox', { name: 'Digest' })).toHaveValue(
-    admittedOriginalArtifact.digest,
-  )
-  await expect(sheet.getByRole('article', { name: `Artifact ${displayName}` })).toBeVisible()
-  await expect(sheet.getByRole('img', { name: `Original of ${displayName}` })).toBeVisible()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('preserves the side inspector beneath the command palette', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useArtifactScenario(page)
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions?workspace=true')
-
-  await resolveArtifactWithoutMouse(page)
-  await page.getByRole('button', { name: 'Open command palette' }).click()
-  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
-  await page.keyboard.press('Escape')
+  await pane(page).getByRole('button', { name: 'Load original' }).click()
+  await expect(pane(page).getByRole('button', { name: 'Original loaded' })).toBeVisible()
+  await page.setViewportSize({ width: 390, height: 844 })
   await expect(
-    page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
+    pane(page).getByRole('img', {
+      name: `Original of Image`,
+    }),
   ).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('does not restore stale side-inspector focus after closing a narrow sheet', async ({
+test('keeps background navigation contained while attachment details have focus', async ({
   page,
 }) => {
-  const problems = watchBrowser(page)
   await useArtifactScenario(page)
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions?workspace=true')
-
-  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
-  await page.setViewportSize({ width: 1024, height: 900 })
-  await expect(page.getByRole('dialog', { name: 'Artifact inspector' })).toBeVisible()
+  await resolveArtifactWithoutMouse(page)
+  const url = page.url()
+  await page.keyboard.press('j')
+  await page.keyboard.press('Control+k')
+  await expect(pane(page)).toBeVisible()
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
+  expect(page.url()).toBe(url)
   await page.keyboard.press('Escape')
-  await expect(page.getByRole('button', { name: 'Open artifact inspector' })).toBeFocused()
-  const theme = page.getByRole('button', { name: 'Use light theme' })
-  await theme.focus()
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await expect(theme).toBeFocused()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('restores inspector focus when a sheet returns to the side pane', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useArtifactScenario(page)
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions?workspace=true')
-
-  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
-  await page.setViewportSize({ width: 1024, height: 900 })
-  await expect(page.getByRole('dialog', { name: 'Artifact inspector' })).toBeVisible()
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await expect(page.getByRole('textbox', { name: 'Digest' })).toBeFocused()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('preserves editing context when Escape is pressed in an inspector input', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useArtifactScenario(page)
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions?workspace=true')
-
-  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
-  const digest = page.getByRole('textbox', { name: 'Digest' })
-  await digest.press('Escape')
-  await expect(digest).toBeFocused()
-  await expect(page.getByRole('heading', { name: 'Artifact inspector' })).toBeVisible()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+  expect(page.url()).toBe(url)
 })
 
 test('keeps an oversized browser-native original download-only', async ({ page }) => {
   const problems = watchBrowser(page)
-  const displayName = oversizedOriginalArtifact.display_filename[0]
   await useArtifactScenario(page, oversizedOriginalArtifact)
-  await page.goto('/sessions?workspace=true')
-
   await resolveArtifactWithoutMouse(page, oversizedOriginalArtifact)
-  const artifact = page.getByRole('article', { name: `Artifact ${displayName}` })
-  await expect(artifact.getByRole('button', { name: 'Load original' })).toHaveCount(0)
-  await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
+  await expect(pane(page).getByRole('button', { name: 'Load original' })).toHaveCount(0)
+  await expect(pane(page).getByRole('link', { name: 'Download' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('discovers the artifact inspector through the command palette', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useArtifactScenario(page)
-  await page.goto('/sessions?workspace=true')
-
-  await expect(
-    page.getByRole('button', { name: 'Open artifact inspector', exact: true }),
-  ).toBeEnabled()
-  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toBeFocused()
-  await page.getByRole('button', { name: 'Open artifact inspector', exact: true }).focus()
-  const modifier = await platformModifier(page)
-  await page.keyboard.press(`${modifier}+K`)
-  const palette = page.getByRole('dialog', { name: 'Command palette' })
-  await palette.getByRole('button', { name: /Open artifact inspector/ }).focus()
-  await page.keyboard.press('Enter')
-  await expect(page.getByRole('textbox', { name: 'Digest' })).toBeFocused()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('recovers after a descriptor response violates the generated contract', async ({ page }) => {
-  const problems = watchBrowser(page)
+test('recovers attachment details after an incompatible descriptor response', async ({ page }) => {
   const scenario = await useRecoveringArtifactScenario(page)
-  await page.goto('/sessions?workspace=true')
-
   await submitArtifactWithoutMouse(page)
-  await expect(page.getByRole('alert')).toContainText(incompatibleDescriptorMessage)
+  await expect(pane(page).getByRole('alert')).toContainText(incompatibleDescriptorMessage)
   scenario.recover()
-  await page.getByRole('button', { name: 'Retry' }).focus()
+  await pane(page).getByRole('button', { name: 'Retry', exact: true }).focus()
   await page.keyboard.press('Enter')
-  await expect(
-    page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
-  ).toBeVisible()
-  await expect(page.getByRole('textbox', { name: 'Digest' })).toBeFocused()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+  await expect(pane(page).getByRole('article')).toBeVisible()
+  await expect(pane(page).getByRole('button', { name: 'Close attachment details' })).toBeFocused()
 })
 
-test('keeps focus moved during a pending descriptor retry', async ({ page }) => {
-  const problems = watchBrowser(page)
+test('keeps focus moved during a pending attachment descriptor retry', async ({ page }) => {
   await useRecoveringArtifactScenario(page)
-  await page.goto('/sessions?workspace=true')
   await submitArtifactWithoutMouse(page)
-  await expect(page.getByRole('alert')).toContainText(incompatibleDescriptorMessage)
-
+  await expect(pane(page).getByRole('alert')).toContainText(incompatibleDescriptorMessage)
   const response = Promise.withResolvers<void>()
   await page.route('**/api/blobs/**/descriptor?*', async (route) => {
     await response.promise
     await route.fulfill({ json: imageArtifact })
   })
   const request = page.waitForRequest('**/api/blobs/**/descriptor?*')
-  await page.getByRole('button', { name: 'Retry', exact: true }).click()
+  await pane(page).getByRole('button', { name: 'Retry', exact: true }).click()
   await request
-  const filename = page.getByRole('textbox', { name: 'Display filename' })
-  await filename.focus()
+  const close = pane(page).getByRole('button', { name: 'Close attachment details' })
+  await close.focus()
   response.resolve()
-  await expect(
-    page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
-  ).toBeVisible()
-  await expect(filename).toBeFocused()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+  await expect(pane(page).getByRole('article')).toBeVisible()
+  await expect(close).toBeFocused()
+})
+
+test('refuses advertised oversized derived views before any content request', async ({ page }) => {
+  const oversized = decodeWebBlobDescriptor({
+    ...imageArtifact,
+    available_views: imageArtifact.available_views.map((view) =>
+      view.kind === 'preview' || view.kind === 'thumbnail'
+        ? { ...view, byte_length: '16777217' }
+        : view,
+    ),
+  })
+  await useArtifactScenario(page, oversized)
+  const contentRequests: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/content/')) contentRequests.push(request.url())
+  })
+  await submitArtifactWithoutMouse(page, oversized)
+  const artifact = pane(page).getByRole('article', { name: 'Artifact Image' })
+  await expect(artifact.getByText('Details only', { exact: true })).toBeVisible()
+  await expect(artifact.locator('img')).toHaveCount(0)
+  expect(contentRequests).toEqual([])
 })
 
 test('keeps focus moved during a pending bootstrap retry', async ({ page }) => {
@@ -320,31 +243,6 @@ test('keeps focus moved during a pending bootstrap retry', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('preserves an intentional blur during a pending descriptor retry', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useRecoveringArtifactScenario(page)
-  await page.goto('/sessions?workspace=true')
-  await submitArtifactWithoutMouse(page)
-  await expect(page.getByRole('alert')).toContainText(incompatibleDescriptorMessage)
-
-  const response = Promise.withResolvers<void>()
-  await page.route('**/api/blobs/**/descriptor?*', async (route) => {
-    await response.promise
-    await route.fulfill({ json: imageArtifact })
-  })
-  const request = page.waitForRequest('**/api/blobs/**/descriptor?*')
-  await page.getByRole('button', { name: 'Retry', exact: true }).click()
-  await request
-  await page.getByText('Signalbox', { exact: true }).click()
-  await expect(page.locator('body')).toBeFocused()
-  response.resolve()
-  await expect(
-    page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
-  ).toBeVisible()
-  await expect(page.locator('body')).toBeFocused()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
 test('preserves an intentional blur during a pending bootstrap retry', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.route('**/api/bootstrap', (route) =>
@@ -367,58 +265,4 @@ test('preserves an intentional blur during a pending bootstrap retry', async ({ 
   await expect(page.locator('.product-connection')).toHaveCount(0)
   await expect(page.locator('body')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('captures desktop and responsive artifact evidence', async ({ page }, testInfo) => {
-  skipUnlessLinuxChromium(testInfo)
-  const problems = watchBrowser(page)
-  await useArtifactScenario(page)
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions?workspace=true')
-  await resolveArtifactWithoutMouse(page)
-
-  await expect.soft(page).toHaveScreenshot('artifact-inspector-desktop-dark.png', {
-    animations: 'disabled',
-  })
-  await page.getByRole('button', { name: 'Use light theme' }).click()
-  await expect.soft(page).toHaveScreenshot('artifact-inspector-desktop-light.png', {
-    animations: 'disabled',
-  })
-  await page.getByRole('button', { name: 'Close artifact inspector' }).click()
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
-  await expect(
-    page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
-  ).toBeVisible()
-  await expect.soft(page).toHaveScreenshot('artifact-inspector-mobile-light.png', {
-    animations: 'disabled',
-  })
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('refuses advertised oversized derived views before any content request', async ({
-  page,
-}, testInfo) => {
-  await page.setViewportSize({ width: 1440, height: 900 })
-  const oversized = decodeWebBlobDescriptor({
-    ...imageArtifact,
-    available_views: imageArtifact.available_views.map((view) =>
-      view.kind === 'preview' || view.kind === 'thumbnail'
-        ? { ...view, byte_length: '16777217' }
-        : view,
-    ),
-  })
-  await useArtifactScenario(page, oversized)
-  const contentRequests: string[] = []
-  page.on('request', (request) => {
-    if (request.url().includes('/content/')) contentRequests.push(request.url())
-  })
-  await page.goto('/sessions?workspace=true')
-  await submitArtifactWithoutMouse(page, oversized)
-  const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
-  await expect(artifact.getByText('Details only', { exact: true })).toBeVisible()
-  await expect(artifact.locator('img')).toHaveCount(0)
-  expect(contentRequests).toEqual([])
-  if (testInfo.project.name === 'chromium')
-    await expect(page).toHaveScreenshot('derived-byte-bound-desktop.png')
 })
