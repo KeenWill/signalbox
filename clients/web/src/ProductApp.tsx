@@ -331,6 +331,89 @@ function CommandPalette({
   )
 }
 
+function OpenSessionDialog({
+  context,
+  openerRef,
+  fallbackRef,
+}: {
+  context: ProductCommandContext
+  openerRef: RefObject<HTMLElement | null>
+  fallbackRef: RefObject<HTMLElement | null>
+}) {
+  const open = useAppSelector((state) => state.app.overlay === 'session-entry')
+  const [sessionId, setSessionId] = useState('')
+  const entryRef = useRef<HTMLInputElement>(null)
+  const submitted = useRef(false)
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) invokeProductCommand('surface.escape', context)
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content
+          className="dialog-content open-session-dialog"
+          aria-describedby="open-session-description"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault()
+            entryRef.current?.focus()
+          }}
+          onEscapeKeyDown={(event) => event.stopPropagation()}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            setSessionId('')
+            const opener = openerRef.current
+            if (!submitted.current && opener?.isConnected && opener.getClientRects().length > 0) {
+              opener.focus()
+            } else {
+              fallbackRef.current?.focus()
+            }
+            submitted.current = false
+          }}
+        >
+          <div className="dialog-heading">
+            <Dialog.Title>Open session by id</Dialog.Title>
+            <Dialog.Close asChild>
+              <button className="icon-button" type="button" aria-label="Close open session">
+                <X />
+              </button>
+            </Dialog.Close>
+          </div>
+          <Dialog.Description id="open-session-description">
+            Paste a session identifier.
+          </Dialog.Description>
+          <form
+            className="open-session-command"
+            onSubmit={(event) => {
+              event.preventDefault()
+              if (context.navigationLocked) return
+              submitted.current = true
+              invokeProductCommand('surface.escape', context)
+              invokeProductCommand('session.open', { ...context, sessionId: sessionId.trim() })
+            }}
+          >
+            <label htmlFor="palette-session-id">Session ID</label>
+            <input
+              id="palette-session-id"
+              ref={entryRef}
+              value={sessionId}
+              onChange={(event) => setSessionId(event.currentTarget.value.trim())}
+              required
+              pattern="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+              autoComplete="off"
+            />
+            <button type="submit" disabled={context.navigationLocked}>
+              Open session
+            </button>
+          </form>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
 function KeyboardHelp({
   context,
   openerRef,
@@ -680,6 +763,13 @@ export function ProductApp({
           ? (anchor) =>
               setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
           : undefined,
+      openSession: (sessionId) => {
+        void navigate({
+          to: '/$surface',
+          params: { surface: 'sessions' },
+          search: { session: sessionId, workspace: true },
+        })
+      },
       navigationLocked: navigationDisabled,
       navigate: (path) => {
         if (path === '/scenario/streaming') {
@@ -1054,6 +1144,7 @@ export function ProductApp({
           />
         </aside>
       )}
+      <OpenSessionDialog context={context} openerRef={paletteOpenerRef} fallbackRef={mainRef} />
       <CommandPalette
         context={context}
         openerRef={paletteOpenerRef}

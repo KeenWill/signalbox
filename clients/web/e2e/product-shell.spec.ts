@@ -2048,3 +2048,25 @@ test('the sidebar rail remembers collapse and keeps keyboard navigation', async 
   await page.getByRole('button', { name: 'Expand sidebar', exact: true }).click()
   await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '218px')
 })
+
+test('the command palette opens a pasted session id and restores focus on cancel', async ({
+  page,
+}, testInfo) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/settings')
+  const palette = page.getByRole('button', { name: 'Open command palette', exact: true })
+  await palette.click()
+  await page.getByRole('button', { name: /^Open session by id/ }).click()
+  const dialog = page.getByRole('dialog', { name: 'Open session by id' })
+  await expect(dialog.getByLabel('Session ID')).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(palette).toBeFocused()
+  await palette.click()
+  await page.getByRole('button', { name: /^Open session by id/ }).click()
+  await dialog.getByLabel('Session ID').fill(sessionWorkspaceFixture.id)
+  await page.screenshot({ path: testInfo.outputPath('open-session-command.png') })
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`/sessions\\?.*session=${sessionWorkspaceFixture.id}`))
+  await expect(dialog).toBeHidden()
+})
