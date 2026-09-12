@@ -985,6 +985,7 @@ for (const action of ['switch', 'close', 'reopen'] as const) {
       await expect(page.getByRole('heading', { name: '0 sessions', exact: true })).toBeVisible()
     } else {
       api.state.active = true
+      api.advanceObservation()
       await session.press('Enter')
       await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
     }
