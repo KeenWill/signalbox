@@ -96,7 +96,7 @@ def resolve_findings(checkout, head, findings):
     resolved = []
     for finding, references in zip(findings, inputs):
         evidence = []
-        cited_paths = {ref['value'] for ref in references if ref['kind'] == 'path'}
+        anchors = []
         primary_line = int(finding.get('line_start') or finding.get('line') or 1)
         for reference in references:
             if reference['kind'] == 'path':
@@ -110,16 +110,18 @@ def resolve_findings(checkout, head, findings):
                     if 1 <= first <= last <= len(source):
                         locations.append({'path': path, 'line': first, 'end_line': last,
                                           'text': '\n'.join(source[first-1:last])})
+                        anchors.append((path, reference['line'] or primary_line,
+                                        reference['end_line'] or reference['line'] or primary_line))
             else:
                 name = reference['value'].split('::')[-1].split('.')[-1]
                 locations = occurrences[name]
                 # A representative source occurrence keeps common identifiers
                 # from duplicating entire generated API inventories in context.
-                locations = sorted(locations, key=lambda item: (
-                    item['path'] not in cited_paths,
-                    abs(item['line'] - primary_line) if item['path'] in cited_paths else 0,
-                    item['path'], item['line'],
-                ))
+                def rank(item):
+                    distances = [max(first - item['line'], item['line'] - last, 0)
+                                 for path, first, last in anchors if path == item['path']]
+                    return (not distances, min(distances, default=0), item['path'], item['line'])
+                locations = sorted(locations, key=rank)
             evidence.append({'citation': reference, 'status': 'found_at_head' if locations else 'absent_at_head',
                              'source_match_count': len(locations), 'matches': locations[:1]})
         resolved.append({**finding, 'citation_resolution': {

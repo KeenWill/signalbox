@@ -82,6 +82,19 @@ class CitationResolutionTests(unittest.TestCase):
         evidence = resolve_findings(self.tree, head, [{'finding_text': '`missing_symbol`'}])[0]
         self.assertEqual(evidence['citation_resolution']['references'][0]['status'], 'absent_at_head')
 
+    def test_identifier_evidence_ranks_against_embedded_lines_and_resolved_paths(self):
+        head = self.commit({'src/lib.rs': 'fn gate() {}\n' + '\n' * 198 +
+                            'fn gate() { current(); }\n',
+                            'src/other.rs': 'fn gate() {}\n' + '\n' * 199})
+        finding = {'finding_text': 'See `other.rs:190` and `lib.rs:200`; `gate()` loses input.'}
+        evidence = resolve_findings(self.tree, head, [finding])[0]['citation_resolution']
+        identifier = next(ref for ref in evidence['references']
+                          if ref['citation'] == {'kind': 'identifier', 'value': 'gate'})
+        self.assertEqual(identifier['source_match_count'], 3)
+        self.assertEqual(identifier['matches'], [
+            {'path': 'src/lib.rs', 'line': 200, 'text': 'fn gate() { current(); }'},
+        ])
+
     def test_resolution_preserves_the_candidate_and_independent_head_evidence(self):
         head = self.commit({'src/lib.rs': 'fn gate() {}\n'})
         finding = {'finding_id': 'original', 'file_path': 'src/lib.rs',
