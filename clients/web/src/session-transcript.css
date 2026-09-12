@@ -23,3 +23,33 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.session-turn {
+  border-bottom: 1px solid var(--border);
+}
+.session-turn .session-message-text {
+  white-space: pre-wrap;
+}
+.session-tool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-block: 0.4rem;
+}
+.session-tool-chips button {
+  min-height: 1.6rem;
+  padding: 0.15rem 0.45rem;
+  font-size: 0.75rem;
+}
+.session-tool-chips button[aria-expanded="true"] {
+  border-color: var(--accent);
+}
+.session-tool-slot {
+  padding-block: 0.35rem;
+}
+.session-tool-summary {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+}

@@ -1,5 +1,5 @@
 import { useInfiniteQuery } from '@tanstack/react-query'
-import { type ReactNode, useEffect, useMemo, useRef } from 'react'
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
 import type { CommandContext } from './commands'
 import type {
@@ -9,10 +9,10 @@ import type {
 } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import type { SessionTranscriptLimits } from './product'
-import { SessionItemDetail } from './SessionItemDetail'
-import { conversationEntryKey, hasConversationContent } from './session-timeline/conversation'
+import { conversationEntryKey } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
 import { readTranscriptWindow, TRANSCRIPT_RETAINED_WINDOWS } from './session-timeline/transcript'
+import { groupTranscriptTurns, type TranscriptTurn } from './session-timeline/turns'
 import type { DetailMode } from './state'
 import { VirtualTranscript } from './Transcript'
 
@@ -111,6 +111,7 @@ function TranscriptWindow({
   observed,
   limits,
   eventSequence,
+  renderTool,
 }: SessionTranscriptTextProps) {
   const transcript = useInfiniteQuery({
     queryKey: ['production', 'scrolling-transcript', sessionId, eventSequence, limits],
@@ -144,11 +145,14 @@ function TranscriptWindow({
     () => pages?.flatMap((page) => page.details.flatMap((detail) => detail.items)) ?? [],
     [pages],
   )
-  const visible = useMemo(
-    () => entries.filter((item, index) => hasConversationContent(item, entries.slice(0, index))),
+  const turns = useMemo(
+    () =>
+      groupTranscriptTurns(entries).filter(
+        (turn) => turn.messages.length > 0 || turn.result || turn.tools.length > 0,
+      ),
     [entries],
   )
-  const ids = useMemo(() => visible.map(conversationEntryKey), [visible])
+  const ids = useMemo(() => turns.map((turn) => turn.id), [turns])
   return (
     <section className="session-transcript-text" aria-label="Transcript text">
       {transcript.isPending && <p role="status">Loading transcript…</p>}
@@ -163,7 +167,11 @@ function TranscriptWindow({
       <VirtualTranscript
         ids={ids}
         initialEnd={!eventSequence}
-        selectedId={eventSequence}
+        selectedId={
+          turns.find((turn) =>
+            turn.events.some((event) => event.address.event_sequence === eventSequence),
+          )?.id
+        }
         onEdge={(direction) => {
           if (transcript.isFetching || transcript.isError) return
           if (direction === 'before' && transcript.hasPreviousPage)
@@ -171,32 +179,18 @@ function TranscriptWindow({
           if (direction === 'after' && transcript.hasNextPage) void transcript.fetchNextPage()
         }}
         renderRow={(index, measure, style) => {
-          const item = visible[index]
-          if (!item) return null
-          const continuation = pages
-            ?.flatMap((page) => page.details)
-            .find((page) => page.items.includes(item))?.continuation
+          const turn = turns[index]
+          if (!turn) return null
           return (
             <div
-              key={conversationEntryKey(item)}
+              key={turn.id}
               ref={measure}
               data-index={index}
               style={style}
-              className="session-message-entry"
-              data-event-sequence={item.address.event_sequence}
+              className="session-message-entry session-turn"
+              data-turn-id={turn.turnId}
             >
-              <BodyText body={item.body} />
-              {continuation && (
-                <details>
-                  <summary>Read more</summary>
-                  <SessionItemDetail
-                    sessionId={sessionId}
-                    item={{ ...item, projected_structured_bytes: 0 }}
-                    limits={limits}
-                    onComplete={() => {}}
-                  />
-                </details>
-              )}
+              <TurnSummary turn={turn} renderTool={renderTool} />
             </div>
           )
         }}
@@ -204,6 +198,62 @@ function TranscriptWindow({
       {transcript.isFetching && !transcript.isPending && (
         <small role="status">Loading messages…</small>
       )}
+    </section>
+  )
+}
+
+function TurnSummary({
+  turn,
+  renderTool,
+}: {
+  turn: TranscriptTurn
+  renderTool?: SessionTranscriptTextProps['renderTool']
+}) {
+  const [openTool, setOpenTool] = useState<string | null>(null)
+  const tool = turn.tools.find((entry) => entry.request_id === openTool)
+  return (
+    <>
+      {turn.messages.map((item) => (
+        <div key={conversationEntryKey(item)} data-event-sequence={item.address.event_sequence}>
+          <BodyText body={item.body} />
+        </div>
+      ))}
+      {turn.tools.length > 0 && (
+        <section className="session-tool-chips" aria-label="Tools used">
+          {turn.tools.map((entry) => (
+            <button
+              type="button"
+              key={entry.request_id}
+              aria-expanded={openTool === entry.request_id}
+              onClick={() => setOpenTool(openTool === entry.request_id ? null : entry.request_id)}
+            >
+              {entry.tool_name}
+            </button>
+          ))}
+        </section>
+      )}
+      {tool && (
+        <div className="session-tool-slot">
+          {renderTool ? renderTool(tool, 'condensed') : <ToolSummary tool={tool} />}
+        </div>
+      )}
+      {turn.result && (
+        <div data-event-sequence={turn.result.address.event_sequence}>
+          <BodyText body={turn.result.body} />
+        </div>
+      )}
+    </>
+  )
+}
+
+function ToolSummary({ tool }: { tool: WebTimelineToolAttempt }) {
+  const evidence = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
+  return (
+    <section aria-label={`${tool.tool_name} details`}>
+      <strong>{tool.tool_name}</strong>
+      {tool.arguments && <p className="session-tool-summary">{tool.arguments.text}</p>}
+      {evidence?.result && <p className="session-tool-summary">{evidence.result.text}</p>}
+      {evidence?.failure && <p className="session-tool-summary">{evidence.failure.text}</p>}
     </section>
   )
 }
