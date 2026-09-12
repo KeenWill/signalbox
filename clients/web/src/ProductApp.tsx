@@ -42,6 +42,7 @@ import {
 } from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext } from './commands'
+import { Field } from './Field'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import { loadRetainedCommand } from './imports/retainedCommand'
@@ -377,8 +378,8 @@ function OpenSessionDialog({
               invokeProductCommand('session.open', { ...context, sessionId: sessionId.trim() })
             }}
           >
-            <label htmlFor="palette-session-id">Session ID</label>
-            <input
+            <Field
+              label="Session ID"
               id="palette-session-id"
               ref={entryRef}
               value={sessionId}

@@ -3285,12 +3285,6 @@ kbd {
   gap: 0.5rem;
   padding: 0.75rem;
 }
-.open-session-command input {
-  min-width: 0;
-  width: 100%;
-  min-height: 32px;
-  padding: 0.4rem 0.5rem;
-}
 
 .open-session-dialog {
   width: min(420px, calc(100vw - 2rem));
