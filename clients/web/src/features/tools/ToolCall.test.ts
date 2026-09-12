@@ -70,6 +70,13 @@ describe('tool presentation', () => {
     expect(markup).toContain('href="https://github.com/example/project/pull/12"')
   })
 
+  it('shows server-side truncation for Git diffs', () => {
+    const markup = render(
+      toolExample('git_diff', {}, { patch: 'diff --git a/file b/file', truncated: true }),
+    )
+    expect(markup).toContain('Showing part of the diff')
+  })
+
   it('does not label complete non-BMP output as truncated', () => {
     const markup = render(toolExample('read_file', { path: 'emoji.txt' }, { content: '😀' }))
     expect(markup).toContain('😀')

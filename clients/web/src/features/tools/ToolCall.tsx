@@ -226,7 +226,10 @@ function Git({ arguments: args, result, resultExcerpt }: RendererProps) {
       </strong>
       {typeof result.url === 'string' && <Link url={result.url} title={result.title} />}
       {typeof result.patch === 'string' ? (
-        <TextPreview text={result.patch} label="Diff" diff />
+        <>
+          <TextPreview text={result.patch} label="Diff" diff />
+          {result.truncated === true && <small>Showing part of the diff</small>}
+        </>
       ) : (
         <Result result={result} resultExcerpt={resultExcerpt} />
       )}
