@@ -747,6 +747,9 @@ fn startup_sections(source: &str) -> Result<toml::Table, ReloadResult> {
         .and_then(toml::Value::as_array_mut)
     {
         for profile in profiles {
+            if profile.get("adapter").and_then(toml::Value::as_str) == Some("github") {
+                continue;
+            }
             if profile.get("delivery").and_then(toml::Value::as_str) == Some("onepassword")
                 && let Some(profile) = profile.as_table_mut()
             {
@@ -1025,6 +1028,42 @@ mod tests {
         reload
             .read_replacement()
             .expect("reload warns and reads the permissive credential");
+    }
+
+    #[tokio::test]
+    async fn reload_refuses_changed_github_credential_sources() {
+        let (_directory, initial) = fixture();
+        let base = format!(
+            "{}\n[[credential_profiles]]\nname = \"github-reload-fixture\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/account/first\"\nexecutable = \"/unused/op\"\n",
+            initial.catalogs().models.source()
+        );
+        let reload = ConfigurationReload::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@localhost/unused")
+                .expect("lazy pool"),
+            HubModelConfiguration::parse(&base).expect("initial profiles"),
+            SessionTemplateConfiguration::default(),
+            initial.model_path,
+            initial.template_path,
+            None,
+        )
+        .expect("reload");
+        for replacement in [
+            base.replace("op://fixture/account/first", "op://fixture/account/second"),
+            base.replace("/unused/op", "/unused/replacement-op"),
+            base.replace(
+                "delivery = \"onepassword\"\nitem = \"op://fixture/account/first\"\nexecutable = \"/unused/op\"",
+                "delivery = \"file\"\nfile = \"/unused/token\"",
+            ),
+        ] {
+            std::fs::write(&reload.model_path, replacement).expect("replacement");
+            assert_eq!(
+                reload
+                    .read_replacement()
+                    .expect_err("startup credential source cannot reload"),
+                failure(ReloadPhase::Validate, "startup-only configuration differs")
+            );
+        }
     }
 
     #[tokio::test]
