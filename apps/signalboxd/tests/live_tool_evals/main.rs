@@ -56,7 +56,7 @@ use signalbox_domain::{
     TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
-    RuntimeModelCallProvider, RuntimeModelCatalog, approval_judge::RuntimeApprovalJudgeModel,
+    RuntimeApprovalJudgeModel, RuntimeModelCallProvider, RuntimeModelCatalog,
 };
 use signalbox_model_runtime::{
     CancellationSignal, CredentialAccess, CredentialAccessError, CredentialAccessFailure,
