@@ -315,6 +315,15 @@ through the module's store. The context carries dispatch identity, repository,
 pull-request number, head SHA, head repository, head branch, and base branch.
 Sessions without a dispatch carry no dispatch authority.
 
+The request JSON contains `request_id`, `tool`, `arguments_kind`, `arguments`,
+`session_context`, and `dispatched_task`. The task block carries the retained
+template name and creation-dispatch repository, pull-request number (null for
+branch events), rule id, event kind, and normalized triggering-event parameters.
+Goal statements and task parameters are untrusted data, never instructions to
+the judge. Each context block quotes every line behind `| ` and limits quoted
+content to 16,384 UTF-8 bytes, with unquoted `(absent)` or `(truncated)` markers
+and separate begin/end delimiters.
+
 Outside a turn judged under the commissioned generation's dispatch authority, an
 `EscalateToHuman` result for a request still admissible stores the completed
 call but no decision and leaves the same request parked. A commissioned dispatch

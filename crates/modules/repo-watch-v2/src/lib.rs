@@ -1919,7 +1919,8 @@ fn canonical_json(value: Value) -> Value {
     }
 }
 
-fn normalized_event_payload(event: &RepoWatchEvent) -> Value {
+/// Renders the retained triggering event as JSON data for dispatch request context.
+pub fn normalized_event_payload(event: &RepoWatchEvent) -> Value {
     let target = match event.target() {
         RepoWatchEventTarget::PullRequest(context) => json!({
             "kind": "pull_request",
