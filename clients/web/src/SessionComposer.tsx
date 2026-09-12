@@ -1,5 +1,5 @@
 import { useMutation } from '@tanstack/react-query'
-import { ArrowUp } from 'lucide-react'
+import { ArrowUp, Paperclip } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { invokeCommand } from './commands'
 import type {
@@ -103,6 +103,21 @@ export function SessionComposer({
       focusTimeline: () => undefined,
       submitSessionInput: canSend ? send : undefined,
     })
+  const disabledReason = newInputBlocked
+    ? capacityNotice
+    : pending?.phase === 'sending'
+      ? 'Sending…'
+      : retained !== null
+        ? 'Delivery unconfirmed'
+        : stateUnavailable
+          ? 'Session unavailable'
+          : activeState === undefined
+            ? 'Connecting…'
+            : activeState !== null
+              ? `Wait for the current turn to finish · ${enumLabel(activeState)}`
+              : text.length === 0
+                ? 'Write a message to send'
+                : ''
   return (
     <form
       className="session-composer"
@@ -112,15 +127,32 @@ export function SessionComposer({
         invokeSend()
       }}
     >
-      <label htmlFor="session-message">Message</label>
+      <label className="sr-only" htmlFor="session-message">
+        Message
+      </label>
       <textarea
         id="session-message"
-        rows={3}
+        rows={2}
+        aria-describedby="session-composer-status session-composer-help"
         placeholder="Write a message…"
         maxLength={MAX_SESSION_MESSAGE_LENGTH}
         value={retained?.message ?? text}
         readOnly={retained !== null}
         onKeyDown={(event) => {
+          if (
+            event.key === 'Enter' &&
+            !event.shiftKey &&
+            !event.altKey &&
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.nativeEvent.isComposing &&
+            event.keyCode !== 229
+          ) {
+            event.preventDefault()
+            event.stopPropagation()
+            invokeSend()
+            return
+          }
           if (event.key !== 'Escape') return
           event.preventDefault()
           event.stopPropagation()
@@ -131,7 +163,19 @@ export function SessionComposer({
         }}
       />
       <div className="session-composer-actions">
-        <button type="submit" disabled={!canSend}>
+        <span className="session-attachment-affordance" title="File attachments are unavailable">
+          <button
+            type="button"
+            disabled
+            aria-label="Attach files (unavailable)"
+            aria-describedby="session-attachment-help"
+          >
+            <Paperclip aria-hidden="true" />
+          </button>
+          <span id="session-attachment-help">Attachments unavailable</span>
+        </span>
+        <span id="session-composer-help">Enter to send · Shift+Enter for newline</span>
+        <button type="submit" disabled={!canSend} aria-describedby="session-composer-status">
           <ArrowUp aria-hidden="true" />
           {retained === null
             ? 'Send message'
@@ -139,23 +183,14 @@ export function SessionComposer({
               ? 'Sending…'
               : 'Retry message'}
         </button>
-        <span role="status">
+        <span id="session-composer-status" role="status">
           {supervision?.pending
             ? 'Session recovery required'
-            : newInputBlocked
-              ? capacityNotice
-              : pending?.phase === 'unconfirmed'
-                ? 'Delivery unconfirmed'
-                : pending?.phase === 'sending'
-                  ? 'Sending…'
-                  : notice ||
-                    (stateUnavailable
-                      ? 'Session unavailable'
-                      : activeState === undefined
-                        ? 'Connecting…'
-                        : activeState === null
-                          ? ''
-                          : `Turn: ${enumLabel(activeState)}`)}
+            : notice.startsWith('Message rejected:')
+              ? [notice, disabledReason].filter(Boolean).join(' · ')
+              : activeState === null && retained === null && !newInputBlocked
+                ? notice || disabledReason
+                : disabledReason || notice}
         </span>
       </div>
     </form>
