@@ -747,6 +747,21 @@ fn startup_sections(source: &str) -> Result<toml::Table, ReloadResult> {
         .and_then(toml::Value::as_array_mut)
     {
         for profile in profiles {
+            if profile.get("adapter").and_then(toml::Value::as_str) == Some("github") {
+                continue;
+            }
+            if matches!(
+                profile.get("delivery").and_then(toml::Value::as_str),
+                Some("file" | "environment" | "kubernetes_secret")
+            ) && let Some(profile) = profile.as_table_mut()
+            {
+                profile.insert(
+                    "delivery".to_owned(),
+                    toml::Value::String("file".to_owned()),
+                );
+                profile.remove("file");
+                profile.remove("variable");
+            }
             if profile.get("delivery").and_then(toml::Value::as_str) == Some("codex_home")
                 && let Some(profile) = profile.as_table_mut()
             {
@@ -1019,6 +1034,239 @@ mod tests {
         reload
             .read_replacement()
             .expect("reload warns and reads the permissive credential");
+    }
+
+    #[test]
+    fn environment_credentials_load_and_reload_in_an_isolated_process() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "configuration_reload::tests::environment_credential_reload_fixture",
+                "--ignored",
+            ])
+            .env("SIGNALBOX_TEST_CREDENTIAL_FIRST", "synthetic-first-secret")
+            .env(
+                "SIGNALBOX_TEST_CREDENTIAL_SECOND",
+                "synthetic-second-secret",
+            )
+            .env_remove("SIGNALBOX_TEST_CREDENTIAL_MISSING")
+            .output()
+            .expect("isolated environment fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_refuses_changed_github_credential_sources() {
+        let (_directory, initial) = fixture();
+        let base = format!(
+            "{}\n[[credential_profiles]]\nname = \"github-reload-fixture\"\nadapter = \"github\"\ndelivery = \"file\"\nfile = \"/unused/original\"\n",
+            initial.catalogs().models.source()
+        );
+        let reload = ConfigurationReload::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@localhost/unused")
+                .expect("lazy pool"),
+            HubModelConfiguration::parse(&base).expect("initial profiles"),
+            SessionTemplateConfiguration::default(),
+            initial.model_path,
+            initial.template_path,
+            None,
+        )
+        .expect("reload");
+        for replacement in [
+            base.replace("/unused/original", "/unused/replacement"),
+            base.replace(
+                "delivery = \"file\"\nfile = \"/unused/original\"",
+                "delivery = \"environment\"\nvariable = \"UNUSED_TOKEN\"",
+            ),
+        ] {
+            std::fs::write(&reload.model_path, replacement).expect("replacement");
+            assert_eq!(
+                reload
+                    .read_replacement()
+                    .expect_err("startup credential source cannot reload"),
+                failure(ReloadPhase::Validate, "startup-only configuration differs")
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "invoked with synthetic credentials by the isolated-process test"]
+    async fn environment_credential_reload_fixture() {
+        if std::env::var("SIGNALBOX_TEST_CREDENTIAL_FIRST").as_deref()
+            != Ok("synthetic-first-secret")
+        {
+            environment_credentials_load_and_reload_in_an_isolated_process();
+            return;
+        }
+        use crate::{FileCredentialAccess, configuration::ModelAdapter};
+        use signalbox_model_runtime::{
+            CredentialAccess, CredentialReference, redact_credential_text,
+        };
+        use signalbox_model_runtime::{
+            CredentialRedactingSink, Observation, ObservationFact, ObservationSink,
+        };
+        let log = tempfile::NamedTempFile::new().expect("captured logs");
+        let writer = log.reopen().expect("log writer");
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || writer.try_clone().expect("log handle"))
+                .finish(),
+        )
+        .expect("isolated log subscriber");
+        let (_directory, reload) = fixture();
+        let reference = CredentialReference::new("anthropic-overflow");
+        let mut document = reload
+            .catalogs()
+            .models
+            .source()
+            .parse::<toml_edit::DocumentMut>()
+            .expect("catalog");
+        let profiles = document["credential_profiles"]
+            .as_array_of_tables_mut()
+            .expect("profiles");
+        let profile = profiles
+            .iter_mut()
+            .find(|profile| profile["name"].as_str() == Some(reference.as_str()))
+            .expect("profile");
+        profile["delivery"] = toml_edit::value("environment");
+        profile.remove("file");
+        profile["variable"] = toml_edit::value("SIGNALBOX_TEST_CREDENTIAL_FIRST");
+        std::fs::write(&reload.model_path, document.to_string()).expect("replacement");
+        let first = reload
+            .read_replacement()
+            .expect("environment admitted on reload");
+        let access =
+            FileCredentialAccess::from_configuration(&first.models, ModelAdapter::Anthropic);
+        let value = access.resolve(&reference).await.expect("first value");
+        assert_eq!(value.expose_bytes(), b"synthetic-first-secret");
+        let diagnostic = format!(
+            "{access:?} {value:?} {:?}",
+            first.models.credential_profile(reference.as_str())
+        );
+        assert!(!diagnostic.contains("synthetic-first-secret"));
+        tracing::info!(?access, ?value, "credential boundary diagnostics");
+        let mut transcript_observations = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut transcript_observations, &value);
+        sink.observe(Observation {
+            correlation: (),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "provider echoed synthetic-first-secret".to_owned(),
+            },
+        });
+        sink.flush();
+        assert!(!format!("{transcript_observations:?}").contains("synthetic-first-secret"));
+        let logs = std::fs::read_to_string(log.path()).expect("captured diagnostics");
+        assert!(logs.contains("credential boundary diagnostics"));
+        assert!(!logs.contains("synthetic-first-secret"));
+        assert!(
+            !redact_credential_text("provider echoed synthetic-first-secret".to_owned(), &value)
+                .contains("synthetic-first-secret")
+        );
+        let replacement = document.to_string().replace(
+            "SIGNALBOX_TEST_CREDENTIAL_FIRST",
+            "SIGNALBOX_TEST_CREDENTIAL_SECOND",
+        );
+        std::fs::write(&reload.model_path, &replacement).expect("changed source");
+        let second = reload
+            .read_replacement()
+            .expect("changed variable admitted");
+        assert_eq!(
+            FileCredentialAccess::from_configuration(&second.models, ModelAdapter::Anthropic)
+                .resolve(&reference)
+                .await
+                .expect("replacement value")
+                .expose_bytes(),
+            b"synthetic-second-secret"
+        );
+        std::fs::write(
+            &reload.model_path,
+            replacement.replace(
+                "SIGNALBOX_TEST_CREDENTIAL_SECOND",
+                "SIGNALBOX_TEST_CREDENTIAL_MISSING",
+            ),
+        )
+        .expect("missing source");
+        assert_eq!(
+            reload
+                .read_replacement()
+                .expect_err("missing variable rejected"),
+            failure(
+                ReloadPhase::Validate,
+                "credential reference `anthropic-overflow` could not be resolved: Unavailable"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn kubernetes_secret_reload_reads_the_replacement_mount() {
+        use crate::{FileCredentialAccess, configuration::ModelAdapter};
+        use signalbox_model_runtime::{CredentialAccess, CredentialReference};
+        let (directory, reload) = fixture();
+        let reference = CredentialReference::new("anthropic-overflow");
+        let mut document = reload
+            .catalogs()
+            .models
+            .source()
+            .parse::<toml_edit::DocumentMut>()
+            .expect("catalog");
+        let profiles = document["credential_profiles"]
+            .as_array_of_tables_mut()
+            .expect("profiles");
+        let profile = profiles
+            .iter_mut()
+            .find(|profile| profile["name"].as_str() == Some(reference.as_str()))
+            .expect("profile");
+        profile["delivery"] = toml_edit::value("kubernetes_secret");
+        let mount = directory.path().join("projected-secret");
+        let target = directory.path().join(reference.as_str());
+        std::fs::write(&target, b"synthetic-first-secret\n").expect("secret");
+        std::os::unix::fs::symlink(&target, &mount).expect("projected secret symlink");
+        profile["file"] = toml_edit::value(mount.to_str().expect("mount path"));
+        std::fs::write(&reload.model_path, document.to_string()).expect("replacement");
+        let first = reload.read_replacement().expect("mounted secret admitted");
+        let access =
+            FileCredentialAccess::from_configuration(&first.models, ModelAdapter::Anthropic);
+        assert_eq!(
+            access
+                .resolve(&reference)
+                .await
+                .expect("projected value")
+                .expose_bytes(),
+            b"synthetic-first-secret"
+        );
+        let second_target =
+            tempfile::NamedTempFile::new_in(directory.path()).expect("rotated secret");
+        std::fs::write(second_target.path(), b"synthetic-second-secret\n").expect("rotated bytes");
+        std::fs::remove_file(&mount).expect("unmount old projection");
+        std::os::unix::fs::symlink(second_target.path(), &mount).expect("rotate projection");
+        reload
+            .read_replacement()
+            .expect("rotated projection admitted");
+        assert_eq!(
+            access
+                .resolve(&reference)
+                .await
+                .expect("live rotated value")
+                .expose_bytes(),
+            b"synthetic-second-secret"
+        );
+        std::fs::remove_file(&mount).expect("remove projection");
+        assert_eq!(
+            reload
+                .read_replacement()
+                .expect_err("missing mount rejected"),
+            failure(
+                ReloadPhase::Validate,
+                "credential reference `anthropic-overflow` could not be resolved: Unavailable"
+            )
+        );
     }
 
     #[tokio::test]

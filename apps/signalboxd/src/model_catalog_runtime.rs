@@ -13,7 +13,6 @@ use signalbox_model_provider_runtime::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
     ContextCompactionModelResult, RuntimeContextCompactionModel,
 };
-use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{
     AnthropicConfig, AnthropicConstructionError, AnthropicRuntime,
 };
@@ -116,12 +115,7 @@ impl ModelRuntimeFactory {
 
     /// Constructs adapters without provider I/O using this snapshot's routes and capabilities.
     pub fn build(&self, models: &HubModelConfiguration) -> Result<Runtime, ModelRuntimeBuildError> {
-        let credentials =
-            |adapter| {
-                FileCredentialAccess::from_files(models.file_credential_profiles(adapter).map(
-                    |(reference, path)| (CredentialReference::new(reference), path.to_path_buf()),
-                ))
-            };
+        let credentials = |adapter| FileCredentialAccess::from_configuration(models, adapter);
         let anthropic = if models.uses_anthropic_adapter() {
             let mut config = AnthropicConfig::new(self.native_message_limit);
             config.exchange_timeout = self.exchange_timeout;
