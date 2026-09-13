@@ -27,7 +27,8 @@ test('a short viewport can scroll to the complete delivery status', async ({ pag
   await page.goto(`/sessions?workspace=true&session=${sessionId}`)
   const status = page.getByRole('form', { name: 'Message composer' }).getByRole('status')
   await expect(status).toHaveText('Wait for the current turn to finish · Running')
-  await status.scrollIntoViewIfNeeded()
+  await page.mouse.move(200, 140)
+  await page.mouse.wheel(0, 500)
   await expect(status).toBeInViewport({ ratio: 1 })
 })
 
