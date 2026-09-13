@@ -222,7 +222,8 @@ function Web({ arguments: args, result, resultExcerpt }: RendererProps) {
       )}
       {textField(args.query) && <strong>{textField(args.query)}</strong>}
       <TextPreview text={textField(result.body ?? result.summary)} label="Summary" />
-      {Array.isArray(result.results) && (
+      {Array.isArray(result.results) && result.results.length === 0 && <p>No results returned</p>}
+      {Array.isArray(result.results) && result.results.length > 0 && (
         <ul>
           {result.results.map((item, index) => {
             const entry = fields(item)

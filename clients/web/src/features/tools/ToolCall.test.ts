@@ -11,6 +11,15 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it('labels an empty search response on its result page', () => {
+    const [, tool] = toolExample(
+      'web_search',
+      { query: 'absent' },
+      { results: [], truncated: false },
+    )
+    expect(renderToStaticMarkup(createElement(ToolCall, { tool }))).toContain('No results returned')
+  })
+
   it.each(['application/json', 'text/html; charset=utf-8', 'application/octet-stream'])(
     'retains response content type %s',
     (contentType) => {
