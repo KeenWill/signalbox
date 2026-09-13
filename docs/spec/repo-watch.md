@@ -292,6 +292,9 @@ Retries use the current pull-request context, retain their preceding dispatch
 and evaluated event context, and pass through the existing singleton and
 dispatch admission limits; they do not create GitHub change events.
 
+Each rule evaluation pass consumes eligible retained events through its captured
+tail before retries and checkout provisioning.
+
 An ordinary dispatch closes nonsticky after its turn ends and no accepted work
 remains. The closure rechecks that condition under the session lock; a goal,
 active or queued turn, or pending steering prevents it. Reconciliation includes
