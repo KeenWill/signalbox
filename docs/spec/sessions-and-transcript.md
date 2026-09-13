@@ -560,7 +560,8 @@ retains facts for at most 24 recently read event addresses; changed excerpt
 lengths under different read budgets preserve compatible prefixes and retain the
 longest checked excerpt.
 
-Windows advance past metadata-only detail records automatically within the
+Windows advance past metadata-only detail records, including goal-only tool
+batches hidden by the selected conversation summary, automatically within the
 workspace record budget and projected-byte budget. All returned headers, detail
 items and projected bytes are charged, including discarded records. The scan
 item budget is clamped to the advertised detail limit; each automatic read uses
@@ -568,11 +569,13 @@ only the remaining scan allowance. Scanning stops at a visible item, a detail
 continuation, or an exhausted budget. An empty detail page preserves its
 unreturned-item continuation. Scrolling again starts a fresh bounded scan using
 the timeline continuation. Turn segments retain window boundaries so prepending
-history preserves existing rows and their disclosures. Turn-wide classification
-uses all loaded events. The conversation shows user and assistant text and
-attachment references, tool arguments and output, and unsuccessful turn outcomes
-in event order. A completed response remains visible as a non-final message when
-its completed-turn closure is not loaded. Distinct physical tool attempts remain
+history preserves existing rows and their disclosures. Retained tool chips stay
+in their assigned window segment when earlier proposal evidence is loaded;
+evicted assignments are discarded. Turn-wide classification uses all loaded
+events. The conversation shows user and assistant text and attachment
+references, tool arguments and output, and unsuccessful turn outcomes in event
+order. A completed response remains visible as a non-final message when its
+completed-turn closure is not loaded. Distinct physical tool attempts remain
 independently inspectable in event order even when they share one request. Later
 batch members load on demand at the batch position as separate tool chips. A
 cursor advancing to another member is exposed outside the preceding tool

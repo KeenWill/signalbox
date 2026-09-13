@@ -2,7 +2,7 @@ import type {
   WebSessionTimelineDetail,
   WebSessionTimelineWindow,
 } from '../src/generated/web-contract.mjs'
-import { transcriptFixture } from '../src/session-timeline/transcript.fixture'
+import { transcriptFixture, transcriptSessionId } from '../src/session-timeline/transcript.fixture'
 import { retriedToolItems, turnApi } from '../src/session-timeline/turns.fixture'
 import { expect, test } from './fontTest'
 import {
@@ -281,15 +281,29 @@ test('keeps a failed physical attempt inspectable after the same request succeed
   await page.screenshot({ path: testInfo.outputPath('retried-tool.png') })
 })
 
-test('keeps the retained turn row and open tool when earlier history is prepended', async ({
+test('keeps the retained tool in its original row when its earlier proposal is prepended', async ({
   page,
-}) => {
+}, testInfo) => {
   const input = detailItems[0]
   const tool = detailItems[1]
-  if (input?.body.type !== 'user_input' || !tool) throw new Error('Fixture missing')
+  if (input?.body.type !== 'user_input' || tool?.body.type !== 'tool_batch')
+    throw new Error('Fixture missing')
+  const batch = tool.body
   const entries = Array.from({ length: 16 }, (_, index) => {
     const address = { event_sequence: String(index + 1) }
     if (index === 8) return { ...tool, address }
+    if (index === 1)
+      return {
+        ...tool,
+        address,
+        body: {
+          ...batch,
+          tools: batch.tools.map((entry) => ({
+            ...entry,
+            evidence: { type: 'request_only' as const },
+          })),
+        },
+      }
     const text = detailExcerpt(`Message ${index + 1}`)
     return {
       ...input,
@@ -299,6 +313,13 @@ test('keeps the retained turn row and open tool when earlier history is prepende
     }
   })
   await turnApi(page, undefined, entries)
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.searchParams.get('first') !== '2') return route.fallback()
+    const proposal = entries[1]
+    if (!proposal) throw new Error('Proposal fixture missing')
+    return route.fulfill({ json: detailPage([proposal]) })
+  })
   let release = () => {}
   const olderReady = new Promise<void>((resolve) => {
     release = resolve
@@ -308,7 +329,7 @@ test('keeps the retained turn row and open tool when earlier history is prepende
     if (url.searchParams.get('anchor') === 'before') await olderReady
     const window = transcriptFixture(url, 16) as WebSessionTimelineWindow
     const items = window.items.map((item) => {
-      const kind = item.address.event_sequence === '9' ? tool.kind : item.kind
+      const kind = ['2', '9'].includes(item.address.event_sequence) ? tool.kind : item.kind
       return { ...item, kind, projected_structured_bytes: 64 + kind.length }
     })
     return route.fulfill({
@@ -340,6 +361,7 @@ test('keeps the retained turn row and open tool when earlier history is prepende
   await expect(
     transcript.getByRole('region', { name: 'exec_command details', exact: true }),
   ).toContainText('release status')
+  await page.screenshot({ path: testInfo.outputPath('retained-tool-segment.png') })
 })
 
 for (const afterOutput of [false, true]) {
@@ -468,3 +490,65 @@ for (const afterOutput of [false, true]) {
     await page.screenshot({ path: testInfo.outputPath('separate-batch-chips.png') })
   })
 }
+
+test('automatically scans past goal-only batch windows to earlier conversation', async ({
+  page,
+}) => {
+  const reads: string[] = []
+  const goal = detailExcerpt('Earlier goal outcome')
+  const batch = detailItems[1]
+  if (batch?.body.type !== 'tool_batch') throw new Error('Batch fixture missing')
+  await page.route('**/api/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    const payload = transcriptFixture(url)
+    if (url.pathname.endsWith('/timeline')) {
+      if (url.searchParams.get('max_items') === '8')
+        reads.push(url.searchParams.get('anchor') ?? '')
+      const window = payload as WebSessionTimelineWindow
+      const items = window.items.map((item) => {
+        const kind = Number(item.address.event_sequence) > 99984 ? batch.kind : item.kind
+        return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+      })
+      return route.fulfill({
+        json: {
+          ...window,
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
+          ),
+        },
+      })
+    }
+    if (
+      url.pathname.endsWith('/timeline-detail') &&
+      Number(url.searchParams.get('first')) > 99984
+    ) {
+      const item = {
+        ...batch,
+        address: { event_sequence: url.searchParams.get('first') ?? '' },
+        projected_body_bytes: 128 + Number(goal.total_bytes),
+        body: {
+          ...batch.body,
+          tools: [],
+          goal_events: [{ type: 'achieved' as const, generation: '1', text: goal }],
+        },
+      }
+      const detail = detailPage([item])
+      return route.fulfill({ json: { ...detail, session_id: transcriptSessionId } })
+    }
+    return route.fulfill({ json: payload })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.getByText('Message 99984', { exact: true })).toBeVisible()
+  expect(reads).toEqual(['latest', 'before', 'before'])
+  await expect(transcript.getByRole('region', { name: 'Tools used' })).toHaveCount(0)
+  expect(Number(await transcript.getAttribute('data-total-loaded'))).toBeLessThanOrEqual(24)
+})

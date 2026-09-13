@@ -28,6 +28,7 @@ import {
 } from './session-timeline/transcript'
 import {
   groupTranscriptTurns,
+  isVisibleTurnEvent,
   type TranscriptTurn,
   toolContinuations,
   toolEvidenceKey,
@@ -274,9 +275,10 @@ function TranscriptWindow({
       ),
     [pages],
   )
+  const toolSegments = useRef(new Map<string, string>())
   const turns = useMemo(
     () =>
-      groupTranscriptTurns(entries, windowStarts).filter(
+      groupTranscriptTurns(entries, windowStarts, toolSegments.current).filter(
         (turn) =>
           turn.messages.length > 0 ||
           turn.result ||
@@ -286,6 +288,11 @@ function TranscriptWindow({
       ),
     [entries, windowStarts],
   )
+  useEffect(() => {
+    toolSegments.current = new Map(
+      turns.flatMap((turn) => turn.tools.map((tool) => [toolEvidenceKey(tool), turn.id] as const)),
+    )
+  }, [turns])
   const pending = useMemo(
     () =>
       pages?.flatMap((page) =>
@@ -333,16 +340,7 @@ function TranscriptWindow({
       oldest?.details.some(
         (page) =>
           page.continuation ||
-          page.items.some((item) =>
-            turns.some(
-              (turn) =>
-                turn.messages.includes(item) ||
-                turn.result === item ||
-                turn.warnings.includes(item) ||
-                turn.outcome === item ||
-                (item.body.type === 'tool_batch' && turn.events.includes(item)),
-            ),
-          ),
+          page.items.some((item) => turns.some((turn) => isVisibleTurnEvent(turn, item))),
       )
     ) {
       emptyScanned.current = { headers: 0, items: 0, bytes: 0, first: '' }
@@ -423,16 +421,7 @@ function TranscriptWindow({
               ?.details.some(
                 (page) =>
                   page.continuation ||
-                  page.items.some((item) =>
-                    turns.some(
-                      (turn) =>
-                        turn.messages.includes(item) ||
-                        turn.result === item ||
-                        turn.warnings.includes(item) ||
-                        turn.outcome === item ||
-                        (item.body.type === 'tool_batch' && turn.events.includes(item)),
-                    ),
-                  ),
+                  page.items.some((item) => turns.some((turn) => isVisibleTurnEvent(turn, item))),
               ),
           )
         }
