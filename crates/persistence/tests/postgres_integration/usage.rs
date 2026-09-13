@@ -17,6 +17,50 @@ const SELECTED_OUTPUT_TOKENS: u64 = 29;
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn title_context_excludes_private_provider_payloads() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let (fixture, repository, authorized) =
+        authorize_checkpointed_model_call(&pool, 0x98_800).await?;
+    let observation = ModelCallTerminalObservation::CompletedWithProviderCompaction {
+        response: vec![
+            AssistantResponsePart::ProviderCompaction(ProviderCompactionBlock::try_new(
+                r#"{"type":"compaction","content":"private summary","encrypted_content":"opaque compaction"}"#.to_owned()
+            ).expect("compaction fixture")),
+            AssistantResponsePart::ProviderReasoning(signalbox_domain::ProviderReasoningItem::try_new(
+                r#"{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"opaque reasoning"}"#.to_owned()
+            ).expect("reasoning fixture")),
+            AssistantResponsePart::Text(AssistantText::try_new("Public title context".to_owned()).expect("assistant text")),
+        ],
+        retained_input_tokens: 19,
+        retained_output_tokens: 3,
+    };
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            authorized
+                .observation_correlation()
+                .bind_terminal_observation(observation),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                (0..3)
+                    .map(|_| SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()))
+                    .collect(),
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            )),
+            |_| panic!("no pending steering"),
+        )
+        .await?;
+    let text = signalbox_persistence::session_titles::SessionTitleRepository::new(pool)
+        .conversation(fixture.session, 4096)
+        .await?;
+    assert!(text.contains("Public title context"));
+    assert!(!text.contains("encrypted_content"));
+    assert!(!text.contains("private summary"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn initial_session_title_is_claimed_once_preserves_manual_names_and_records_usage()
 -> Result<(), Box<dyn Error>> {
     use signalbox_application::{UsageCallKind, UsageCallScope, UsageTokenAxes};

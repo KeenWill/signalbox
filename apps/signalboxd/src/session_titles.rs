@@ -63,16 +63,6 @@ impl From<signalbox_persistence::model_execution::ModelCallRepositoryError> for 
 }
 
 impl SessionTitles {
-    pub(crate) async fn restore_pending(&self) -> Result<(), sqlx::Error> {
-        for (session, turn) in SessionTitleRepository::new(self.pool.clone())
-            .unclaimed_initial_turns()
-            .await?
-        {
-            self.defer_initial(session, turn);
-        }
-        Ok(())
-    }
-
     pub(crate) fn defer_initial(&self, session: SessionId, turn: TurnId) {
         self.processes.retain_initial_title(session, turn);
     }

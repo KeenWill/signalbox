@@ -458,8 +458,13 @@ impl ConfigurationReload {
                 self.deliver(request, &intent, replacement, true).await?;
             }
         }
-        if let Some(titles) = self.session_titles(self.pool.clone()) {
-            titles.restore_pending().await?;
+        self.restore_pending_titles().await?;
+        Ok(())
+    }
+
+    async fn restore_pending_titles(&self) -> Result<(), sqlx::Error> {
+        if let Some(processes) = &self.title_invocation_processes {
+            processes.restore_pending_titles().await?;
         }
         Ok(())
     }
@@ -641,6 +646,7 @@ impl ConfigurationReload {
             })?;
             watch.nudge_restored(restored).await;
         }
+        self.restore_pending_titles().await?;
         self.repository
             .finish_profile_reload(request, &changed_profiles)
             .await?;
