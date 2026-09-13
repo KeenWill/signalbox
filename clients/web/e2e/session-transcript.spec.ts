@@ -1016,9 +1016,10 @@ for (const [itemLimit, byteLimit, expectedReads, retry] of [
   [10, 65536, 10, false],
   [128, 1024, 7, false],
   [9, 65536, 9, true],
+  [9, 65536, 9, 'gesture'],
   [128, 1024, 7, true],
 ] as const) {
-  test(`charges discarded details to the ${itemLimit}-item / ${byteLimit}-byte automatic scan budget${retry ? ' across failed retries' : ''}`, async ({
+  test(`charges discarded details to the ${itemLimit}-item / ${byteLimit}-byte automatic scan budget${retry === 'gesture' ? ' with a fresh gesture after failure' : retry ? ' across failed retries' : ''}`, async ({
     page,
   }) => {
     const reads: URL[] = []
@@ -1053,7 +1054,7 @@ for (const [itemLimit, byteLimit, expectedReads, retry] of [
         headers.push(url)
         if (
           retry &&
-          failed.length < 2 &&
+          failed.length < (retry === 'gesture' ? 1 : 2) &&
           url.searchParams.get('anchor') === 'before' &&
           url.searchParams.get('max_items') === '1'
         ) {
@@ -1101,6 +1102,20 @@ for (const [itemLimit, byteLimit, expectedReads, retry] of [
     })
     await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
     const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+    if (retry === 'gesture') {
+      await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
+      expect(reads).toHaveLength(expectedReads - 1)
+      const beforeGesture = headers.length
+      const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+      await transcript.hover()
+      await page.mouse.wheel(0, -900)
+      await expect.poll(() => reads.length).toBe(expectedReads - 1 + itemLimit)
+      await expect(surface).toHaveAttribute('aria-busy', 'false')
+      await expect(surface.getByRole('alert')).toHaveCount(0)
+      expect(headers[beforeGesture]?.searchParams.get('max_items')).toBe('8')
+      expect(failed).toHaveLength(1)
+      return
+    }
     if (retry) {
       for (const count of [1, 2]) {
         await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')

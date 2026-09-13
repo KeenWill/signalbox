@@ -416,7 +416,7 @@ function TranscriptWindow({
         selectedId={selectedId}
         pinnedId={focusedRow}
         onEdge={(direction) => {
-          if (pageRead.current || transcript.isFetching || transcript.isError) return
+          if (pageRead.current || transcript.isFetching) return
           if (!(direction === 'before' ? transcript.hasPreviousPage : transcript.hasNextPage))
             return
           if (direction === 'before') followLatest.current = false
