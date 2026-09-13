@@ -636,11 +636,8 @@ impl super::HubModelConfiguration {
 }
 
 fn ambient_environment(variable: &str) -> Result<Vec<u8>, CredentialAccessFailure> {
-    let value = std::env::var_os(variable).ok_or(CredentialAccessFailure::Unavailable)?;
-    let bytes = value.as_encoded_bytes();
-    if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
-        return Err(CredentialAccessFailure::TooLarge);
-    }
+    let value = read_environment(variable)?;
+    let bytes = credential_bytes(&value);
     validate_ambient_utf8(bytes)?;
     Ok(bytes.to_vec())
 }

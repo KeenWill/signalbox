@@ -1285,15 +1285,19 @@ mod tests {
         const INVALID_VARIABLE: &str = "SIGNALBOX_AMBIENT_INVALID_UTF8";
         const VARIABLE: &str = "SIGNALBOX_AMBIENT_RELOAD_FIXTURE";
         const REPLACEMENT_VARIABLE: &str = "SIGNALBOX_AMBIENT_RELOAD_REPLACEMENT";
-        if std::env::var(VARIABLE).as_deref() != Ok("synthetic-task-first") {
+        const EMPTY_VARIABLE: &str = "SIGNALBOX_AMBIENT_EMPTY";
+        const TERMINATORS_VARIABLE: &str = "SIGNALBOX_AMBIENT_TERMINATORS";
+        if std::env::var(VARIABLE).as_deref() != Ok("synthetic-task-first\n") {
             let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
                 .args([
                     "--exact",
                     "configuration_reload::tests::ambient_task_sources_load_reload_and_disappear",
                     "--nocapture",
                 ])
-                .env(VARIABLE, "synthetic-task-first")
-                .env(REPLACEMENT_VARIABLE, "synthetic-task-second")
+                .env(VARIABLE, "synthetic-task-first\n")
+                .env(REPLACEMENT_VARIABLE, "synthetic-task-second\r\n")
+                .env(EMPTY_VARIABLE, "")
+                .env(TERMINATORS_VARIABLE, "\r\n")
                 .env(
                     INVALID_VARIABLE,
                     std::ffi::OsString::from_vec(b"prefix\xffsecret".to_vec()),
@@ -1311,8 +1315,8 @@ mod tests {
         let (directory, reload) = fixture();
         let first_file = directory.path().join("task-first");
         let second_file = directory.path().join("task-second");
-        std::fs::write(&first_file, "synthetic-task-first").expect("first source");
-        std::fs::write(&second_file, "synthetic-task-second").expect("second source");
+        std::fs::write(&first_file, "synthetic-task-first\n").expect("first source");
+        std::fs::write(&second_file, "synthetic-task-second\r\n").expect("second source");
         let base = reload.catalogs().models.source().to_owned();
         for (source, expected) in [
             (
@@ -1343,6 +1347,14 @@ mod tests {
                 .await
                 .expect("current source resolves");
             assert_eq!(value.expose_bytes(), expected);
+            assert_eq!(
+                signalbox_model_runtime::redact_credential_text(
+                    serde_json::to_string(std::str::from_utf8(expected).expect("synthetic UTF-8"))
+                        .expect("serialized task output"),
+                    &value,
+                ),
+                r#""[redacted]""#
+            );
             assert!(
                 !format!("{value:?}")
                     .contains(std::str::from_utf8(expected).expect("synthetic UTF-8"))
@@ -1350,9 +1362,24 @@ mod tests {
             *reload.current.write().expect("catalog lock") = replacement;
         }
         std::fs::write(&first_file, b"prefix\xffsecret").expect("invalid UTF-8 credential");
-        for source in [
-            format!("file = {first_file:?}"),
-            format!("variable = {INVALID_VARIABLE:?}"),
+        use signalbox_model_runtime::CredentialAccessFailure;
+        for (source, expected_failure) in [
+            (
+                format!("file = {first_file:?}"),
+                CredentialAccessFailure::InvalidUtf8,
+            ),
+            (
+                format!("variable = {INVALID_VARIABLE:?}"),
+                CredentialAccessFailure::InvalidUtf8,
+            ),
+            (
+                format!("variable = {EMPTY_VARIABLE:?}"),
+                CredentialAccessFailure::Unavailable,
+            ),
+            (
+                format!("variable = {TERMINATORS_VARIABLE:?}"),
+                CredentialAccessFailure::Unavailable,
+            ),
         ] {
             let configured = format!(
                 "{base}\n[[credential_profiles]]\nname = \"task-fixture\"\nadapter = \"sandboxed_exec\"\ndelivery = \"ambient\"\n{source}\n"
@@ -1361,26 +1388,28 @@ mod tests {
             assert_eq!(
                 models
                     .validate_credential_files()
-                    .expect_err("invalid UTF-8 rejected at load")
+                    .expect_err("invalid ambient credential rejected at load")
                     .failure,
-                signalbox_model_runtime::CredentialAccessFailure::InvalidUtf8
+                expected_failure
             );
             assert_eq!(
                 models
                     .resolve_ambient_task_credential("task-fixture")
                     .await
-                    .expect_err("invalid UTF-8 rejected at use")
+                    .expect_err("invalid ambient credential rejected at use")
                     .failure,
-                signalbox_model_runtime::CredentialAccessFailure::InvalidUtf8
+                expected_failure
             );
             std::fs::write(&reload.model_path, configured).expect("invalid replacement");
             assert_eq!(
                 reload
                     .read_replacement()
-                    .expect_err("invalid UTF-8 rejected on reload"),
+                    .expect_err("invalid ambient credential rejected on reload"),
                 failure(
                     ReloadPhase::Validate,
-                    "credential reference `task-fixture` could not be resolved: InvalidUtf8"
+                    &format!(
+                        "credential reference `task-fixture` could not be resolved: {expected_failure:?}"
+                    )
                 )
             );
         }

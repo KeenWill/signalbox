@@ -611,12 +611,13 @@ contents. The credential of a currently routed S3 blob store is read after the
 recovery scan and before socket admission, as [blob storage](blob-storage.md)
 requires.
 
-Environment sources are checked at startup, reload, and use for presence, a
-nonempty value after trimming trailing line termination, and the same 64 KiB
-ceiling. Mounted Kubernetes Secrets use the file admission rules, including
-final-target checks through projection symlinks. Both sources are read at each
-use, trim trailing line termination, and seed the same exact-value redaction as
-file credentials. Source values never enter configuration snapshots.
+Environment sources, including ambient-task profiles, are checked at startup,
+reload, and use for presence, a nonempty value after trimming trailing line
+termination, and the same 64 KiB ceiling. Mounted Kubernetes Secrets use the
+file admission rules, including final-target checks through projection symlinks.
+Both sources are read at each use, trim trailing line termination, and seed the
+same exact-value redaction as file credentials. Source values never enter
+configuration snapshots.
 
 Unauthenticated session, search, usage, attention, and blob reads require an IP
 or `localhost` `Host` authority; another authority receives a 403
