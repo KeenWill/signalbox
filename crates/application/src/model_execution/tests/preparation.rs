@@ -33,13 +33,45 @@ async fn checkpoint_stops_before_every_later_port() {
     );
     assert_eq!(
         service
-            .execute(identity(1, SessionId::from_uuid))
+            .execute_with_tool_request_allowance(
+                identity(1, SessionId::from_uuid),
+                |_, _| -> std::future::Ready<Result<Option<u64>, FakeError>> {
+                    panic!("a newly checkpointed call must not read its allowance yet")
+                }
+            )
             .await
             .expect("checkpointing succeeds"),
         ModelCallExecutionOutcome::Checkpointed(checkpoint)
     );
     let (_, prepare, ..) = service.into_parts();
     assert_eq!(prepare.calls, 1);
+}
+
+#[tokio::test]
+async fn an_unavailable_tool_allowance_does_not_prepare_a_provider_capability() {
+    let (request, _) = prepared_fixture();
+    let session = request.session();
+    let mut service = ModelCallExecutionService::new(
+        FixedIds::baseline(),
+        FakePrepare {
+            outcomes: [Ok(ready(request))].into(),
+            calls: 0,
+        },
+        UnusedFailure,
+        UnusedAuthorization,
+        UnusedObservation,
+        UnusedProvider,
+        InProcessAttemptDispatchGate::default(),
+        None,
+    );
+    assert!(matches!(
+        service
+            .execute_with_tool_request_allowance(session, |_, _| {
+                std::future::ready(Err(FakeError::Infrastructure))
+            })
+            .await,
+        Err(ModelCallExecutionError::Prepare(FakeError::Infrastructure))
+    ));
 }
 
 /// a proven fresh-identity collision retries only the rolled-back prepare transaction with
@@ -153,6 +185,56 @@ async fn prepared_capability_receives_the_configured_tool_catalog_snapshot() {
         provider.last_prepared_tools(),
         Some([definition].as_slice())
     );
+}
+
+#[tokio::test]
+async fn exhausted_tool_allowance_advertises_no_tools() {
+    let (request, _) = prepared_fixture();
+    let session = request.session();
+    let turn = request.turn();
+    let definition = crate::ToolDefinition::new(
+        ToolName::try_new(String::from("current_time")).expect("fixture tool name"),
+        String::from("Returns the current UTC time."),
+        crate::ToolInputSchema::try_new(String::from(
+            r#"{"additionalProperties":false,"properties":{},"type":"object"}"#,
+        ))
+        .expect("fixture schema"),
+        ToolPermissionDefault::Auto,
+        ToolEffectClass::EffectFree,
+    );
+    let catalog = crate::CompiledToolCatalog::try_new([crate::CompiledTool::new(
+        definition.clone(),
+        |_arguments: &NormalizedToolArguments| Ok(()),
+    )])
+    .expect("fixture catalog");
+    let mut service = ModelCallExecutionService::new(
+        FixedIds::baseline(),
+        FakePrepare {
+            outcomes: [Ok(ready(request))].into(),
+            calls: 0,
+        },
+        UnusedFailure,
+        UnusedAuthorization,
+        UnusedObservation,
+        ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
+        InProcessAttemptDispatchGate::default(),
+        None,
+    )
+    .with_tool_catalog(catalog);
+
+    assert_eq!(
+        service
+            .execute_with_tool_request_allowance(session, |prepared_session, prepared_turn| {
+                assert_eq!(prepared_session, session);
+                assert_eq!(prepared_turn, turn);
+                std::future::ready(Ok(Some(0)))
+            })
+            .await
+            .expect("durable cancellation is authoritative"),
+        ModelCallExecutionOutcome::NoWork
+    );
+    let (_, _, _, _, _, provider, ..) = service.into_parts();
+    assert_eq!(provider.last_prepared_tools(), Some([].as_slice()));
 }
 
 /// the execution loop presents the prepare transaction's exact frozen-epoch system prompt to

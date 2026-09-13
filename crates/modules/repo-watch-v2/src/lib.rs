@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 mod activation;
 mod baseline;
+mod check_dispatch;
 
 #[derive(Clone, Copy)]
 enum Reevaluation<'a> {
@@ -50,6 +51,7 @@ mod observation_decode;
 pub mod observation_workflow;
 pub mod poll_cache;
 pub mod provider;
+pub mod required_checks;
 mod retry;
 pub mod workflow;
 
@@ -370,9 +372,79 @@ impl PlannedCommand {
     }
 }
 
+type OriginRow = (
+    Uuid,
+    Decimal,
+    String,
+    String,
+    Decimal,
+    Uuid,
+    String,
+    Option<Decimal>,
+    Option<String>,
+    Option<String>,
+);
+
+fn retained_dispatch_origin(row: &OriginRow) -> Result<RetainedDispatchAction, StoreError> {
+    let (
+        dispatch,
+        ordinal,
+        repository,
+        rule_id,
+        rule_revision,
+        event_id,
+        event_kind,
+        pull_request,
+        head_branch,
+        base_branch,
+    ) = row;
+    let action_ordinal = ordinal
+        .to_u64()
+        .and_then(NonZeroU64::new)
+        .ok_or(StoreError::InvalidRetainedCommand)?;
+    let rule_revision = rule_revision
+        .to_u64()
+        .and_then(NonZeroU64::new)
+        .and_then(RepoWatchRuleVersion::new)
+        .ok_or(StoreError::InvalidRetainedCommand)?;
+    Ok(RetainedDispatchAction {
+        head_branch: head_branch
+            .clone()
+            .map(BranchName::try_new)
+            .transpose()
+            .map_err(|_| StoreError::InvalidRetainedCommand)?,
+        base_branch: base_branch
+            .clone()
+            .map(BranchName::try_new)
+            .transpose()
+            .map_err(|_| StoreError::InvalidRetainedCommand)?,
+        event_kind: event_kind_from_storage(event_kind)
+            .ok_or(StoreError::InvalidRetainedCommand)?,
+        pull_request: pull_request
+            .map(|number| {
+                number
+                    .to_u64()
+                    .and_then(NonZeroU64::new)
+                    .map(PullRequestNumber::new)
+                    .ok_or(StoreError::InvalidRetainedCommand)
+            })
+            .transpose()?,
+        dispatch: RepoWatchDispatchId::from_uuid(*dispatch),
+        action_ordinal,
+        repository: RepositorySlug::try_new(repository.clone())
+            .map_err(|_| StoreError::InvalidRetainedCommand)?,
+        rule_id: RepoWatchRuleId::try_new(rule_id.clone())
+            .map_err(|_| StoreError::InvalidRetainedCommand)?,
+        rule_revision,
+        event_id: signalbox_session_ownership::RepoWatchEventId::from_uuid(*event_id),
+    })
+}
+
 /// Retained origin of the create action that produced one session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetainedDispatchAction {
+    head_branch: Option<BranchName>,
+    base_branch: Option<BranchName>,
     event_kind: RepoWatchEventKindNameV1,
     pull_request: Option<PullRequestNumber>,
     dispatch: RepoWatchDispatchId,
@@ -384,6 +456,15 @@ pub struct RetainedDispatchAction {
 }
 
 impl RetainedDispatchAction {
+    /// Returns the head branch of the dispatched pull-request context.
+    pub const fn head_branch(&self) -> Option<&BranchName> {
+        self.head_branch.as_ref()
+    }
+    /// Returns the base branch of the dispatched pull-request context.
+    pub const fn base_branch(&self) -> Option<&BranchName> {
+        self.base_branch.as_ref()
+    }
+
     /// Returns the retained triggering event kind.
     pub const fn event_kind(&self) -> RepoWatchEventKindNameV1 {
         self.event_kind
@@ -2343,7 +2424,10 @@ impl RepoWatchStore {
                 .bind(first.rule_id().as_str()).bind(Decimal::from(first.rule_revision().get())).bind(key)
                 .bind(issued_at).bind(Decimal::from(cooldown.as_secs()))
                 .fetch_one(&mut **transaction).await?;
-            if suppressed {
+            let check_head_dispatched = !suppressed
+                && reevaluation.is_none()
+                && check_dispatch::head_was_dispatched(transaction, first).await?;
+            if suppressed || check_head_dispatched {
                 if reevaluation.is_none() {
                     advance_evaluation(transaction, first).await?;
                 }
@@ -2549,13 +2633,35 @@ impl RepoWatchStore {
         }
     }
 
-    /// Resolves a session's retained create action before or after ledger settlement.
-    pub async fn origin_for_create_command(
+    /// Resolves a page's core creation references in one module query.
+    ///
+    /// Each tuple names the session, dispatch and creation command read from
+    /// core storage, so the lookup also works before lifecycle settlement.
+    pub async fn origins_for_sessions(
         &self,
-        dispatch: RepoWatchDispatchId,
-        command: signalbox_session_ownership::DurableCommandId,
-    ) -> Result<Option<RetainedDispatchAction>, StoreError> {
-        type OriginRow = (
+        sessions: &[(
+            SessionId,
+            RepoWatchDispatchId,
+            signalbox_session_ownership::DurableCommandId,
+        )],
+    ) -> Result<BTreeMap<SessionId, RetainedDispatchAction>, StoreError> {
+        if sessions.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let session_ids: Vec<_> = sessions
+            .iter()
+            .map(|(session, _, _)| session.into_uuid())
+            .collect();
+        let dispatches: Vec<_> = sessions
+            .iter()
+            .map(|(_, dispatch, _)| dispatch.into_uuid())
+            .collect();
+        let commands: Vec<_> = sessions
+            .iter()
+            .map(|(_, _, command)| command.into_uuid())
+            .collect();
+        type BatchOriginRow = (
+            Uuid,
             Uuid,
             Decimal,
             String,
@@ -2564,11 +2670,70 @@ impl RepoWatchStore {
             Uuid,
             String,
             Option<Decimal>,
+            Option<String>,
+            Option<String>,
         );
+        let rows: Vec<BatchOriginRow> = sqlx::query_as(
+            "SELECT requested.session_id, ledger.dispatch_ref, ledger.action_ordinal,
+                    ledger.repository, ledger.rule_id, ledger.rule_revision,
+                    ledger.event_id, retained_event.event_kind, retained_event.pull_request_number,
+                    convert_from(COALESCE(ledger.activation_event, ledger.retry_event, retained_event.normalized_payload), 'UTF8')::jsonb #>> '{target,head_branch}',
+                    convert_from(COALESCE(ledger.activation_event, ledger.retry_event, retained_event.normalized_payload), 'UTF8')::jsonb #>> '{target,base_branch}'
+               FROM unnest($1::uuid[], $2::uuid[], $3::uuid[])
+                    AS requested(session_id, dispatch_ref, command_id)
+               JOIN dispatch_ledger AS ledger
+                 ON ledger.command_id = requested.command_id
+                AND ledger.dispatch_ref = requested.dispatch_ref
+               JOIN rule_revision AS retained_rule
+                 ON retained_rule.repository = ledger.repository
+                AND retained_rule.rule_id = ledger.rule_id
+                AND retained_rule.revision = ledger.rule_revision
+               JOIN gh_event AS retained_event
+                 ON retained_event.event_id = ledger.event_id
+                AND retained_event.repository = ledger.repository
+              WHERE ledger.command_kind = 'create_session'
+                AND ledger.trigger_sequence IS NULL AND ledger.retirement_event_id IS NULL",
+        ).bind(session_ids).bind(dispatches).bind(commands).fetch_all(&self.pool).await?;
+        if rows.len() != sessions.len() {
+            return Err(StoreError::InvalidRetainedCommand);
+        }
+        rows.into_iter()
+            .map(
+                |(
+                    session,
+                    dispatch,
+                    ordinal,
+                    repository,
+                    rule,
+                    revision,
+                    event,
+                    kind,
+                    pull,
+                    head,
+                    base,
+                )| {
+                    retained_dispatch_origin(&(
+                        dispatch, ordinal, repository, rule, revision, event, kind, pull, head,
+                        base,
+                    ))
+                    .map(|origin| (SessionId::from_uuid(session), origin))
+                },
+            )
+            .collect()
+    }
+
+    /// Resolves a session's retained create action before or after ledger settlement.
+    pub async fn origin_for_create_command(
+        &self,
+        dispatch: RepoWatchDispatchId,
+        command: signalbox_session_ownership::DurableCommandId,
+    ) -> Result<Option<RetainedDispatchAction>, StoreError> {
         let row: Option<OriginRow> = sqlx::query_as(
             "SELECT ledger.dispatch_ref, ledger.action_ordinal, ledger.repository,
                     ledger.rule_id, ledger.rule_revision, ledger.event_id,
-                    retained_event.event_kind, retained_event.pull_request_number
+                    retained_event.event_kind, retained_event.pull_request_number,
+                    convert_from(COALESCE(ledger.activation_event, ledger.retry_event, retained_event.normalized_payload), 'UTF8')::jsonb #>> '{target,head_branch}',
+                    convert_from(COALESCE(ledger.activation_event, ledger.retry_event, retained_event.normalized_payload), 'UTF8')::jsonb #>> '{target,base_branch}'
                FROM dispatch_ledger AS ledger
                JOIN rule_revision AS retained_rule
                  ON retained_rule.repository = ledger.repository
@@ -2585,49 +2750,7 @@ impl RepoWatchStore {
         .bind(dispatch.into_uuid())
         .fetch_optional(&self.pool)
         .await?;
-        let Some(row) = row.as_ref() else {
-            return Ok(None);
-        };
-        let (
-            dispatch,
-            ordinal,
-            repository,
-            rule_id,
-            rule_revision,
-            event_id,
-            event_kind,
-            pull_request,
-        ) = row;
-        let action_ordinal = ordinal
-            .to_u64()
-            .and_then(NonZeroU64::new)
-            .ok_or(StoreError::InvalidRetainedCommand)?;
-        let rule_revision = rule_revision
-            .to_u64()
-            .and_then(NonZeroU64::new)
-            .and_then(RepoWatchRuleVersion::new)
-            .ok_or(StoreError::InvalidRetainedCommand)?;
-        Ok(Some(RetainedDispatchAction {
-            event_kind: event_kind_from_storage(event_kind)
-                .ok_or(StoreError::InvalidRetainedCommand)?,
-            pull_request: pull_request
-                .map(|number| {
-                    number
-                        .to_u64()
-                        .and_then(NonZeroU64::new)
-                        .map(PullRequestNumber::new)
-                        .ok_or(StoreError::InvalidRetainedCommand)
-                })
-                .transpose()?,
-            dispatch: RepoWatchDispatchId::from_uuid(*dispatch),
-            action_ordinal,
-            repository: RepositorySlug::try_new(repository.clone())
-                .map_err(|_| StoreError::InvalidRetainedCommand)?,
-            rule_id: RepoWatchRuleId::try_new(rule_id.clone())
-                .map_err(|_| StoreError::InvalidRetainedCommand)?,
-            rule_revision,
-            event_id: signalbox_session_ownership::RepoWatchEventId::from_uuid(*event_id),
-        }))
+        row.as_ref().map(retained_dispatch_origin).transpose()
     }
 
     /// Applies one lifecycle event to the module command ledger.

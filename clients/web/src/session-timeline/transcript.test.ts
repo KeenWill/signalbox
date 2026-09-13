@@ -344,3 +344,18 @@ it('rejects changed immutable detail facts on overlapping transcript reads', asy
     reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal),
   ).rejects.toThrow('changed its retained immutable facts')
 })
+
+it.each([
+  ['after', '100000'],
+  ['before', '1'],
+])('ends fixture traversal %s boundary %s without nonexistent continuations', (anchor, address) => {
+  const url = new URL(`http://localhost/api/sessions/${transcriptSessionId}/timeline`)
+  url.searchParams.set('anchor', anchor)
+  url.searchParams.set('address', address)
+  expect(transcriptFixture(url)).toMatchObject({
+    items: [],
+    projected_structured_bytes: 0,
+    continuation_before: null,
+    continuation_after: null,
+  })
+})

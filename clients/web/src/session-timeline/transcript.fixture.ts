@@ -52,8 +52,9 @@ export function transcriptFixture(url: URL, latest = transcriptSize): unknown {
       session_id: transcriptSessionId,
       items,
       projected_structured_bytes: items.length * 78,
-      continuation_before: first > 1 ? { event_sequence: String(first) } : null,
-      continuation_after: last < latest ? { event_sequence: String(last) } : null,
+      continuation_before: items.length > 0 && first > 1 ? { event_sequence: String(first) } : null,
+      continuation_after:
+        items.length > 0 && last < latest ? { event_sequence: String(last) } : null,
     }
   }
   if (url.pathname.endsWith('/live'))

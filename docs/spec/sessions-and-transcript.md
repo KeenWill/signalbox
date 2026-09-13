@@ -131,10 +131,28 @@ with a visible reason, while retries remain available. A bounded rates read
 reports lifecycle state, turn outcome counts, the latest failed turn and its
 provider cause, and goal disposition for up to 32 listed sessions.
 
+Completed tool-attempt detail includes its retained presented-media digest,
+media type, presentation kind, and byte length when the result is media.
+Presentation preserves the retained image or document kind. Blob bytes use the
+existing content route for images and the descriptor's download route for
+documents; earlier transition snapshots carry no later result reference. Each
+detail page loads completed media references in one batch. Media read failures
+return `session_projection_failed` and log the underlying failure
+classification.
+
+`POST /api/sessions` creates a pathless interactive session from a named
+template through `CreateSession`, with an open start gate and unmonitored
+ownership. It accepts a creation command ID and an optional first text input
+with its own command ID; creation commits before input submission. A 201
+response returns the session ID and current catalog summary after both requested
+commands succeed. Retries retain both identities and payloads.
+
 `PATCH /api/sessions/{session_id}/metadata` accepts a command ID and nonempty
 title, rejects other fields, and replaces metadata through the user command
-service while carrying forward the loaded tags, attributes, and archive flag. A
-204 response acknowledges the committed replacement; equal replay returns the
+service. It loads and preserves tags, attributes, and the archive flag under the
+session lock in the replacement transaction. A title that exceeds the complete
+metadata size limit after merging returns 400 without changing metadata. A 204
+response acknowledges the committed replacement; equal replay returns the
 recorded result without reinstalling it. Title-only intent is retained with the
 receipt; reusing a full-replacement command ID for a title request, or the
 reverse, is conflicting reuse.
@@ -518,7 +536,9 @@ issued it and is rejected under the other order. The catalog keeps only sessions
 carrying every required tag, excludes archived sessions unless they are
 requested, and searches by an exact case-sensitive substring of the title or the
 canonical session UUID. A catalog page, its exact total, and its cursor are read
-in one snapshot.
+in one snapshot. Catalog summaries require `repository_watch`, with null for a
+non-watch session; provenance requires nullable `head_branch` and `base_branch`
+members.
 
 The follow stream subscribes to the daemon's browser monitor fanout before
 reading the session state and its observed cursor from one repeatable-read
@@ -552,14 +572,16 @@ position even when that window reaches the actual tail; it does not
 automatically request the remaining history. Following live growth resumes when
 the reader scrolls to that tail. Session and anchor changes reset the view;
 observation refreshes retain visible text while rereading loaded windows, or
-refresh from latest when following the confirmed actual timeline tail.
-User-driven backward navigation clears that tail intent; automatic scans through
-hidden tail records preserve it. Refreshes continue retaining current text
-through a failed reread. The session-scoped reader compares immutable detail
-facts, including identities, attachment references and excerpt byte totals and
-overlapping excerpt content, across initial reads. It retains facts for at most
-24 recently read event addresses; changed excerpt lengths under different read
-budgets preserve compatible prefixes and retain the longest checked excerpt.
+refresh from latest when following the confirmed actual timeline tail. Following
+continues when a refresh replaces the entire retained window, even if the prior
+tail row is absent. User-driven backward navigation clears that tail intent;
+automatic scans through hidden tail records preserve it. Refreshes continue
+retaining current text through a failed reread. The session-scoped reader
+compares immutable detail facts, including identities, attachment references and
+excerpt byte totals and overlapping excerpt content, across initial reads. It
+retains facts for at most 24 recently read event addresses; changed excerpt
+lengths under different read budgets preserve compatible prefixes and retain the
+longest checked excerpt.
 
 Windows advance past metadata-only detail records, including goal-only tool
 batches hidden by the selected conversation summary, in the requested direction
@@ -569,29 +591,32 @@ discarded records. The scan item budget is clamped to the advertised detail
 limit; each automatic read uses only the remaining scan allowance. Scanning
 stops at a visible item, a detail continuation, or an exhausted budget. Rapid
 edge events share one in-flight page read. Programmatic anchor and measurement
-adjustments do not start page reads. An empty detail page preserves its
-unreturned-item continuation. Scrolling again starts a fresh bounded scan using
-the timeline continuation. Turn segments retain window boundaries so prepending
-history preserves existing rows and their disclosures. Retained tool chips stay
-in their assigned window segment when earlier proposal evidence is loaded;
-evicted assignments are discarded. An open request-only tool keeps its
-disclosure and continued text when its first physical attempt arrives. Later
-physical attempts retain separate disclosure identities. Turn-wide
-classification uses all loaded events. The conversation shows user and assistant
-text and attachment references, tool arguments and output, and unsuccessful turn
-outcomes in event order. A completed response remains visible as a non-final
-message when its completed-turn closure is not loaded. Distinct physical tool
-attempts remain independently inspectable in event order even when they share
-one request. A failed attempt remains labeled as failed with its available
-cause even when it has no failure excerpt. Later batch members load on demand at the batch position as
-separate tool chips. A cursor advancing to another member is exposed outside the
-preceding tool disclosure; same-member argument, output and failure fields
-remain inside that disclosure. Goal-text cursors do not belong to tool
-disclosures, including cursors returned after reading tool text; nested reading
-controls stop before a goal field. Repeated terminal outcomes for the same turn
-and cause appear once at their first chronological position. Bookkeeping is
-hidden until Events is selected. Raw detail pages remain available to validate
-body continuations.
+adjustments do not start page reads. Prepending rows does not trigger selection
+scrolling when the selected row identity stays unchanged; a changed selection
+scrolls into view once its row is available. An empty detail page preserves its
+unreturned-item continuation. Hidden non-tool details with a body continuation
+retain an addressable reading row; opening it shows the requested excerpt.
+Scrolling again starts a fresh bounded scan using the timeline continuation.
+Turn segments retain window boundaries so prepending history preserves existing
+rows and their disclosures. Retained tool chips stay in their assigned window
+segment when earlier proposal evidence is loaded; evicted assignments are
+discarded. An open request-only tool keeps its disclosure and continued text
+when its first physical attempt arrives. Later physical attempts retain separate
+disclosure identities. Turn-wide classification uses all loaded events. The
+conversation shows user and assistant text and attachment references, tool
+arguments and output, and unsuccessful turn outcomes in event order. A completed
+response remains visible as a non-final message when its completed-turn closure
+is not loaded. Distinct physical tool attempts remain independently inspectable
+in event order even when they share one request. A failed attempt remains
+labeled as failed with its available cause even when it has no failure excerpt.
+Later batch members load on demand at the batch position as separate tool chips.
+A cursor advancing to another member is exposed outside the preceding tool
+disclosure; same-member argument, output and failure fields remain inside that
+disclosure. Goal-text cursors do not belong to tool disclosures, including
+cursors returned after reading tool text; nested reading controls stop before a
+goal field. Repeated terminal outcomes for the same turn and cause appear once
+at their first chronological position. Bookkeeping is hidden until Events is
+selected. Raw detail pages remain available to validate body continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

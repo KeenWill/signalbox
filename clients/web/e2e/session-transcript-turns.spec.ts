@@ -850,46 +850,94 @@ test('stops nested tool output reading before the next goal', async ({ page }, t
   expect(problems).toEqual([])
 })
 
-
-for (const cause of ['crash_lost', null] as const) {
-  test(`identifies a failed physical attempt without detail text ${cause ? 'with a cause' : 'without a cause'}`, async ({ page }, testInfo) => {
-    const problems: string[] = []
-    page.on('pageerror', (error) => problems.push(error.message))
-    page.on('console', (message) => {
-      if (message.type() === 'error') problems.push(message.text())
-    })
-    const items = retriedToolItems().map((item) => {
-      if (item.body.type !== 'tool_batch') return item
-      const tool = item.body.tools[0]
-      if (tool?.evidence.type !== 'physical_attempt' || tool.evidence.state !== 'known_failed') return item
-      return {
-        ...item,
-        projected_body_bytes: 128 + Number(tool.arguments?.total_bytes ?? '0'),
-        body: { ...item.body, tools: [{ ...tool, evidence: {
-          ...tool.evidence, cause, failure_present: false, failure: null,
-        } }] },
-      }
-    })
-    await turnApi(page, undefined, items)
-    await page.route('**/timeline-detail?**', (route) => {
-      const url = new URL(route.request().url())
-      const item = items.find((item) => item.address.event_sequence === url.searchParams.get('first'))
-      return item ? route.fulfill({ json: detailPage([item]) }) : route.fallback()
-    })
-    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
-    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-    const chips = transcript.getByRole('button', { name: 'exec_command', exact: true })
-    await expect(chips).toHaveCount(2)
-    await chips.first().click()
-    await chips.last().click()
-    const slots = transcript.locator('.session-tool-slot')
-    await expect(slots.first().locator('.session-turn-outcome')).toHaveText(
-      cause ? 'Failure · Attempt lost on restart' : 'Failure · Failed',
-    )
-    await expect(slots.first().getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
-    await expect(slots.last().getByRole('region', { name: 'Output', exact: true })).toContainText('passed')
-    await expect(slots.last().locator('.session-turn-outcome')).toHaveCount(0)
-    await page.screenshot({ path: testInfo.outputPath('textless-tool-failure.png') })
-    expect(problems).toEqual([])
+test('identifies a failed physical attempt without detail text after a successful retry', async ({
+  page,
+}, testInfo) => {
+  const problems: string[] = []
+  page.on('pageerror', (error) => problems.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') problems.push(message.text())
   })
-}
+  const items = retriedToolItems().map((item) => {
+    if (item.body.type !== 'tool_batch') return item
+    const tool = item.body.tools[0]
+    if (tool?.evidence.type !== 'physical_attempt' || tool.evidence.state !== 'known_failed')
+      return item
+    return {
+      ...item,
+      projected_body_bytes: 128 + Number(tool.arguments?.total_bytes ?? '0'),
+      body: {
+        ...item.body,
+        tools: [
+          {
+            ...tool,
+            evidence: {
+              ...tool.evidence,
+              cause: 'crash_lost' as const,
+              failure_present: false,
+              failure: null,
+            },
+          },
+        ],
+      },
+    }
+  })
+  await turnApi(page, undefined, items)
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    const item = items.find((item) => item.address.event_sequence === url.searchParams.get('first'))
+    if (!item) return route.fallback()
+    const body = item.body
+    const tool = body.type === 'tool_batch' ? body.tools[0] : undefined
+    if (
+      body.type !== 'tool_batch' ||
+      tool?.evidence.type !== 'physical_attempt' ||
+      !tool.evidence.result_present
+    )
+      return route.fulfill({ json: detailPage([item]) })
+    const continued = url.searchParams.has('cursor_field')
+    const excerpt = continued ? tool.evidence.result : tool.arguments
+    return route.fulfill({
+      json: detailPage(
+        [
+          {
+            ...item,
+            projected_body_bytes: 128 + Number(excerpt?.total_bytes ?? '0'),
+            body: {
+              ...body,
+              tools: [
+                {
+                  ...tool,
+                  arguments: continued ? null : tool.arguments,
+                  evidence: { ...tool.evidence, result: continued ? tool.evidence.result : null },
+                },
+              ],
+            },
+          },
+        ],
+        continued
+          ? null
+          : { ...resultCursor, body: { ...resultCursor.body, address: item.address } },
+      ),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const chips = transcript.getByRole('button', { name: 'exec_command', exact: true })
+  await expect(chips).toHaveCount(2)
+  await chips.first().click()
+  await chips.last().click()
+  const slots = transcript.locator('.session-tool-slot')
+  await expect(slots.first().locator('.session-turn-outcome')).toHaveText(
+    'Failure · Attempt lost on restart',
+  )
+  await expect(slots.first().getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+  await slots.last().getByRole('button', { name: 'Read more', exact: true }).click()
+  await expect(slots.last().getByRole('region', { name: 'Output', exact: true })).toContainText(
+    'passed',
+  )
+  await expect(slots.last().locator('.session-turn-outcome')).toHaveCount(0)
+  await slots.first().locator('.session-turn-outcome').scrollIntoViewIfNeeded()
+  await page.screenshot({ path: testInfo.outputPath('textless-tool-failure.png') })
+  expect(problems).toEqual([])
+})

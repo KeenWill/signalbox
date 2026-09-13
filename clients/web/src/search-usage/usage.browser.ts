@@ -20,6 +20,161 @@ test('filters usage and keeps dollars visible on a phone', async ({ page }, test
   expect(errors).toEqual([])
 })
 
+test('loads session and turn chips through the HTTP usage client', async ({ page }, testInfo) => {
+  const { webContractBootstrapFixture } = await import('../product.fixture')
+  const { SearchUsageScenarioSource, SEARCH_USAGE_SCENARIO_SESSION_ID } = await import('./scenario')
+  const source = new SearchUsageScenarioSource()
+  const calls = await source.usageCalls({ filters: {}, order: 'newest', maxItems: 100 })
+  const turnId = calls.calls[0]?.turn_id
+  if (!turnId) throw new Error('Fixture must have a turn')
+  const requests: URL[] = []
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    requests.push(url)
+    if (url.pathname === '/api/bootstrap')
+      return route.fulfill({
+        json: {
+          ...webContractBootstrapFixture,
+          capabilities: {
+            ...webContractBootstrapFixture.capabilities,
+            bounded_lexical_search: false,
+          },
+        },
+      })
+    if (url.pathname === '/api/usage/calls') return route.fulfill({ json: calls })
+    if (url.pathname === '/api/usage/summary')
+      return route.fulfill({ json: await source.usageSummary({}) })
+    throw new Error(`Unexpected endpoint ${url.pathname}`)
+  })
+  await page.goto(
+    `/src/search-usage/preview.html?preview=cost&session=${SEARCH_USAGE_SCENARIO_SESSION_ID}&turn=${turnId}`,
+  )
+  await expect(page.getByRole('region', { name: 'Session cost', exact: true })).toContainText(
+    'unpriced',
+  )
+  await expect(page.getByRole('region', { name: 'Turn cost', exact: true })).toContainText(
+    'unpriced',
+  )
+  await expect(page.getByRole('region', { name: 'Recent turn costs' })).toContainText('partial')
+  await expect(page.getByRole('link')).toHaveCount(1)
+  const attention = page.getByRole('region', { name: 'Attention row' })
+  await expect(attention.getByRole('button', { name: /unpriced/ })).toBeVisible()
+  await expect(attention.getByRole('link', { name: 'Example session' })).toBeEnabled()
+  await expect(attention.getByRole('link', { name: 'Example session' })).toHaveAttribute(
+    'href',
+    `/sessions?session=${SEARCH_USAGE_SCENARIO_SESSION_ID}&workspace=true`,
+  )
+  await attention.getByRole('button', { name: 'Preview example session' }).click()
+  await expect(attention.getByRole('button', { name: 'Preview example session' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+
+  const session = page.getByRole('region', { name: 'Session cost', exact: true })
+  const toggle = session.getByRole('button')
+  const pricing = session.getByText(/Reported · Metered cost · rates-2026-08-a/)
+  await expect(pricing).toBeHidden()
+  await toggle.focus()
+  await page.keyboard.press('Enter')
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(pricing).toBeVisible()
+  await expect(pricing).toContainText('Estimated · Equivalent metered cost · rates-2026-08-b')
+  await page.keyboard.press('Space')
+  await expect(pricing).toBeHidden()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await toggle.click()
+  await expect(pricing).toBeVisible()
+  expect(await session.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('cost-details-phone.png'), fullPage: true })
+  await toggle.click()
+  await page.setViewportSize({ width: 1280, height: 844 })
+  await page.screenshot({ path: testInfo.outputPath('cost-chips.png') })
+  for (const width of [1280, 761, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    const sessionBox = await attention.getByRole('link', { name: 'Example session' }).boundingBox()
+    const costBox = await attention.getByRole('button', { name: /unpriced/ }).boundingBox()
+    if (!sessionBox || !costBox)
+      throw new Error('The session action and cost display must be visible')
+    if (width > 1259) expect(costBox.x).toBeGreaterThanOrEqual(sessionBox.x + sessionBox.width)
+    else expect(costBox.y).toBeGreaterThanOrEqual(sessionBox.y + sessionBox.height)
+    await attention.getByRole('button', { name: /unpriced/ }).click()
+    await expect(attention.getByText(/Reported · Metered cost · rates-2026-08-a/)).toBeVisible()
+    expect(await attention.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+      true,
+    )
+    await attention.screenshot({ path: testInfo.outputPath(`attention-cost-${width}.png`) })
+    await attention.getByRole('button', { name: /unpriced/ }).click()
+  }
+  expect(requests.filter((url) => url.pathname === '/api/bootstrap')).toHaveLength(1)
+  expect(
+    requests
+      .filter((url) => url.pathname === '/api/usage/summary')
+      .map((url) => url.searchParams.get('turn_id')),
+  ).toEqual([null, turnId])
+  expect(
+    requests
+      .filter((url) => url.pathname.startsWith('/api/usage/'))
+      .every((url) => url.searchParams.get('session_id') === SEARCH_USAGE_SCENARIO_SESSION_ID),
+  ).toBe(true)
+})
+
+test('retries the connection when a session cost refresh follows bootstrap failure', async ({
+  page,
+}) => {
+  const { webContractBootstrapFixture } = await import('../product.fixture')
+  const { SEARCH_USAGE_SCENARIO_SESSION_ID } = await import('./scenario')
+  let unavailable = true
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/bootstrap')
+      return unavailable
+        ? route.fulfill({ status: 503, body: 'Service unavailable' })
+        : route.fulfill({ json: webContractBootstrapFixture })
+    if (url.pathname === '/api/usage/calls')
+      return route.fulfill({ json: { calls: [], continuation: null } })
+    return route.fulfill({ json: { groups: [], truncated: false } })
+  })
+  await page.goto(
+    `/src/search-usage/preview.html?preview=cost&session=${SEARCH_USAGE_SCENARIO_SESSION_ID}`,
+  )
+  const session = page.getByRole('region', { name: 'Session cost', exact: true })
+  await expect(session).toHaveText('Cost unavailable')
+  unavailable = false
+  await page.getByRole('button', { name: 'Refresh costs' }).click()
+  await expect(session.getByRole('button')).toHaveText('$0')
+})
+
+test('does not show session totals as turn cost when no turn is selected', async ({ page }) => {
+  const { webContractBootstrapFixture } = await import('../product.fixture')
+  const { SearchUsageScenarioSource, SEARCH_USAGE_SCENARIO_SESSION_ID } = await import('./scenario')
+  const source = new SearchUsageScenarioSource()
+  const summaryRequests: URL[] = []
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/bootstrap')
+      return route.fulfill({ json: webContractBootstrapFixture })
+    if (url.pathname === '/api/usage/calls')
+      return route.fulfill({ json: { calls: [], continuation: null } })
+    if (url.pathname === '/api/usage/summary') {
+      summaryRequests.push(url)
+      return route.fulfill({ json: await source.usageSummary({}) })
+    }
+    throw new Error(`Unexpected endpoint ${url.pathname}`)
+  })
+  await page.goto(
+    `/src/search-usage/preview.html?preview=cost&session=${SEARCH_USAGE_SCENARIO_SESSION_ID}`,
+  )
+  await expect(page.getByRole('region', { name: 'Session cost', exact: true })).toContainText(
+    '$2.84',
+  )
+  const turn = page.getByRole('region', { name: 'Turn cost', exact: true })
+  await expect(turn).toHaveText('Cost not loaded')
+  await expect(turn.getByRole('button')).toHaveCount(0)
+  expect(summaryRequests).toHaveLength(1)
+  expect(summaryRequests[0]?.searchParams.get('session_id')).toBe(SEARCH_USAGE_SCENARIO_SESSION_ID)
+  expect(summaryRequests[0]?.searchParams.has('turn_id')).toBe(false)
+})
+
 test('keeps filters in the route across reload and history navigation', async ({ page }) => {
   await page.goto('/src/search-usage/preview.html')
   const model = page.getByLabel('Model', { exact: true })
@@ -99,6 +254,24 @@ test('mounts loaded subtotals only while inspected at the six-page limit', async
   await expect(subtotals).toHaveCount(0)
 })
 
+test('reports missing session context without a loading status or request', async ({ page }) => {
+  const requests: string[] = []
+  await page.route('**/api/**', async (route) => {
+    requests.push(route.request().url())
+    await route.fulfill({ status: 500, body: 'No request should run without a session' })
+  })
+  await page.goto(
+    '/src/search-usage/preview.html?preview=cost&turn=00000000-0000-0000-0000-000000000001',
+  )
+  await expect(page.getByRole('region', { name: 'Session cost', exact: true })).toHaveText(
+    'Cost not loaded',
+  )
+  await expect(page.getByRole('region', { name: 'Turn cost', exact: true })).toHaveText(
+    'Cost not loaded',
+  )
+  expect(requests).toEqual([])
+})
+
 test('never presents cached scenario usage as server usage during failed reads', async ({
   page,
 }) => {
@@ -127,4 +300,37 @@ test('never presents cached scenario usage as server usage during failed reads',
   await expect(page.getByRole('alert')).toContainText('Usage could not load')
   await expect(rows).toHaveAttribute('data-total-loaded', '0')
   await expect(page.getByText('unpriced', { exact: false })).toHaveCount(0)
+})
+
+test('distinguishes equal Attention costs by session in button navigation', async ({ page }) => {
+  const { webContractBootstrapFixture } = await import('../product.fixture')
+  const { SEARCH_USAGE_SCENARIO_SESSION_ID } = await import('./scenario')
+  const otherSessionId = '00000000-0000-0000-0000-000000000995'
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/bootstrap')
+      return route.fulfill({ json: webContractBootstrapFixture })
+    if (url.pathname === '/api/usage/summary')
+      return route.fulfill({ json: { groups: [], truncated: false } })
+    throw new Error(`Unexpected endpoint ${url.pathname}`)
+  })
+  await page.goto('/src/search-usage/preview.html?preview=attention-costs')
+  const first = page.getByRole('button', {
+    name: `Cost for session ${SEARCH_USAGE_SCENARIO_SESSION_ID}: $0`,
+    exact: true,
+  })
+  const second = page.getByRole('button', {
+    name: `Cost for session ${otherSessionId}: $0`,
+    exact: true,
+  })
+  await expect(first).toHaveText('$0')
+  await expect(second).toHaveText('$0')
+  await first.focus()
+  await page.keyboard.press('Enter')
+  await expect(first).toHaveAttribute('aria-expanded', 'true')
+  await expect(second).toHaveAttribute('aria-expanded', 'false')
+  await page.keyboard.press('Tab')
+  await expect(second).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(second).toHaveAttribute('aria-expanded', 'true')
 })

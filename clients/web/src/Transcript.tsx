@@ -247,7 +247,6 @@ export function VirtualTranscript({
   const atEnd = useRef(initialEnd)
   const restoringLaterAnchor = useRef(false)
   const restoredOffset = useRef<number | null>(null)
-  const previousLast = useRef<string | undefined>(undefined)
   const touchStart = useRef<number | null>(null)
   const virtualizer = useVirtualizer({
     useFlushSync: false,
@@ -279,9 +278,23 @@ export function VirtualTranscript({
   useEffect(() => {
     if (autoFocus) parent.current?.focus()
   }, [autoFocus, parent])
+  const scrolledSelection = useRef<{
+    id: typeof selectedId
+    virtualizer: typeof virtualizer
+  } | null>(null)
   useEffect(() => {
-    if (selected >= 0) virtualizer.scrollToIndex(selected, { align: 'auto' })
-  }, [selected, virtualizer])
+    if (selected < 0) {
+      scrolledSelection.current = null
+      return
+    }
+    if (
+      scrolledSelection.current?.id === selectedId &&
+      scrolledSelection.current?.virtualizer === virtualizer
+    )
+      return
+    virtualizer.scrollToIndex(selected, { align: 'auto' })
+    scrolledSelection.current = { id: selectedId, virtualizer }
+  }, [selected, selectedId, virtualizer])
   const reportEnd = useEffectEvent((value: boolean) => onEndChange?.(value))
   useLayoutEffect(() => {
     if (loadingLater) {
@@ -294,12 +307,7 @@ export function VirtualTranscript({
     if (!initialized.current) {
       initialized.current = true
       if (initialEnd && selected < 0) virtualizer.scrollToIndex(ids.length - 1, { align: 'end' })
-    } else if (
-      followEnd &&
-      atEnd.current &&
-      previousLast.current &&
-      ids.includes(previousLast.current)
-    ) {
+    } else if (followEnd && atEnd.current) {
       virtualizer.scrollToIndex(ids.length - 1, { align: 'end' })
     } else if (anchor.current) {
       const index = ids.indexOf(anchor.current.id)
@@ -313,7 +321,6 @@ export function VirtualTranscript({
       }
     }
     restoringLaterAnchor.current = false
-    previousLast.current = ids.at(-1)
     restoredOffset.current ??= parent.current?.scrollTop ?? null
   }, [ids, initialEnd, followEnd, loadingLater, selected, virtualizer, parent])
   const remember = () => {
