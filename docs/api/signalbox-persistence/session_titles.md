@@ -57,7 +57,7 @@ impl session_titles::SessionTitleRepository {
     pub async fn conversation(
         &self,
         session: signalbox_domain::SessionId,
-        max_chars: i32,
+        max_utf8_bytes: i32,
     ) -> result::Result<string::String, error::Error>;
     pub async fn authorize(
         &self,

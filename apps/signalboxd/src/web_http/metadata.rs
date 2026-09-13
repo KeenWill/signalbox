@@ -25,6 +25,7 @@ use super::{
 pub(super) async fn suggest_title(
     State(state): State<WebApiState>,
     reload: Option<axum::Extension<crate::configuration_reload::ConfigurationReload>>,
+    tasks: Option<axum::Extension<tokio::sync::mpsc::Sender<super::SessionTitleTask>>>,
     Path(session_id): Path<String>,
     request: Request,
 ) -> Response {
@@ -40,14 +41,15 @@ pub(super) async fn suggest_title(
     let service = state
         .pool
         .and_then(|pool| reload.and_then(|reload| reload.0.session_titles(pool)));
-    let Some(service) = service else {
+    let (Some(service), Some(axum::Extension(tasks))) = (service, tasks) else {
         return application_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "session_titles_unavailable",
             "Session name suggestions are not configured.",
         );
     };
-    match await_title_generation(async move { service.generate(session, None).await }).await {
+    match await_title_generation(tasks, async move { service.generate(session, None).await }).await
+    {
         Ok(Some(title)) => {
             axum::Json(signalbox_web_contract::WebSessionTitleSuggestion { title }).into_response()
         }
@@ -68,13 +70,20 @@ pub(super) async fn suggest_title(
 }
 
 async fn await_title_generation(
+    tasks: tokio::sync::mpsc::Sender<super::SessionTitleTask>,
     generation: impl std::future::Future<
         Output = Result<Option<String>, crate::session_titles::TitleError>,
     > + Send
     + 'static,
 ) -> Result<Option<String>, crate::session_titles::TitleError> {
-    // Dropping the request's waiter detaches the task; preparation and settlement continue.
-    tokio::spawn(generation)
+    let (completed, result) = tokio::sync::oneshot::channel();
+    tasks
+        .send(Box::pin(async move {
+            let _ = completed.send(generation.await);
+        }))
+        .await
+        .map_err(|_| crate::session_titles::TitleError::Generation)?;
+    result
         .await
         .unwrap_or(Err(crate::session_titles::TitleError::Generation))
 }
@@ -193,6 +202,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_abort_drains_a_suggestion_after_its_request_is_cancelled() {
+        let (tasks, mut pending) = tokio::sync::mpsc::channel(1);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (held, mut ended) = tokio::sync::oneshot::channel::<()>();
+        let request = tokio::spawn(await_title_generation(tasks, async move {
+            started.send(()).expect("fixture observes execution");
+            std::future::pending::<()>().await;
+            drop(held);
+            Ok(None)
+        }));
+        let mut runtime_tasks = tokio::task::JoinSet::new();
+        runtime_tasks.spawn(pending.recv().await.expect("runtime receives title task"));
+        ready.await.expect("generation started");
+        request.abort();
+        assert!(request.await.expect_err("request cancelled").is_cancelled());
+        assert!(matches!(
+            ended.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        runtime_tasks.abort_all();
+        while runtime_tasks.join_next().await.is_some() {}
+        assert!(
+            ended.await.is_err(),
+            "runtime drain drops the generation future"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn cancelled_suggestion_request_still_settles_its_call_and_releases_capacity()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -250,7 +287,9 @@ mod tests {
         let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
         let mut generation_call = call.clone();
         let generation_repository = repository.clone();
-        let request = tokio::spawn(await_title_generation(async move {
+        let (tasks, mut pending) = tokio::sync::mpsc::channel(1);
+        let mut runtime_tasks = tokio::task::JoinSet::new();
+        let request = tokio::spawn(await_title_generation(tasks, async move {
             assert!(
                 generation_repository
                     .prepare(&mut generation_call, &Default::default())
@@ -283,6 +322,7 @@ mod tests {
             settled_tx.send(()).expect("fixture observes settlement");
             Ok(title)
         }));
+        runtime_tasks.spawn(pending.recv().await.expect("runtime receives title task"));
         prepared_rx.await?;
         request.abort();
         assert!(
@@ -293,6 +333,11 @@ mod tests {
         );
         resume_tx.send(()).expect("generation outlives its request");
         settled_rx.await?;
+        runtime_tasks
+            .join_next()
+            .await
+            .expect("title task")
+            .expect("title completes");
         let completed: (String, Option<String>, bool) = sqlx::query_as(
             "SELECT call.state_kind, call.title, reservation.released_at IS NOT NULL
              FROM session_title_model_call call JOIN credential_invocation_reservation reservation USING (model_call_id)

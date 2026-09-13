@@ -154,7 +154,7 @@ impl SessionTitleRepository {
     pub async fn conversation(
         &self,
         session: SessionId,
-        max_chars: i32,
+        max_utf8_bytes: i32,
     ) -> Result<String, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         let Some(source) = crate::context_compaction::load_compaction_source(&mut tx, session)
@@ -178,10 +178,10 @@ impl SessionTitleRepository {
                AND (COALESCE(entry.assistant_text_value, entry.context_summary_value, part.text_value) IS NOT NULL
                 OR imported.content_encoding IS NOT NULL)
              ORDER BY member.member_position DESC, part.position DESC NULLS LAST")
-            .bind(session.into_uuid()).bind(max_chars)
-            .bind(max_chars.saturating_add(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES))
+            .bind(session.into_uuid()).bind(max_utf8_bytes)
+            .bind(max_utf8_bytes.saturating_add(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES))
             .bind(source.frontier.into_uuid()).fetch(&mut *tx);
-        let mut remaining = usize::try_from(max_chars).unwrap_or_default();
+        let mut remaining = usize::try_from(max_utf8_bytes).unwrap_or_default();
         let mut parts = Vec::new();
         while remaining > 0 {
             let Some(row) = rows.try_next().await? else {
@@ -199,8 +199,12 @@ impl SessionTitleRepository {
                     }
                 }
             };
-            let text = text.chars().take(remaining).collect::<String>();
-            remaining = remaining.saturating_sub(text.chars().count() + 1);
+            let mut text = text;
+            text.truncate(text.floor_char_boundary(remaining));
+            if text.is_empty() {
+                break;
+            }
+            remaining = remaining.saturating_sub(text.len() + 1);
             parts.push(text);
         }
         parts.reverse();

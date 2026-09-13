@@ -265,6 +265,9 @@ impl fmt::Display for WebHttpRuntimeError {
 
 impl Error for WebHttpRuntimeError {}
 
+/// Suggestion work submitted to the daemon incarnation's runtime task set.
+pub type SessionTitleTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 /// Bound browser HTTP runtime.
 pub struct WebHttpRuntime {
     listener: TcpListener,
@@ -320,6 +323,12 @@ impl BoundWebHttpListener {
 }
 
 impl WebHttpRuntime {
+    /// Hands suggestion execution to the runtime task owner.
+    pub fn with_session_title_tasks(mut self, tasks: mpsc::Sender<SessionTitleTask>) -> Self {
+        self.router = self.router.layer(axum::Extension(tasks));
+        self
+    }
+
     /// Supplies one current catalog snapshot to each browser request.
     pub fn with_configuration_reload(
         mut self,

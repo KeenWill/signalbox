@@ -154,11 +154,8 @@ impl SessionTitles {
         if !exists {
             return Err(TitleError::NotFound);
         }
-        let input_budget =
-            configure_title_budget(&mut settings, definition.context_window_tokens());
-        if input_budget as usize <= TITLE_PROMPT.len() + REQUEST_MARGIN_BYTES {
-            return Err(TitleError::Configuration);
-        }
+        let input_budget = title_input_budget(&mut settings, definition.context_window_tokens())
+            .ok_or(TitleError::Configuration)?;
         let credential = signalbox_persistence::session_credentials::current_session_credential_with_migration_fallback(
             &self.pool, session, family, migration_fallback,
         ).await.map_err(|error| match error { sqlx::Error::RowNotFound => TitleError::Configuration, _ => TitleError::Database })?;
@@ -190,7 +187,8 @@ impl SessionTitles {
             .await
         {
             Ok(text) if !text.is_empty() => text,
-            _ => {
+            Err(error) => return Err(self.close_before_send(call.call, error.into()).await),
+            Ok(_) => {
                 self.settle(&call, None, usage_axes(TokenUsage::unreported()))
                     .await?;
                 return Err(TitleError::Generation);
@@ -401,6 +399,14 @@ fn title_operation(
     );
     operation.retained_mapped_target = mapped;
     operation
+}
+
+pub(crate) fn title_input_budget(
+    settings: &mut ModelSettings,
+    context_window_tokens: u32,
+) -> Option<u32> {
+    let budget = configure_title_budget(settings, context_window_tokens);
+    (budget as usize > TITLE_PROMPT.len() + REQUEST_MARGIN_BYTES).then_some(budget)
 }
 
 fn configure_title_budget(settings: &mut ModelSettings, context_window_tokens: u32) -> u32 {

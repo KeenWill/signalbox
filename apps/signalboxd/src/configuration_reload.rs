@@ -314,9 +314,13 @@ impl ConfigurationReload {
         pool: sqlx::PgPool,
     ) -> Option<crate::session_titles::SessionTitles> {
         let models = self.catalogs().models;
-        let (_, target, _) = models.session_title_settings()?;
+        let (_, target, mut settings) = models.session_title_settings()?;
         let catalog = models.runtime_model_catalog();
         let definition = catalog.resolve(target)?;
+        crate::session_titles::title_input_budget(
+            &mut settings,
+            definition.context_window_tokens(),
+        )?;
         let adapter = models.adapter_for_provider_model(definition.provider_model())?;
         let factory = self.runtime_factory.as_ref()?;
         if !factory.adapter_available(adapter) {
