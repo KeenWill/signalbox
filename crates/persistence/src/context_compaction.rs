@@ -836,7 +836,7 @@ impl PreparedContextCompaction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CompactionSource {
     pub(crate) frontier: ContextFrontierId,
-    pub(crate) member_count: u64,
+    member_count: u64,
 }
 
 pub(crate) async fn load_compaction_source(
