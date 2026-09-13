@@ -49,6 +49,8 @@ import {
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MAX_CACHED_SESSION_WORKSPACES = 4
+// ToolDenialReason::MAX_UTF8_BYTES in crates/domain/src/tool/policy.rs.
+const MAX_DENIAL_NOTE_UTF8_BYTES = 4096
 const SESSION_ACTION_DRAFTS_KEY = ['session-action-drafts'] as const
 type SessionActionDrafts = Record<string, { action: SessionAction; error: Error }>
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
@@ -183,6 +185,16 @@ function SessionActions({
     ((pendingRequest !== null && (choice === 'cancel' || choice === 'clear-goal')) ||
       (choice === 'cancel' && chosenTurn !== activeTurn) ||
       ((choice === 'approve' || choice === 'deny') && chosenRequest !== pendingRequest))
+  // Strip the POSIX edges forbidden by ToolDenialReason; line feeds are its only admitted controls.
+  const denialNote = choice === 'deny' ? text.replace(/^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g, '') : ''
+  const denialNoteError =
+    retained === null && choice === 'deny'
+      ? new TextEncoder().encode(denialNote).byteLength > MAX_DENIAL_NOTE_UTF8_BYTES
+        ? 'The note must be 4096 UTF-8 bytes or fewer.'
+        : /\p{Cc}/u.test(denialNote.replaceAll('\n', ''))
+          ? 'Remove control characters such as tabs from the note. Line breaks are allowed.'
+          : undefined
+      : undefined
   const [notice, setNotice] = useState('')
   const mutation = useMutation({
     mutationKey: ['session-action', sessionId],
@@ -249,20 +261,19 @@ function SessionActions({
     dismiss()
   }
   const confirm = () => {
-    if (inFlight.current || sending || capacityReached || freshActionUnavailable) return
+    if (inFlight.current || sending || capacityReached || freshActionUnavailable || denialNoteError)
+      return
     let action = retained
     if (!action) {
       const command_id = createSessionActionCommandId()
       if ((choice === 'approve' || choice === 'deny') && chosenRequest) {
-        // Strip only the POSIX edge whitespace forbidden by ToolDenialReason.
-        const note = text.replace(/^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g, '')
         action = {
           kind: 'approval',
           requestId: chosenRequest,
           input: {
             command_id,
             decision: choice,
-            note: choice === 'deny' && note.length > 0 ? note : null,
+            note: choice === 'deny' && denialNote.length > 0 ? denialNote : null,
           },
         }
       } else if (choice === 'cancel' && chosenTurn && text.length > 0) {
@@ -364,6 +375,7 @@ function SessionActions({
                       ? 'Message to continue with'
                       : 'Note (optional)'
                 }
+                error={denialNoteError}
                 rows={3}
                 value={retained ? retainedText : text}
                 onChange={(event) => editText(event.target.value)}
@@ -385,6 +397,7 @@ function SessionActions({
               sending ||
               capacityReached ||
               freshActionUnavailable ||
+              denialNoteError !== undefined ||
               (!retained && (choice === 'set-goal' || choice === 'cancel') && text.length === 0)
             }
           >

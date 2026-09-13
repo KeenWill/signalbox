@@ -62,6 +62,12 @@ for (const denial of [
     text: '\u00a0Outside the requested work\u00a0',
     note: '\u00a0Outside the requested work\u00a0',
   },
+  {
+    name: 'admits 4096 ASCII bytes after trimming',
+    text: ` ${'x'.repeat(4096)} `,
+    note: 'x'.repeat(4096),
+  },
+  { name: 'admits 4096 multibyte bytes', text: '😀'.repeat(1024), note: '😀'.repeat(1024) },
   { name: 'preserves NBSP only', text: '\u00a0', note: '\u00a0' },
   { name: 'omits POSIX whitespace only', text: ' \t\n\v\f', note: null },
   { name: 'strips ordinary trailing whitespace', text: 'Outside scope ', note: 'Outside scope' },
@@ -91,6 +97,67 @@ for (const denial of [
     await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
     expect(requests).toEqual([
       { command_id: expect.any(String), decision: 'deny', note: denial.note },
+    ])
+  })
+}
+
+for (const denial of [
+  { name: 'interior tab', text: 'Before\tAfter', reason: 'control' },
+  { name: 'interior NUL', text: 'Before\u0000After', reason: 'control' },
+  { name: 'DEL', text: 'Before\u007fAfter', reason: 'control' },
+  { name: 'C1 control', text: 'Before\u0085After', reason: 'control' },
+  { name: '4097 ASCII bytes', text: 'x'.repeat(4097), reason: 'length' },
+  { name: '4097 multibyte bytes', text: `${'😀'.repeat(1024)}x`, reason: 'length' },
+]) {
+  test(`denial validation rejects ${denial.name} before submission`, async ({ page }, testInfo) => {
+    const api = await sessionApi(page, true)
+    api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
+    const requests: unknown[] = []
+    await page.route(`**/api/sessions/${sessionId}/approvals/${requestId}`, (route) => {
+      requests.push(route.request().postDataJSON())
+      return route.fulfill({ status: 204 })
+    })
+    await openSession(page)
+    await page.getByRole('button', { name: 'Deny', exact: true }).click()
+    const field = page.getByRole('textbox', { name: 'Note (optional)' })
+    if (denial.name === 'interior NUL' || denial.name === 'DEL') {
+      // Firefox's fill path removes these controls before dispatching input.
+      await field.evaluate((element, value) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+        if (!setter) throw new Error('Missing textarea value setter')
+        setter.call(element, value)
+        element.dispatchEvent(new Event('input', { bubbles: true }))
+      }, denial.text)
+    } else await field.fill(denial.text)
+    await expect(field).toHaveValue(denial.text)
+    const reason =
+      denial.reason === 'length'
+        ? 'The note must be 4096 UTF-8 bytes or fewer.'
+        : 'Remove control characters such as tabs from the note. Line breaks are allowed.'
+    await expect(field).toHaveAttribute('aria-invalid', 'true')
+    await expect(field).toHaveAccessibleDescription(reason)
+    await expect(page.getByText(reason, { exact: true })).toBeVisible()
+    const confirm = page.getByRole('button', { name: 'Confirm', exact: true })
+    await expect(confirm).toBeDisabled()
+    await confirm.evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) throw new Error('Confirm must be a button')
+      button.form?.requestSubmit()
+    })
+    expect(requests).toHaveLength(0)
+    if (denial.name === 'interior tab')
+      await page.screenshot({
+        path: testInfo.outputPath('denial-note-validation.png'),
+        fullPage: true,
+      })
+    const corrected = 'Outside scope\nPlease revise'
+    await field.fill(corrected)
+    await expect(field).not.toHaveAttribute('aria-invalid', 'true')
+    await expect(page.getByText(reason, { exact: true })).toHaveCount(0)
+    await expect(confirm).toBeEnabled()
+    await confirm.click()
+    await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
+    expect(requests).toEqual([
+      { command_id: expect.any(String), decision: 'deny', note: corrected },
     ])
   })
 }
