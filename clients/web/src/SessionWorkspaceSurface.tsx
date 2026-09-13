@@ -1,7 +1,15 @@
-import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  type QueryClient,
+  skipToken,
+  useMutation,
+  useMutationState,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, SkipBack, SkipForward } from 'lucide-react'
 import {
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
   useCallback,
   useEffect,
@@ -10,12 +18,15 @@ import {
   useRef,
   useState,
 } from 'react'
+import { type SessionAction, submitSessionAction } from './attention'
 import { invokeCommand } from './commands'
+import { Field } from './Field'
 import type { WebSessionTimelineWindow, WebUsageSummary } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import './session-header.css'
 import './session-polish.css'
-import type { SessionTranscriptLimits } from './product'
+import { ProductInputError, ProductRequestError, type SessionTranscriptLimits } from './product'
+import './session-actions.css'
 import { SessionComposer } from './SessionComposer'
 import { SessionItemDetail } from './SessionItemDetail'
 import { SessionTranscriptText } from './SessionTranscriptText'
@@ -28,6 +39,7 @@ import {
 import { SESSION_WINDOW_BYTES, SESSION_WINDOW_ITEMS } from './session-workspace'
 import {
   actions,
+  MAX_PENDING_SESSION_INPUTS,
   selectApp,
   selectSessionSync,
   store,
@@ -37,7 +49,384 @@ import {
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MAX_CACHED_SESSION_WORKSPACES = 4
+// ToolDenialReason::MAX_UTF8_BYTES in crates/domain/src/tool/policy.rs.
+const MAX_DENIAL_NOTE_UTF8_BYTES = 4096
+const SESSION_ACTION_DRAFTS_KEY = ['session-action-drafts'] as const
+type SessionActionDrafts = Record<string, { action: SessionAction; error: Error }>
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
+
+function createSessionActionCommandId() {
+  // UUID v4 uses 16 random bytes with the version and variant bits fixed.
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  const hex = Array.from(bytes, (byte, index) => {
+    const value = index === 6 ? (byte & 0x0f) | 0x40 : index === 8 ? (byte & 0x3f) | 0x80 : byte
+    return value.toString(16).padStart(2, '0')
+  }).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+function SessionActions({
+  sessionId,
+  pendingRequest,
+  activeTurn,
+  onAccepted,
+  returnFocusRef,
+  renderHeader,
+}: {
+  sessionId: string
+  pendingRequest: string | null
+  activeTurn: string | null
+  onAccepted: () => Promise<unknown>
+  returnFocusRef: RefObject<HTMLElement | null>
+  renderHeader: (controls: ReactNode) => ReactNode
+}) {
+  const [draftChoice, setChoice] = useState<
+    'approve' | 'deny' | 'cancel' | 'set-goal' | 'clear-goal' | null
+  >(null)
+  const [text, setText] = useState('')
+  const [chosenRequest, setChosenRequest] = useState<string | null>(null)
+  const [chosenTurn, setChosenTurn] = useState<string | null>(null)
+  const inFlight = useRef(false)
+  const actionOpener = useRef<HTMLElement>(null)
+  const actionRoot = useRef<HTMLElement>(null)
+  const queryClient = useQueryClient()
+  const { data: rejectedDrafts = {} } = useQuery({
+    queryKey: SESSION_ACTION_DRAFTS_KEY,
+    queryFn: skipToken,
+    initialData: {} as SessionActionDrafts,
+    gcTime: Number.POSITIVE_INFINITY,
+  })
+  const [draftError, setDraftError] = useState<Error | null>(null)
+  const rejectedDraft = rejectedDrafts[sessionId]
+  useEffect(() => {
+    if (!rejectedDraft) return
+    const { action, error } = rejectedDraft
+    setChoice(action.kind === 'approval' ? action.input.decision : action.kind)
+    setText(
+      action.kind === 'cancel'
+        ? action.input.message
+        : action.kind === 'set-goal'
+          ? action.input.statement
+          : action.kind === 'approval'
+            ? (action.input.note ?? '')
+            : '',
+    )
+    setChosenRequest(action.kind === 'approval' ? action.requestId : null)
+    setChosenTurn(action.kind === 'cancel' ? action.input.expected_active_turn_id : null)
+    setDraftError(error)
+    if (!actionOpener.current?.isConnected) actionOpener.current = returnFocusRef.current
+  }, [rejectedDraft, returnFocusRef])
+  const clearRejectedDraft = () => {
+    queryClient.setQueryData<SessionActionDrafts>(SESSION_ACTION_DRAFTS_KEY, (drafts) => {
+      if (!drafts?.[sessionId]) return drafts
+      const remaining = { ...drafts }
+      delete remaining[sessionId]
+      return remaining
+    })
+  }
+  const editText = (value: string) => {
+    setText(value)
+    queryClient.setQueryData<SessionActionDrafts>(SESSION_ACTION_DRAFTS_KEY, (drafts) => {
+      const draft = drafts?.[sessionId]
+      if (!draft) return drafts
+      const action = draft.action
+      const updated =
+        action.kind === 'cancel'
+          ? { ...action, input: { ...action.input, message: value } }
+          : action.kind === 'set-goal'
+            ? { ...action, input: { ...action.input, statement: value } }
+            : action.kind === 'approval'
+              ? { ...action, input: { ...action.input, note: value } }
+              : action
+      return { ...drafts, [sessionId]: { ...draft, action: updated } }
+    })
+  }
+  const restoreActionFocus = () => {
+    if (!actionRoot.current) return
+    const opener = actionOpener.current
+    const target =
+      opener?.isConnected && !(opener instanceof HTMLButtonElement && opener.disabled)
+        ? opener
+        : returnFocusRef.current
+    target?.focus()
+  }
+  const pendingActions = useMutationState({
+    filters: { mutationKey: ['session-action'] },
+    select: (mutation) => ({
+      sessionId: mutation.options.mutationKey?.[1],
+      action: mutation.state.variables as SessionAction,
+      status: mutation.state.status,
+      error: mutation.state.error,
+    }),
+  })
+  const pending = pendingActions.find((action) => action.sessionId === sessionId)
+  const retained = pending?.action ?? null
+  const choice = retained
+    ? retained.kind === 'approval'
+      ? retained.input.decision
+      : retained.kind
+    : draftChoice
+  const retainedText =
+    retained?.kind === 'cancel'
+      ? retained.input.message
+      : retained?.kind === 'set-goal'
+        ? retained.input.statement
+        : retained?.kind === 'approval'
+          ? (retained.input.note ?? '')
+          : ''
+  const sending = pending?.status === 'pending'
+  const capacityReached =
+    retained === null &&
+    !rejectedDraft &&
+    new Set([...pendingActions.map((action) => action.sessionId), ...Object.keys(rejectedDrafts)])
+      .size >= MAX_PENDING_SESSION_INPUTS
+  const freshActionUnavailable =
+    retained === null &&
+    ((pendingRequest !== null && (choice === 'cancel' || choice === 'clear-goal')) ||
+      (choice === 'cancel' && chosenTurn !== activeTurn) ||
+      ((choice === 'approve' || choice === 'deny') && chosenRequest !== pendingRequest))
+  // Strip the POSIX edges forbidden by ToolDenialReason; line feeds are its only admitted controls.
+  const denialNote = choice === 'deny' ? text.replace(/^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g, '') : ''
+  const denialNoteError =
+    retained === null && choice === 'deny'
+      ? new TextEncoder().encode(denialNote).byteLength > MAX_DENIAL_NOTE_UTF8_BYTES
+        ? 'The note must be 4096 UTF-8 bytes or fewer.'
+        : /\p{Cc}/u.test(denialNote.replaceAll('\n', ''))
+          ? 'Remove control characters such as tabs from the note. Line breaks are allowed.'
+          : undefined
+      : undefined
+  const [notice, setNotice] = useState('')
+  const mutation = useMutation({
+    mutationKey: ['session-action', sessionId],
+    // Unconfirmed commands remain available across workspace navigation. Confirmed entries are removed below.
+    gcTime: Number.POSITIVE_INFINITY,
+    mutationFn: (action: SessionAction) => submitSessionAction(sessionId, action),
+    onSuccess: () => {
+      if (
+        actionRoot.current?.contains(document.activeElement) ||
+        document.activeElement === document.body
+      )
+        restoreActionFocus()
+      setChoice(null)
+      setText('')
+      setNotice('Action accepted')
+      void onAccepted()
+    },
+    onSettled: (_, error, action) => {
+      inFlight.current = false
+      if (
+        !error ||
+        error instanceof ProductInputError ||
+        (error instanceof ProductRequestError && error.status < 500)
+      ) {
+        if (error) {
+          // Settlement can happen after this workspace unmounts.
+          queryClient.setQueryData<SessionActionDrafts>(SESSION_ACTION_DRAFTS_KEY, (drafts) => ({
+            ...drafts,
+            [sessionId]: { action, error },
+          }))
+        }
+        for (const mutation of queryClient
+          .getMutationCache()
+          .findAll({ mutationKey: ['session-action', sessionId] })) {
+          if (
+            (mutation.state.variables as SessionAction).input.command_id === action.input.command_id
+          ) {
+            queryClient.getMutationCache().remove(mutation)
+          }
+        }
+      }
+    },
+  })
+  const error = pending?.error ?? mutation.error ?? draftError
+  const choose = (next: typeof choice, opener?: HTMLButtonElement) => {
+    clearRejectedDraft()
+    if (opener) actionOpener.current = opener
+    setChoice(next)
+    setChosenRequest(pendingRequest)
+    setChosenTurn(activeTurn)
+    setText('')
+    setNotice('')
+    setDraftError(null)
+    mutation.reset()
+  }
+  const dismiss = () => {
+    choose(null)
+    restoreActionFocus()
+  }
+  const handleConfirmationKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Escape' || !choice || retained || inFlight.current) return
+    event.preventDefault()
+    event.stopPropagation()
+    dismiss()
+  }
+  const confirm = () => {
+    if (inFlight.current || sending || capacityReached || freshActionUnavailable || denialNoteError)
+      return
+    let action = retained
+    if (!action) {
+      const command_id = createSessionActionCommandId()
+      if ((choice === 'approve' || choice === 'deny') && chosenRequest) {
+        action = {
+          kind: 'approval',
+          requestId: chosenRequest,
+          input: {
+            command_id,
+            decision: choice,
+            note: choice === 'deny' && denialNote.length > 0 ? denialNote : null,
+          },
+        }
+      } else if (choice === 'cancel' && chosenTurn && text.length > 0) {
+        action = {
+          kind: 'cancel',
+          input: { command_id, expected_active_turn_id: chosenTurn, message: text },
+        }
+      } else if (choice === 'set-goal' && text.length > 0) {
+        action = { kind: 'set-goal', input: { command_id, statement: text } }
+      } else if (choice === 'clear-goal') {
+        action = { kind: 'clear-goal', input: { command_id } }
+      }
+    }
+    if (!action) return
+    inFlight.current = true
+    clearRejectedDraft()
+    setDraftError(null)
+    for (const previous of queryClient
+      .getMutationCache()
+      .findAll({ mutationKey: ['session-action', sessionId] })) {
+      queryClient.getMutationCache().remove(previous)
+    }
+    mutation.mutate(action)
+  }
+  return (
+    <section
+      ref={actionRoot}
+      className="session-actions"
+      aria-label="Session actions"
+      onKeyDown={(event) => {
+        if (event.target === actionOpener.current) handleConfirmationKeyDown(event)
+      }}
+    >
+      {renderHeader(
+        <div className="session-action-buttons">
+          {pendingRequest && (
+            <>
+              <span className="sr-only">Approval needed</span>
+              <button
+                type="button"
+                disabled={retained !== null || capacityReached}
+                onClick={(event) => choose('approve', event.currentTarget)}
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                disabled={retained !== null || capacityReached}
+                onClick={(event) => choose('deny', event.currentTarget)}
+              >
+                Deny
+              </button>
+            </>
+          )}
+          {activeTurn && (
+            <button
+              type="button"
+              disabled={retained !== null || capacityReached}
+              onClick={(event) => choose('cancel', event.currentTarget)}
+            >
+              Cancel turn
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={retained !== null || capacityReached}
+            onClick={(event) => choose('set-goal', event.currentTarget)}
+          >
+            Set goal
+          </button>
+          {!pendingRequest && (
+            <button
+              type="button"
+              disabled={retained !== null || capacityReached}
+              onClick={(event) => choose('clear-goal', event.currentTarget)}
+            >
+              Clear goal
+            </button>
+          )}
+        </div>,
+      )}
+      {choice && (
+        <form
+          className="session-action-confirmation"
+          onKeyDown={handleConfirmationKeyDown}
+          onSubmit={(event) => {
+            event.preventDefault()
+            confirm()
+          }}
+        >
+          {choice === 'set-goal' || choice === 'deny' || choice === 'cancel' ? (
+            <div className="session-action-entry">
+              <Field
+                as="textarea"
+                label={
+                  choice === 'set-goal'
+                    ? 'Goal'
+                    : choice === 'cancel'
+                      ? 'Message to continue with'
+                      : 'Note (optional)'
+                }
+                error={denialNoteError}
+                rows={3}
+                value={retained ? retainedText : text}
+                onChange={(event) => editText(event.target.value)}
+                disabled={retained !== null || capacityReached}
+                required={choice === 'set-goal' || choice === 'cancel'}
+              />
+              {choice === 'cancel' && <p>Cancel this turn and continue with your message.</p>}
+            </div>
+          ) : (
+            <span>
+              {choice === 'approve'
+                ? 'Approve this pending request?'
+                : 'Clear the goal and stop its current turn?'}
+            </span>
+          )}
+          <button
+            type="submit"
+            disabled={
+              sending ||
+              capacityReached ||
+              freshActionUnavailable ||
+              denialNoteError !== undefined ||
+              (!retained && (choice === 'set-goal' || choice === 'cancel') && text.length === 0)
+            }
+          >
+            {sending ? 'Sending…' : retained ? 'Retry same action' : 'Confirm'}
+          </button>
+          {!retained && (
+            <button type="button" onClick={dismiss}>
+              Keep unchanged
+            </button>
+          )}
+        </form>
+      )}
+      {capacityReached && (
+        <p role="status">Return to an unfinished session action before starting another.</p>
+      )}
+      {error && (
+        <p role="alert">
+          {error instanceof ProductRequestError
+            ? `${error.response.error.code}: ${error.message}`
+            : error instanceof ProductInputError
+              ? error.message
+              : 'Outcome unconfirmed. Retry the same action.'}
+          {retained && <small>Command {retained.input.command_id}</small>}
+        </p>
+      )}
+      {notice && <p role="status">{notice}</p>}
+    </section>
+  )
+}
 
 export const isCanonicalSessionId = (value: string): boolean => SESSION_ID_PATTERN.test(value)
 export const sessionWorkspaceQueryKey = (sessionId: string | null) =>
@@ -606,170 +995,199 @@ export function SessionWorkspaceSurface({
           <p className="sr-only" role="status">
             Session {sessionId} loaded.
           </p>
-          <header className="session-compact-header">
-            <div className="session-header-line">
-              <h2 id="session-workspace-heading">Session</h2>
-              <p className="session-header-state">
-                {displayedSession.descriptor.supervision?.pending
-                  ? 'Recovery required'
-                  : displayedSession.active
-                    ? 'Active'
-                    : 'Inactive'}
-              </p>
-              <span className="session-header-cost" data-testid="session-cost" title={costLabel}>
-                {costLabel}
-              </span>
-              <div
-                className="session-header-actions"
-                role="toolbar"
-                aria-label="Timeline shortcuts"
-              >
-                <button
-                  type="button"
-                  title="First (gg)"
-                  aria-label="First"
-                  onClick={(event) => invokeBoundaryCommand('selection.first', event.currentTarget)}
-                >
-                  <SkipBack aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  title="Latest (G)"
-                  aria-label="Latest"
-                  onClick={(event) => invokeBoundaryCommand('selection.last', event.currentTarget)}
-                >
-                  <SkipForward aria-hidden="true" />
-                </button>
-              </div>
-            </div>
-            <div className="session-header-line session-header-secondary">
-              {origin && (
-                <div className="session-header-context">
-                  <a
-                    href={`https://github.com/${origin.repository.split('/').map(encodeURIComponent).join('/')}`}
+          <SessionActions
+            key={sessionId}
+            sessionId={sessionId ?? ''}
+            pendingRequest={
+              live?.active?.state.kind === 'awaiting_tool_approval'
+                ? live.active.state.tool_request_id
+                : null
+            }
+            activeTurn={
+              live?.active?.state.kind === 'awaiting_tool_approval'
+                ? null
+                : (live?.active?.turn_id ?? null)
+            }
+            onAccepted={refetchSession}
+            returnFocusRef={workspaceRef}
+            renderHeader={(controls) => (
+              <header className="session-compact-header">
+                <div className="session-header-line">
+                  <h2 id="session-workspace-heading">Session</h2>
+                  <p className="session-header-state">
+                    {displayedSession.descriptor.supervision?.pending
+                      ? 'Recovery required'
+                      : displayedSession.active
+                        ? 'Active'
+                        : 'Inactive'}
+                  </p>
+                  <span
+                    className="session-header-cost"
+                    data-testid="session-cost"
+                    title={costLabel}
                   >
-                    {origin.repository}
-                  </a>
-                  {origin.pull_request !== null && (
-                    <a
-                      href={`https://github.com/${origin.repository.split('/').map(encodeURIComponent).join('/')}/pull/${encodeURIComponent(origin.pull_request)}`}
-                    >
-                      #{origin.pull_request}
-                    </a>
-                  )}
-                  <span title={`Rule ${origin.rule_id} · ${enumLabel(origin.event_kind)}`}>
-                    Rule {origin.rule_id} · {enumLabel(origin.event_kind)}
+                    {costLabel}
                   </span>
-                </div>
-              )}
-              <span role="status">
-                {followFailed
-                  ? 'Live updates unavailable.'
-                  : synchronization.phase === 'resyncing'
-                    ? 'Reconnecting…'
-                    : live
-                      ? 'Live'
-                      : 'Connecting…'}
-              </span>
-              <label className="session-events-toggle">
-                <input
-                  type="checkbox"
-                  checked={showEvents}
-                  onChange={(event) => setShowEvents(event.target.checked)}
-                />
-                Events
-              </label>
-              <details ref={detailsRef} className="session-header-details">
-                <summary>Session details</summary>
-                <div className="session-header-detail-content">
-                  <p>Session {sessionId}</p>
-                  <p>Cost: {costLabel}</p>
-                  <dl className="session-telemetry">
-                    <div>
-                      <dt>Items</dt>
-                      <dd>{displayedSession.descriptor.sizes.item_count}</dd>
-                    </div>
-                    <div>
-                      <dt>Active</dt>
-                      <dd>{displayedSession.descriptor.work.active_turn_count}</dd>
-                    </div>
-                    <div>
-                      <dt>Queued</dt>
-                      <dd>{displayedSession.descriptor.work.queued_turn_count}</dd>
-                    </div>
-                    <div>
-                      <dt>Up to date as of</dt>
-                      <dd>{displayedSession.descriptor.observed_through}</dd>
-                    </div>
-                  </dl>
-                  {displayedSession.descriptor.supervision && (
-                    <section className="session-provenance" aria-label="Session supervision">
-                      <p>
-                        {displayedSession.descriptor.supervision.pending
-                          ? 'Recovery required'
-                          : 'Recovery recorded'}
-                      </p>
-                      <p>
-                        {enumLabel(displayedSession.descriptor.supervision.class)} ·{' '}
-                        <code>{displayedSession.descriptor.supervision.cause_code}</code>
-                      </p>
-                    </section>
-                  )}
-                  {displayedSession.descriptor.repository_watch && (
-                    <section className="session-provenance" aria-label="Repository watch">
-                      Repository watch · {displayedSession.descriptor.repository_watch.repository}
-                      {displayedSession.descriptor.repository_watch.pull_request !== null &&
-                        ` #${displayedSession.descriptor.repository_watch.pull_request}`}
-                      {' · Rule '}
-                      {displayedSession.descriptor.repository_watch.rule_id}
-                      {' v'}
-                      {displayedSession.descriptor.repository_watch.rule_revision}
-                      {' · '}
-                      {enumLabel(displayedSession.descriptor.repository_watch.event_kind)}
-                      <details>
-                        <summary>Trigger details</summary>
-                        <p>
-                          Trigger {displayedSession.descriptor.repository_watch.dispatch_id}
-                          {' · Action '}
-                          {displayedSession.descriptor.repository_watch.action_ordinal}
-                        </p>
-                        <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>
-                      </details>
-                    </section>
-                  )}
-                  {followFailed && (
+                  <div
+                    className="session-header-actions"
+                    role="toolbar"
+                    aria-label="Timeline shortcuts"
+                  >
                     <button
                       type="button"
-                      onClick={() => dispatch(actions.sessionFollowReconnectRequested())}
+                      title="First (gg)"
+                      aria-label="First"
+                      onClick={(event) =>
+                        invokeBoundaryCommand('selection.first', event.currentTarget)
+                      }
                     >
-                      Reconnect live updates
+                      <SkipBack aria-hidden="true" />
                     </button>
-                  )}
-                  {live?.active?.state.kind === 'awaiting_credential_availability' && (
-                    <p role="status" className="availability-tag">
-                      Waiting for credentials · {enumLabel(live.active.state.cause)}
-                    </p>
-                  )}
-                  {(live?.reconciliation || live?.runner) && (
-                    <div className="session-live-facts">
-                      {live.reconciliation && (
-                        <span className="availability-tag">
-                          Recovery needed · {enumLabel(live.reconciliation.kind)}
-                        </span>
+                    <button
+                      type="button"
+                      title="Latest (G)"
+                      aria-label="Latest"
+                      onClick={(event) =>
+                        invokeBoundaryCommand('selection.last', event.currentTarget)
+                      }
+                    >
+                      <SkipForward aria-hidden="true" />
+                    </button>
+                  </div>
+
+                  <span role="status">
+                    {followFailed
+                      ? 'Live updates unavailable.'
+                      : synchronization.phase === 'resyncing'
+                        ? 'Reconnecting…'
+                        : live
+                          ? 'Live'
+                          : 'Connecting…'}
+                  </span>
+                  <details ref={detailsRef} className="session-header-details">
+                    <summary>Session details</summary>
+                    <div className="session-header-detail-content">
+                      <p>Session {sessionId}</p>
+                      <p>Cost: {costLabel}</p>
+                      <dl className="session-telemetry">
+                        <div>
+                          <dt>Items</dt>
+                          <dd>{displayedSession.descriptor.sizes.item_count}</dd>
+                        </div>
+                        <div>
+                          <dt>Active</dt>
+                          <dd>{displayedSession.descriptor.work.active_turn_count}</dd>
+                        </div>
+                        <div>
+                          <dt>Queued</dt>
+                          <dd>{displayedSession.descriptor.work.queued_turn_count}</dd>
+                        </div>
+                        <div>
+                          <dt>Up to date as of</dt>
+                          <dd>{displayedSession.descriptor.observed_through}</dd>
+                        </div>
+                      </dl>
+                      {displayedSession.descriptor.supervision && (
+                        <section className="session-provenance" aria-label="Session supervision">
+                          <p>
+                            {displayedSession.descriptor.supervision.pending
+                              ? 'Recovery required'
+                              : 'Recovery recorded'}
+                          </p>
+                          <p>
+                            {enumLabel(displayedSession.descriptor.supervision.class)} ·{' '}
+                            <code>{displayedSession.descriptor.supervision.cause_code}</code>
+                          </p>
+                        </section>
                       )}
-                      {live.runner && (
-                        <span className="availability-tag">
-                          Runner: {enumLabel(live.runner.state)}
-                          {live.runner.state === 'pinned' &&
-                            `, ${enumLabel(live.runner.connection_health)}`}
-                        </span>
+                      {displayedSession.descriptor.repository_watch && (
+                        <section className="session-provenance" aria-label="Repository watch">
+                          Repository watch ·{' '}
+                          {displayedSession.descriptor.repository_watch.repository}
+                          {displayedSession.descriptor.repository_watch.pull_request !== null &&
+                            ` #${displayedSession.descriptor.repository_watch.pull_request}`}
+                          {' · Rule '}
+                          {displayedSession.descriptor.repository_watch.rule_id}
+                          {' v'}
+                          {displayedSession.descriptor.repository_watch.rule_revision}
+                          {' · '}
+                          {enumLabel(displayedSession.descriptor.repository_watch.event_kind)}
+                          <details>
+                            <summary>Trigger details</summary>
+                            <p>
+                              Trigger {displayedSession.descriptor.repository_watch.dispatch_id}
+                              {' · Action '}
+                              {displayedSession.descriptor.repository_watch.action_ordinal}
+                            </p>
+                            <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>
+                          </details>
+                        </section>
+                      )}
+                      {followFailed && (
+                        <button
+                          type="button"
+                          onClick={() => dispatch(actions.sessionFollowReconnectRequested())}
+                        >
+                          Reconnect live updates
+                        </button>
+                      )}
+                      {live?.active?.state.kind === 'awaiting_credential_availability' && (
+                        <p role="status" className="availability-tag">
+                          Waiting for credentials · {enumLabel(live.active.state.cause)}
+                        </p>
+                      )}
+                      {(live?.reconciliation || live?.runner) && (
+                        <div className="session-live-facts">
+                          {live.reconciliation && (
+                            <span className="availability-tag">
+                              Recovery needed · {enumLabel(live.reconciliation.kind)}
+                            </span>
+                          )}
+                          {live.runner && (
+                            <span className="availability-tag">
+                              Runner: {enumLabel(live.runner.state)}
+                              {live.runner.state === 'pinned' &&
+                                `, ${enumLabel(live.runner.connection_health)}`}
+                            </span>
+                          )}
+                        </div>
                       )}
                     </div>
-                  )}
+                  </details>
                 </div>
-              </details>
-            </div>
-          </header>
+                <div className="session-header-line session-header-secondary">
+                  {origin && (
+                    <div className="session-header-context">
+                      <a
+                        href={`https://github.com/${origin.repository.split('/').map(encodeURIComponent).join('/')}`}
+                      >
+                        {origin.repository}
+                      </a>
+                      {origin.pull_request !== null && (
+                        <a
+                          href={`https://github.com/${origin.repository.split('/').map(encodeURIComponent).join('/')}/pull/${encodeURIComponent(origin.pull_request)}`}
+                        >
+                          #{origin.pull_request}
+                        </a>
+                      )}
+                      <span title={`Rule ${origin.rule_id} · ${enumLabel(origin.event_kind)}`}>
+                        Rule {origin.rule_id} · {enumLabel(origin.event_kind)}
+                      </span>
+                    </div>
+                  )}
+                  {controls}
+                  <label className="session-events-toggle">
+                    <input
+                      type="checkbox"
+                      checked={showEvents}
+                      onChange={(event) => setShowEvents(event.target.checked)}
+                    />
+                    Events
+                  </label>
+                </div>
+              </header>
+            )}
+          />
           <section
             ref={!showEvents && !transcriptAvailable ? timelineRef : undefined}
             tabIndex={!showEvents && !transcriptAvailable ? 0 : undefined}
