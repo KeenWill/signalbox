@@ -253,6 +253,13 @@ for (const action of [
     await expect(page.getByRole('alert')).toContainText('action_refused: The action was refused.')
     await expect(field).toHaveValue(originalText)
     await expect(field).toBeEnabled()
+    if (action.button === 'Set goal') {
+      await field.press('Escape')
+      await expect(
+        page.getByRole('region', { name: 'Session workspace', exact: true }),
+      ).toBeFocused()
+      await page.getByRole('button', { name: 'Set goal', exact: true }).press('Enter')
+    }
     const revisedText = 'Revised after returning'
     await field.fill(revisedText)
     await page.getByRole('button', { name: 'Confirm', exact: true }).click()
@@ -382,6 +389,7 @@ test('rejected drafts share the four-action capacity and are recovered without e
   await openSessionFromCatalog(page, sessionId)
   await expect(page.getByRole('textbox', { name: 'Goal', exact: true })).toHaveValue(goalStatement)
   await page.getByRole('button', { name: 'Keep unchanged', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Session workspace', exact: true })).toBeFocused()
   const fifth = sessions[4]
   if (!fifth) throw new Error('Missing fifth session fixture')
   await openSessionFromCatalog(page, fifth)
@@ -389,6 +397,30 @@ test('rejected drafts share the four-action capacity and are recovered without e
 })
 
 for (const action of ['Cancel turn', 'Clear goal']) {
+  test(`a retained ${action} remains replayable during approval waiting`, async ({ page }) => {
+    const api = await sessionApi(page, true)
+    const requests: unknown[] = []
+    const path = action === 'Cancel turn' ? 'cancel' : 'goal'
+    await page.route(`**/api/sessions/${sessionId}/${path}`, (route) => {
+      requests.push(route.request().postDataJSON())
+      return requests.length === 1 ? route.abort('failed') : route.fulfill({ status: 204 })
+    })
+    await openSession(page)
+    await page.getByRole('button', { name: action, exact: true }).click()
+    if (action === 'Cancel turn') {
+      await page.getByRole('textbox', { name: 'Message to continue with' }).fill(successorMessage)
+    }
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+    await expect(page.getByRole('alert')).toContainText('Outcome unconfirmed')
+    api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
+    api.advanceObservation()
+    await expect(page.getByRole('button', { name: 'Approve', exact: true })).toBeDisabled()
+    await page.getByRole('button', { name: 'Retry same action' }).click()
+    await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
+    expect(requests).toEqual([requests[0], requests[0]])
+    await expect(page.getByRole('button', { name: 'Approve', exact: true })).toBeEnabled()
+  })
+
   test(`an open ${action} confirmation stops submitting when approval waiting begins`, async ({
     page,
   }) => {
@@ -419,6 +451,63 @@ for (const action of ['Cancel turn', 'Clear goal']) {
       )
     }
   })
+}
+
+for (const action of ['Approve', 'Clear goal']) {
+  test(`Escape from the ${action} opener dismisses its confirmation`, async ({ page }) => {
+    const api = await sessionApi(page, true)
+    if (action === 'Approve') {
+      api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
+    }
+    const requests: string[] = []
+    page.on('request', (request) => {
+      if (['POST', 'PUT', 'DELETE'].includes(request.method())) requests.push(request.url())
+    })
+    await openSession(page)
+    const opener = page.getByRole('button', { name: action, exact: true })
+    await opener.press('Enter')
+    const confirm = page.getByRole('button', { name: 'Confirm', exact: true })
+    await expect(confirm).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(confirm).toHaveCount(0)
+    await expect(opener).toBeFocused()
+    expect(requests).toEqual([])
+  })
+}
+
+for (const action of ['Approve', 'Deny']) {
+  for (const transition of ['changes', 'ends']) {
+    test(`a fresh ${action} confirmation stops submitting when its request ${transition}`, async ({
+      page,
+    }) => {
+      const api = await sessionApi(page, true)
+      api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
+      const requests: string[] = []
+      page.on('request', (request) => {
+        if (['POST', 'PUT', 'DELETE'].includes(request.method())) requests.push(request.url())
+      })
+      await openSession(page)
+      await page.getByRole('button', { name: action, exact: true }).click()
+      if (action === 'Deny')
+        await page.getByRole('textbox', { name: 'Note (optional)' }).fill('Outside scope')
+      const confirm = page.getByRole('button', { name: 'Confirm', exact: true })
+      await expect(confirm).toBeEnabled()
+      api.state.activeState =
+        transition === 'changes'
+          ? {
+              kind: 'awaiting_tool_approval',
+              tool_request_id: '20000000-0000-4000-8000-000000000002',
+            }
+          : { kind: 'running', model_call_id: null }
+      api.advanceObservation()
+      await expect(confirm).toBeDisabled()
+      await confirm.evaluate((button) => {
+        if (!(button instanceof HTMLButtonElement)) throw new Error('Confirm must be a button')
+        button.form?.requestSubmit()
+      })
+      expect(requests).toEqual([])
+    })
+  }
 }
 
 test('two synchronous confirmations send one command', async ({ page }) => {

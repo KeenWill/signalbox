@@ -68,12 +68,14 @@ function SessionActions({
   pendingRequest,
   activeTurn,
   onAccepted,
+  returnFocusRef,
   renderHeader,
 }: {
   sessionId: string
   pendingRequest: string | null
   activeTurn: string | null
   onAccepted: () => Promise<unknown>
+  returnFocusRef: RefObject<HTMLElement | null>
   renderHeader: (controls: ReactNode) => ReactNode
 }) {
   const [draftChoice, setChoice] = useState<
@@ -83,7 +85,7 @@ function SessionActions({
   const [chosenRequest, setChosenRequest] = useState<string | null>(null)
   const [chosenTurn, setChosenTurn] = useState<string | null>(null)
   const inFlight = useRef(false)
-  const actionOpener = useRef<HTMLButtonElement>(null)
+  const actionOpener = useRef<HTMLElement>(null)
   const queryClient = useQueryClient()
   const { data: rejectedDrafts = {} } = useQuery({
     queryKey: SESSION_ACTION_DRAFTS_KEY,
@@ -109,12 +111,13 @@ function SessionActions({
     setChosenRequest(action.kind === 'approval' ? action.requestId : null)
     setChosenTurn(action.kind === 'cancel' ? action.input.expected_active_turn_id : null)
     setDraftError(error)
+    if (!actionOpener.current?.isConnected) actionOpener.current = returnFocusRef.current
     queryClient.setQueryData<SessionActionDrafts>(SESSION_ACTION_DRAFTS_KEY, (drafts) => {
       const remaining = { ...drafts }
       delete remaining[sessionId]
       return remaining
     })
-  }, [queryClient, rejectedDraft, sessionId])
+  }, [queryClient, rejectedDraft, returnFocusRef, sessionId])
   const pendingActions = useMutationState({
     filters: { mutationKey: ['session-action'] },
     select: (mutation) => ({
@@ -144,8 +147,10 @@ function SessionActions({
     retained === null &&
     new Set([...pendingActions.map((action) => action.sessionId), ...Object.keys(rejectedDrafts)])
       .size >= MAX_PENDING_SESSION_INPUTS
-  const approvalBlocksAction =
-    pendingRequest !== null && (choice === 'cancel' || choice === 'clear-goal')
+  const freshActionUnavailable =
+    retained === null &&
+    ((pendingRequest !== null && (choice === 'cancel' || choice === 'clear-goal')) ||
+      ((choice === 'approve' || choice === 'deny') && chosenRequest !== pendingRequest))
   const [notice, setNotice] = useState('')
   const mutation = useMutation({
     mutationKey: ['session-action', sessionId],
@@ -197,10 +202,17 @@ function SessionActions({
   }
   const dismiss = () => {
     choose(null)
-    actionOpener.current?.focus()
+    const target = actionOpener.current?.isConnected ? actionOpener.current : returnFocusRef.current
+    target?.focus()
+  }
+  const handleConfirmationKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Escape' || !choice || retained || inFlight.current) return
+    event.preventDefault()
+    event.stopPropagation()
+    dismiss()
   }
   const confirm = () => {
-    if (inFlight.current || sending || capacityReached || approvalBlocksAction) return
+    if (inFlight.current || sending || capacityReached || freshActionUnavailable) return
     let action = retained
     if (!action) {
       const command_id = createSessionActionCommandId()
@@ -238,7 +250,13 @@ function SessionActions({
     mutation.mutate(action)
   }
   return (
-    <section className="session-actions" aria-label="Session actions">
+    <section
+      className="session-actions"
+      aria-label="Session actions"
+      onKeyDown={(event) => {
+        if (event.target === actionOpener.current) handleConfirmationKeyDown(event)
+      }}
+    >
       {renderHeader(
         <div className="session-action-buttons">
           {pendingRequest && (
@@ -290,12 +308,7 @@ function SessionActions({
       {choice && (
         <form
           className="session-action-confirmation"
-          onKeyDown={(event) => {
-            if (event.key !== 'Escape' || retained || inFlight.current) return
-            event.preventDefault()
-            event.stopPropagation()
-            dismiss()
-          }}
+          onKeyDown={handleConfirmationKeyDown}
           onSubmit={(event) => {
             event.preventDefault()
             confirm()
@@ -332,7 +345,7 @@ function SessionActions({
             disabled={
               sending ||
               capacityReached ||
-              approvalBlocksAction ||
+              freshActionUnavailable ||
               (!retained && (choice === 'set-goal' || choice === 'cancel') && text.length === 0)
             }
           >
@@ -944,6 +957,7 @@ export function SessionWorkspaceSurface({
                 : (live?.active?.turn_id ?? null)
             }
             onAccepted={refetchSession}
+            returnFocusRef={workspaceRef}
             renderHeader={(controls) => (
               <header className="session-compact-header">
                 <div className="session-header-line">
