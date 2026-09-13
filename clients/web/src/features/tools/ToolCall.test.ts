@@ -622,7 +622,7 @@ describe('tool presentation', () => {
     expect(webLink('javascript:alert(1)')).toBeUndefined()
   })
 
-  it('shows the recorded approval actor and reason', () => {
+  it.each([0, 512])('shows the recorded approval reason at byte %s', (offset) => {
     const markup = renderToStaticMarkup(
       createElement(ToolApproval, {
         approval: {
@@ -630,7 +630,11 @@ describe('tool presentation', () => {
           tool_name: 'unsandboxed_exec',
           decision: 'deny',
           actor: { type: 'policy' },
-          rationale: toolExcerpt('Command is outside the workspace'),
+          rationale: {
+            ...toolExcerpt('Command is outside the workspace'),
+            offset_bytes: String(offset),
+            total_bytes: String(offset + 32),
+          },
           request_id: '00000000-0000-7000-8000-000000000001',
           turn_id: '00000000-0000-7000-8000-000000000002',
           approval_judge_escalated: false,

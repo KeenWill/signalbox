@@ -180,3 +180,32 @@ for (const entry of jsonExamples) {
     }
   }
 }
+
+export const argumentExamples = [
+  { name: 'absent_arguments', arguments: null, empty: false },
+  {
+    name: 'partial_arguments',
+    arguments: { ...toolExcerpt('{"path":'), offset_bytes: '10', total_bytes: '18' },
+    empty: false,
+  },
+  { name: 'array_arguments', arguments: toolExcerpt('[]'), empty: false },
+  { name: 'empty_arguments', arguments: toolExcerpt('{}'), empty: true },
+].map((example) => ({
+  ...example,
+  tool: { ...toolExample(example.name, {}, {})[0], arguments: example.arguments },
+}))
+
+export const partialApproval = {
+  type: 'tool_approval_decision' as const,
+  tool_name: 'unsandboxed_exec',
+  decision: 'deny' as const,
+  actor: { type: 'policy' as const },
+  rationale: {
+    ...toolExcerpt('Command is outside the workspace'),
+    offset_bytes: '512',
+    total_bytes: '544',
+  },
+  request_id: '00000000-0000-7000-8000-000000000001',
+  turn_id: '00000000-0000-7000-8000-000000000002',
+  approval_judge_escalated: false,
+}

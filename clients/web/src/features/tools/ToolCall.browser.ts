@@ -1,5 +1,11 @@
 import { expect, test } from '@playwright/test'
-import { fileEvidence, jsonExamples, longEvidence, rawFileEvidence } from './toolScenario'
+import {
+  argumentExamples,
+  fileEvidence,
+  jsonExamples,
+  longEvidence,
+  rawFileEvidence,
+} from './toolScenario'
 
 test('tool summaries expose raw evidence by keyboard', async ({ page }, testInfo) => {
   const errors: string[] = []
@@ -85,3 +91,24 @@ for (const example of jsonExamples) {
     }
   })
 }
+
+for (const example of argumentExamples) {
+  test(`labels only a completely empty object as empty for ${example.name}`, async ({ page }) => {
+    await page.goto('/src/features/tools/scenario.html')
+    const tool = page.getByRole('article', { name: `Tool ${example.name}`, exact: true })
+    await expect(tool.getByText('No fields', { exact: true })).toHaveCount(example.empty ? 1 : 0)
+    if (example.name === 'absent_arguments')
+      await expect(tool).toContainText('Arguments are on another detail page')
+    if (example.name === 'partial_arguments')
+      await expect(tool).toContainText('Arguments excerpt available in Raw')
+  })
+}
+
+test('keeps a fetched approval rationale visible without a Raw toggle', async ({ page }) => {
+  await page.goto('/src/features/tools/scenario.html')
+  const approval = page.getByRole('article', { name: 'Tool approval', exact: true })
+  await expect(approval).toContainText('Command is outside the workspace')
+  await expect(approval).toContainText('Showing part of reason')
+  await expect(approval).not.toContainText('available in Raw')
+  await expect(approval.getByRole('button', { name: 'Raw', exact: true })).toHaveCount(0)
+})

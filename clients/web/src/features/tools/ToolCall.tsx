@@ -141,9 +141,7 @@ function FieldList({ value }: { value: Fields }) {
   }
   return (
     <>
-      {entries.length === 0 ? (
-        <p>No fields</p>
-      ) : (
+      {entries.length > 0 && (
         <dl className="tool-fields">
           {rows.map(({ key, label, text }) => (
             <div key={key}>
@@ -170,6 +168,17 @@ function PresentedExcerpt({ excerpt, label }: { excerpt: WebTimelineTextExcerpt;
     return <p>{label} excerpt available in Raw</p>
   try {
     const parsed: unknown = JSON.parse(excerpt.text)
+    if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      Object.keys(parsed).length === 0
+    )
+      return (
+        <section aria-label={label}>
+          <p>No fields</p>
+        </section>
+      )
     return (
       <section aria-label={label}>
         <p>
@@ -493,7 +502,7 @@ export function ToolApproval({
         </strong>
         <span>{actors[approval.actor.type]}</span>
       </header>
-      <Excerpt excerpt={approval.rationale} label="Reason" />
+      <Excerpt excerpt={approval.rationale} label="Reason" expandable />
     </article>
   )
 }
