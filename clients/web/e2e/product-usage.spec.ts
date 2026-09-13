@@ -67,6 +67,28 @@ for (const available of [true, false]) {
     await page.setViewportSize({ width: 390, height: 844 })
     await expect(page.getByRole('columnheader', { name: 'Cost' })).toBeVisible()
     await page.screenshot({ path: testInfo.outputPath('product-usage-phone.png'), fullPage: true })
+    for (const width of [390, 1280]) {
+      await page.setViewportSize({ width, height: 600 })
+      const disclosure = page.getByText('Session and turn costs in loaded calls', { exact: true })
+      await disclosure.click()
+      const subtotals = page.getByRole('region', { name: 'Loaded cost subtotals' })
+      const lastTurn = subtotals.getByRole('button', { name: /^Turn / }).last()
+      await lastTurn.focus()
+      await expect(lastTurn).toBeInViewport()
+      const usage = page.getByRole('region', { name: 'Usage', exact: true })
+      expect(
+        await usage.evaluate((element) => {
+          const scroller = element.parentElement
+          return (
+            scroller !== null &&
+            getComputedStyle(scroller).overflowY === 'auto' &&
+            scroller.scrollHeight > scroller.clientHeight &&
+            scroller.scrollTop > 0
+          )
+        }),
+      ).toBe(true)
+      await disclosure.click()
+    }
   })
 }
 

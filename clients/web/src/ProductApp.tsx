@@ -1062,7 +1062,9 @@ export function ProductApp({
         </section>
       </div>
     ) : surface === 'usage' && bootstrap.isSuccess ? (
-      <UsageSurface bootstrap={bootstrap.data} />
+      <div className="surface-body">
+        <UsageSurface bootstrap={bootstrap.data} />
+      </div>
     ) : surface === 'usage' ? (
       <p role={bootstrap.isError ? 'alert' : 'status'}>
         {bootstrap.isError ? 'Usage could not load.' : 'Loading usage…'}
