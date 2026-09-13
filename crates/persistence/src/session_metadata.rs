@@ -93,8 +93,10 @@ pub enum SessionMetadataRepositoryError {
     #[error("session metadata commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL did not reveal whether the final commit took effect.
     CommitAmbiguous(#[source] sqlx::Error),
-    #[error("durable command {command_id:?} does not name ReplaceSessionMetadata")]
-    /// A purpose-specific load named a valid command of another admitted kind.
+    #[error(
+        "durable command {command_id:?} does not name the requested metadata replacement shape"
+    )]
+    /// A purpose-specific load named a different command kind or metadata request shape.
     DifferentCommandKind {
         /// The user-global identifier that names another kind.
         command_id: DurableCommandId,
@@ -116,16 +118,35 @@ impl From<SessionMetadataCorruption> for SessionMetadataRepositoryError {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MetadataRequestShape {
+    FullReplacement,
+    TitleOnly,
+}
+
 /// PostgreSQL implementation of metadata replacement, reads, and list pages.
 #[derive(Clone, Debug)]
 pub struct SessionMetadataRepository {
     pool: PgPool,
+    request_shape: MetadataRequestShape,
 }
 
 impl SessionMetadataRepository {
     /// Uses the supplied pool for independent commands and snapshots.
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            request_shape: MetadataRequestShape::FullReplacement,
+        }
+    }
+
+    /// Retains title-only request intent atomically with the replacement receipt.
+    /// Replay compares session, actor, and title, independently of preserved fields.
+    pub const fn for_title_update(pool: PgPool) -> Self {
+        Self {
+            pool,
+            request_shape: MetadataRequestShape::TitleOnly,
+        }
     }
 
     /// Claims and handles an unseen command, or resolves its recorded meaning.
@@ -142,7 +163,9 @@ impl SessionMetadataRepository {
         let mut transaction = self.pool.begin().await?;
 
         if let Some(kind) = inspect_registry(&mut transaction, command_id).await? {
-            let outcome = existing_or_conflicting(&mut transaction, &command, kind).await?;
+            let outcome =
+                existing_or_conflicting(&mut transaction, &command, kind, self.request_shape)
+                    .await?;
             transaction.rollback().await?;
             return Ok(outcome);
         }
@@ -175,7 +198,9 @@ impl SessionMetadataRepository {
                 .ok_or(SessionMetadataCorruption::Inconsistent(
                     "winner command claim disappeared",
                 ))?;
-            let outcome = existing_or_conflicting(&mut transaction, &command, kind).await?;
+            let outcome =
+                existing_or_conflicting(&mut transaction, &command, kind, self.request_shape)
+                    .await?;
             transaction.rollback().await?;
             return Ok(outcome);
         }
@@ -201,7 +226,7 @@ impl SessionMetadataRepository {
         if let Some(updated_at) = updated_at {
             replace_current_snapshot(&mut transaction, prepared.command(), updated_at).await?;
         }
-        insert_typed_record(&mut transaction, &prepared, updated_at).await?;
+        insert_typed_record(&mut transaction, &prepared, updated_at, self.request_shape).await?;
         let result = prepared.result().clone();
 
         match transaction.commit().await {
@@ -222,6 +247,11 @@ impl SessionMetadataRepository {
         match inspect_registry(&mut connection, command_id).await? {
             None => Ok(None),
             Some(CommandKind::ReplaceSessionMetadata) => {
+                if load_request_shape(&mut connection, command_id).await? != self.request_shape {
+                    return Err(SessionMetadataRepositoryError::DifferentCommandKind {
+                        command_id,
+                    });
+                }
                 load_command_from_connection(&mut connection, command_id).await
             }
             Some(
@@ -586,6 +616,7 @@ async fn existing_or_conflicting(
     connection: &mut PgConnection,
     command: &ReplaceSessionMetadata,
     kind: CommandKind,
+    request_shape: MetadataRequestShape,
 ) -> Result<ReplaceSessionMetadataHandlingOutcome, SessionMetadataRepositoryError> {
     match kind {
         CommandKind::ReplaceSessionMetadata => {}
@@ -623,12 +654,38 @@ async fn existing_or_conflicting(
         .ok_or(SessionMetadataCorruption::Inconsistent(
             "registry entry disappeared",
         ))?;
-    Ok(if command == recorded.command() {
+    let same_shape = load_request_shape(connection, command.command_id()).await? == request_shape;
+    let same_request = match request_shape {
+        MetadataRequestShape::FullReplacement => command == recorded.command(),
+        MetadataRequestShape::TitleOnly => {
+            command.session() == recorded.command().session()
+                && command.actor() == recorded.command().actor()
+                && command.replacement().title() == recorded.command().replacement().title()
+        }
+    };
+    Ok(if same_shape && same_request {
         ReplaceSessionMetadataHandlingOutcome::Recorded(recorded.result().clone())
     } else {
         ReplaceSessionMetadataHandlingOutcome::ConflictingReuse {
             command_id: command.command_id(),
         }
+    })
+}
+
+async fn load_request_shape(
+    connection: &mut PgConnection,
+    command_id: DurableCommandId,
+) -> Result<MetadataRequestShape, SessionMetadataRepositoryError> {
+    let title_only: bool = sqlx::query_scalar(
+        "SELECT title_only FROM replace_session_metadata_command WHERE command_id = $1",
+    )
+    .bind(durable_command_id_to_uuid(command_id))
+    .fetch_one(connection)
+    .await?;
+    Ok(if title_only {
+        MetadataRequestShape::TitleOnly
+    } else {
+        MetadataRequestShape::FullReplacement
     })
 }
 
@@ -720,6 +777,7 @@ async fn insert_typed_record(
     connection: &mut PgConnection,
     prepared: &signalbox_domain::PreparedReplaceSessionMetadata,
     updated_at: Option<SessionMetadataUpdatedAt>,
+    request_shape: MetadataRequestShape,
 ) -> Result<(), SessionMetadataRepositoryError> {
     let command = prepared.command();
     let actor = encode_actor(command.actor())?;
@@ -767,7 +825,7 @@ async fn insert_typed_record(
              result_kind, rejection_kind, result_session_id,
              result_applied_session_id, result_updated_at, result_actor_kind,
              result_actor_turn_id, result_actor_tool_request_id,
-             issuer_kind, issuer_tool_request_id)
+             issuer_kind, issuer_tool_request_id, title_only)
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
              CASE WHEN $13::numeric IS NOT NULL THEN $4 ELSE NULL END,
@@ -778,7 +836,7 @@ async fn insert_typed_record(
              END,
              CASE WHEN $13::numeric IS NOT NULL THEN $5 ELSE NULL END,
              CASE WHEN $13::numeric IS NOT NULL THEN $6 ELSE NULL END,
-             CASE WHEN $13::numeric IS NOT NULL THEN $7 ELSE NULL END, $14, $15)",
+             CASE WHEN $13::numeric IS NOT NULL THEN $7 ELSE NULL END, $14, $15, $16)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(REPLACE_SESSION_METADATA_KIND)
@@ -795,6 +853,7 @@ async fn insert_typed_record(
     .bind(updated_at.map(|value| Decimal::from(value.as_unix_micros())))
     .bind(actor.kind)
     .bind(actor.tool_request)
+    .bind(request_shape == MetadataRequestShape::TitleOnly)
     .execute(&mut *connection)
     .await?;
 

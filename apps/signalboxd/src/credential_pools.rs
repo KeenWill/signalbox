@@ -43,9 +43,10 @@ pub(crate) const MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS: u32 = 1_024;
 
 /// Every delivery spelling the grammar recognizes, whether or not this build
 /// supplies a surface for it.
-const DELIVERY_KEYS: [&str; 6] = [
+const DELIVERY_KEYS: [&str; 7] = [
     "ambient",
     "file",
+    "onepassword",
     "environment",
     "kubernetes_secret",
     "codex_home",
@@ -64,6 +65,8 @@ pub enum CredentialDelivery {
     /// The adapter's own client resolves its login and the daemon supplies no
     /// credential material. The Codex CLI owns its external login this way.
     Ambient,
+    /// Ambient authority exposed to one judged sandboxed task.
+    AmbientTask(AmbientCredentialSource),
     /// Daemon-owned device authorization; configuration admission requires dispatch support.
     Oauth(Box<OauthDelivery>),
     /// An absolute deployment-owned file read per preparation and never cached.
@@ -71,6 +74,15 @@ pub enum CredentialDelivery {
         /// Absolute path the deployment writes the credential value to.
         path: PathBuf,
         /// Process environment key a spawned adapter supplies the value under.
+        env_key: Option<Arc<str>>,
+    },
+    /// A field resolved live by the configured 1Password CLI.
+    Onepassword {
+        /// Non-secret `op://` field reference.
+        item: Arc<str>,
+        /// Absolute path to the deployment's 1Password CLI.
+        executable: PathBuf,
+        /// Optional environment key used by a CLI adapter.
         env_key: Option<Arc<str>>,
     },
     /// A named variable in the daemon's process environment.
@@ -96,6 +108,59 @@ pub enum CredentialDelivery {
         /// Optional per-home process concurrency declaration.
         max_concurrent_invocations: Option<NonZeroU32>,
     },
+}
+
+/// One ambient credential source selected by a sandboxed task's purpose.
+#[derive(Clone, Eq, PartialEq)]
+pub enum AmbientCredentialSource {
+    /// One regular credential file mounted read-only at its configured path.
+    File(PathBuf),
+    /// One process variable supplied under the same name inside bubblewrap.
+    Environment(Arc<str>),
+}
+
+impl fmt::Debug for AmbientCredentialSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AmbientCredentialSource([REDACTED])")
+    }
+}
+
+pub(crate) fn parse_ambient_task_profiles(
+    item: Option<&Item>,
+) -> Result<HashMap<Arc<str>, CredentialDelivery>, HubModelConfigurationError> {
+    let mut profiles = HashMap::new();
+    for profile in item
+        .and_then(Item::as_array_of_tables)
+        .into_iter()
+        .flatten()
+    {
+        if profile.get("adapter").and_then(Item::as_str) != Some("sandboxed_exec") {
+            continue;
+        }
+        reject_unknown_fields(
+            profile,
+            &["name", "adapter", "delivery", "file", "variable"],
+        )?;
+        if required_string(profile, "delivery")? != "ambient" {
+            return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+        }
+        let name = validated_credential_catalog_name(required_string(profile, "name")?)?;
+        let source = match (profile.get("file"), profile.get("variable")) {
+            (Some(_), None) => AmbientCredentialSource::File(normalize_absolute_path(
+                required_string(profile, "file")?,
+            )?),
+            (None, Some(_)) => {
+                let variable = required_string(profile, "variable")?;
+                if variable.is_empty() || variable.contains(['=', '\0']) {
+                    return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+                }
+                AmbientCredentialSource::Environment(Arc::from(variable))
+            }
+            _ => return Err(HubModelConfigurationError::InvalidCredentialDelivery),
+        };
+        profiles.insert(name, CredentialDelivery::AmbientTask(source));
+    }
+    Ok(profiles)
 }
 
 /// Validated OAuth configuration, separate from its durable registration record.
@@ -155,7 +220,9 @@ impl fmt::Debug for CredentialDelivery {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ambient => formatter.write_str("Ambient"),
+            Self::AmbientTask(_) => formatter.write_str("AmbientTask([REDACTED])"),
             Self::Oauth(_) => formatter.write_str("Oauth"),
+            Self::Onepassword { .. } => formatter.write_str("Onepassword([REDACTED])"),
             Self::Environment { .. } => formatter.write_str("Environment([REDACTED])"),
             Self::KubernetesSecret { .. } => formatter.write_str("KubernetesSecret([REDACTED])"),
             Self::File { env_key, .. } => formatter
@@ -180,8 +247,10 @@ impl CredentialDelivery {
     pub const fn key(&self) -> &'static str {
         match self {
             Self::Ambient => "ambient",
+            Self::AmbientTask(_) => "ambient",
             Self::Oauth(_) => "oauth",
             Self::File { .. } => "file",
+            Self::Onepassword { .. } => "onepassword",
             Self::Environment { .. } => "environment",
             Self::KubernetesSecret { .. } => "kubernetes_secret",
             Self::CodexHome { .. } => "codex_home",
@@ -191,7 +260,11 @@ impl CredentialDelivery {
     /// Absolute deployment path this delivery references, where it has one.
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Ambient | Self::Oauth(_) | Self::Environment { .. } => None,
+            Self::Ambient
+            | Self::Oauth(_)
+            | Self::AmbientTask(_)
+            | Self::Onepassword { .. }
+            | Self::Environment { .. } => None,
             Self::File { path, .. } | Self::KubernetesSecret { path, .. } => Some(path),
             Self::CodexHome { path, .. } => Some(path),
         }
@@ -200,8 +273,9 @@ impl CredentialDelivery {
     /// Process environment key a spawned adapter supplies the value under.
     pub fn env_key(&self) -> Option<&str> {
         match self {
-            Self::Ambient | Self::Oauth(_) => None,
+            Self::Ambient | Self::Oauth(_) | Self::AmbientTask(_) => None,
             Self::File { env_key, .. }
+            | Self::Onepassword { env_key, .. }
             | Self::Environment { env_key, .. }
             | Self::KubernetesSecret { env_key, .. } => env_key.as_deref(),
             Self::CodexHome { .. } => None,
@@ -240,6 +314,19 @@ impl CredentialDelivery {
                 let env_key = parse_file_env_key(profile, adapter)?;
                 reject_undelivered(adapter, key)?;
                 Ok(Self::File { path, env_key })
+            }
+            "onepassword" => {
+                let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
+                allowed.extend_from_slice(&["item", "executable", "env_key"]);
+                reject_unknown_fields(profile, &allowed)?;
+                let (item, executable) = parse_onepassword_source(profile)?;
+                let env_key = parse_file_env_key(profile, adapter)?;
+                reject_undelivered(adapter, key)?;
+                Ok(Self::Onepassword {
+                    item,
+                    executable,
+                    env_key,
+                })
             }
             "environment" => {
                 let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
@@ -299,6 +386,29 @@ impl CredentialDelivery {
     }
 }
 
+fn parse_onepassword_source(
+    profile: &Table,
+) -> Result<(Arc<str>, PathBuf), HubModelConfigurationError> {
+    let item = required_string(profile, "item")?;
+    let Some(reference) = item.strip_prefix("op://") else {
+        return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+    };
+    let mut segments = reference.split('/');
+    // https://developer.1password.com/docs/cli/secret-references/
+    if item.contains('\0')
+        || !matches!(segments.clone().count(), 3 | 4)
+        || segments.any(str::is_empty)
+    {
+        return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+    }
+    let executable = normalize_absolute_path(required_string(profile, "executable")?)?;
+    Ok((Arc::from(item), executable))
+}
+
+/// Identity of an admitted reference, excluding its section and field.
+pub(crate) fn onepassword_item_identity(reference: &str) -> String {
+    reference.split('/').take(4).collect::<Vec<_>>().join("/")
+}
 fn parse_environment_variable(profile: &Table) -> Result<Arc<str>, HubModelConfigurationError> {
     let variable = required_string(profile, "variable")?;
     if variable.is_empty() || variable.contains(['=', '\0']) {
@@ -354,7 +464,9 @@ fn reject_disagreeing_billing_kind(
     billing_kind: BillingKind,
 ) -> Result<(), HubModelConfigurationError> {
     let admitted = match delivery {
-        "file" | "environment" | "kubernetes_secret" => billing_kind == BillingKind::ApiMetered,
+        "file" | "onepassword" | "environment" | "kubernetes_secret" => {
+            billing_kind == BillingKind::ApiMetered
+        }
         "oauth" => billing_kind == BillingKind::Subscription,
         // `ambient` and `codex_home` admit either, so nothing is checked.
         _ => true,
@@ -822,9 +934,13 @@ fn parse_credential_profiles_with_home_admission(
     let mut profiles: HashMap<Arc<str>, CredentialProfile> = HashMap::with_capacity(tables.len());
     let mut ambient_adapters = HashSet::new();
     let mut file_paths = HashSet::new();
+    let mut onepassword_sources = HashSet::new();
     let mut environment_variables = HashSet::new();
     for profile in tables {
-        if profile.get("adapter").and_then(Item::as_str) == Some("github") {
+        if matches!(
+            profile.get("adapter").and_then(Item::as_str),
+            Some("github" | "sandboxed_exec")
+        ) {
             continue;
         }
         let name = validated_credential_catalog_name(required_string(profile, "name")?)?;
@@ -871,12 +987,19 @@ fn parse_credential_profiles_with_home_admission(
             | CredentialDelivery::KubernetesSecret { path, .. } => Some(path),
             CredentialDelivery::CodexHome { path, .. } if admit_credential_homes => Some(path),
             CredentialDelivery::Ambient
+            | CredentialDelivery::AmbientTask(_)
+            | CredentialDelivery::Onepassword { .. }
             | CredentialDelivery::Environment { .. }
             | CredentialDelivery::Oauth(_)
             | CredentialDelivery::CodexHome { .. } => None,
         };
         if let Some(path) = path
             && !file_paths.insert((adapter, path.clone()))
+        {
+            return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+        }
+        if let CredentialDelivery::Onepassword { item, .. } = &delivery
+            && !onepassword_sources.insert((adapter, onepassword_item_identity(item)))
         {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
@@ -1131,6 +1254,13 @@ fn reject_unobserved_capacity_policy(
 pub enum GithubCredentialDelivery {
     /// Token file resolved at each use.
     File(PathBuf),
+    /// Token field resolved live with 1Password CLI.
+    Onepassword {
+        /// Non-secret field reference.
+        item: Arc<str>,
+        /// Absolute CLI path.
+        executable: PathBuf,
+    },
     /// Token supplied by a named process environment variable.
     Environment(Arc<str>),
     /// Token supplied by a mounted Kubernetes Secret.
@@ -1203,6 +1333,17 @@ pub(crate) fn parse_github_credential_profiles(
         }
         validated_credential_catalog_name(name)?;
         let profile = match required_string(table, "delivery")? {
+            "onepassword" => {
+                reject_unknown_fields(
+                    table,
+                    &["name", "adapter", "delivery", "item", "executable"],
+                )?;
+                let (item, executable) = parse_onepassword_source(table)?;
+                GithubCredentialProfile {
+                    delivery: GithubCredentialDelivery::Onepassword { item, executable },
+                    authentication: None,
+                }
+            }
             "environment" => {
                 reject_unknown_fields(table, &["name", "adapter", "delivery", "variable"])?;
                 GithubCredentialProfile {

@@ -26,6 +26,22 @@ pub struct ExecArguments {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
 ```
 
+## SandboxedExecArguments
+
+```rust
+pub struct SandboxedExecArguments {
+    pub command: ExecArguments,
+    pub credential_purpose: option::Option<string::String>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
+impl SandboxedExecArguments {
+    pub fn decode(
+        arguments: &signalbox_domain::NormalizedToolArguments,
+        timeout_bound: option::Option<time::Duration>,
+    ) -> result::Result<Self, InvalidExecArguments>;
+}
+```
+
 ## ExecToolConstructionError
 
 ```rust
@@ -133,6 +149,13 @@ impl error::Error for InvalidExecArguments {
 ```rust
 pub struct ExecExecutor<CommandRunner> {/* private */}
 // derives: clone::Clone, fmt::Debug
+impl<Runner: ProcessRunner> ExecExecutor<SandboxedCommandRunner<Runner>> {
+    pub async fn run_with_configuration(
+        &mut self,
+        arguments: ExecArguments,
+        configuration: SandboxConfiguration,
+    ) -> result::Result<ExecResult, ExecExecutorError>;
+}
 impl<CommandRunner: CommandExecution> signalbox_application::ToolExecutor
     for ExecExecutor<CommandRunner>
 {
@@ -179,7 +202,10 @@ pub struct ProcessRequest {
     pub environment_inheritance: ProcessEnvironment,
     pub status_protocol: ProcessStatusProtocol,
 }
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, cmp::Eq, cmp::PartialEq
+impl fmt::Debug for ProcessRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
 ```
 
 ## ProcessEnvironment
@@ -279,8 +305,12 @@ pub struct SandboxConfiguration {
     pub path_prepend: vec::Vec<path::PathBuf>,
     pub rustup_home: option::Option<path::PathBuf>,
     pub rustup_toolchain: option::Option<string::String>,
+    pub environment: map::BTreeMap<os_str::OsString, os_str::OsString>,
 }
-// derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, default::Default, cmp::Eq, cmp::PartialEq
+impl fmt::Debug for SandboxConfiguration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
 ```
 
 ## SandboxReadOnlyMount

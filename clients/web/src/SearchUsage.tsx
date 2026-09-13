@@ -51,10 +51,10 @@ const tokenText = (value: string | null): string =>
 export const tokenSummary = (tokens: UsageCall['tokens']): string =>
   `in ${tokenText(tokens.input)} · out ${tokenText(tokens.output)} · cache write ${tokenText(tokens.cache_creation_input)} · cache read ${tokenText(tokens.cache_read_input)}`
 
-const costText = (cost: UsageCall['cost']): string =>
+export const costText = (cost: UsageCall['cost']): string =>
   cost.status === 'derived'
     ? `$${cost.amount_usd} · ${enumLabel(cost.label)} · ${cost.rate_version}`
-    : `Unavailable · ${enumLabel(cost.reason)}`
+    : `unpriced · ${enumLabel(cost.reason)}`
 
 export const searchResultIdentity = (result: SearchResult): string =>
   `${result.session_id}:${result.address.event_sequence}:${result.projection_id}`
@@ -221,7 +221,7 @@ function SearchResults({
   )
 }
 
-function UsageTable({
+export function UsageTable({
   calls,
   hasNextPage,
   loadNextPage,
@@ -236,7 +236,14 @@ function UsageTable({
       {
         accessorKey: 'recorded_at_micros',
         header: 'Recorded',
-        cell: ({ getValue }) => String(getValue()),
+        cell: ({ row }) => (
+          <a
+            href={`/sessions?session=${encodeURIComponent(row.original.session_id)}&workspace=true`}
+            title="Open session"
+          >
+            {new Date(Number(row.original.recorded_at_micros) / 1000).toLocaleString()}
+          </a>
+        ),
       },
       {
         accessorKey: 'model_id',
@@ -250,7 +257,14 @@ function UsageTable({
           `${enumLabel(row.original.provenance)} · ${enumLabel(row.original.call_kind)}`,
       },
       { id: 'tokens', header: 'Tokens', cell: ({ row }) => tokenSummary(row.original.tokens) },
-      { id: 'cost', header: 'Cost', cell: ({ row }) => costText(row.original.cost) },
+      {
+        id: 'cost',
+        header: 'Cost',
+        cell: ({ row }) =>
+          row.original.cost.status === 'unavailable'
+            ? `unpriced · ${row.original.model_id}`
+            : costText(row.original.cost),
+      },
     ],
     [],
   )
@@ -308,7 +322,15 @@ function UsageTable({
                 >
                   {row.getVisibleCells().map((cell) => (
                     // biome-ignore lint/a11y/useSemanticElements: Virtualized ARIA cells cannot be native table cells here.
-                    <div role="cell" key={cell.id}>
+                    <div
+                      role="cell"
+                      key={cell.id}
+                      title={
+                        cell.column.id === 'cost'
+                          ? `${row.original.model_id} · ${costText(row.original.cost)}`
+                          : undefined
+                      }
+                    >
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </div>
                   ))}

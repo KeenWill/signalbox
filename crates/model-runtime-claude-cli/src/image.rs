@@ -4,13 +4,16 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 use base64::Engine as _;
 use serde::Serialize;
-use signalbox_model_runtime::{ImageInput, ImagePresentationCapability};
+use signalbox_model_runtime::{
+    DocumentInput, DocumentPresentationCapability, ImageInput, ImagePresentationCapability,
+};
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum InputPart {
     Text { text: String },
     Image { source: ImageSource },
+    Document { source: ImageSource },
 }
 
 #[derive(Serialize)]
@@ -57,6 +60,35 @@ pub(crate) fn image_content(image: &ImageInput) -> InputPart {
             r#type: "base64",
             media_type: image.media_type.clone(),
             data: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+        },
+    }
+}
+
+/// Claude Code PDF support under the complete native request bound.
+pub fn document_presentation_capability() -> DocumentPresentationCapability {
+    // Same complete request ceiling as image presentation, including base64 framing.
+    const REQUEST_BYTES: NonZeroUsize = NonZeroUsize::new(10_000_000).unwrap();
+    const DOCUMENT_BYTES: NonZeroU64 = NonZeroU64::new(7_500_000).unwrap();
+    let empty = document_content(&DocumentInput {
+        media_type: String::from("application/pdf"),
+        bytes: std::sync::Arc::from([]),
+    });
+    DocumentPresentationCapability::new(
+        [String::from("application/pdf")].into(),
+        DOCUMENT_BYTES,
+        REQUEST_BYTES,
+        serde_json::to_vec(&empty)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX),
+    )
+}
+
+pub(crate) fn document_content(document: &DocumentInput) -> InputPart {
+    InputPart::Document {
+        source: ImageSource {
+            r#type: "base64",
+            media_type: document.media_type.clone(),
+            data: base64::engine::general_purpose::STANDARD.encode(&document.bytes),
         },
     }
 }
