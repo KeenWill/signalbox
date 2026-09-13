@@ -28,15 +28,19 @@ CREATE TABLE session_title_model_call (
     in_flight_at timestamptz,
     terminal_at timestamptz,
     title text,
+    abandoned boolean NOT NULL DEFAULT false,
     input_tokens numeric,
     output_tokens numeric,
     cache_creation_input_tokens numeric,
     cache_read_input_tokens numeric,
     CHECK ((state_kind = 'terminal') = (terminal_at IS NOT NULL)),
-    CHECK (title IS NULL OR (state_kind = 'terminal' AND length(title) > 0))
+    CHECK (title IS NULL OR (state_kind = 'terminal' AND length(title) > 0)),
+    CONSTRAINT session_title_abandoned_terminal CHECK (
+        NOT abandoned OR (state_kind = 'terminal' AND title IS NULL)
+    )
 );
 CREATE UNIQUE INDEX session_title_initial_call ON session_title_model_call(session_id)
-    WHERE initial_for_turn IS NOT NULL;
+    WHERE initial_for_turn IS NOT NULL AND NOT abandoned;
 CREATE FUNCTION guard_session_title_call() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF OLD.state_kind = 'terminal'
