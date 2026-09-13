@@ -6,6 +6,7 @@ import {
   toolResultItem,
 } from '../../e2e/session-detail-fixture'
 import { groupTranscriptTurns, toolContinuations, turnSummaryParts } from './turns'
+import { retriedToolItems } from './turns.fixture'
 
 it('groups final text, user messages, and repeated tool evidence under the durable turn identity', () => {
   const turns = groupTranscriptTurns([
@@ -250,4 +251,30 @@ it('merges repeated tool evidence into the first interleaved turn segment', () =
   expect(turns[0]?.tools[0]?.evidence).toMatchObject({
     result: { text: '{"release":"ready","checks":"passed"}' },
   })
+})
+
+it('retains distinct physical attempts of one request across interleaved segments', () => {
+  const turns = groupTranscriptTurns(retriedToolItems())
+  expect(turns.map((turn) => turn.tools.length)).toEqual([1, 0, 1])
+  const failed = turns[0]?.tools[0]
+  const succeeded = turns[2]?.tools[0]
+  expect(failed?.request_id).toBe(succeeded?.request_id)
+  expect(failed?.evidence).toMatchObject({
+    attempt_id: '00000000-0000-0000-0000-000000000120',
+    cause: 'crash_lost',
+    failure: { text: 'Runner disconnected during the release check.' },
+  })
+  expect(succeeded?.evidence).toMatchObject({
+    attempt_id: '00000000-0000-0000-0000-000000000127',
+    result: { text: '{"release":"ready","checks":"passed"}' },
+  })
+  expect(failed?.arguments?.text).toContain('release status')
+  expect(succeeded?.arguments).toEqual(failed?.arguments)
+  expect(turns.flatMap(turnSummaryParts).map((part) => part.kind)).toEqual([
+    'message',
+    'tools',
+    'message',
+    'tools',
+    'message',
+  ])
 })

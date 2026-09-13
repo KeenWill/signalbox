@@ -22,6 +22,7 @@ import {
   groupTranscriptTurns,
   type TranscriptTurn,
   toolContinuations,
+  toolEvidenceKey,
   turnSummaryParts,
 } from './session-timeline/turns'
 
@@ -414,7 +415,7 @@ function TurnSummary({
   limits: SessionTranscriptLimits
 }) {
   const [openTool, setOpenTool] = useState<string | null>(null)
-  const tool = turn.tools.find((entry) => entry.request_id === openTool)
+  const tool = turn.tools.find((entry) => toolEvidenceKey(entry) === openTool)
   const more = (sequence: string) => {
     const page = detailPages.find((page) => page.items.at(-1)?.address.event_sequence === sequence)
     return page?.continuation ? (
@@ -436,49 +437,54 @@ function TurnSummary({
           <section
             className="session-tool-chips"
             aria-label="Tools used"
-            key={part.tools[0]?.request_id}
+            key={part.tools[0] ? toolEvidenceKey(part.tools[0]) : undefined}
           >
             {part.tools.map((entry) => (
               <button
                 type="button"
-                key={entry.request_id}
-                aria-expanded={openTool === entry.request_id}
-                onClick={() => setOpenTool(openTool === entry.request_id ? null : entry.request_id)}
+                key={toolEvidenceKey(entry)}
+                aria-expanded={openTool === toolEvidenceKey(entry)}
+                onClick={() =>
+                  setOpenTool(openTool === toolEvidenceKey(entry) ? null : toolEvidenceKey(entry))
+                }
               >
                 {entry.tool_name}
               </button>
             ))}
-            {tool && part.tools.some((entry) => entry.request_id === tool.request_id) && (
-              <div className="session-tool-slot">
-                {renderTool ? renderTool(tool, 'condensed') : <ToolSummary tool={tool} />}
-                {detailPages
-                  .filter((candidate) => {
-                    const cursor = candidate.continuation
-                    const item = candidate.items.at(-1)
-                    return (
-                      cursor?.type === 'more_body' &&
-                      ((item?.body.type === 'tool_batch' &&
-                        item.body.tools.at(-1)?.request_id === tool.request_id) ||
-                        toolContinuations(tool).some(
-                          ({ continuation }) =>
-                            cursor.body.address.event_sequence ===
-                              continuation.address.event_sequence &&
-                            cursor.body.field === continuation.field &&
-                            cursor.body.member_index === continuation.member_index &&
-                            cursor.body.offset_bytes === continuation.offset_bytes,
-                        ))
-                    )
-                  })
-                  .map((page) => (
-                    <ContinuedEvent
-                      key={JSON.stringify(page.continuation)}
-                      sessionId={sessionId}
-                      page={page}
-                      limits={limits}
-                    />
-                  ))}
-              </div>
-            )}
+            {tool &&
+              part.tools.some((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool)) && (
+                <div className="session-tool-slot">
+                  {renderTool ? renderTool(tool, 'condensed') : <ToolSummary tool={tool} />}
+                  {detailPages
+                    .filter((candidate) => {
+                      const cursor = candidate.continuation
+                      const item = candidate.items.at(-1)
+                      return (
+                        cursor?.type === 'more_body' &&
+                        ((item?.body.type === 'tool_batch' &&
+                          item.body.tools.some(
+                            (entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool),
+                          )) ||
+                          toolContinuations(tool).some(
+                            ({ continuation }) =>
+                              cursor.body.address.event_sequence ===
+                                continuation.address.event_sequence &&
+                              cursor.body.field === continuation.field &&
+                              cursor.body.member_index === continuation.member_index &&
+                              cursor.body.offset_bytes === continuation.offset_bytes,
+                          ))
+                      )
+                    })
+                    .map((page) => (
+                      <ContinuedEvent
+                        key={JSON.stringify(page.continuation)}
+                        sessionId={sessionId}
+                        page={page}
+                        limits={limits}
+                      />
+                    ))}
+                </div>
+              )}
           </section>
         ),
       )}

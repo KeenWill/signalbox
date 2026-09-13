@@ -567,9 +567,11 @@ unreturned-item continuation. Scrolling again starts a fresh bounded scan using
 the timeline continuation. The conversation shows user and assistant text and
 attachment references, tool arguments and output, and unsuccessful turn outcomes
 in event order. A completed response remains visible as a non-final message when
-its completed-turn closure is not loaded. Repeated terminal outcomes for the
-same turn and cause appear once. Bookkeeping is hidden until Events is selected.
-Raw detail pages remain available to validate body continuations.
+its completed-turn closure is not loaded. Distinct physical tool attempts remain
+independently inspectable in event order even when they share one request.
+Repeated terminal outcomes for the same turn and cause appear once. Bookkeeping
+is hidden until Events is selected. Raw detail pages remain available to
+validate body continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
