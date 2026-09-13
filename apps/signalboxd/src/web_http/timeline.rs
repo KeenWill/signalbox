@@ -1794,7 +1794,7 @@ fn ownership_detail_dto(value: TimelineOwnershipTransition) -> WebTimelineOwners
     clippy::expect_used,
     reason = "checked domain revisions and pull request numbers are positive"
 )]
-fn repository_watch_origin_dto(
+pub(super) fn repository_watch_origin_dto(
     origin: signalbox_module_repo_watch_v2::RetainedDispatchAction,
 ) -> signalbox_web_contract::WebRepositoryWatchProvenance {
     use signalbox_domain::RepoWatchEventKindNameV1;
@@ -1803,6 +1803,12 @@ fn repository_watch_origin_dto(
         WebRepositoryWatchProvenance,
     };
     WebRepositoryWatchProvenance {
+        head_branch: origin
+            .head_branch()
+            .map(|branch| branch.as_str().to_owned()),
+        base_branch: origin
+            .base_branch()
+            .map(|branch| branch.as_str().to_owned()),
         dispatch_id: WebLiveResourceId::from_uuid_bytes(*origin.dispatch().into_uuid().as_bytes()),
         action_ordinal: WebPositiveU64::from_nonzero(origin.action_ordinal()),
         repository: origin.repository().as_str().to_owned(),
