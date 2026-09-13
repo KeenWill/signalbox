@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from '@tanstack/react-router'
 import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
@@ -12,7 +12,12 @@ import type {
   WebTimelineToolAttempt,
 } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
-import { readSessionTranscript, type SessionTranscriptLimits } from './product'
+import {
+  ProductRequestError,
+  readProductSessionState,
+  readSessionTranscript,
+  type SessionTranscriptLimits,
+} from './product'
 import { GoalEventDetail } from './SessionItemDetail'
 import { conversationEntryKey } from './session-timeline/conversation'
 import { initialDetailFacts, type SessionWindowAnchor } from './session-timeline/model'
@@ -24,6 +29,7 @@ import {
 } from './session-timeline/transcript'
 import { readTurnTranscript } from './session-timeline/turn-detail'
 import {
+  detailTurnId,
   groupTranscriptTurns,
   type TranscriptTurn,
   toolContinuations,
@@ -145,7 +151,7 @@ export function SessionTranscriptText(props: SessionTranscriptTextProps) {
   const search = useLocation({ select: (location) => location.searchStr })
   const params = new URLSearchParams(search)
   const address = props.eventSequence ?? params.get('around') ?? undefined
-  const eventSequence = address && /^[1-9]\d{0,19}$/.test(address) ? address : undefined
+  const eventSequence = readProductSessionState({ around: address }).around
   const requestedTurn = props.turnId ?? params.get('turn') ?? undefined
   const turnId =
     requestedTurn &&
@@ -283,20 +289,102 @@ function TranscriptWindow({
       ),
     [pages],
   )
+  const knownTurnIds = new Set(
+    entries.flatMap((event) => {
+      const turnId = detailTurnId(event)
+      return turnId ? [turnId] : []
+    }),
+  )
+  const expandedTurnIds =
+    detail === 'full'
+      ? []
+      : [
+          ...new Set([
+            ...Object.entries(turnModes).flatMap(([id, mode]) =>
+              mode === 'full' && knownTurnIds.has(id) ? [id] : [],
+            ),
+            ...(requestedTurn && (turnModes[requestedTurn] ?? 'full') === 'full'
+              ? [requestedTurn]
+              : []),
+            ...entries.flatMap((event) => {
+              const turnId = detailTurnId(event)
+              return event.address.event_sequence === eventSequence &&
+                turnId &&
+                (turnModes[turnId] ?? 'full') === 'full'
+                ? [turnId]
+                : []
+            }),
+          ]),
+        ]
+  const associations = useQueries({
+    queries: entries
+      .filter((event) => detailTurnId(event) === null)
+      .flatMap((event) =>
+        expandedTurnIds.map((turnId) => ({
+          queryKey: [
+            'production',
+            'retained-turn-membership',
+            sessionId,
+            turnId,
+            event.address,
+            limits,
+          ],
+          queryFn: async ({ signal }: { signal: AbortSignal }) => {
+            const page = await readTurnTranscript(
+              sessionId,
+              turnId,
+              { type: 'more_at', address: event.address },
+              limits,
+              signal,
+            ).catch((error: unknown) => {
+              // A retained address outside this turn is an invalid per-turn cursor.
+              if (
+                error instanceof ProductRequestError &&
+                error.status === 400 &&
+                error.response.error.code === 'invalid_timeline_detail_limits'
+              )
+                return null
+              throw error
+            })
+            const item = page?.items[0]
+            if (!item || item.address.event_sequence !== event.address.event_sequence) return null
+            if (initialDetailFacts(item) !== initialDetailFacts(event))
+              throw new TypeError('Turn membership read changed retained immutable facts')
+            return { sequence: item.address.event_sequence, turnId }
+          },
+          gcTime: 0,
+          staleTime: Number.POSITIVE_INFINITY,
+        })),
+      ),
+    combine: (results) => ({
+      members: results.flatMap((query) => (query.data ? [query.data] : [])),
+      retries: results.filter((query) => query.isError).map((query) => query.refetch),
+    }),
+  })
   const turns = useMemo(
     () =>
-      groupTranscriptTurns(entries, windowStarts).filter(
-        (turn) =>
-          detail === 'full' ||
-          turnModes[turn.turnId ?? turn.id] === 'full' ||
-          turn.events.some((event) => event.address.event_sequence === eventSequence) ||
-          turn.messages.length > 0 ||
-          turn.result ||
-          turn.tools.length > 0 ||
-          turn.warnings.length > 0 ||
-          turn.outcome,
-      ),
-    [entries, windowStarts, detail, turnModes, eventSequence],
+      groupTranscriptTurns(entries, windowStarts)
+        .map((turn) => {
+          const association = associations.members.find(
+            (member) => member.sequence === turn.events[0]?.address.event_sequence,
+          )
+          return turn.turnId === null && association
+            ? { ...turn, turnId: association.turnId }
+            : turn
+        })
+        .filter(
+          (turn) =>
+            detail === 'full' ||
+            turnModes[turn.turnId ?? turn.id] === 'full' ||
+            (requestedTurn === turn.turnId && !turnModes[turn.turnId ?? turn.id]) ||
+            turn.events.some((event) => event.address.event_sequence === eventSequence) ||
+            turn.messages.length > 0 ||
+            turn.result ||
+            turn.tools.length > 0 ||
+            turn.warnings.length > 0 ||
+            turn.outcome,
+        ),
+    [entries, windowStarts, detail, turnModes, eventSequence, associations, requestedTurn],
   )
   const pending = useMemo(
     () =>
@@ -370,7 +458,9 @@ function TranscriptWindow({
           )
         : current,
     )
-    const loadedSegments = new Set(groupTranscriptTurns(entries, windowStarts).map((turn) => turn.id))
+    const loadedSegments = new Set(
+      groupTranscriptTurns(entries, windowStarts).map((turn) => turn.id),
+    )
     setOpenTools((current) =>
       Object.keys(current).some((id) => !loadedSegments.has(id))
         ? Object.fromEntries(Object.entries(current).filter(([id]) => loadedSegments.has(id)))
@@ -547,6 +637,19 @@ function TranscriptWindow({
       {!transcript.isPending && !transcript.isFetching && rows.length === 0 && (
         <p>No messages in this part of the conversation. Scroll up to keep looking.</p>
       )}
+      {associations.retries.length > 0 && (
+        <p role="alert">
+          Turn details could not be loaded.{' '}
+          <button
+            type="button"
+            onClick={() => {
+              for (const retry of associations.retries) void retry()
+            }}
+          >
+            Retry turn details
+          </button>
+        </p>
+      )}
       <VirtualTranscript
         scrollRef={scrollRef}
         ids={ids}
@@ -619,7 +722,7 @@ function TranscriptWindow({
                 detail={
                   turnModes[turn.turnId ?? turn.id] ??
                   (detail === 'full' ||
-                  requestedTurn === turn.turnId ||
+                  (requestedTurn === turn.turnId && !turnModes[turn.turnId ?? turn.id]) ||
                   turn.events.some((event) => event.address.event_sequence === eventSequence)
                     ? 'full'
                     : detail)

@@ -1,4 +1,7 @@
-import type { WebSessionTimelineWindow } from '../src/generated/web-contract.mjs'
+import type {
+  WebSessionTimelineDetail,
+  WebSessionTimelineWindow,
+} from '../src/generated/web-contract.mjs'
 import { transcriptFixture } from '../src/session-timeline/transcript.fixture'
 import { retriedToolItems, toolGoalApi, turnApi } from '../src/session-timeline/turns.fixture'
 import { expect, test } from './fontTest'
@@ -1092,3 +1095,132 @@ test('keeps the retained turn row and open tool when earlier history is prepende
     transcript.getByRole('region', { name: 'exec_command details', exact: true }),
   ).toContainText('release status')
 })
+
+for (const around of ['18446744073709551616', '99999999999999999999']) {
+  test(`ignores an out-of-range around address ${around}`, async ({ page }) => {
+    await turnApi(page)
+    const anchors: string[] = []
+    page.on('request', (request) => {
+      const url = new URL(request.url())
+      if (url.pathname.endsWith('/timeline')) anchors.push(url.searchParams.get('anchor') ?? '')
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}&around=${around}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    await expect(
+      transcript.getByText('The release checks passed. Publishing remains unapproved.', {
+        exact: true,
+      }),
+    ).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    expect(anchors.length).toBeGreaterThan(0)
+    expect(anchors.every((anchor) => anchor === 'latest')).toBe(true)
+  })
+}
+
+for (const open of ['Summary', 'Tools', 'turn link']) {
+  test(`includes a turn-associated compaction without turn_id from ${open}`, async ({
+    page,
+  }, testInfo) => {
+    const input = detailItems[0]
+    const response = detailItems[3]
+    const completion = detailItems[4]
+    if (input?.body.type !== 'user_input' || !response || !completion)
+      throw new Error('Fixture missing')
+    const turnId = input.body.turn_id
+    const summary = detailExcerpt('Earlier conversation condensed for this turn.')
+    const compaction: WebSessionTimelineDetail = {
+      address: { event_sequence: '2' },
+      kind: 'context_compacted',
+      projected_body_bytes: 128 + Number(summary.total_bytes),
+      body: {
+        type: 'context_compaction',
+        compaction_id: '00000000-0000-0000-0000-000000000131',
+        model_call_id: detailCallId,
+        result_frontier_id: '00000000-0000-0000-0000-000000000132',
+        summary_entry_id: '00000000-0000-0000-0000-000000000133',
+        through_position: '1',
+        summary,
+      },
+    }
+    const unrelated: WebSessionTimelineDetail = {
+      address: { event_sequence: '3' },
+      kind: 'goal_turn_retired',
+      projected_body_bytes: 128,
+      body: { type: 'event_fact', kind: 'goal_turn_retired' },
+    }
+    const entries = [input, compaction, unrelated, response, completion]
+    await turnApi(page, undefined, entries)
+    const membership: string[] = []
+    let unavailable = open === 'Summary'
+    await page.route('**/turns/*/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      const address = url.searchParams.get('cursor_address') ?? '1'
+      if (address === '2' || address === '3') membership.push(address)
+      if (address === '2' && unavailable)
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              code: 'session_projection_unavailable',
+              kind: 'application',
+              message: 'Turn detail is temporarily unavailable.',
+            },
+          },
+        })
+      if (address === '3')
+        return route.fulfill({
+          status: 400,
+          json: {
+            error: {
+              code: 'invalid_timeline_detail_limits',
+              kind: 'transport',
+              message: 'Address is not part of this turn.',
+            },
+          },
+        })
+      const item = entries.find(
+        (item) => item !== unrelated && BigInt(item.address.event_sequence) >= BigInt(address),
+      )
+      if (!item) return route.fulfill({ json: detailPage([]) })
+      const loaded =
+        item.body.type === 'user_input'
+          ? { ...item, body: { ...item.body, attachments: [] } }
+          : item
+      return route.fulfill({ json: detailPage([loaded]) })
+    })
+    await page.goto(
+      `/sessions?workspace=true&session=${detailSessionId}${open === 'turn link' ? `&turn=${turnId}` : ''}`,
+    )
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    if (open !== 'turn link') {
+      await page.getByRole('radio', { name: open, exact: true }).check()
+      await transcript
+        .getByRole('button', { name: 'Open turn details', exact: true })
+        .first()
+        .click()
+    }
+    const event = transcript.locator('[data-event-sequence="2"]')
+    if (unavailable) {
+      await expect(page.getByRole('alert')).toContainText('Turn details could not be loaded.')
+      await expect(event).toHaveCount(0)
+      unavailable = false
+      await page.getByRole('button', { name: 'Retry turn details', exact: true }).click()
+    }
+    await expect(event).toContainText(summary.text)
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect(event).toBeVisible()
+    await expect(
+      transcript
+        .locator('[data-turn-id]')
+        .filter({ has: page.locator('[data-event-sequence="2"]') }),
+    ).toHaveAttribute('data-turn-id', turnId)
+    await expect(transcript.locator('[data-event-sequence="3"]')).toHaveCount(0)
+    expect(membership.filter((address) => address === '3')).toHaveLength(1)
+    expect(membership.filter((address) => address === '2').length).toBeLessThanOrEqual(
+      open === 'Summary' ? 3 : 2,
+    )
+    await page.screenshot({ path: testInfo.outputPath('associated-compaction.png') })
+    await transcript.getByRole('button', { name: 'Collapse turn', exact: true }).first().click()
+    await expect(event).toHaveCount(0)
+  })
+}
