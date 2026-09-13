@@ -204,6 +204,9 @@ export function VirtualTranscript({
   ids,
   renderRow,
   selectedId,
+  revealId,
+  onReveal,
+  pinnedId,
   estimateSize = 100,
   className = 'session-transcript-scroll',
   autoFocus = false,
@@ -225,6 +228,9 @@ export function VirtualTranscript({
     style: React.CSSProperties,
   ) => ReactNode
   selectedId?: string | null
+  revealId?: string | null
+  onReveal?: () => void
+  pinnedId?: string | null
   estimateSize?: number
   className?: string
   autoFocus?: boolean
@@ -242,6 +248,8 @@ export function VirtualTranscript({
   const localParent = useRef<HTMLDivElement>(null)
   const parent = scrollRef ?? localParent
   const selected = selectedId ? ids.indexOf(selectedId) : -1
+  const revealed = revealId ? ids.indexOf(revealId) : -1
+  const pinned = pinnedId ? ids.indexOf(pinnedId) : -1
   const anchor = useRef<{ id: string; offset: number } | null>(null)
   const initialized = useRef(false)
   const atEnd = useRef(initialEnd)
@@ -261,9 +269,9 @@ export function VirtualTranscript({
     getItemKey: (index) => ids[index] ?? index,
     rangeExtractor: (range) => {
       const indexes = defaultRangeExtractor(range)
-      return selected < 0 || indexes.includes(selected)
-        ? indexes
-        : [...indexes, selected].sort((a, b) => a - b)
+      for (const index of [selected, revealed, pinned])
+        if (index >= 0 && !indexes.includes(index)) indexes.push(index)
+      return indexes.sort((a, b) => a - b)
     },
   })
   const rows = virtualizer.getVirtualItems()
@@ -323,6 +331,13 @@ export function VirtualTranscript({
     restoringLaterAnchor.current = false
     restoredOffset.current ??= parent.current?.scrollTop ?? null
   }, [ids, initialEnd, followEnd, loadingLater, selected, virtualizer, parent])
+  const reportReveal = useEffectEvent(() => onReveal?.())
+  useLayoutEffect(() => {
+    if (!revealId || revealed < 0) return
+    virtualizer.scrollToIndex(revealed, { align: 'auto' })
+    const frame = requestAnimationFrame(() => reportReveal())
+    return () => cancelAnimationFrame(frame)
+  }, [revealed, revealId, virtualizer])
   const remember = () => {
     const offset = parent.current?.scrollTop ?? 0
     const row = virtualizer.getVirtualItems().find((item) => item.end > offset)
@@ -345,6 +360,8 @@ export function VirtualTranscript({
       element.scrollHeight - element.scrollTop - element.clientHeight <= 1
     onEndChange?.(atEnd.current)
     if (restored) return
+    // An explicit edge gesture already handled a queued scroll at this same offset.
+    if (direction !== undefined) restoredOffset.current = element.scrollTop
     if (element.scrollTop < estimateSize && direction !== 'after') onEdge?.('before')
     else if (
       element.scrollHeight - element.scrollTop - element.clientHeight < estimateSize &&
