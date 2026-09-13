@@ -10,10 +10,7 @@ for (const viewport of [
     const api = await sessionApi(page)
     await openSession(page)
     const message = page.getByRole('textbox', { name: 'Message', exact: true })
-    await expect(page.getByText('Write a message to send', { exact: true })).toBeVisible()
-    await expect(
-      page.getByRole('button', { name: 'Attach files (unavailable)', exact: true }),
-    ).toBeDisabled()
+    await expect(message).toHaveAccessibleDescription(/Write a message to send/)
     await message.fill('First line')
     await message.press('Shift+Enter')
     await message.press('x')

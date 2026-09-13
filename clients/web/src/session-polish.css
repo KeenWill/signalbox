@@ -1,0 +1,87 @@
+.surface-body.session-workspace-surface {
+  gap: var(--product-space);
+  padding: var(--product-space);
+  overflow: auto;
+}
+.surface-body.session-workspace-surface:has(> .session-composer) {
+  grid-template-rows: minmax(18rem, 1fr) auto;
+}
+.surface-body.session-workspace-surface > .session-workspace {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.session-workspace > .session-compact-header {
+  flex: none;
+  padding: calc(var(--product-space) / 2) var(--product-space);
+}
+.session-header-secondary .session-events-toggle {
+  padding: 0;
+  font-size: inherit;
+}
+.session-conversation {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.session-conversation:has(.session-transcript-scroll) {
+  display: flex;
+  overflow: hidden;
+}
+.session-conversation:has(.session-transcript-scroll) > .session-transcript-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.session-conversation .session-transcript-scroll {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+.session-workspace > .session-timeline:not([hidden]) {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+.session-workspace > .provider-drafts {
+  flex: none;
+  max-height: 25dvh;
+  overflow: auto;
+}
+.surface-body > .session-composer {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: calc(var(--product-space) / 2) var(--product-space);
+  padding: var(--product-space);
+  border-radius: var(--product-space);
+}
+.session-composer > .field > label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.surface-body > .session-composer textarea {
+  min-height: 2rem;
+  max-height: 25dvh;
+  padding: calc(var(--product-space) / 2);
+  resize: none;
+  overflow-y: auto;
+}
+.surface-body .session-composer-actions {
+  display: contents;
+}
+.surface-body .session-composer-actions > button {
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 2rem;
+  padding: calc(var(--product-space) / 2) var(--product-space);
+}
+.session-composer-actions > [role="status"]:not(.sr-only) {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+}
