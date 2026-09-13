@@ -97,3 +97,59 @@ export async function turnApi(page: Page, turnId = detailTurnId, entries = detai
     return route.fulfill({ json: transcriptFixture(url) })
   })
 }
+
+export async function toolGoalApi(page: Page, type: 'blocked' | 'achieved') {
+  await turnApi(page)
+  const prefix = type === 'blocked' ? 'Need ' : 'Release '
+  const suffix = type === 'blocked' ? 'approval.' : 'verified.'
+  const goalCursor = {
+    type: 'more_body' as const,
+    body: {
+      address: { event_sequence: '2' },
+      field: 'goal_text' as const,
+      member_index: 0,
+      offset_bytes: '0',
+    },
+  }
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.searchParams.get('cursor_address') !== '2') return route.fallback()
+    if (url.searchParams.get('cursor_field') === 'tool_result')
+      return route.fulfill({ json: detailPage([toolResultItem()], goalCursor) })
+    if (url.searchParams.get('cursor_field') !== 'goal_text') return route.fallback()
+    const first = url.searchParams.get('cursor_offset') === '0'
+    const next = first
+      ? { ...goalCursor, body: { ...goalCursor.body, offset_bytes: String(prefix.length) } }
+      : null
+    const text = {
+      text: first ? prefix : suffix,
+      offset_bytes: first ? '0' : String(prefix.length),
+      total_bytes: String(prefix.length + suffix.length),
+      continuation: next?.body ?? null,
+    }
+    const original = toolResultItem()
+    if (original.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+    return route.fulfill({
+      json: detailPage(
+        [
+          {
+            ...original,
+            projected_body_bytes: 128 + text.text.length,
+            body: {
+              ...original.body,
+              projected_member_index: 0,
+              tools: [],
+              goal_events: [
+                type === 'blocked'
+                  ? { type, generation: '1', reason: 'user_input_required', text }
+                  : { type, generation: '1', text },
+              ],
+            },
+          },
+        ],
+        next,
+      ),
+    })
+  })
+  return { prefix, suffix }
+}

@@ -1,4 +1,4 @@
-import { turnApi } from '../src/session-timeline/turns.fixture'
+import { toolGoalApi, turnApi } from '../src/session-timeline/turns.fixture'
 import { expect, test } from './fontTest'
 import {
   detailCallId,
@@ -350,5 +350,32 @@ for (const recovered of [false, true]) {
       'Provider error: Quota reached',
       ...(recovered ? ['The release checks passed. Publishing remains unapproved.'] : []),
     ])
+  })
+}
+
+for (const type of ['blocked', 'achieved'] as const) {
+  test(`All details renders a tool-produced ${type} goal and continues its text`, async ({
+    page,
+  }) => {
+    const { prefix, suffix } = await toolGoalApi(page, type)
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    await page.getByRole('radio', { name: 'All details', exact: true }).check()
+    const event = page
+      .getByRole('region', { name: 'Session transcript', exact: true })
+      .locator('.session-turn-event[data-event-sequence="2"]')
+    const next = event.getByRole('button', { name: 'Continue reading', exact: true })
+    await next.click()
+    await next.click()
+    const goals = event.getByRole('region', { name: 'Goal events', exact: true })
+    await expect(goals).toContainText(type === 'blocked' ? 'Blocked' : 'Achieved')
+    if (type === 'blocked') await expect(goals).toContainText('Input required')
+    await expect(
+      goals.getByRole('region', { name: 'Goal text', exact: true }).locator('pre'),
+    ).toHaveText(prefix)
+    await next.click()
+    await expect(
+      goals.getByRole('region', { name: 'Goal text', exact: true }).locator('pre'),
+    ).toHaveText([prefix, suffix])
+    await expect(next).toHaveCount(0)
   })
 }

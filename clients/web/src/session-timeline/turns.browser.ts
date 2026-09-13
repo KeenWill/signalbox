@@ -1,6 +1,6 @@
 import { expect, test } from '../../e2e/fontTest'
 import { detailTurnId } from '../../e2e/session-detail-fixture'
-import { turnApi } from './turns.fixture'
+import { toolGoalApi, turnApi } from './turns.fixture'
 import '../../e2e/session-transcript-turns.spec'
 
 test('keeps linked events and turn targets visible', async ({ page }, testInfo) => {
@@ -105,4 +105,26 @@ test('opens an uppercase turn link using its canonical identity', async ({ page 
   expect(reads.length).toBeGreaterThan(0)
   expect(reads.every((path) => path.includes(`/turns/${turnId}/`))).toBe(true)
   await expect(page.getByRole('alert')).toHaveCount(0)
+})
+
+test('retains tool-produced goal text alongside an injected tool renderer', async ({ page }) => {
+  const { prefix, suffix } = await toolGoalApi(page, 'blocked')
+  await page.goto('/src/session-timeline/transcript-scenario.html?renderer=true')
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const event = page
+    .getByRole('region', { name: 'Session transcript', exact: true })
+    .locator('.session-turn-event[data-event-sequence="2"]')
+  const renderer = event.getByRole('region', { name: 'Injected tool renderer', exact: true })
+  await expect(renderer).toContainText('release status')
+  const next = event.getByRole('button', { name: 'Continue reading', exact: true })
+  await next.click()
+  await next.click()
+  const goals = event.getByRole('region', { name: 'Goal events', exact: true })
+  await expect(goals).toContainText('Input required')
+  await next.click()
+  await expect(
+    goals.getByRole('region', { name: 'Goal text', exact: true }).locator('pre'),
+  ).toHaveText([prefix, suffix])
+  await expect(renderer).toHaveCount(2)
+  await expect(renderer.last()).toContainText('passed')
 })

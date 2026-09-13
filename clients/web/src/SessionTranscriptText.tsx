@@ -13,6 +13,7 @@ import type {
 } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
+import { GoalEventDetail } from './SessionItemDetail'
 import { conversationEntryKey } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
 import {
@@ -188,8 +189,6 @@ function TranscriptWindow({
     () => (eventSequence ? { kind: 'around', eventSequence } : (anchor ?? { kind: 'latest' })),
     [eventSequence, anchor],
   )
-  const selectedSequence =
-    eventSequence ?? (initialAnchor.kind === 'around' ? initialAnchor.eventSequence : undefined)
   const queryKey = useMemo(
     () => ['production', 'scrolling-transcript', sessionId, initialAnchor, limits],
     [sessionId, initialAnchor, limits],
@@ -219,23 +218,29 @@ function TranscriptWindow({
   useEffect(() => {
     if (transcript.error) console.error('Transcript load failed', transcript.error)
   }, [transcript.error])
+  const pages = transcript.data?.pages
   const previousObservation = useRef(observed)
   useEffect(() => {
     if (previousObservation.current !== observed) {
       previousObservation.current = observed
-      if (readerAtEnd.current && initialAnchor.kind === 'latest')
+      if (
+        readerAtEnd.current &&
+        (initialAnchor.kind === 'latest' || !pages?.at(-1)?.window.continuation_after)
+      )
         queries.setQueryData<typeof transcript.data>(queryKey, (data) =>
           data
             ? {
                 ...data,
-                pageParams: [initialAnchor, ...data.pageParams.slice(1)],
+                pageParams: [
+                  { kind: 'latest' } satisfies SessionWindowAnchor,
+                  ...data.pageParams.slice(1),
+                ],
               }
             : data,
         )
       void transcript.refetch()
     }
-  }, [observed, transcript.refetch, queries, queryKey, initialAnchor])
-  const pages = transcript.data?.pages
+  }, [observed, transcript.refetch, queries, queryKey, initialAnchor, pages])
   const entries = useMemo(
     () => pages?.flatMap((page) => page.details.flatMap((detail) => detail.items)) ?? [],
     [pages],
@@ -277,7 +282,11 @@ function TranscriptWindow({
           turn: undefined,
           pending: page,
         })),
-      ].sort((a, b) => (BigInt(a.sequence) < BigInt(b.sequence) ? -1 : 1)),
+      ].sort((a, b) => {
+        const left = BigInt(a.sequence)
+        const right = BigInt(b.sequence)
+        return left < right ? -1 : left > right ? 1 : 0
+      }),
     [turns, pending],
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
@@ -324,6 +333,12 @@ function TranscriptWindow({
       }),
     [registerUnwind, turns, turnModes, requestedTurn, eventSequence, detail],
   )
+  const selectedSequence =
+    eventSequence ?? (initialAnchor.kind === 'around' ? initialAnchor.eventSequence : undefined)
+  const selectedId =
+    turns.find((turn) =>
+      turn.events.some((event) => event.address.event_sequence === selectedSequence),
+    )?.id ?? rows.find((row) => row.sequence === selectedSequence)?.id
   const emptyScanned = useRef({ headers: 0, items: 0, bytes: 0, first: '' })
   useEffect(() => {
     const oldest = pages?.[0]
@@ -443,7 +458,7 @@ function TranscriptWindow({
           readerAtEnd.current = atEnd
         }}
         followEnd={
-          initialAnchor.kind === 'latest' &&
+          (initialAnchor.kind === 'latest' || !pages?.at(-1)?.window.continuation_after) &&
           Boolean(
             pages
               ?.at(-1)
@@ -465,11 +480,7 @@ function TranscriptWindow({
               ),
           )
         }
-        selectedId={
-          turns.find((turn) =>
-            turn.events.some((event) => event.address.event_sequence === selectedSequence),
-          )?.id ?? rows.find((row) => row.sequence === selectedSequence)?.id
-        }
+        selectedId={selectedId}
         onEdge={(direction) => {
           if (transcript.isFetching || transcript.isError) return
           if (direction === 'before' && transcript.hasPreviousPage) {
@@ -763,6 +774,8 @@ function ToolSummary({
       ? body.tools.find((entry) => entry.request_id === tool.request_id)?.evidence
       : null
   const loaded = returned?.type === 'physical_attempt' ? returned : null
+  const result = evidence?.result ?? loaded?.result
+  const failure = evidence?.failure ?? loaded?.failure
   return (
     <section aria-label={`${tool.tool_name} details`}>
       {renderTool ? (
@@ -770,14 +783,10 @@ function ToolSummary({
       ) : (
         <>
           <strong>{tool.tool_name}</strong>
-          <small>Argument and output summaries</small>
-          {tool.arguments && <p className="session-tool-summary">{tool.arguments.text}</p>}
-          {(evidence?.result ?? loaded?.result) && (
-            <p className="session-tool-summary">{(evidence?.result ?? loaded?.result)?.text}</p>
-          )}
-          {(evidence?.failure ?? loaded?.failure) && (
-            <p className="session-tool-summary">{(evidence?.failure ?? loaded?.failure)?.text}</p>
-          )}
+          <small>Tool summaries</small>
+          {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
+          {result && <ToolText label="Output" excerpt={result} />}
+          {failure && <ToolText label="Failure" excerpt={failure} />}
         </>
       )}
       {needsOutput && output.isPending && <small role="status">Loading output…</small>}
@@ -857,6 +866,13 @@ function EventDetail({
               ))
             ) : (
               <BodyText body={item.body} />
+            )}
+            {item.body.type === 'tool_batch' && item.body.goal_events.length > 0 && (
+              <section aria-label="Goal events">
+                {item.body.goal_events.map((event) => (
+                  <GoalEventDetail key={`${event.type}:${event.generation}`} event={event} />
+                ))}
+              </section>
             )}
             {!['user_input', 'model_call', 'tool_batch'].includes(item.body.type) && (
               <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>
