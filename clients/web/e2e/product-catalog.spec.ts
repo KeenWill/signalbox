@@ -812,3 +812,34 @@ test('opens a session link directly on a phone without an inspector', async ({ p
   )
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })
+
+test('keeps untitled session fallbacks without the detail capability', async ({ page }) => {
+  await useCatalogFixture(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: { ...bootstrapFixture.capabilities, bounded_session_timeline_detail: false },
+      },
+    }),
+  )
+  await page.route('**/api/sessions?**', (route) =>
+    route.fulfill({
+      json: {
+        ...firstPage,
+        summaries: firstPage.summaries.map((summary, index) =>
+          index === 0 ? { ...summary, title_summary: null } : summary,
+        ),
+      },
+    }),
+  )
+  let timelineReads = 0
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.includes('/timeline')) timelineReads += 1
+  })
+  await page.goto('/sessions')
+  await expect(
+    page.getByRole('button', { name: new RegExp(`Session ${firstSessionId}`) }),
+  ).toBeVisible()
+  expect(timelineReads).toBe(0)
+})
