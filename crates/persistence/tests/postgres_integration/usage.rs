@@ -317,6 +317,34 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         credential_invocations::process_group(&pool, contended.call).await?,
         None
     );
+    let mut unsent = SessionTitleCall {
+        call: ModelCallId::from_uuid(Uuid::now_v7()),
+        ..contended.clone()
+    };
+    assert!(titles.prepare(&mut unsent, &pools).await?);
+    titles.authorize(unsent.call).await?;
+    titles
+        .finish(
+            unsent.call,
+            None,
+            UsageTokenAxes {
+                input: None,
+                output: None,
+                cache_creation_input: None,
+                cache_read_input: None,
+            },
+        )
+        .await?;
+    let released: bool = sqlx::query_scalar(
+        "SELECT released_at IS NOT NULL FROM credential_invocation_reservation WHERE model_call_id = $1",
+    )
+    .bind(unsent.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        released,
+        "closing an authorized but unsent title releases capacity"
+    );
     for in_flight in [false, true] {
         let mut abandoned = SessionTitleCall {
             call: ModelCallId::from_uuid(Uuid::now_v7()),

@@ -31,6 +31,12 @@ pub(crate) struct SessionTitles {
     processes: crate::credential_invocations::CredentialInvocationProcesses,
 }
 
+pub(crate) struct PreparedTitle {
+    call: SessionTitleCall,
+    operation: ModelOperation<ModelCallId>,
+    max_output_tokens: u32,
+}
+
 #[derive(Debug)]
 pub(crate) enum TitleError {
     Configuration,
@@ -71,20 +77,40 @@ impl SessionTitles {
         session: SessionId,
         initial_for_turn: Option<TurnId>,
     ) -> Result<Option<String>, TitleError> {
-        let runtime = self
-            .factory
-            .build(&self.models)
-            .map_err(|_| TitleError::Configuration)?;
-        self.generate_using(&runtime, session, initial_for_turn)
-            .await
+        let Some(prepared) = self.prepare(session, initial_for_turn).await? else {
+            return Ok(None);
+        };
+        self.generate_prepared(prepared).await.map(Some)
     }
 
-    async fn generate_using<R: ModelRuntime<ModelCallId>>(
+    pub(crate) async fn generate_prepared(
         &self,
-        runtime: &R,
+        prepared: PreparedTitle,
+    ) -> Result<String, TitleError> {
+        let runtime = match self.factory.build(&self.models) {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                return Err(self
+                    .close_before_send(prepared.call.call, TitleError::Configuration)
+                    .await);
+            }
+        };
+        self.generate_using(&runtime, prepared).await
+    }
+
+    async fn close_before_send(&self, call: ModelCallId, error: TitleError) -> TitleError {
+        // Execution has not begun; a committed preparation/authorization can safely close.
+        let _ = SessionTitleRepository::new(self.pool.clone())
+            .finish(call, None, usage_axes(TokenUsage::unreported()))
+            .await;
+        error
+    }
+
+    pub(crate) async fn prepare(
+        &self,
         session: SessionId,
         initial_for_turn: Option<TurnId>,
-    ) -> Result<Option<String>, TitleError> {
+    ) -> Result<Option<PreparedTitle>, TitleError> {
         let (selection, target, settings) = self
             .models
             .session_title_settings()
@@ -118,10 +144,14 @@ impl SessionTitles {
             initial_for_turn,
         };
         let repository = SessionTitleRepository::new(self.pool.clone());
-        if !repository
+        let admitted = match repository
             .prepare(&mut call, &self.models.credential_pool_runtime_catalog())
-            .await?
+            .await
         {
+            Ok(admitted) => admitted,
+            Err(error) => return Err(self.close_before_send(call.call, error.into()).await),
+        };
+        if !admitted {
             return if initial_for_turn.is_some() {
                 Ok(None)
             } else {
@@ -161,6 +191,25 @@ impl SessionTitles {
                 .await?;
             return Err(TitleError::Generation);
         }
+        Ok(Some(PreparedTitle {
+            call,
+            operation,
+            max_output_tokens: definition.max_output_tokens(),
+        }))
+    }
+
+    async fn generate_using<R: ModelRuntime<ModelCallId>>(
+        &self,
+        runtime: &R,
+        request: PreparedTitle,
+    ) -> Result<String, TitleError> {
+        let PreparedTitle {
+            call,
+            operation,
+            max_output_tokens,
+        } = request;
+        let resolved = operation.resolved_target.clone();
+        let repository = SessionTitleRepository::new(self.pool.clone());
         let prepared = match runtime
             .prepare(operation, CancellationSignal::never())
             .await
@@ -175,7 +224,9 @@ impl SessionTitles {
                 return Err(TitleError::Generation);
             }
         };
-        repository.authorize(call.call).await?;
+        if let Err(error) = repository.authorize(call.call).await {
+            return Err(self.close_before_send(call.call, error.into()).await);
+        }
         let mut observations = TitleObservations {
             call: call.call,
             processes: self.processes.clone(),
@@ -245,7 +296,7 @@ impl SessionTitles {
         };
         valid &= usage
             .output_tokens
-            .is_none_or(|tokens| tokens <= u64::from(definition.max_output_tokens()));
+            .is_none_or(|tokens| tokens <= u64::from(max_output_tokens));
         let mut text = String::new();
         for part in content {
             match part {
@@ -263,17 +314,17 @@ impl SessionTitles {
             .finish(call.call, title.as_deref(), usage_axes(usage))
             .await?;
         let title = title.ok_or(TitleError::Generation)?;
-        if initial_for_turn.is_some() {
+        if call.initial_for_turn.is_some() {
             SessionMetadataRepository::new(self.pool.clone())
                 .install_generated_title(
                     DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
-                    session,
+                    call.session,
                     title.clone(),
                 )
                 .await
                 .map_err(|_| TitleError::Database)?;
         }
-        Ok(Some(title))
+        Ok(title)
     }
 }
 
