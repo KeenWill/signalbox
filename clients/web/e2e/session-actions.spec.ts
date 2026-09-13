@@ -63,9 +63,7 @@ test('goal retry keeps its original command and statement', async ({ page }) => 
   expect(requests[1]).toEqual(requests[0])
 })
 
-test('cancel requires a successor message and retries the same turn', async ({
-  page,
-}, testInfo) => {
+test('cancel retains its successor and identity across navigation', async ({ page }, testInfo) => {
   await sessionApi(page, true)
   const requests: unknown[] = []
   await page.route(`**/api/sessions/${sessionId}/cancel`, (route) => {
@@ -80,6 +78,13 @@ test('cancel requires a successor message and retries the same turn', async ({
   await page.screenshot({ path: testInfo.outputPath('cancel-confirmation.png'), fullPage: true })
   await page.getByRole('button', { name: 'Confirm', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Message to continue with' })).toBeDisabled()
+  await expect(page.getByRole('alert')).toContainText('Outcome unconfirmed')
+  await page.getByRole('link', { name: 'Settings', exact: true }).click()
+  await expect(page).toHaveURL(/\/settings$/)
+  await page.goBack()
+  await expect(page.getByRole('textbox', { name: 'Message to continue with' })).toHaveValue(
+    'Focus on the parser',
+  )
   await page.getByRole('button', { name: 'Retry same action' }).click()
   await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
   expect(requests).toEqual([

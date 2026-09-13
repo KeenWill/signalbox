@@ -12,7 +12,7 @@ import {
   type WebSessionActionRequest,
 } from './generated/web-contract.mjs'
 import type { ProductTransport } from './product'
-import { MAX_PRODUCT_JSON_BYTES, ProductRequestError } from './product'
+import { MAX_PRODUCT_JSON_BYTES, ProductInputError, ProductRequestError } from './product'
 
 export type SessionAction =
   | { kind: 'approval'; requestId: string; input: WebApprovalRequest }
@@ -21,6 +21,13 @@ export type SessionAction =
   | { kind: 'clear-goal'; input: WebSessionActionRequest }
 
 export async function submitSessionAction(sessionId: string, action: SessionAction): Promise<void> {
+  if (
+    Object.values(action.input).some(
+      (value) => typeof value === 'string' && value.length > MAX_PRODUCT_JSON_BYTES,
+    )
+  ) {
+    throw new ProductInputError('Action content is too long.')
+  }
   const input =
     action.kind === 'approval'
       ? decodeWebApprovalRequest(action.input)
@@ -29,6 +36,10 @@ export async function submitSessionAction(sessionId: string, action: SessionActi
         : action.kind === 'set-goal'
           ? decodeWebGoalRequest(action.input)
           : decodeWebSessionActionRequest(action.input)
+  const body = JSON.stringify(input)
+  if (new TextEncoder().encode(body).byteLength > MAX_PRODUCT_JSON_BYTES) {
+    throw new ProductInputError('Action content is too long.')
+  }
   const suffix =
     action.kind === 'approval'
       ? `approvals/${encodeURIComponent(action.requestId)}`
@@ -44,7 +55,7 @@ export async function submitSessionAction(sessionId: string, action: SessionActi
           : 'DELETE',
     credentials: 'same-origin',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(input),
+    body,
   })
   if (response.status === 204) return
   if (response.ok) throw new Error('The action was not acknowledged. Retry the same action.')

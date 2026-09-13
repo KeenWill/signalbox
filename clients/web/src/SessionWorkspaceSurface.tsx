@@ -1,4 +1,10 @@
-import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  type QueryClient,
+  useMutation,
+  useMutationState,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, SkipBack, SkipForward } from 'lucide-react'
 import {
   type KeyboardEvent,
@@ -14,7 +20,7 @@ import { invokeCommand } from './commands'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import './session-header.css'
-import { ProductRequestError, type SessionTranscriptLimits } from './product'
+import { ProductInputError, ProductRequestError, type SessionTranscriptLimits } from './product'
 import './session-actions.css'
 import { SessionComposer } from './SessionComposer'
 import { SessionItemDetail } from './SessionItemDetail'
@@ -27,6 +33,7 @@ import {
 import { SESSION_WINDOW_BYTES, SESSION_WINDOW_ITEMS } from './session-workspace'
 import {
   actions,
+  MAX_PENDING_SESSION_INPUTS,
   selectApp,
   selectSessionSync,
   store,
@@ -49,27 +56,70 @@ function SessionActions({
   activeTurn: string | null
   onAccepted: () => Promise<unknown>
 }) {
-  const [choice, setChoice] = useState<
+  const [draftChoice, setChoice] = useState<
     'approve' | 'deny' | 'cancel' | 'set-goal' | 'clear-goal' | null
   >(null)
   const [text, setText] = useState('')
   const [chosenRequest, setChosenRequest] = useState<string | null>(null)
   const [chosenTurn, setChosenTurn] = useState<string | null>(null)
-  const [retained, setRetained] = useState<SessionAction | null>(null)
+  const queryClient = useQueryClient()
+  const pendingActions = useMutationState({
+    filters: { mutationKey: ['session-action'] },
+    select: (mutation) => ({
+      sessionId: mutation.options.mutationKey?.[1],
+      action: mutation.state.variables as SessionAction,
+      status: mutation.state.status,
+      error: mutation.state.error,
+    }),
+  })
+  const pending = pendingActions.find((action) => action.sessionId === sessionId)
+  const retained = pending?.action ?? null
+  const choice = retained
+    ? retained.kind === 'approval'
+      ? retained.input.decision
+      : retained.kind
+    : draftChoice
+  const retainedText =
+    retained?.kind === 'cancel'
+      ? retained.input.message
+      : retained?.kind === 'set-goal'
+        ? retained.input.statement
+        : retained?.kind === 'approval'
+          ? (retained.input.note ?? '')
+          : ''
+  const sending = pending?.status === 'pending'
+  const capacityReached = retained === null && pendingActions.length >= MAX_PENDING_SESSION_INPUTS
   const [notice, setNotice] = useState('')
   const mutation = useMutation({
+    mutationKey: ['session-action', sessionId],
+    // Unconfirmed commands remain available across workspace navigation. Confirmed entries are removed below.
+    gcTime: Number.POSITIVE_INFINITY,
     mutationFn: (action: SessionAction) => submitSessionAction(sessionId, action),
     onSuccess: () => {
-      setRetained(null)
       setChoice(null)
       setText('')
       setNotice('Action accepted')
       void onAccepted()
     },
-    onError: (error) => {
-      if (error instanceof ProductRequestError && error.status < 500) setRetained(null)
+    onSettled: (_, error, action) => {
+      if (
+        !error ||
+        error instanceof ProductInputError ||
+        (error instanceof ProductRequestError && error.status < 500)
+      ) {
+        for (const mutation of queryClient
+          .getMutationCache()
+          .findAll({ mutationKey: ['session-action', sessionId] })) {
+          if (
+            (mutation.state.variables as SessionAction).input.command_id === action.input.command_id
+          ) {
+            queryClient.getMutationCache().remove(mutation)
+          }
+        }
+      }
     },
   })
+  const error = pending?.error ?? mutation.error
   const choose = (next: typeof choice) => {
     setChoice(next)
     setChosenRequest(pendingRequest)
@@ -79,7 +129,7 @@ function SessionActions({
     mutation.reset()
   }
   const confirm = () => {
-    if (mutation.isPending) return
+    if (sending || capacityReached) return
     let action = retained
     if (!action) {
       const command_id = crypto.randomUUID()
@@ -105,7 +155,11 @@ function SessionActions({
       }
     }
     if (!action) return
-    setRetained(action)
+    for (const previous of queryClient
+      .getMutationCache()
+      .findAll({ mutationKey: ['session-action', sessionId] })) {
+      queryClient.getMutationCache().remove(previous)
+    }
     mutation.mutate(action)
   }
   return (
@@ -114,23 +168,43 @@ function SessionActions({
         {pendingRequest && (
           <>
             <span>Approval needed</span>
-            <button type="button" disabled={retained !== null} onClick={() => choose('approve')}>
+            <button
+              type="button"
+              disabled={retained !== null || capacityReached}
+              onClick={() => choose('approve')}
+            >
               Approve
             </button>
-            <button type="button" disabled={retained !== null} onClick={() => choose('deny')}>
+            <button
+              type="button"
+              disabled={retained !== null || capacityReached}
+              onClick={() => choose('deny')}
+            >
               Deny
             </button>
           </>
         )}
         {activeTurn && (
-          <button type="button" disabled={retained !== null} onClick={() => choose('cancel')}>
+          <button
+            type="button"
+            disabled={retained !== null || capacityReached}
+            onClick={() => choose('cancel')}
+          >
             Cancel turn
           </button>
         )}
-        <button type="button" disabled={retained !== null} onClick={() => choose('set-goal')}>
+        <button
+          type="button"
+          disabled={retained !== null || capacityReached}
+          onClick={() => choose('set-goal')}
+        >
           Set goal
         </button>
-        <button type="button" disabled={retained !== null} onClick={() => choose('clear-goal')}>
+        <button
+          type="button"
+          disabled={retained !== null || capacityReached}
+          onClick={() => choose('clear-goal')}
+        >
           Clear goal
         </button>
       </div>
@@ -151,9 +225,9 @@ function SessionActions({
                   : 'Note (optional)'}
               {choice === 'cancel' && <span>Cancel this turn and continue with your message.</span>}
               <textarea
-                value={text}
+                value={retained ? retainedText : text}
                 onChange={(event) => setText(event.target.value)}
-                disabled={retained !== null}
+                disabled={retained !== null || capacityReached}
                 required={choice === 'set-goal' || choice === 'cancel'}
               />
             </label>
@@ -167,10 +241,12 @@ function SessionActions({
           <button
             type="submit"
             disabled={
-              mutation.isPending || ((choice === 'set-goal' || choice === 'cancel') && !text.trim())
+              sending ||
+              capacityReached ||
+              (!retained && (choice === 'set-goal' || choice === 'cancel') && !text.trim())
             }
           >
-            {mutation.isPending ? 'Sending…' : retained ? 'Retry same action' : 'Confirm'}
+            {sending ? 'Sending…' : retained ? 'Retry same action' : 'Confirm'}
           </button>
           {!retained && (
             <button type="button" onClick={() => choose(null)}>
@@ -179,11 +255,16 @@ function SessionActions({
           )}
         </form>
       )}
-      {mutation.error && (
+      {capacityReached && (
+        <p role="status">Resolve an unconfirmed session action before starting another.</p>
+      )}
+      {error && (
         <p role="alert">
-          {mutation.error instanceof ProductRequestError
-            ? `${mutation.error.response.error.code}: ${mutation.error.message}`
-            : 'Outcome unconfirmed. Retry the same action.'}
+          {error instanceof ProductRequestError
+            ? `${error.response.error.code}: ${error.message}`
+            : error instanceof ProductInputError
+              ? error.message
+              : 'Outcome unconfirmed. Retry the same action.'}
           {retained && <small>Command {retained.input.command_id}</small>}
         </p>
       )}
