@@ -14,7 +14,7 @@ export const defaultBrowserPreferences: BrowserPreferences = {
   navigationCollapsed: false,
   layout: 'workbench',
   density: 'compact',
-  detail: 'condensed',
+  detail: 'results',
   theme: 'dark',
   paneSizes: { navigation: 218, inspector: 252 },
   lastLogicalPositions: {},

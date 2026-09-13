@@ -119,6 +119,7 @@ export function SessionWorkspaceSurface({
   initialAround,
   onAroundConsumed,
   onReturnToCatalog,
+  registerTranscriptUnwind,
   onTimelineIds,
   onTimelineWindowAvailable,
   onWindowRequestConsumed,
@@ -134,6 +135,7 @@ export function SessionWorkspaceSurface({
   focusEntry: boolean
   onSessionOpen: (sessionId: string) => void
   onReturnToCatalog: () => void
+  registerTranscriptUnwind?: (handler: () => boolean) => () => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
   onWindowRequestConsumed: () => void
@@ -647,12 +649,15 @@ export function SessionWorkspaceSurface({
             </div>
           </header>
           <section
-            ref={showEvents ? undefined : timelineRef}
-            tabIndex={showEvents ? -1 : 0}
+            ref={!showEvents && !transcriptAvailable ? timelineRef : undefined}
+            tabIndex={!showEvents && !transcriptAvailable ? 0 : undefined}
             aria-label="Conversation"
           >
             {transcriptAvailable ? (
               <SessionTranscriptText
+                registerUnwind={registerTranscriptUnwind}
+                scrollRef={showEvents ? undefined : timelineRef}
+                anchor={displayedSession.anchor}
                 sessionId={sessionId ?? ''}
                 first={
                   displayedSession.window.items[0]?.address.event_sequence ??

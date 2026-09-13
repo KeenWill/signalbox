@@ -120,7 +120,7 @@ const Facts = ({ facts }: { facts: ReadonlyArray<readonly [string, ReactNode]> }
   </dl>
 )
 
-const GoalEventDetail = ({ event }: { event: GoalEvent }) => (
+export const GoalEventDetail = ({ event }: { event: GoalEvent }) => (
   <article className="session-detail-member">
     <Facts
       facts={[
