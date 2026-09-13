@@ -71,6 +71,7 @@ import { SearchSurface } from './SearchSurface'
 import { SessionCatalogSurface } from './SessionCatalogSurface'
 import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
+import { UsageSurface } from './search-usage/UsageSurface'
 import { hasValidSessionTimelineContract } from './session-timeline/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
@@ -1051,6 +1052,8 @@ export function ProductApp({
           </div>
         </section>
       </div>
+    ) : surface === 'usage' ? (
+      <UsageSurface />
     ) : surface === 'reviews' ? (
       <DeferredSurface surface="reviews" />
     ) : (
