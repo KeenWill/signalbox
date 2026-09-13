@@ -202,8 +202,12 @@ impl SessionTitles {
             PrepareSessionTitleOutcome::Unavailable => return Err(TitleError::Unavailable),
         }
         let max_output_tokens = settings.max_output_tokens;
+        let conversation_budget = title_conversation_budget(input_budget);
         let conversation = match repository
-            .conversation(session, i32::try_from(input_budget).unwrap_or(i32::MAX))
+            .conversation(
+                session,
+                i32::try_from(conversation_budget).unwrap_or(i32::MAX),
+            )
             .await
         {
             Ok(text) if !text.is_empty() => text,
@@ -439,6 +443,12 @@ pub(crate) fn title_input_budget(
 ) -> Option<u32> {
     let budget = configure_title_budget(settings, context_window_tokens);
     (budget as usize > TITLE_PROMPT.len() + REQUEST_MARGIN_BYTES).then_some(budget)
+}
+
+fn title_conversation_budget(input_budget: u32) -> u32 {
+    input_budget.saturating_sub(
+        u32::try_from(TITLE_PROMPT.len() + REQUEST_MARGIN_BYTES).unwrap_or(u32::MAX),
+    )
 }
 
 fn configure_title_budget(settings: &mut ModelSettings, context_window_tokens: u32) -> u32 {
@@ -1022,6 +1032,7 @@ selection_id = "{selection}"
             signalbox_model_runtime::ModelSettings::new(256),
         );
         let budget = TITLE_PROMPT.len() + 1024 + 4;
+        assert_eq!(title_conversation_budget(budget as u32), 4);
         assert!(fit_title_context(&mut operation, "界界", budget));
         assert_eq!(
             operation.messages,
