@@ -25,13 +25,30 @@ it('groups final text, user messages, and repeated tool evidence under the durab
   })
 })
 
-it('does not call a tool-producing response the final assistant result', () => {
+it('retains tool-producing assistant text as a non-final message in event order', () => {
   const response = detailItems[3]
-  if (response?.body.type !== 'model_call') throw new Error('model fixture missing')
-  const intermediate = { ...response, body: { ...response.body, model_call_id: detailCallId } }
-  const turn = groupTranscriptTurns([intermediate, ...detailItems.slice(0, 3)])[0]
-  expect(turn?.result).toBeUndefined()
-  expect(turn?.tools).toHaveLength(1)
+  const tool = detailItems[1]
+  if (response?.body.type !== 'model_call' || !tool) throw new Error('model/tool fixture missing')
+  const intermediate = {
+    ...response,
+    address: { event_sequence: '2' },
+    body: { ...response.body, model_call_id: detailCallId },
+  }
+  const turn = groupTranscriptTurns([
+    detailItems[0]!,
+    intermediate,
+    { ...tool, address: { event_sequence: '3' } },
+    response,
+    detailItems[4]!,
+  ])[0]
+  if (!turn) throw new Error('turn fixture missing')
+  expect(turn.messages).toEqual([detailItems[0], intermediate])
+  expect(turn.result).toBe(response)
+  expect(
+    turnSummaryParts(turn).map((part) =>
+      part.kind === 'message' ? part.item.address.event_sequence : 'tools',
+    ),
+  ).toEqual(['1', '2', 'tools', '4'])
 })
 
 it('keeps an unowned retired outcome visible without assigning it to a neighboring turn', () => {

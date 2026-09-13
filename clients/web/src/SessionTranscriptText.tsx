@@ -403,26 +403,32 @@ function TurnSummary({
             {tool && part.tools.some((entry) => entry.request_id === tool.request_id) && (
               <div className="session-tool-slot">
                 {renderTool ? renderTool(tool, 'condensed') : <ToolSummary tool={tool} />}
-                {toolContinuations(tool).map(({ field, continuation }) => {
-                  const page = detailPages.find((candidate) => {
+                {detailPages
+                  .filter((candidate) => {
                     const cursor = candidate.continuation
+                    const item = candidate.items.at(-1)
                     return (
                       cursor?.type === 'more_body' &&
-                      cursor.body.address.event_sequence === continuation.address.event_sequence &&
-                      cursor.body.field === continuation.field &&
-                      cursor.body.member_index === continuation.member_index &&
-                      cursor.body.offset_bytes === continuation.offset_bytes
+                      ((item?.body.type === 'tool_batch' &&
+                        item.body.tools.at(-1)?.request_id === tool.request_id) ||
+                        toolContinuations(tool).some(
+                          ({ continuation }) =>
+                            cursor.body.address.event_sequence ===
+                              continuation.address.event_sequence &&
+                            cursor.body.field === continuation.field &&
+                            cursor.body.member_index === continuation.member_index &&
+                            cursor.body.offset_bytes === continuation.offset_bytes,
+                        ))
                     )
                   })
-                  return page ? (
+                  .map((page) => (
                     <ContinuedEvent
-                      key={`${field}:${continuation.address.event_sequence}:${continuation.member_index}:${continuation.offset_bytes}`}
+                      key={JSON.stringify(page.continuation)}
                       sessionId={sessionId}
                       page={page}
                       limits={limits}
                     />
-                  ) : null
-                })}
+                  ))}
               </div>
             )}
           </section>

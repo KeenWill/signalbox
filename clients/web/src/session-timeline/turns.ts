@@ -78,6 +78,19 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
       group.result = item
   }
   for (const group of groups.values()) {
+    for (const event of group.events) {
+      const body = event.body
+      if (
+        body.type === 'model_call' &&
+        body.response &&
+        group.events.some(
+          (candidate) =>
+            candidate.body.type === 'tool_batch' &&
+            candidate.body.producing_model_call_id === body.model_call_id,
+        )
+      )
+        group.messages.push(event)
+    }
     if (
       !group.events.some(
         (event) =>
@@ -154,7 +167,7 @@ export function turnSummaryParts(turn: TranscriptTurn): TurnSummaryPart[] {
   const parts: TurnSummaryPart[] = []
   const seen = new Set<string>()
   for (const item of turn.events) {
-    if (item.body.type === 'user_input' || item === turn.result || turn.warnings.includes(item))
+    if (turn.messages.includes(item) || item === turn.result || turn.warnings.includes(item))
       parts.push({ kind: 'message', item })
     if (item.body.type !== 'tool_batch') continue
     for (const evidence of item.body.tools) {

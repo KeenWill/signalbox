@@ -462,7 +462,10 @@ test('keeps a terminal result reachable when its repeated arguments are hidden',
   })
   await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  await expect(transcript.getByRole('region', { name: 'Arguments', exact: true })).toHaveCount(1)
+  await transcript.getByRole('button', { name: 'exec_command', exact: true }).click()
+  await expect(
+    transcript.getByRole('region', { name: 'exec_command details', exact: true }),
+  ).toHaveCount(1)
   await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
   await expect(transcript.getByRole('region', { name: 'More message text' })).toContainText(
     'passed',
