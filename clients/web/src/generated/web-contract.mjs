@@ -4366,6 +4366,16 @@ const schemas = {
   },
   "WebSessionTimelineDescriptor": {
     "$defs": {
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
       "WebLiveResourceId": {
         "description": "Checked canonical UUID used for browser-visible live resource identities.",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -4455,6 +4465,22 @@ const schemas = {
             "type": "string"
           }
         ]
+      },
+      "WebSessionCatalogActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_microseconds": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "unix_microseconds",
+          "kind"
+        ],
+        "type": "object"
       },
       "WebSessionId": {
         "description": "Checked canonical UUID used for browser-visible session identities.",
@@ -4549,6 +4575,10 @@ const schemas = {
     "properties": {
       "first_address": {
         "$ref": "#/$defs/WebTimelineAddress"
+      },
+      "last_activity": {
+        "$ref": "#/$defs/WebSessionCatalogActivity",
+        "description": "Current catalog activity, including its timestamp and category."
       },
       "latest_address": {
         "$ref": "#/$defs/WebTimelineAddress"
@@ -4670,6 +4700,14 @@ const schemas = {
           }
         ]
       },
+      "title_summary": {
+        "description": "Current human title projected by the session catalog.",
+        "maxLength": 128,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "work": {
         "$ref": "#/$defs/WebSessionWorkFacts"
       },
@@ -4691,6 +4729,8 @@ const schemas = {
       }
     },
     "required": [
+      "title_summary",
+      "last_activity",
       "supervision",
       "workspace_root_kind",
       "repository_watch",

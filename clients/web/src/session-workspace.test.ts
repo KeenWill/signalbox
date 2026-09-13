@@ -21,6 +21,8 @@ const descriptor = (count: number) => ({
   supervision: null,
   repository_watch: null,
   workspace_root_kind: null,
+  title_summary: null,
+  last_activity: { kind: 'session' as const, unix_microseconds: '1' },
   sizes: {
     item_count: String(count),
     projected_structured_bytes: String(count * 78),

@@ -178,6 +178,8 @@ const useDeterministicSession = async (
         supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
+        title_summary: null,
+        last_activity: { kind: 'session', unix_microseconds: '1' },
         sizes: {
           item_count: sessionWorkspaceFixture.itemCount,
           projected_text_bytes: '0',
@@ -216,7 +218,7 @@ test('applies saved visual preferences before the first rendered frame', async (
         density: 'comfortable',
         detail: 'condensed',
         theme: 'light',
-        paneSizes: { navigation: 218, inspector: 252 },
+        paneSizes: { navigation: 218 },
         lastLogicalPositions: {},
       }),
     )
@@ -509,6 +511,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
   await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
@@ -572,6 +575,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
   await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.locator('.session-item-summary small').first()).toBeHidden()
@@ -590,6 +594,7 @@ test('keeps palette selection commands focused on the Session timeline', async (
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
   await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   const timeline = page.getByRole('grid', { name: 'Session timeline' })
   await expect(timeline).toBeVisible()
@@ -736,7 +741,7 @@ test('keeps maximum pane widths inside the viewport', async ({ page }) => {
 
   const paneWidths = page.locator('.pane-preferences input[type="range"]')
   await paneWidths.nth(0).fill('360')
-  await paneWidths.nth(1).fill('480')
+  await expect(page.getByRole('slider', { name: 'Inspector width' })).toHaveCount(0)
 
   await expect(page.locator('.product-inspector')).toBeHidden()
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1180)
@@ -987,15 +992,14 @@ test('keeps Settings within the pane when a vertical scrollbar reduces content w
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('applies saved pane widths to the scenario workspace', async ({ page }) => {
+test('applies saved navigation width to the scenario workspace', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/settings')
 
   const paneSliders = page.getByRole('group', { name: 'Pane widths' }).getByRole('slider')
   await paneSliders.nth(0).fill('300')
-  await paneSliders.nth(1).fill('400')
-  await paneSliders.nth(1).blur()
+  await paneSliders.nth(0).blur()
   await page.setViewportSize({ width: 1000, height: 800 })
   await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '300px')
   await page.goto('/scenario/streaming')
@@ -1003,11 +1007,11 @@ test('applies saved pane widths to the scenario workspace', async ({ page }) => 
   await expect(page.locator('.navigation-pane')).toHaveCSS('width', '300px')
   await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toBeHidden()
   await page.setViewportSize({ width: 1440, height: 900 })
-  await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toHaveCSS('width', '400px')
+  await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toHaveCSS('width', '252px')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('fits Settings inside a narrow primary pane with maximum saved side panes', async ({
+test('fits Settings inside a narrow primary pane with maximum saved navigation width', async ({
   page,
 }, testInfo) => {
   const problems = watchBrowser(page)
@@ -1015,7 +1019,6 @@ test('fits Settings inside a narrow primary pane with maximum saved side panes',
   await page.goto('/settings')
   const sliders = page.getByRole('group', { name: 'Pane widths' }).getByRole('slider')
   await sliders.nth(0).fill('360')
-  await sliders.nth(1).fill('480')
 
   const settings = page.locator('.settings-surface')
   await expect(settings).toBeVisible()
@@ -1441,15 +1444,14 @@ test('stacks Imports from the available product pane width', async ({ page }) =>
         density: 'compact',
         detail: 'condensed',
         theme: 'dark',
-        paneSizes: { navigation: 360, inspector: 480 },
+        paneSizes: { navigation: 360 },
         lastLogicalPositions: {},
       }),
     )
   })
-  await page.setViewportSize({ width: 1280, height: 844 })
+  await page.setViewportSize({ width: 900, height: 844 })
   await page.goto(importsProductFixture.path)
 
-  await page.getByRole('button', { name: 'Open artifact inspector', exact: true }).click()
   const workspace = page.locator('.imports-workspace-product')
   const inspectorBody = page.locator('.import-inspector-body')
   await expect(workspace).toBeVisible()
@@ -1599,31 +1601,19 @@ test('does not run product view hotkeys while a modal owns focus', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('does not run product view hotkeys while the artifact sheet owns focus', async ({ page }) => {
+test('omits the unbound artifact inspector from the toolbar and palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
-  await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/attention')
-  const presentationBefore = await page.evaluate(() => ({
-    theme: document.documentElement.dataset.theme,
-    density: document.documentElement.dataset.density,
-  }))
-
-  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
-  const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
-  await expect(sheet).toBeVisible()
-  await sheet.getByRole('button', { name: 'Close artifact inspector' }).focus()
-  await page.keyboard.press('Shift+T')
-  await page.keyboard.press('Shift+D')
-  await page.keyboard.press('Shift+W')
-
-  expect(
-    await page.evaluate(() => ({
-      theme: document.documentElement.dataset.theme,
-      density: document.documentElement.dataset.density,
-    })),
-  ).toEqual(presentationBefore)
-  await expect(sheet).toBeVisible()
+  await expect(
+    page.getByRole('button', { name: 'Open artifact inspector', exact: true }),
+  ).toHaveCount(0)
+  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette', exact: true })
+  await expect(palette).toBeVisible()
+  await expect(
+    palette.getByRole('button', { name: 'Open artifact inspector', exact: true }),
+  ).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

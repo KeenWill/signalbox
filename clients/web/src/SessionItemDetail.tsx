@@ -92,7 +92,12 @@ const effectiveSettingsFacts = (
   ],
 ]
 
-const boundedSettingEvidence = (value: unknown): ReactNode => <code>{JSON.stringify(value)}</code>
+const boundedSettingEvidence = (value: unknown): ReactNode => (
+  <details>
+    <summary>Raw setting data</summary>
+    <code>{JSON.stringify(value)}</code>
+  </details>
+)
 
 const TextDetail = ({ label, excerpt }: { label: string; excerpt: TextExcerpt }) => {
   return (
@@ -119,23 +124,31 @@ const Facts = ({ facts }: { facts: ReadonlyArray<readonly [string, ReactNode]> }
   </dl>
 )
 
-const GoalEventDetail = ({ event }: { event: GoalEvent }) => (
+export const GoalEventDetail = ({
+  event,
+  includeFacts = true,
+}: {
+  event: GoalEvent
+  includeFacts?: boolean
+}) => (
   <article className="session-detail-member">
-    <Facts
-      facts={[
-        ['Goal event', enumLabel(event.type)],
-        ['Generation', event.generation],
-        [
-          'Reason',
-          event.type === 'blocked'
-            ? enumLabel(event.reason)
-            : event.type === 'session_closed'
-              ? enumLabel(event.outcome)
-              : 'Not recorded',
-        ],
-      ]}
-    />
-    {event.type === 'user_stopped' && (
+    {includeFacts && (
+      <Facts
+        facts={[
+          ['Goal event', enumLabel(event.type)],
+          ['Generation', event.generation],
+          [
+            'Reason',
+            event.type === 'blocked'
+              ? enumLabel(event.reason)
+              : event.type === 'session_closed'
+                ? enumLabel(event.outcome)
+                : 'Not recorded',
+          ],
+        ]}
+      />
+    )}
+    {includeFacts && event.type === 'user_stopped' && (
       <Facts
         facts={[
           ['Closing turn', event.settling_turn_id ?? 'None'],
@@ -147,7 +160,13 @@ const GoalEventDetail = ({ event }: { event: GoalEvent }) => (
   </article>
 )
 
-const ToolAttemptDetail = ({ tool }: { tool: ToolAttempt }) => {
+const ToolAttemptDetail = ({
+  tool,
+  includeText = true,
+}: {
+  tool: ToolAttempt
+  includeText?: boolean
+}) => {
   const evidence = tool.evidence
   const physical = evidence.type === 'physical_attempt' ? evidence : null
   return (
@@ -165,9 +184,15 @@ const ToolAttemptDetail = ({ tool }: { tool: ToolAttempt }) => {
           ['Cause', enumLabel(physical?.cause ?? 'Not recorded')],
         ]}
       />
-      {tool.arguments && <TextDetail label="Tool arguments" excerpt={tool.arguments} />}
-      {physical?.result && <TextDetail label="Tool result" excerpt={physical.result} />}
-      {physical?.failure && <TextDetail label="Tool failure" excerpt={physical.failure} />}
+      {includeText && tool.arguments && (
+        <TextDetail label="Tool arguments" excerpt={tool.arguments} />
+      )}
+      {includeText && physical?.result && (
+        <TextDetail label="Tool result" excerpt={physical.result} />
+      )}
+      {includeText && physical?.failure && (
+        <TextDetail label="Tool failure" excerpt={physical.failure} />
+      )}
     </article>
   )
 }
@@ -272,7 +297,24 @@ const unreachableBody = (body: never): never => {
   throw new TypeError(`unhandled generated timeline detail body: ${String(body)}`)
 }
 
-const detailContent = (body: DetailBody): ReactNode => {
+export const detailTextContent = (body: DetailBody): ReactNode => {
+  switch (body.type) {
+    case 'tool_approval_decision':
+      return body.rationale && <TextDetail label="Approval rationale" excerpt={body.rationale} />
+    case 'context_compaction':
+      return <TextDetail label="Compaction summary" excerpt={body.summary} />
+    case 'delegation': {
+      const content = 'content' in body.detail ? body.detail.content : null
+      return content && <TextDetail label="Delegation content" excerpt={content} />
+    }
+    case 'goal_event':
+      return <GoalEventDetail event={body.event} includeFacts={false} />
+    default:
+      return null
+  }
+}
+
+export const detailContent = (body: DetailBody, includeText = true): ReactNode => {
   switch (body.type) {
     case 'session_state':
       return <Facts facts={[['State', enumLabel(body.state)]]} />
@@ -400,11 +442,12 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Cache read input tokens', body.usage.cache_read_input_tokens ?? 'Not reported'],
             ]}
           />
-          {body.response ? (
-            <TextDetail label="Model response" excerpt={body.response} />
-          ) : (
-            <p className="session-detail-note">No response text at this checkpoint.</p>
-          )}
+          {includeText &&
+            (body.response ? (
+              <TextDetail label="Model response" excerpt={body.response} />
+            ) : (
+              <p className="session-detail-note">No response text at this checkpoint.</p>
+            ))}
         </>
       )
     case 'tool_batch': {
@@ -435,11 +478,19 @@ const detailContent = (body: DetailBody): ReactNode => {
           {tools.length > 0 && (
             <section className="session-detail-members" aria-label="Tool requests">
               {tools.map((tool) => (
-                <ToolAttemptDetail key={tool.request_id} tool={tool} />
+                <ToolAttemptDetail
+                  key={
+                    tool.evidence.type === 'physical_attempt'
+                      ? tool.evidence.attempt_id
+                      : tool.request_id
+                  }
+                  tool={tool}
+                  includeText={includeText}
+                />
               ))}
             </section>
           )}
-          {goalEvents.length > 0 && (
+          {includeText && goalEvents.length > 0 && (
             <section className="session-detail-members" aria-label="Goal events">
               {goalEvents[0] && <GoalEventDetail event={goalEvents[0]} />}
             </section>
@@ -475,7 +526,7 @@ const detailContent = (body: DetailBody): ReactNode => {
               ...actorFacts,
             ]}
           />
-          {body.rationale && <TextDetail label="Approval rationale" excerpt={body.rationale} />}
+          {includeText && detailTextContent(body)}
         </>
       )
     }
@@ -493,7 +544,7 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Up to position', body.through_position],
             ]}
           />
-          <TextDetail label="Compaction summary" excerpt={body.summary} />
+          {includeText && detailTextContent(body)}
         </>
       )
     case 'turn_lifecycle':
@@ -536,11 +587,10 @@ const detailContent = (body: DetailBody): ReactNode => {
       )
     case 'delegation': {
       const detail = body.detail
-      const content = 'content' in detail ? detail.content : null
       return (
         <>
           <Facts facts={delegationFacts(detail)} />
-          {content && <TextDetail label="Delegation content" excerpt={content} />}
+          {includeText && detailTextContent(body)}
         </>
       )
     }
