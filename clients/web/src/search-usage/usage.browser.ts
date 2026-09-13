@@ -41,15 +41,14 @@ test('loads session and turn chips through the HTTP usage client', async ({ page
   await page.goto(
     `/src/search-usage/preview.html?preview=cost&session=${SEARCH_USAGE_SCENARIO_SESSION_ID}&turn=${turnId}`,
   )
-  await expect(
-    page.getByRole('region', { name: 'Session cost', exact: true }).getByRole('link'),
-  ).toContainText('unpriced')
-  await expect(
-    page.getByRole('region', { name: 'Turn cost', exact: true }).getByRole('link'),
-  ).toHaveAttribute('href', `/usage?session=${SEARCH_USAGE_SCENARIO_SESSION_ID}&turn=${turnId}`)
-  await expect(
-    page.getByRole('region', { name: 'Recent turn costs' }).getByRole('link').first(),
-  ).toContainText('partial')
+  await expect(page.getByRole('region', { name: 'Session cost', exact: true })).toContainText(
+    'unpriced',
+  )
+  await expect(page.getByRole('region', { name: 'Turn cost', exact: true })).toContainText(
+    'unpriced',
+  )
+  await expect(page.getByRole('region', { name: 'Recent turn costs' })).toContainText('partial')
+  await expect(page.getByRole('link')).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('cost-chips.png') })
   expect(requests.filter((url) => url.pathname === '/api/bootstrap')).toHaveLength(1)
   expect(
@@ -84,8 +83,8 @@ test('retries the connection when a session cost refresh follows bootstrap failu
     `/src/search-usage/preview.html?preview=cost&session=${SEARCH_USAGE_SCENARIO_SESSION_ID}`,
   )
   const session = page.getByRole('region', { name: 'Session cost', exact: true })
-  await expect(session.getByRole('link')).toHaveText('Cost unavailable')
+  await expect(session).toHaveText('Cost unavailable')
   unavailable = false
   await page.getByRole('button', { name: 'Refresh costs' }).click()
-  await expect(session.getByRole('link')).toHaveText('$0')
+  await expect(session).toHaveText('$0')
 })

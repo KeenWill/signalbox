@@ -25,12 +25,9 @@ it('groups complete call evidence by turn without mixing adjacent turns', async 
   expect(totals.get(turnId)?.unpricedModels).toEqual([])
 })
 
-it('links missing cost evidence to usage without displaying zero', () => {
-  const sessionId = 'fixture-session'
-  const markup = renderToStaticMarkup(
-    createElement(CostChip, { sessionId, turnId: 'fixture-turn', status: 'success' }),
-  )
+it('shows missing cost evidence without linking to an unavailable route or displaying zero', () => {
+  const markup = renderToStaticMarkup(createElement(CostChip, { status: 'success' }))
   expect(markup).toContain('Cost not loaded')
-  expect(markup).toContain('/usage?session=fixture-session&amp;turn=fixture-turn')
+  expect(markup).not.toContain('href=')
   expect(markup).not.toContain('$0')
 })

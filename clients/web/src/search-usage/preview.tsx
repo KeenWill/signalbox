@@ -27,7 +27,7 @@ function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string 
       </section>
       <section aria-label="Recent turn costs">
         {[...(turns.data ?? [])].map(([id, cost]) => (
-          <CostChip key={id} sessionId={sessionId} turnId={id} cost={cost} status={turns.status} />
+          <CostChip key={id} cost={cost} status={turns.status} />
         ))}
       </section>
     </>
