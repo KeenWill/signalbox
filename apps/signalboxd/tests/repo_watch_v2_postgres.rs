@@ -6117,3 +6117,116 @@ async fn a_head_change_during_required_check_observation_restarts_the_partial_pu
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn inconsistent_branch_pages_are_refetched_after_a_partial_poll() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_module_repo_watch_v2::{poll_cache::poll_with_cache, provider::ObservationError};
+    let (_database, _core, url) = postgres().await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("example/project".to_owned())?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    let mut io = ConditionalPollFixture::new();
+    let first_page = "/repos/example/project/branches?per_page=100&page=1";
+    let second_page = "/repos/example/project/branches?per_page=100&page=2";
+    let head = io.pages[first_page].0[0]["commit"]["sha"].clone();
+    io.pages.insert(
+        first_page.to_owned(),
+        (
+            serde_json::json!([
+                {"name":"main","commit":{"sha":head}},
+                {"name":"topic","commit":{"sha":head}},
+            ]),
+            true,
+        ),
+    );
+    io.pages.insert(
+        second_page.to_owned(),
+        (
+            serde_json::json!([
+                {"name":"other","commit":{"sha":head}},
+            ]),
+            false,
+        ),
+    );
+    // Rate limit, repository metadata, and the first branch page fill this attempt.
+    assert!(
+        !poll_with_cache(
+            &io,
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(3).expect("three-request fixture budget")
+        )
+        .await?
+    );
+
+    // Provider pagination shifts while the saved first page still contains topic.
+    io.changed = true;
+    io.pages.insert(
+        first_page.to_owned(),
+        (
+            serde_json::json!([
+                {"name":"main","commit":{"sha":head}},
+            ]),
+            true,
+        ),
+    );
+    io.pages.insert(
+        second_page.to_owned(),
+        (
+            serde_json::json!([
+                {"name":"topic","commit":{"sha":head}},
+            ]),
+            false,
+        ),
+    );
+    let complete_budget = std::num::NonZeroUsize::new(100).expect("complete fixture budget");
+    assert!(matches!(
+        poll_with_cache(
+            &io,
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            complete_budget
+        )
+        .await,
+        Err(ObservationError::InvalidState { .. })
+    ));
+    assert!(
+        store
+            .ingest_baseline(&repository)
+            .await?
+            .observation
+            .is_none()
+    );
+
+    assert!(
+        poll_with_cache(
+            &io,
+            &RepoWatchStore::new(pool.clone()),
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            complete_budget
+        )
+        .await?
+    );
+    let observed = store
+        .ingest_baseline(&repository)
+        .await?
+        .observation
+        .expect("refetched state");
+    let branches = observed
+        .state()
+        .branch_heads()
+        .iter()
+        .map(|branch| branch.branch().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(branches, ["main", "topic"]);
+    Ok(())
+}

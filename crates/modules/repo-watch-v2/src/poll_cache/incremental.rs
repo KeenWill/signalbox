@@ -296,7 +296,9 @@ pub async fn poll_with_cache(
                 tracing::info!(repository=repository.as_str(),producer=?EventProducer::Poll,requests=io.requests.load(Ordering::Relaxed),outcome="partial","repository-watch observation completed");
                 return Ok(false);
             }
-            Err(error @ ObservationError::HeadChanged) => {
+            Err(
+                error @ (ObservationError::HeadChanged | ObservationError::InvalidState { .. }),
+            ) => {
                 cursor.pages.clear();
                 cursor.threads.clear();
                 cursor.checks.clear();

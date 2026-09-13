@@ -214,13 +214,15 @@ heads are refreshed after pending PR lifecycles and bases, before deriving
 `base_advanced` facts. Budget exhaustion reports `partial` in logs and operator
 status and retains a durable `poll_cursor` with pending subjects and normalized
 unfinished pages; the next poll resumes those reads, and completion clears the
-cursor. A webhook refresh removes its subject from the pending poll and discards
-unfinished reads for that subject. Webhook observations retain a 1,000-request
-ceiling per pull request. Check inventories exceeding GitHub's 1,000-suite
-commit limit and workflow searches exceeding GitHub's 1,000-result cap reject
-their stage. Failed stages preserve completed stage commits. The daemon starts
-these tasks, the configured webhook listener, and one serialized command worker
-beside the convergence sweep, and drains them before closing its database.
+cursor. A changed head or inconsistent composed observation discards unfinished
+pages so the next attempt refetches them. A webhook refresh removes its subject
+from the pending poll and discards unfinished reads for that subject. Webhook
+observations retain a 1,000-request ceiling per pull request. Check inventories
+exceeding GitHub's 1,000-suite commit limit and workflow searches exceeding
+GitHub's 1,000-result cap reject their stage. Failed stages preserve completed
+stage commits. The daemon starts these tasks, the configured webhook listener,
+and one serialized command worker beside the convergence sweep, and drains them
+before closing its database.
 
 The webhook listener authenticates the configured hook identity, secret, and
 repository before accepting a delivery. An empty resolved webhook secret is
