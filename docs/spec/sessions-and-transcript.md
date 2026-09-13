@@ -148,6 +148,8 @@ response returns the session ID and current catalog summary after both requested
 commands succeed. Retries retain both identities and payloads. The browser shell
 opens a template picker from New session and navigates to the created workspace.
 Unconfirmed creation requests retain their identity and template across reloads.
+The browser bounds creation success and error response bodies to 65,536 bytes
+before decoding JSON.
 
 The web timeline descriptor includes the current catalog title summary and last
 activity category and timestamp, including for archived sessions. Both members

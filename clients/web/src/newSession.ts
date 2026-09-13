@@ -5,6 +5,8 @@ import {
   type WebCreateSessionRequest,
 } from './generated/web-contract.mjs'
 
+import { readBoundedJson } from './product'
+
 const retainedCreationKey = 'signalbox.new-session'
 
 export function readRetainedCreation(): WebCreateSessionRequest | null {
@@ -38,7 +40,7 @@ export class HttpSessionCreationApi {
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
     })
-    const value: unknown = await response.json()
+    const value: unknown = await readBoundedJson(response)
     if (!response.ok) {
       const message = decodeWebApiErrorResponse(value).error.message
       if (response.status === 400 || response.status === 409)

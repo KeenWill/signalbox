@@ -588,7 +588,7 @@ const validateBlobDescriptorInput = (input: BlobDescriptorInput): void => {
   }
 }
 
-const readBoundedJson = async (
+export const readBoundedJson = async (
   response: Response,
   maximumBytes: number = MAX_PRODUCT_JSON_BYTES,
 ): Promise<unknown> => {
