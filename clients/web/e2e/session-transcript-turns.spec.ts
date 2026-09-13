@@ -104,6 +104,26 @@ test('restores the selected Tools level after collapsing a tool-opened turn', as
   await expect(heading).toBeFocused()
 })
 
+test('clears an expanded turn when a transcript level command runs', async ({ page }) => {
+  await turnApi(page)
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await transcript.getByRole('button', { name: 'Open turn details', exact: true }).click()
+  await expect(transcript.getByRole('button', { name: 'Collapse turn', exact: true })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+  await page
+    .getByRole('dialog', { name: 'Command palette' })
+    .getByRole('button', { name: /Show condensed transcript detail/ })
+    .click()
+
+  await expect(page.getByRole('radio', { name: 'Tools', exact: true })).toBeChecked()
+  await expect(transcript.getByRole('button', { name: 'Collapse turn', exact: true })).toHaveCount(0)
+  await expect(transcript.getByRole('region', { name: 'exec_command details' })).toContainText(
+    'passed',
+  )
+})
+
 test('reads later tool members on demand in Tools mode', async ({ page }) => {
   await turnApi(page)
   const members: string[] = []
@@ -226,6 +246,91 @@ test('Escape collapses the focused turn before closing the product workspace', a
   await expect(page).not.toHaveURL(/workspace=true/)
 })
 
+test('Escape collapses a focused turn while All details is selected', async ({ page }) => {
+  await turnApi(page)
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const collapse = transcript.getByRole('button', { name: 'Collapse turn', exact: true })
+  await collapse.focus()
+  await page.keyboard.press('Escape')
+
+  await expect(page.getByRole('radio', { name: 'All details', exact: true })).toBeChecked()
+  await expect(
+    transcript.getByRole('button', { name: 'Open turn details', exact: true }),
+  ).toBeFocused()
+  await expect(transcript).toBeVisible()
+})
+
+test('rejects changed tool evidence in a summary continuation', async ({ page }) => {
+  await turnApi(page)
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.searchParams.get('cursor_field') !== 'tool_result') return route.fallback()
+    const item = toolResultItem()
+    if (item.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+    const tool = item.body.tools[0]
+    if (!tool || tool.evidence.type !== 'physical_attempt')
+      throw new Error('Tool evidence fixture missing')
+    return route.fulfill({
+      json: detailPage([
+        {
+          ...item,
+          body: {
+            ...item.body,
+            tools: [
+              {
+                ...tool,
+                evidence: {
+                  ...tool.evidence,
+                  attempt_id: '00000000-0000-0000-0000-000000000999',
+                },
+              },
+            ],
+          },
+        },
+      ]),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+
+  const details = page.getByRole('region', { name: 'exec_command details', exact: true })
+  await expect(details.getByRole('alert')).toContainText('Output could not be loaded.')
+  await expect(details).not.toContainText('passed')
+})
+
+test('renders tool-batch goal events in All details', async ({ page }) => {
+  const tool = detailItems[1]
+  const input = detailItems[0]
+  if (!input || tool?.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+  await turnApi(page, undefined, [
+    input,
+    {
+      ...tool,
+      body: {
+        ...tool.body,
+        goal_events: [
+          {
+            type: 'blocked',
+            generation: '1',
+            reason: 'authorization_required',
+            text: detailExcerpt('Release approval is required.'),
+          },
+        ],
+      },
+    },
+    ...detailItems.slice(2),
+  ])
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.getByText('Blocked', { exact: true })).toBeVisible()
+  await expect(transcript.getByText('Authorization required', { exact: true })).toBeVisible()
+  await expect(transcript.getByText('Release approval is required.', { exact: true })).toBeVisible()
+})
+
 test('All details retains earlier message chunks through continuation failures and retries', async ({
   page,
 }) => {
@@ -284,6 +389,111 @@ test('All details retains earlier message chunks through continuation failures a
   await input.getByRole('button', { name: 'Retry details' }).click()
   await expect(input.locator('.session-message-text')).toHaveText(['a', 'b', 'c'])
   await expect(input.getByRole('button', { name: 'Continue reading' })).toHaveCount(0)
+})
+
+test('retains continued event text while its virtualized row is unmounted', async ({ page }) => {
+  const source = detailItems[0]
+  if (source?.body.type !== 'user_input') throw new Error('Input fixture missing')
+  const entries = Array.from({ length: 24 }, (_, index) => {
+    const sequence = String(index + 1)
+    const text = detailExcerpt(index === 0 ? 'first chunk' : `Message ${sequence}`)
+    return {
+      ...source,
+      address: { event_sequence: sequence },
+      projected_body_bytes: 128 + Number(text.total_bytes),
+      body: {
+        ...source.body,
+        turn_id: `00000000-0000-0000-0000-${sequence.padStart(12, '0')}`,
+        text,
+        attachments: [],
+      },
+    }
+  })
+  await turnApi(page, undefined, entries)
+  await page.route('**/timeline?**', (route) => {
+    const url = new URL(route.request().url())
+    const anchor = url.searchParams.get('anchor')
+    const address = Number(url.searchParams.get('address') ?? '0')
+    const maxItems = Number(url.searchParams.get('max_items') ?? '8')
+    const end = anchor === 'latest' ? entries.length : Math.max(0, address - 1)
+    const start = Math.max(0, end - maxItems)
+    const items = entries.slice(start, end).map(({ address, kind }) => ({
+      address,
+      kind,
+      projected_structured_bytes: 64 + kind.length,
+    }))
+    return route.fulfill({
+      json: {
+        session_id: detailSessionId,
+        items,
+        projected_structured_bytes: items.reduce(
+          (sum, item) => sum + item.projected_structured_bytes,
+          0,
+        ),
+        continuation_before: start > 0 ? items[0]?.address ?? null : null,
+        continuation_after: end < entries.length ? items.at(-1)?.address ?? null : null,
+      },
+    })
+  })
+  await page.route('**/turns/*/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.searchParams.get('cursor_address') !== '1') return route.fallback()
+    const offset = url.searchParams.get('cursor_offset')
+    const item = entries[0]
+    if (!item || item.body.type !== 'user_input') throw new Error('Input fixture missing')
+    const continuation =
+      offset === '1'
+        ? null
+        : {
+            address: item.address,
+            field: 'input_text' as const,
+            member_index: 0,
+            offset_bytes: '1',
+          }
+    return route.fulfill({
+      json: detailPage(
+        [
+          {
+            ...item,
+            body: {
+              ...item.body,
+              text: {
+                text: offset === '1' ? 'second chunk' : 'first chunk',
+                offset_bytes: offset ?? '0',
+                total_bytes: '2',
+                continuation,
+              },
+            },
+          },
+        ],
+        continuation ? { type: 'more_body', body: continuation } : null,
+      ),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  for (const expected of ['Message 9', 'first chunk']) {
+    await transcript.evaluate((element) => {
+      element.scrollTop = 0
+      element.dispatchEvent(new Event('scroll'))
+    })
+    await expect(transcript.getByText(expected, { exact: true })).toBeVisible()
+  }
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const input = transcript.locator('[data-event-sequence="1"]')
+  await input.getByRole('button', { name: 'Continue reading' }).click()
+  await expect(input.locator('.session-message-text')).toHaveText(['first chunk', 'second chunk'])
+
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+    element.dispatchEvent(new Event('scroll'))
+  })
+  await expect(input).toHaveCount(0)
+  await transcript.evaluate((element) => {
+    element.scrollTop = 0
+    element.dispatchEvent(new Event('scroll'))
+  })
+  await expect(input.locator('.session-message-text')).toHaveText(['first chunk', 'second chunk'])
 })
 
 test('preserves assistant text before its tool without treating it as the final response', async ({
