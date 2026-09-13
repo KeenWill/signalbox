@@ -2546,12 +2546,14 @@ max_output_tokens = 256
 context_window_tokens = 200000
 "#
     );
-    for (configured, codex, disabled) in [
-        (false, false, false),
-        (true, false, false),
-        (true, false, true),
-        (true, true, false),
-        (true, true, true),
+    for (configured, codex, disabled, small_window) in [
+        (false, false, false, false),
+        (true, false, false, false),
+        (true, false, true, false),
+        (true, true, false, false),
+        (true, true, true, false),
+        (true, false, false, true),
+        (true, true, false, true),
     ] {
         let selection = if codex {
             "10000000-0000-4000-8000-000000000002"
@@ -2562,6 +2564,17 @@ context_window_tokens = 200000
             format!("{source}\n[session_titles]\nselection_id = {selection:?}\n")
         } else {
             source.clone()
+        };
+        let source = if small_window {
+            source
+                .replace("max_output_tokens = 4096", "max_output_tokens = 128")
+                .replace("max_output_tokens = 256", "max_output_tokens = 128")
+                .replace(
+                    "context_window_tokens = 200000",
+                    "context_window_tokens = 1024",
+                )
+        } else {
+            source
         };
         let factory = crate::model_catalog_runtime::ModelRuntimeFactory::new(None, None, None);
         let factory = if disabled {
@@ -2601,7 +2614,7 @@ context_window_tokens = 200000
             serde_json::from_slice(&response_body(response).await).expect("bootstrap DTO");
         assert_eq!(
             bootstrap.capabilities.session_title_generation,
-            configured && !(codex && disabled)
+            configured && !(codex && disabled) && !small_window
         );
     }
     pool.close().await;

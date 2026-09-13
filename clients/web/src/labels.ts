@@ -201,6 +201,7 @@ const labels = new Map<string, string>(
     session_ownership_changed: 'Session ownership changed',
     session_state_changed: 'Session state changed',
     session_terminal: 'Session finished',
+    session_title: 'Session name',
     session_transcript_entry: 'Session transcript entry',
     settled: 'Done',
     shutdown: 'Shut down',

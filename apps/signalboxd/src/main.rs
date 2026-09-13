@@ -674,6 +674,7 @@ enum RuntimeTaskExit {
     LifecycleDeadline,
     LifecycleMetrics,
     SessionSupervision,
+    SessionTitle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1173,6 +1174,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::TurnLiveness)
         | Ok(RuntimeTaskExit::LifecycleDeadline)
         | Ok(RuntimeTaskExit::LifecycleMetrics)
+        | Ok(RuntimeTaskExit::SessionTitle)
         | Ok(RuntimeTaskExit::SessionSupervision) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
@@ -2924,6 +2926,10 @@ async fn run_hub_incarnation(
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
     let (lifecycle_metrics_shutdown, lifecycle_metrics_shutdown_receiver) = watch::channel(false);
+    // One handoff slot; the incarnation task set owns execution and drain.
+    let (title_tasks, mut pending_titles) =
+        tokio::sync::mpsc::channel::<signalboxd::web_http::SessionTitleTask>(1);
+    let web_http_runtime = web_http_runtime.with_session_title_tasks(title_tasks);
     let mut runtime_tasks = JoinSet::new();
     let supervision_pool = pool.clone();
     let supervision_nudge = eligibility_nudge.clone();
@@ -3029,112 +3035,119 @@ async fn run_hub_incarnation(
                 guard_recovery.runtime_ready();
                 tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
 
-                select! {
-                    listener_failed = shutdown_requested(&mut termination_signals) => {
-                        if listener_failed {
-                            RuntimeStopCause::SignalListenerFailed
-                        } else {
-                            RuntimeStopCause::Requested
+                loop {
+                    break select! {
+                        Some(task) = pending_titles.recv() => {
+                            runtime_tasks.spawn(async move { task.await; RuntimeTaskExit::SessionTitle });
+                            continue;
                         }
-                    }
-                    () = fatal_execution.wait_for_process_recovery() => RuntimeStopCause::ExecutionFailed,
-                    completed = runtime_tasks.join_next() => {
-                        match completed {
-                            Some(Ok(RuntimeTaskExit::Workflows(result))) => {
-                                match result {
-                                    Ok(()) => tracing::error!("workflow runtime completed before shutdown"),
-                                    Err(error) => tracing::error!(cause = error.cause_code(), "workflow runtime failed"),
+                        listener_failed = shutdown_requested(&mut termination_signals) => {
+                            if listener_failed {
+                                RuntimeStopCause::SignalListenerFailed
+                            } else {
+                                RuntimeStopCause::Requested
+                            }
+                        }
+                        () = fatal_execution.wait_for_process_recovery() => RuntimeStopCause::ExecutionFailed,
+                        completed = runtime_tasks.join_next() => {
+                            match completed {
+                                Some(Ok(RuntimeTaskExit::SessionTitle)) => continue,
+                                Some(Ok(RuntimeTaskExit::Workflows(result))) => {
+                                    match result {
+                                        Ok(()) => tracing::error!("workflow runtime completed before shutdown"),
+                                        Err(error) => tracing::error!(cause = error.cause_code(), "workflow runtime failed"),
+                                    }
+                                    RuntimeStopCause::RuntimeFailed
                                 }
-                                RuntimeStopCause::RuntimeFailed
-                            }
-                            Some(Ok(RuntimeTaskExit::Process(Err(error)))) => {
-                                report_process_runtime_failure(&error);
-                                RuntimeStopCause::RuntimeFailed
-                            }
-                            Some(Ok(RuntimeTaskExit::FencedPoolFloor)) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::FencedPoolFloorCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::Process(Ok(())))) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::ProcessCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::Runner(Err(error)))) => {
-                                report_runner_runtime_failure(&error);
-                                RuntimeStopCause::RuntimeFailed
-                            }
-                            Some(Ok(RuntimeTaskExit::Runner(Ok(())))) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::RunnerCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
-                                tracing::error!(?error, "repository-watch runtime failed");
-                                RuntimeStopCause::RuntimeFailed
-                            }
-                            Some(Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))) => {
-                                report_runtime_task_defect(RuntimeTaskDefect::RepositoryWatchCompletedBeforeShutdown);
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
-                                report_web_http_runtime_failure(&error);
-                                RuntimeStopCause::RuntimeFailed
-                            }
-                            Some(Ok(RuntimeTaskExit::WebHttp(Ok(())))) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::WebHttpCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::SessionSupervision)) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::SessionSupervisionCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::LifecycleMetrics)) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::LifecycleMetricsCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::CredentialInvocations)) => {
-                                tracing::error!("invocation reservation reconciliation completed before shutdown");
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::TurnLiveness)) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::TurnLivenessCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::LifecycleDeadline)) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::LifecycleDeadlineCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Err(error)) => {
-                                report_runtime_task_defect(joined_task_defect(&error));
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            None => {
-                                report_runtime_task_defect(RuntimeTaskDefect::TaskSetEmpty);
-                                RuntimeStopCause::RuntimeDefect
+                                Some(Ok(RuntimeTaskExit::Process(Err(error)))) => {
+                                    report_process_runtime_failure(&error);
+                                    RuntimeStopCause::RuntimeFailed
+                                }
+                                Some(Ok(RuntimeTaskExit::FencedPoolFloor)) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::FencedPoolFloorCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::Process(Ok(())))) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::ProcessCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::Runner(Err(error)))) => {
+                                    report_runner_runtime_failure(&error);
+                                    RuntimeStopCause::RuntimeFailed
+                                }
+                                Some(Ok(RuntimeTaskExit::Runner(Ok(())))) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::RunnerCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
+                                    tracing::error!(?error, "repository-watch runtime failed");
+                                    RuntimeStopCause::RuntimeFailed
+                                }
+                                Some(Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))) => {
+                                    report_runtime_task_defect(RuntimeTaskDefect::RepositoryWatchCompletedBeforeShutdown);
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
+                                    report_web_http_runtime_failure(&error);
+                                    RuntimeStopCause::RuntimeFailed
+                                }
+                                Some(Ok(RuntimeTaskExit::WebHttp(Ok(())))) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::WebHttpCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::SessionSupervision)) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::SessionSupervisionCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::LifecycleMetrics)) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::LifecycleMetricsCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::CredentialInvocations)) => {
+                                    tracing::error!("invocation reservation reconciliation completed before shutdown");
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::TurnLiveness)) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::TurnLivenessCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::LifecycleDeadline)) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::LifecycleDeadlineCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Err(error)) => {
+                                    report_runtime_task_defect(joined_task_defect(&error));
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                None => {
+                                    report_runtime_task_defect(RuntimeTaskDefect::TaskSetEmpty);
+                                    RuntimeStopCause::RuntimeDefect
+                                }
                             }
                         }
-                    }
+                    };
                 }
             };
             pin!(runtime);
@@ -3145,6 +3158,9 @@ async fn run_hub_incarnation(
             }
         };
 
+        // Unstarted suggestions cannot cross an incarnation boundary.
+        pending_titles.close();
+        while pending_titles.try_recv().is_ok() {}
         let _ = workflow_shutdown.send(());
         let _ = repository_watch_shutdown.send(true);
         if cause == RuntimeStopCause::GuardLost {

@@ -51,8 +51,11 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         .observation_correlation()
         .bind_terminal_observation(ModelCallTerminalObservation::Completed {
             assistant_text: vec![
-                AssistantText::try_new("Database indexing is complete".to_owned())
-                    .expect("assistant text"),
+                AssistantText::try_new(format!(
+                    "Database indexing is complete {}",
+                    "界".repeat(64)
+                ))
+                .expect("assistant text"),
             ],
         });
     model_repository
@@ -139,6 +142,10 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
             |_| TurnId::from_uuid(Uuid::now_v7()),
         )
         .await?;
+    let recent = titles.conversation(fixture.session, 96).await?;
+    assert!(recent.len() <= 96);
+    assert!(recent.ends_with("Index validation complete"));
+    assert!(recent.contains("Check the completed indexing work"));
     for startup in [false, true] {
         let mut abandoned = SessionTitleCall {
             call: ModelCallId::from_uuid(Uuid::now_v7()),

@@ -384,6 +384,40 @@ mod tests {
             &[(profile.clone(), std::num::NonZeroU32::new(1))],
         )
         .await?;
+        let read_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("SET statement_timeout = '1s'")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with(pool.connect_options().as_ref().clone())
+            .await?;
+        let read_processes = CredentialInvocationProcesses::new(pool.clone(), nudge.clone());
+        let read_titles = crate::session_titles::SessionTitles::new(
+            read_pool.clone(),
+            models.clone(),
+            crate::model_catalog_runtime::ModelRuntimeFactory::new(None, None, None),
+            read_processes,
+        );
+        let mut held_read = pool.begin().await?;
+        sqlx::query("LOCK TABLE accepted_input_content_part IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *held_read)
+            .await?;
+        assert!(matches!(
+            read_titles.prepare(session, Some(turn)).await,
+            Err(crate::session_titles::TitleError::Database)
+        ));
+        held_read.rollback().await?;
+        let abandoned: (bool, bool) = sqlx::query_as(
+            "SELECT title.abandoned, reservation.released_at IS NOT NULL FROM session_title_model_call title
+             JOIN credential_invocation_reservation reservation USING (model_call_id) WHERE title.session_id = $1",
+        ).bind(session.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(abandoned, (true, true));
+        read_pool.close().await;
         let repository = SessionTitleRepository::new(pool.clone());
         let mut occupying = SessionTitleCall {
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
@@ -462,7 +496,7 @@ mod tests {
         titles.restore_pending().await?;
         assert!(processes.prepare_pending_titles(&titles).await.is_empty());
         assert!(repository.unclaimed_initial_turns().await?.is_empty());
-        let recovered: uuid::Uuid = sqlx::query_scalar("SELECT model_call_id FROM session_title_model_call WHERE session_id = $1 AND initial_for_turn = $2")
+        let recovered: uuid::Uuid = sqlx::query_scalar("SELECT model_call_id FROM session_title_model_call WHERE session_id = $1 AND initial_for_turn = $2 AND NOT abandoned")
             .bind(session.into_uuid()).bind(turn.into_uuid()).fetch_one(&pool).await?;
         let recovered_target: uuid::Uuid = sqlx::query_scalar(
             "SELECT resolved_provider_model_identity_id FROM session_title_model_call WHERE model_call_id = $1",
