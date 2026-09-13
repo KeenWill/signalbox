@@ -1,8 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { activityTime } from './AttentionSurface'
-import { attentionSnapshotsMatch, reduceAttentionEvent, synchronizeAttention } from './attention'
+import {
+  attentionSnapshotsMatch,
+  reduceAttentionEvent,
+  submitSessionAction,
+  synchronizeAttention,
+} from './attention'
 import type { WebAttentionSnapshot, WebAttentionStreamEvent } from './generated/web-contract.mjs'
-import type { ProductTransport } from './product'
+import { MAX_PRODUCT_JSON_BYTES, type ProductTransport } from './product'
 
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const earlierSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6c'
@@ -388,4 +393,24 @@ it('compares admitted attention values independently of object key order and abs
   }
   expect(attentionSnapshotsMatch(snapshot, reordered)).toBe(true)
   expect(attentionSnapshotsMatch(snapshot, { ...reordered, summaries: [replacement] })).toBe(false)
+})
+
+it('rejects oversized action text and escaped payloads before sending', async () => {
+  const fetch = vi.spyOn(globalThis, 'fetch')
+  try {
+    for (const message of [
+      'x'.repeat(MAX_PRODUCT_JSON_BYTES + 1),
+      '\n'.repeat(MAX_PRODUCT_JSON_BYTES),
+    ]) {
+      await expect(
+        submitSessionAction(sessionId, {
+          kind: 'cancel',
+          input: { command_id: anotherSessionId, expected_active_turn_id: turnId, message },
+        }),
+      ).rejects.toThrow('Action content is too long.')
+    }
+    expect(fetch).not.toHaveBeenCalled()
+  } finally {
+    fetch.mockRestore()
+  }
 })

@@ -88,3 +88,24 @@
   padding: 0 var(--product-space) var(--product-space);
   overflow-wrap: anywhere;
 }
+
+.session-action-buttons {
+  gap: 4px;
+  min-width: 0;
+}
+
+.session-action-buttons button {
+  flex-shrink: 0;
+  padding: 2px 4px;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.session-actions > .session-action-confirmation,
+.session-actions > p {
+  margin: 0 12px;
+}
+
+.session-actions .session-header-line {
+  gap: 4px;
+}
