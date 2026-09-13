@@ -3,8 +3,9 @@ use std::io::Write;
 use signalbox_application::{
     CorrelatedToolExecutorEvidence, ToolExecutionInvocation, ToolExecutorEvidence,
 };
-use signalbox_domain::ToolExecutionErrorDetail;
+use signalbox_domain::{ToolDecisionSource, ToolExecutionErrorDetail};
 use signalbox_model_runtime::{CredentialValue, redact_credential_text};
+use signalbox_persistence::tool_loop::PostgresToolLoopRepository;
 use signalbox_tools_exec::{
     CaptureCompleteness, ExecExecutor, OutputCapture, OutputEncoding, ProcessRunner,
     SandboxConfiguration, SandboxReadOnlyMount, SandboxedCommandRunner, SandboxedExecArguments,
@@ -23,14 +24,12 @@ pub(super) async fn execute<Runner: ProcessRunner>(
     let Some(purpose) = arguments.credential_purpose else {
         return failed(invocation, "ambient credential purpose is missing");
     };
-    let approved = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM tool_approval_decision
-          WHERE request_id = $1 AND decision_kind = 'approve' AND decision_source = 'delegate')",
-    )
-    .bind(invocation.request().id().into_uuid())
-    .fetch_one(pool)
-    .await;
-    if !matches!(approved, Ok(true)) {
+    let approval = PostgresToolLoopRepository::new(pool.clone())
+        .load_approval(invocation.request().id())
+        .await;
+    if !matches!(approval, Ok(Some(approval))
+        if approval.is_approved() && approval.source() == ToolDecisionSource::Delegate)
+    {
         return failed(
             invocation,
             "ambient credential requires approval of this request by the judge",
