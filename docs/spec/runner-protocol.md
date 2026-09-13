@@ -221,7 +221,9 @@ carry the same complete correlation. It fsyncs `dispatch_received` before
 acknowledging the frame internally and `execution_may_have_started` immediately
 before it invokes the executor. The runner retains one terminal evidence
 envelope and resends it until the daemon commits the matching attempt and lease
-transition and replies `result_recorded`, then discards it.
+transition and replies `result_recorded`, then discards it. Local runner
+shutdown waits for admitted execution and its result acknowledgement before
+sending the shutdown frame.
 
 Resume authenticates the enrollment receipt before changing registration or
 recording retained terminal evidence. Canonical lease state determines its exact

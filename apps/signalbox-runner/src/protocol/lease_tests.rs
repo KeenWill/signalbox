@@ -387,6 +387,121 @@ async fn reconnect_discards_only_exact_canonical_terminal_directives() {
 }
 
 #[tokio::test]
+async fn local_shutdown_drains_execution_through_result_acknowledgement() {
+    let parent = TempDir::new().expect("fixture parent");
+    let (mut state, mut connection, mut hub, offer) = fixture(&parent);
+    connection.pending_offer = Some(offer.clone());
+    for phase in [
+        LeasePhaseKind::WaitingDispatch,
+        LeasePhaseKind::DispatchReceived,
+        LeasePhaseKind::ExecutionMayHaveStarted,
+    ] {
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: offer.correlation.clone(),
+                phase,
+            })
+            .expect("durable execution boundary");
+    }
+    let (finish, finished) = tokio::sync::oneshot::channel();
+    connection.execution = Some(RunnerExecution {
+        correlation: offer.correlation.clone(),
+        task: tokio::spawn(async move {
+            finished.await.expect("execution is allowed to finish");
+            signalbox_domain::ToolAttemptEnd::Completed {
+                result: signalbox_domain::ToolResultContent::Text(
+                    signalbox_domain::ToolResultText::try_new("finished echo".to_owned())
+                        .expect("fixture result"),
+                ),
+            }
+        }),
+    });
+    let (signaled, signal_observed) = tokio::sync::oneshot::channel();
+    let runner = async {
+        assert_eq!(
+            connection
+                .serve_until_shutdown(&mut state, async {
+                    signaled.send(()).expect("local shutdown observed");
+                })
+                .await
+                .expect("execution drains"),
+            ServeOutcome::ShutdownReady
+        );
+        assert_eq!(state.reconnect_inventory(), Default::default());
+        connection.shutdown().await.expect("clean shutdown frame")
+    };
+    let daemon = async {
+        signal_observed.await.expect("shutdown signal consumed");
+        let first = PositiveU64::try_new(1).expect("first heartbeat");
+        send_message(
+            &mut hub,
+            Message::Heartbeat(Heartbeat {
+                sequence: first,
+                last_accepted_peer_sequence: 0,
+            }),
+        )
+        .await
+        .expect("heartbeat while execution drains");
+        assert!(matches!(
+            receive_message(&mut hub).await.expect("still serving"),
+            Message::HeartbeatAck(_)
+        ));
+        finish.send(()).expect("child has not been aborted");
+        let result = receive_message(&mut hub).await.expect("retained result");
+        assert_eq!(
+            result,
+            Message::Result(ResultFrame {
+                correlation: offer.correlation.clone(),
+                result: TerminalResult::Success {
+                    text: "finished echo".to_owned(),
+                },
+            })
+        );
+        send_message(
+            &mut hub,
+            Message::Heartbeat(Heartbeat {
+                sequence: PositiveU64::try_new(2).expect("next heartbeat"),
+                last_accepted_peer_sequence: 1,
+            }),
+        )
+        .await
+        .expect("heartbeat before result acknowledgement");
+        assert!(matches!(
+            receive_message(&mut hub)
+                .await
+                .expect("still awaiting acknowledgement"),
+            Message::HeartbeatAck(_)
+        ));
+        assert_eq!(
+            receive_message(&mut hub).await.expect("result resend"),
+            result
+        );
+        send_message(
+            &mut hub,
+            Message::ResultRecorded(ResultRecorded {
+                correlation: offer.correlation,
+            }),
+        )
+        .await
+        .expect("durable result acknowledgement");
+        assert!(matches!(
+            receive_message(&mut hub)
+                .await
+                .expect("shutdown after acknowledgement"),
+            Message::Shutdown(Shutdown {
+                reason: ShutdownReason::RunnerShutdown,
+                ..
+            })
+        ));
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        tokio::join!(runner, daemon)
+    })
+    .await
+    .expect("shutdown drains without stranding the lease");
+}
+
+#[tokio::test]
 async fn offer_and_unacknowledged_claim_cannot_start_execution() {
     let parent = TempDir::new().expect("fixture parent");
     let (mut state, mut connection, mut hub, offer) = fixture(&parent);
@@ -536,6 +651,54 @@ async fn retained_result_is_resent_until_the_exact_durable_acknowledgement() {
         signalbox_runner_wire::ReconnectInventory::default()
     );
     assert!(connection.pending_offer.is_none());
+}
+
+#[tokio::test]
+async fn local_shutdown_waits_for_the_durable_result_acknowledgement() {
+    let parent = TempDir::new().expect("fixture parent");
+    let (mut state, mut connection, mut hub, offer) = fixture(&parent);
+    connection.pending_offer = Some(offer.clone());
+    for phase in [
+        LeasePhaseKind::WaitingDispatch,
+        LeasePhaseKind::DispatchReceived,
+        LeasePhaseKind::ExecutionMayHaveStarted,
+    ] {
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: offer.correlation.clone(),
+                phase,
+            })
+            .expect("ordered durable phase");
+    }
+    state
+        .record_terminal_result(RetainedResult {
+            correlation: offer.correlation.clone(),
+            result: TerminalResult::Success {
+                text: "exact result".to_owned(),
+            },
+        })
+        .expect("durable result");
+
+    let serving = connection.serve_until_shutdown(&mut state, async {});
+    tokio::pin!(serving);
+    tokio::select! {
+        biased;
+        outcome = &mut serving => panic!("shutdown completed before result acknowledgement: {outcome:?}"),
+        () = tokio::task::yield_now() => {},
+    }
+
+    send_message(
+        &mut hub,
+        Message::ResultRecorded(ResultRecorded {
+            correlation: offer.correlation,
+        }),
+    )
+    .await
+    .expect("result acknowledgement");
+    assert_eq!(
+        serving.await.expect("clean shutdown boundary"),
+        ServeOutcome::ShutdownReady
+    );
 }
 
 #[tokio::test]

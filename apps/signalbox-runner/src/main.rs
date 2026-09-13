@@ -100,11 +100,13 @@ async fn run(
         };
         report_established(&connection);
         backoff.reset();
+        let mut shutdown_requested = false;
         let shutdown = async {
             tokio::select! {
                 _ = terminate.recv() => {}
                 _ = interrupt.recv() => {}
             }
+            shutdown_requested = true;
         };
         let served = connection.serve_until_shutdown(&mut state, shutdown).await;
         match served {
@@ -122,7 +124,7 @@ async fn run(
             Ok(ServeOutcome::ShutdownReady) => {
                 return shutdown_with_timeout(&mut connection).await;
             }
-            Err(error) if error.is_reconnectable() => {
+            Err(error) if error.is_reconnectable() && !shutdown_requested => {
                 let delay = backoff.next_delay();
                 report_reconnect(ReconnectStage::Serving, &error, delay);
                 if wait_for_retry(delay, &mut terminate, &mut interrupt).await {

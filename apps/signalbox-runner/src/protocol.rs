@@ -811,7 +811,7 @@ where
         }
     }
 
-    /// Serves until the connection ends or local shutdown reaches a clean frame boundary.
+    /// Drains admitted execution and its acknowledgement before local shutdown.
     pub async fn serve_until_shutdown<F>(
         &mut self,
         state: &mut RunnerStateRoot,
@@ -821,15 +821,30 @@ where
         F: Future<Output = ()>,
     {
         tokio::pin!(shutdown);
+        let mut shutdown_requested = false;
         loop {
+            if shutdown_requested && !self.has_unsettled_lease(state) {
+                return Ok(ServeOutcome::ShutdownReady);
+            }
             let event = tokio::select! {
                 event = self.receive_event() => event?,
-                () = &mut shutdown => return Ok(ServeOutcome::ShutdownReady),
+                () = &mut shutdown, if !shutdown_requested => {
+                    shutdown_requested = true;
+                    continue;
+                },
             };
             if let Some(end) = self.serve_event(state, event).await? {
                 return Ok(ServeOutcome::ConnectionEnded(end));
             }
         }
+    }
+
+    fn has_unsettled_lease(&self, state: &RunnerStateRoot) -> bool {
+        let inventory = state.reconnect_inventory();
+        self.pending_offer.is_some()
+            || self.execution.is_some()
+            || inventory.lease.is_some()
+            || inventory.result.is_some()
     }
 
     /// Handles one complete daemon frame or completed child result.
