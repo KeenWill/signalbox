@@ -1092,7 +1092,8 @@ test('does not start Attention reads when bootstrap validation fails', async ({ 
 
   await page.goto('/attention')
 
-  await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
+  await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
+  await expect(page.getByText('Sessions unavailable', { exact: true })).toBeVisible()
   await expect(page.getByText('Unexpected daemon response')).toBeVisible()
   expect(attentionRequests).toBe(0)
 })
@@ -1114,7 +1115,8 @@ test('does not start Attention reads for incompatible bootstrap values', async (
 
   await page.goto('/attention')
 
-  await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
+  await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
+  await expect(page.getByText('Sessions unavailable', { exact: true })).toBeVisible()
   await expect(page.getByText('Unexpected daemon response')).toBeVisible()
   expect(attentionRequests).toBe(0)
 })
@@ -1124,7 +1126,8 @@ test('retries a transient Attention bootstrap failure in place', async ({ page }
   await useDeterministicCatalog(page)
   await page.goto('/attention')
 
-  await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
+  await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
+  await expect(page.getByText('Sessions unavailable', { exact: true })).toBeVisible()
   await expect(page.getByText('Daemon unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: /^Retry/ })).toHaveCount(1)
   await page.getByRole('button', { name: 'Retry connection', exact: true }).click()
@@ -1137,13 +1140,22 @@ test('retries a transient Attention bootstrap failure in place', async ({ page }
   expect(admission.attempts).toBe(2)
 })
 
-test('gives iconless Attention contract errors the full empty-state width', async ({ page }) => {
-  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+test('redirects Attention before bootstrap completes', async ({ page }) => {
+  let finishBootstrap = () => {}
+  const pendingBootstrap = new Promise<void>((resolve) => {
+    finishBootstrap = resolve
+  })
+  await page.route('**/api/bootstrap', async (route) => {
+    await pendingBootstrap
+    await route.fulfill({ json: bootstrapFixture })
+  })
+  await useDeterministicCatalog(page)
   await page.goto('/attention')
 
-  const message = page.getByRole('heading', { name: 'Attention unavailable' }).locator('..')
-  await expect(message).toHaveCSS('grid-column-start', '1')
-  await expect(message).toHaveCSS('grid-column-end', '-1')
+  await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
+  await expect(page.getByText('Sessions unavailable', { exact: true })).toBeVisible()
+  finishBootstrap()
+  await expect(page.getByRole('checkbox', { name: 'Needs attention' })).toBeChecked()
 })
 
 test('mounts Imports inside the product shell without a second navigation or header', async ({

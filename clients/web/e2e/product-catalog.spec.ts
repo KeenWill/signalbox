@@ -626,7 +626,7 @@ test('uses product navigation sequences and closes mobile navigation after activ
 
   await page.keyboard.press('g')
   await page.keyboard.press('a')
-  await expect(page).toHaveURL(/attention/)
+  await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
 
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('button', { name: 'Open navigation' }).click()
@@ -736,7 +736,7 @@ test('replaces catalog continuation history instead of accumulating visited page
   await page.getByRole('button', { name: 'Next page' }).click()
   await expect(page).toHaveURL(/afterSession=/)
   await page.goBack()
-  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
 })
 
 for (const entry of ['direct', 'reload'] as const) {

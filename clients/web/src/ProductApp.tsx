@@ -960,16 +960,8 @@ export function ProductApp({
     void navigate({ to: '/$surface', params: { surface }, search: next })
 
   const content =
-    surface === 'attention' && bootstrap.isSuccess ? (
+    surface === 'attention' ? (
       <AttentionSurface registerEscapeHandler={registerSurfaceEscape} />
-    ) : surface === 'attention' ? (
-      <div className="surface-body">
-        <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
-          <div>
-            <h2>{bootstrap.isError ? 'Attention unavailable' : 'Loading Attention…'}</h2>
-          </div>
-        </section>
-      </div>
     ) : surface === 'sessions' &&
       bootstrap.isSuccess &&
       (sessionState.workspace || sessionState.session) ? (
