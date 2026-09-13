@@ -39,10 +39,14 @@ Native review publication and thread replies retain their returned review IDs
 and reply comment IDs before releasing the repository frontier lock. Review
 submissions and new thread openings retain their source review ID with
 `gh_event`; matching native receipts exclude them from `gh_readable_event`.
-Observation resolves the authenticated GitHub account before ingesting facts;
-review submissions by that account are excluded from rule evaluation, including
-retries. Subsequent thread reopenings remain eligible. Receipts are permanent;
-writes without a retained acknowledgement have no receipt provenance.
+Startup and reload pause repository event evaluation until observation resolves
+its authenticated GitHub account. Identity resolution consumes one bounded
+partial attempt; subsequent attempts use that identity until reload. Review
+submissions by that account are permanently marked at ingestion and excluded
+from rule evaluation and retries. Credential rotation does not reclassify
+already observed reviews. Subsequent thread reopenings remain eligible. Receipts
+are permanent; writes without a retained acknowledgement have no receipt
+provenance.
 
 Rules are versioned `RepoWatchRule` values. Fields within one matcher are
 conjunctive and rules are evaluated independently. The checked matcher owns the

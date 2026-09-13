@@ -326,22 +326,37 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
             .load_client()
             .await
             .map_err(RepositoryAttemptError::Client)?;
-        let response = client
-            .graphql(br#"{"query":"query RepositoryWatchActor { viewer { login } }"}"#.to_vec())
+        if !self
+            .store
+            .observer_identity_ready(&self.repository)
             .await
-            .map_err(|error| {
-                RepositoryAttemptError::Observation(ObservationError::Transport(error))
+            .map_err(RepositoryAttemptError::Store)?
+        {
+            let response = client
+                .graphql(br#"{"query":"query RepositoryWatchActor { viewer { login } }"}"#.to_vec())
+                .await
+                .map_err(|error| {
+                    RepositoryAttemptError::Observation(ObservationError::Transport(error))
+                })?;
+            let value: serde_json::Value = serde_json::from_slice(&response).map_err(|_| {
+                RepositoryAttemptError::Observation(ObservationError::InvalidResponse)
             })?;
-        let value: serde_json::Value = serde_json::from_slice(&response)
-            .map_err(|_| RepositoryAttemptError::Observation(ObservationError::InvalidResponse))?;
-        let actor = text(&value["data"]["viewer"]["login"])
-            .and_then(|login| RepoWatchAuthorLogin::try_new(login).ok())
-            .ok_or(RepositoryAttemptError::Observation(
-                ObservationError::InvalidResponse,
-            ))?;
-        sqlx::query("INSERT INTO observer_actor(repository, login) VALUES ($1,$2) ON CONFLICT (repository) DO UPDATE SET login=EXCLUDED.login")
-            .bind(self.repository.as_str()).bind(actor.as_str()).execute(&self.store.pool)
-            .await.map_err(StoreError::from).map_err(RepositoryAttemptError::Store)?;
+            let actor = text(&value["data"]["viewer"]["login"])
+                .and_then(|login| RepoWatchAuthorLogin::try_new(login).ok())
+                .ok_or(RepositoryAttemptError::Observation(
+                    ObservationError::InvalidResponse,
+                ))?;
+            self.store
+                .record_observer_identity(&self.repository, &actor)
+                .await
+                .map_err(RepositoryAttemptError::Store)?;
+            tracing::info!(
+                repository = self.repository.as_str(),
+                requests = 1_u64,
+                "repository-watch observer identity prepared"
+            );
+            return Ok(crate::measurements::PollOutcome::Partial);
+        }
         if producer == EventProducer::Webhook {
             return crate::poll_cache::observe_webhook_pulls(
                 &client,
@@ -1283,37 +1298,8 @@ mod tests {
             .connect_lazy("postgres://unused:unused@localhost/unused")?;
         pool.close().await;
         let store = RepoWatchStore::new(pool);
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let address = listener.local_addr()?;
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("identity request");
-            let mut request = [0_u8; 4096];
-            assert_ne!(stream.read(&mut request).expect("read request"), 0);
-            let body = r#"{"data":{"viewer":{"login":"fixture-observer"}}}"#;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .expect("identity response");
-        });
-        let client = GitHubClient::try_with_request_sender(
-            "repo-watch-test",
-            std::sync::Arc::new(move |_, path| {
-                Box::pin(async move {
-                    reqwest::Client::new()
-                        .get(format!("http://{address}"))
-                        .send()
-                        .await
-                        .map_err(|source| GitHubClientError::Request {
-                            path,
-                            status: None,
-                            source,
-                        })
-                })
-            }),
-        )?;
+        // Inert credentials: the closed store fails before identity I/O.
+        let client = GitHubClient::try_new("repo-watch-test", "unused-test-token")?;
         let mut task = GitHubRepositoryTask {
             repository: repository.clone(),
             signal_reviewers: Vec::new(),
@@ -1331,7 +1317,6 @@ mod tests {
                 sqlx::Error::PoolClosed
             )))
         ));
-        server.join().expect("identity server finishes");
         let evidence = store.ingestion_measurements(&repository);
         assert_eq!(
             evidence.last_poll.expect("attempt recorded").outcome,

@@ -153,34 +153,6 @@ async fn native_review_receipts_preserve_owner_reviews_and_later_thread_actions(
         "the owner's review and thread are both eligible"
     );
 
-    sqlx::query("INSERT INTO observer_actor(repository,login) VALUES ($1,'reviewer')")
-        .bind(repository.as_str())
-        .execute(&pool)
-        .await?;
-    let readable_reviews: i64 = sqlx::query_scalar("SELECT count(*) FROM gh_readable_event WHERE repository=$1 AND event_kind='review_submitted'")
-        .bind(repository.as_str()).fetch_one(&pool).await?;
-    assert_eq!(
-        readable_reviews, 0,
-        "all reviews by the authenticated account are excluded, even without a native receipt"
-    );
-    let retained_reviews: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM gh_event WHERE repository=$1 AND event_kind='review_submitted'",
-    )
-    .bind(repository.as_str())
-    .fetch_one(&pool)
-    .await?;
-    assert!(retained_reviews > 0, "excluded events remain durable");
-    sqlx::query("UPDATE observer_actor SET login='another-account' WHERE repository=$1")
-        .bind(repository.as_str())
-        .execute(&pool)
-        .await?;
-    let other_reviews: i64 = sqlx::query_scalar("SELECT count(*) FROM gh_readable_event WHERE repository=$1 AND event_kind='review_submitted'")
-        .bind(repository.as_str()).fetch_one(&pool).await?;
-    assert!(
-        other_reviews > 0,
-        "other accounts remain eligible after credential rotation"
-    );
-
     let resolved = review_and_thread(&repository, native_review.get(), true);
     restarted
         .ingest_observation(
@@ -205,13 +177,188 @@ async fn native_review_receipts_preserve_owner_reviews_and_later_thread_actions(
         reopening, 1,
         "an owner reopening a native thread is a distinct action"
     );
-    let poisoned: uuid::Uuid = sqlx::query_scalar("UPDATE gh_event SET normalized_payload=$2 WHERE repository=$1 AND source_review_id=3 AND event_kind='review_submitted' RETURNING event_id")
+    pool.close().await;
+    core.close().await;
+    Ok(())
+}
+
+struct IdentityClient(signalbox_module_repo_watch_v2::github::GitHubClient);
+
+impl signalbox_module_repo_watch_v2::provider::RepositoryClientLoader for IdentityClient {
+    type Error = std::convert::Infallible;
+    async fn load_client(
+        &self,
+    ) -> Result<signalbox_module_repo_watch_v2::github::GitHubClient, Self::Error> {
+        Ok(self.0.clone())
+    }
+}
+
+pub(super) async fn identity_attempt(
+    store: &RepoWatchStore,
+    repository: &RepositorySlug,
+    login: Option<&str>,
+) -> bool {
+    use signalbox_module_repo_watch_v2::{
+        github::GitHubClient, measurements::PollOutcome, provider::GitHubRepositoryTask,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let requests = Arc::new(AtomicUsize::new(0));
+    let observed = requests.clone();
+    let body = serde_json::json!({"data":{"viewer":{"login":login}}}).to_string();
+    let client = GitHubClient::try_with_request_sender(
+        "identity-fixture",
+        Arc::new(move |request, _| {
+            let body = body.clone();
+            assert_eq!(request.build().expect("request").url().path(), "/graphql");
+            observed.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(http::Response::builder()
+                    .status(200)
+                    .body(body)
+                    .expect("identity response")
+                    .into())
+            })
+        }),
+    )
+    .expect("fixture client");
+    let mut task = GitHubRepositoryTask {
+        repository: repository.clone(),
+        signal_reviewers: Vec::new(),
+        subject_retention: MERGED_RETENTION,
+        poll_request_budget: std::num::NonZeroUsize::MIN,
+        clients: IdentityClient(client),
+        store: store.clone(),
+    };
+    let result = task.poll_outcome(EventProducer::Poll).await;
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "identity lookup stays within the one-request attempt budget"
+    );
+    if login.is_some() {
+        assert!(matches!(result, Ok(PollOutcome::Partial)));
+        true
+    } else {
+        assert!(result.is_err());
+        false
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn observer_identity_gates_evaluation_and_self_review_exclusion_survives_rotation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, core, url) = postgres().await?;
+    migrate(&core).await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("identity/project".to_owned())?;
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new("identity-gate".to_owned())?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::ReviewSubmitted],
+            ..Default::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new("watch".to_owned())?,
+        }],
+        RepoWatchSingletonScope::PullRequest,
+        Duration::ZERO,
+    )?;
+    for review in [1, 2] {
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &goal_review_observation(&repository, review),
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+        if review == 1 {
+            store
+                .reconcile_rules(
+                    &[RepositoryRuleSet::new(
+                        &repository,
+                        std::slice::from_ref(&rule),
+                    )],
+                    OffsetDateTime::now_utc(),
+                )
+                .await?;
+        }
+    }
+    assert!(store.next_rule_event(&repository, &rule).await?.is_some());
+
+    store.prepare_observer_identity(&repository).await?;
+    assert!(
+        store.next_rule_event(&repository, &rule).await?.is_none(),
+        "startup cannot evaluate ahead of identity resolution"
+    );
+    assert!(!identity_attempt(&store, &repository, None).await);
+    assert!(
+        store.next_rule_event(&repository, &rule).await?.is_none(),
+        "a failed lookup keeps evaluation paused"
+    );
+    assert!(identity_attempt(&store, &repository, Some("Reviewer")).await);
+    let own: bool = sqlx::query_scalar("SELECT self_review FROM gh_event WHERE repository=$1 AND event_kind='review_submitted' AND source_review_id=2")
+        .bind(repository.as_str()).fetch_one(&pool).await?;
+    assert!(
+        own,
+        "the first identity resolves retained review provenance"
+    );
+    store.prepare_observer_identity(&repository).await?;
+    assert!(identity_attempt(&store, &repository, Some("another-account")).await);
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &goal_review_observation(&repository, 3),
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let reviews: Vec<Decimal> = sqlx::query_scalar("SELECT stored.source_review_id FROM gh_readable_event readable JOIN gh_event stored USING(event_id) WHERE readable.repository=$1 AND readable.event_kind='review_submitted' ORDER BY readable.repository_event_ordinal")
+        .bind(repository.as_str()).fetch_all(&pool).await?;
+    assert_eq!(
+        reviews,
+        vec![Decimal::from(3_u64)],
+        "old self reviews stay excluded; new reviews from the former account are eligible"
+    );
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new("reviews".to_owned())?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::ReviewSubmitted],
+            ..Default::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new("watch".to_owned())?,
+        }],
+        RepoWatchSingletonScope::PullRequest,
+        Duration::ZERO,
+    )?;
+    store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                &repository,
+                std::slice::from_ref(&rule),
+            )],
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &goal_review_observation(&repository, 4),
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let poisoned: uuid::Uuid = sqlx::query_scalar("UPDATE gh_event SET normalized_payload=$2 WHERE repository=$1 AND source_review_id=4 AND event_kind='review_submitted' RETURNING event_id")
         .bind(repository.as_str()).bind(b"not json".as_slice()).fetch_one(&pool).await?;
-    let next = restarted
-        .next_rule_event(&repository, &rule)
-        .await?
-        .expect("next readable event");
-    assert_ne!(next.event.id().into_uuid(), poisoned);
+    assert!(store.next_rule_event(&repository, &rule).await?.is_none());
     let quarantined: bool =
         sqlx::query_scalar("SELECT decode_error IS NOT NULL FROM gh_event WHERE event_id=$1")
             .bind(poisoned)
@@ -219,9 +366,8 @@ async fn native_review_receipts_preserve_owner_reviews_and_later_thread_actions(
             .await?;
     assert!(
         quarantined,
-        "actor filtering preserves ordinary event quarantine"
+        "identity filtering preserves ordinary event quarantine"
     );
-
     pool.close().await;
     core.close().await;
     Ok(())
