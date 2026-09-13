@@ -60,9 +60,24 @@
 .cost-chip {
   display: inline-block;
   max-width: 22rem;
-  overflow: hidden;
+  min-width: 0;
   vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+}
+.cost-chip-toggle {
+  max-width: 100%;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-variant-numeric: tabular-nums;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.cost-chip-details {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.cost-chip-details[hidden] {
+  display: none;
 }

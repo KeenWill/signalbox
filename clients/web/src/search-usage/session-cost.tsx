@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useId, useState } from 'react'
 import type { WebUsageCallPage } from '../generated/web-contract.mjs'
 import { type CostTotal, costTotalText, totalCost } from './cost'
 import { usageSourceOptions } from './queries'
@@ -64,6 +65,8 @@ export function CostChip({
   cost?: CostTotal
   status: 'pending' | 'error' | 'success'
 }) {
+  const [expanded, setExpanded] = useState(false)
+  const detailsId = useId()
   const text =
     status === 'error'
       ? 'Cost unavailable'
@@ -79,12 +82,21 @@ export function CostChip({
               .filter(Boolean)
               .join(' · ')
           : 'Cost not loaded'
+  if (!cost || status !== 'success') return <span className="cost-chip">{text}</span>
   return (
-    <span
-      className="cost-chip"
-      title={cost ? [costTotalText(cost), ...cost.rates].join(' · ') : text}
-    >
-      {text}
+    <span className="cost-chip">
+      <button
+        type="button"
+        className="cost-chip-toggle"
+        aria-expanded={expanded}
+        aria-controls={detailsId}
+        onClick={() => setExpanded(!expanded)}
+      >
+        {text}
+      </button>
+      <span id={detailsId} className="cost-chip-details" hidden={!expanded}>
+        {[costTotalText(cost), ...cost.rates].join(' · ')}
+      </span>
     </span>
   )
 }
