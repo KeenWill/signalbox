@@ -1084,16 +1084,22 @@ for (const leaveCatalog of [false, true]) {
     await useCatalogFixture(page)
     const requests: Array<{ command_id: string; title: string }> = []
     let savedTitle = 'Release verification'
-    await page.route('**/api/sessions?**', (route) =>
-      route.fulfill({
+    let stallRefresh = false
+    let refreshStalled = false
+    await page.route('**/api/sessions?**', (route) => {
+      if (stallRefresh) {
+        refreshStalled = true
+        return
+      }
+      return route.fulfill({
         json: {
           ...firstPage,
           summaries: firstPage.summaries.map((row, index) =>
             index === 0 ? { ...row, title_summary: savedTitle } : row,
           ),
         },
-      }),
-    )
+      })
+    })
     await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
       requests.push(route.request().postDataJSON())
       if (requests.length === 1) {
@@ -1111,6 +1117,7 @@ for (const leaveCatalog of [false, true]) {
       } else {
         if (requests.at(-1)?.command_id !== requests[0]?.command_id)
           savedTitle = 'Stale title reinstalled'
+        stallRefresh = leaveCatalog
         await route.fulfill({ status: 204 })
       }
     })
@@ -1129,11 +1136,14 @@ for (const leaveCatalog of [false, true]) {
       await page.getByRole('link', { name: 'Settings', exact: true }).click()
       await expect(page).toHaveURL(/\/settings$/)
       await page.getByRole('link', { name: 'Sessions', exact: true }).click()
+      await expect(page.getByRole('button', { name: /Another writer title/ })).toBeVisible()
     }
     await rename.click()
     await expect(input).toHaveValue('My ambiguous title')
     await expect(input).toHaveAttribute('readonly', '')
     await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(input).toBeHidden()
+    if (leaveCatalog) await expect.poll(() => refreshStalled).toBe(true)
     await expect(page.getByRole('button', { name: /Another writer title/ })).toBeVisible()
     expect(requests).toHaveLength(2)
     expect(requests[1]).toEqual(requests[0])
