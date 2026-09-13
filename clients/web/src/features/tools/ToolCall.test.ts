@@ -11,6 +11,25 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each([
+    ['sandbox_setup_failed', 'Sandbox setup failed'],
+    ['filesystem_confined', 'Filesystem confined'],
+    ['unsandboxed', 'Unsandboxed'],
+  ])('identifies the execution boundary for a %s timeout', (kind, label) => {
+    const [, tool] = toolExample(
+      'sandboxed_exec',
+      { program: 'tool' },
+      {
+        confinement: { kind },
+        outcome: { kind: 'timed_out' },
+      },
+    )
+    const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))
+    expect(markup).toContain('Timed out')
+    expect(markup).toContain(`<span>${label}</span>`)
+    expect(markup.includes('Sandbox setup failed')).toBe(kind === 'sandbox_setup_failed')
+  })
+
   it.each([null, 0, 7])('distinguishes a signal from exit code %s', (code) => {
     const markup = render(
       toolExample('sandboxed_exec', { program: 'tool' }, { outcome: { kind: 'exited', code } }),

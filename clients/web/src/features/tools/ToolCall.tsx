@@ -110,6 +110,7 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
       .filter(Boolean)
       .join(' ')
   const outcome = fields(result.outcome)
+  const confinement = fields(result.confinement)
   const code = result.exit_code ?? outcome.code
   const stdout = fields(result.stdout)
   const stderr = fields(result.stderr)
@@ -128,6 +129,7 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
         </span>
       )}
       {typeof outcome.reason === 'string' && <span>{fieldLabel(outcome.reason)}</span>}
+      {typeof confinement.kind === 'string' && <span>{fieldLabel(confinement.kind)}</span>}
       <TextPreview text={textField(stdout.text ?? result.stdout ?? result.output)} label="Output" />
       <TextPreview text={textField(stderr.text ?? result.stderr)} label="Error output" />
       {(stdout.completeness === 'truncated' || stderr.completeness === 'truncated') && (
