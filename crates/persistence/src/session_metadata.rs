@@ -214,11 +214,18 @@ impl SessionMetadataRepository {
     /// User-global registry inspection is the first durable read. An unseen
     /// command serializes with other metadata writers by locking the session
     /// row before a separate statement samples its timestamp and replaces
-    /// satellites.
+    /// satellites. Core receipt commands are rejected; Core writes are confined
+    /// to the title settlement transaction.
     pub async fn handle(
         &self,
         command: ReplaceSessionMetadata,
     ) -> Result<ReplaceSessionMetadataHandlingOutcome, SessionMetadataRepositoryError> {
+        if command.actor() == Actor::Core {
+            return Err(SessionMetadataCorruption::Inconsistent(
+                "core metadata requires title settlement",
+            )
+            .into());
+        }
         let command_id = command.command_id();
         let mut transaction = self.pool.begin().await?;
 
