@@ -748,6 +748,14 @@ function ContinuedEvent({
     if (adoptToolPage && detail.data && advancesToolMember(detail.data))
       adoptToolPage(previous.current, detail.data, false)
   }, [detail.data, adoptToolPage])
+  const next = detail.data?.continuation
+  const canContinue =
+    detail.data &&
+    next &&
+    (!adoptToolPage ||
+      (next.type === 'more_body' &&
+        isToolBodyContinuation(next.body) &&
+        !advancesToolMember(detail.data)))
   if (!open)
     return (
       <button type="button" onClick={() => setOpen(true)}>
@@ -770,7 +778,7 @@ function ContinuedEvent({
           <BodyText body={item.body} />
         </div>
       ))}
-      {detail.data?.continuation && !(adoptToolPage && advancesToolMember(detail.data)) && (
+      {canContinue && (
         <button
           type="button"
           onClick={() => {

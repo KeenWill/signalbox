@@ -14,6 +14,7 @@ import {
   detailSessionId,
   detailWindow,
   resultCursor,
+  toolResultItem,
 } from './session-detail-fixture'
 
 test('shows a completed assistant response before its turn closure is loaded', async ({
@@ -772,4 +773,78 @@ test('does not offer a goal-text continuation inside a tool disclosure', async (
   await expect(
     transcript.getByRole('button', { name: 'Show more tools', exact: true }),
   ).toHaveCount(0)
+})
+
+test('stops nested tool output reading before the next goal', async ({ page }, testInfo) => {
+  const problems: string[] = []
+  page.on('pageerror', (error) => problems.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') problems.push(message.text())
+  })
+  const reads: string[] = []
+  const item = toolResultItem()
+  if (item.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+  const body = item.body
+  const tool = body.tools[0]
+  if (tool?.evidence.type !== 'physical_attempt') throw new Error('Physical tool missing')
+  const evidence = tool.evidence
+  const continued = {
+    ...resultCursor,
+    body: { ...resultCursor.body, offset_bytes: '5' },
+  }
+  const goal = {
+    ...resultCursor,
+    body: { ...resultCursor.body, field: 'goal_text' as const },
+  }
+  await turnApi(page)
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    const field = url.searchParams.get('cursor_field')
+    if (!field) return route.fallback()
+    reads.push(field)
+    if (field !== 'tool_result') return route.abort()
+    const final = url.searchParams.get('cursor_offset') === '5'
+    const text = final ? 'output' : 'tool '
+    return route.fulfill({
+      json: detailPage(
+        [
+          {
+            ...item,
+            projected_body_bytes: 128 + text.length,
+            body: {
+              ...body,
+              tools: [
+                {
+                  ...tool,
+                  evidence: {
+                    ...evidence,
+                    result: {
+                      text,
+                      offset_bytes: final ? '5' : '0',
+                      total_bytes: '11',
+                      continuation: final ? null : continued.body,
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+        final ? goal : continued,
+      ),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const chips = transcript.getByRole('region', { name: 'Tools used' })
+  await chips.getByRole('button', { name: 'exec_command', exact: true }).click()
+  await chips.getByRole('button', { name: 'Read more', exact: true }).click()
+  await expect(chips.getByText('tool', { exact: true })).toBeVisible()
+  await chips.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await expect(chips.getByText('output', { exact: true })).toBeVisible()
+  await expect(chips.getByRole('button', { name: 'Continue reading', exact: true })).toHaveCount(0)
+  await expect(chips.getByRole('button', { name: 'Show more tools', exact: true })).toHaveCount(0)
+  expect(reads).toEqual(['tool_result', 'tool_result'])
+  await page.screenshot({ path: testInfo.outputPath('tool-stops-before-goal.png') })
+  expect(problems).toEqual([])
 })
