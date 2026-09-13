@@ -308,12 +308,7 @@ export function VirtualTranscript({
     if (!initialized.current) {
       initialized.current = true
       if (initialEnd && selected < 0) virtualizer.scrollToIndex(ids.length - 1, { align: 'end' })
-    } else if (
-      followEnd &&
-      atEnd.current &&
-      previousLast.current &&
-      ids.includes(previousLast.current)
-    ) {
+    } else if (followEnd && atEnd.current) {
       virtualizer.scrollToIndex(ids.length - 1, { align: 'end' })
     } else if (anchor.current) {
       const index = ids.indexOf(anchor.current.id)
