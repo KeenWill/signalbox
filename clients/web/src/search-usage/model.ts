@@ -180,8 +180,11 @@ export class HttpSearchUsageSource implements SearchUsageSource {
     private readonly request: typeof fetch,
   ) {}
 
-  static connect(request: typeof fetch = fetch): Promise<HttpSearchUsageSource> {
-    return HttpSearchUsageSource.connectSource(request, true)
+  static connect(
+    request: typeof fetch = fetch,
+    signal?: AbortSignal,
+  ): Promise<HttpSearchUsageSource> {
+    return HttpSearchUsageSource.connectSource(request, true, signal)
   }
 
   static connectUsage(
@@ -193,10 +196,26 @@ export class HttpSearchUsageSource implements SearchUsageSource {
   private static async connectSource(
     request: typeof fetch,
     requireSearch: boolean,
+    signal?: AbortSignal,
   ): Promise<HttpSearchUsageSource> {
-    const response = await request('/api/bootstrap')
+    const response = await request('/api/bootstrap', { signal })
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
+    return HttpSearchUsageSource.fromBootstrap(bootstrap, request, requireSearch)
+  }
+
+  static withAdmittedUsageBootstrap(
+    bootstrap: WebContractBootstrap,
+    request: typeof fetch = fetch,
+  ): Pick<HttpSearchUsageSource, 'limits' | 'usageSummary' | 'usageCalls'> {
+    return HttpSearchUsageSource.fromBootstrap(bootstrap, request, false)
+  }
+
+  private static fromBootstrap(
+    bootstrap: WebContractBootstrap,
+    request: typeof fetch,
+    requireSearch: boolean,
+  ): HttpSearchUsageSource {
     if (requireSearch && !bootstrap.capabilities.bounded_lexical_search) {
       throw new TypeError('bounded lexical search capability is unavailable')
     }

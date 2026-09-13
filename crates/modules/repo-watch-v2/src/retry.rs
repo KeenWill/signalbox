@@ -54,6 +54,13 @@ impl RepoWatchStore {
         Codec: crate::SessionCommandCodec,
     {
         use crate::dispatch::EvaluationError;
+        if self
+            .observer_evaluation_paused(repository)
+            .await
+            .map_err(EvaluationError::Store)?
+        {
+            return Ok(false);
+        }
         let rows: Vec<Candidate> = sqlx::query_as(
             "WITH latest AS (
                SELECT DISTINCT ON (e.pull_request_number) d.* FROM dispatch_ledger d JOIN gh_readable_event e USING(event_id)
