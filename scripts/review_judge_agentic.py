@@ -17,7 +17,8 @@ def prepare_workspace(workspace, session_id, checkout, head_sha, patch, context)
                               capture_output=True, text=True).stdout.strip()
 
     if not (root / ".git").exists():
-        object_format = git("-C", workspace, "rev-parse", "--show-object-format")
+        format_source = workspace if (workspace / ".git").exists() else checkout
+        object_format = git("-C", format_source, "rev-parse", "--show-object-format")
         git("init", "--object-format=" + object_format, root)
     head = root / "head"
     if not head.exists():

@@ -128,6 +128,22 @@ class ScratchCheckoutTests(unittest.TestCase):
         self.assertEqual(git(head.parent, "rev-parse", "--show-object-format"), "sha256")
         self.assertEqual(git(head, "rev-parse", "HEAD"), self.head)
 
+    def test_plain_workspace_uses_the_reviewed_checkouts_object_format(self):
+        checkout = self.repository.parent / "sha256-checkout"
+        git(self.repository, "init", "--object-format=sha256", str(checkout))
+        git(checkout, "-c", "user.name=Judge fixture", "-c",
+            "user.email=judge@example.com", "commit", "--allow-empty", "-m", "Head")
+        head_sha = git(checkout, "rev-parse", "HEAD")
+        patch = self.repository.parent / "change.patch"
+        patch.write_text("Diff")
+        for parent in (self.repository.parent, self.repository):
+            with self.subTest(parent=parent):
+                workspace = parent / "plain-workspace"
+                workspace.mkdir()
+                head = prepare_workspace(workspace, "session", checkout, head_sha, patch, "Context")
+                self.assertEqual(git(head.parent, "rev-parse", "--show-object-format"), "sha256")
+                self.assertEqual(git(head, "rev-parse", "HEAD"), head_sha)
+
     def test_citations_are_resolved_before_the_judge_session_is_created(self):
         args = SimpleNamespace(repository=self.repository, workspace=self.workspace,
                                output=self.repository.parent / "results",
