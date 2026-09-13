@@ -30,7 +30,9 @@ leaves that axis's total unknown.
 inline the unchanged default context builder's output and the sibling helper's
 16,384-byte full-text projection. The templates allow sixteen and zero tool
 requests respectively. Both use the same prompt and terminal-result accounting.
-`read_diff` parses the prepared `change.patch` through the pinned file reader.
+Both definitions are included in the
+[example catalog](../../config/session-templates.example.toml). `read_diff`
+parses the prepared `change.patch` through the pinned file reader.
 
 Before submitting agentic input, the harness provisions the session's
 [derived workspace](configuration-and-credentials.md) with a detached `head/`

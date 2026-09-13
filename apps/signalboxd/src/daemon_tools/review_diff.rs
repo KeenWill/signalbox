@@ -213,4 +213,39 @@ mod tests {
         };
         assert!(text.contains("+after"));
     }
+
+    #[test]
+    fn diff_read_preserves_rename_edits_through_either_path() {
+        use signalbox_tools_workspace::LocalWorkspaceFileSystem;
+
+        // A rename with a small edit deep in the file must keep the prepared
+        // edit hunk instead of treating the destination as a whole-file addition.
+        const RENAME_PATCH: &str = "diff --git a/before.txt b/after.txt\nsimilarity index 99%\nrename from before.txt\nrename to after.txt\nindex 064705c..f190835 100644\n--- a/before.txt\n+++ b/after.txt\n@@ -4997,7 +4997,7 @@ line 4996\n line 4997\n line 4998\n line 4999\n-before\n+after\n line 5001\n line 5002\n line 5003\n";
+        const EDIT_HUNK: &str = "@@ -4997,7 +4997,7 @@ line 4996\n line 4997\n line 4998\n line 4999\n-before\n+after\n line 5001\n line 5002\n line 5003\n";
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("change.patch"), RENAME_PATCH).unwrap();
+
+        for path in ["before.txt", "after.txt"] {
+            let arguments = NormalizedToolArguments::try_from_provider_text(
+                serde_json::json!({"path": path, "line": 5000}).to_string(),
+            )
+            .unwrap();
+            let evidence = read(&LocalWorkspaceFileSystem, root.path(), &arguments);
+            let ToolExecutorEvidence::CompletedText(text) = evidence else {
+                panic!("prepared rename edit should be readable through {path}: {evidence:?}")
+            };
+            let result: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                result,
+                serde_json::json!({"hunk": {
+                    "path": path,
+                    "head_start": 4997,
+                    "head_end": 5003,
+                    "text": EDIT_HUNK,
+                    "truncated": false,
+                }}),
+                "rename evidence through {path}",
+            );
+        }
+    }
 }
