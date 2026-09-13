@@ -163,10 +163,11 @@ impl SessionTitleRepository {
         else {
             return Ok(String::new());
         };
-        let members = crate::context_compaction::projected_frontier_membership(
+        let members = crate::context_compaction::projected_title_frontier_membership(
             &mut tx,
             session,
             source.frontier,
+            max_utf8_bytes,
         )
         .await
         .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
