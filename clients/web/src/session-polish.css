@@ -97,3 +97,24 @@
   margin-block: calc(var(--product-space) / 2);
   line-height: 1.5;
 }
+
+.session-workspace-surface > .session-load-state {
+  align-self: start;
+  margin: 0;
+  padding: var(--product-space);
+  border: 0;
+}
+.session-load-state button {
+  padding: calc(var(--product-space) / 2) var(--product-space);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--product-space) / 2);
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: inherit;
+  cursor: pointer;
+}
+.session-conversation > p {
+  padding: var(--product-space);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}

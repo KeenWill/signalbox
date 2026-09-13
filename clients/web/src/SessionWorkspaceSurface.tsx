@@ -585,7 +585,17 @@ export function SessionWorkspaceSurface({
         </p>
       ) : session.isError ? (
         <p className="session-load-state" role="alert">
-          Session failed to load.
+          <span>{session.isFetching ? 'Retrying session…' : 'Session failed to load.'}</span>{' '}
+          <button
+            type="button"
+            disabled={session.isFetching}
+            onClick={() => {
+              workspaceRef.current?.focus()
+              void refetchSession()
+            }}
+          >
+            Retry session
+          </button>
         </p>
       ) : displayedSession === undefined ? (
         <p className="session-load-state" role="status">
@@ -784,7 +794,7 @@ export function SessionWorkspaceSurface({
                 limits={transcriptLimits}
               />
             ) : (
-              <p>Transcript text unavailable</p>
+              <p>Conversation text is unavailable; use Events to view this session.</p>
             )}
           </section>
           {synchronization.sessionId === sessionId && synchronization.drafts.length > 0 && (
