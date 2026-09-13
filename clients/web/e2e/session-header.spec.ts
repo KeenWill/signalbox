@@ -14,7 +14,9 @@ for (const viewport of [
     const box = await page.locator('.session-compact-header').boundingBox()
     expect(box?.height).toBeLessThanOrEqual(70)
     await page.getByRole('textbox', { name: 'Message', exact: true }).press('Escape')
-    await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeFocused()
+    await expect(
+      page.getByRole('region', { name: 'Session transcript', exact: true }),
+    ).toBeFocused()
     await page.screenshot({
       path: testInfo.outputPath(`header-${viewport.name}.png`),
       fullPage: true,
@@ -88,12 +90,12 @@ for (const load of ['pending', 'failed'] as const) {
 }
 
 for (const focus of ['conversation', 'composer'] as const) {
-  test(`Escape closes session details after focus moves to the ${focus}`, async ({ page }) => {
+  test(`Escape leaves the workspace after focus moves to the ${focus}`, async ({ page }) => {
     await sessionApi(page)
     await openSession(page)
     const details = page.getByText('Session details', { exact: true })
     const telemetry = page.getByText('Up to date as of', { exact: true })
-    const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
+    const conversation = page.getByRole('region', { name: 'Session transcript', exact: true })
     await details.click()
     if (focus === 'composer') {
       const message = page.getByRole('textbox', { name: 'Message', exact: true })
@@ -104,11 +106,9 @@ for (const focus of ['conversation', 'composer'] as const) {
       await expect(telemetry).toBeVisible()
     } else {
       await conversation.focus()
+      await expect(conversation).toBeFocused()
     }
-    await page.keyboard.press('Escape')
-    await expect(telemetry).toBeHidden()
-    await expect(details).toBeFocused()
-    await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(sessionId)
+    await expect(telemetry).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(page).toHaveURL(/\/sessions$/)
   })
