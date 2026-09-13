@@ -251,7 +251,7 @@ test('releases the phone height reservation after reloading at desktop width', a
   expect(desktop.height).toBeLessThan(phone.height)
 })
 
-for (const label of ['garbage', 'image/png;']) {
+for (const label of ['garbage', 'image/png;', String.raw`image/png;x="abc\"`]) {
   test(`downloads attachments carrying timeline label ${label}`, async ({ page }) => {
     const mediaTypes: string[] = []
     await page.route('**/api/bootstrap', (route) =>

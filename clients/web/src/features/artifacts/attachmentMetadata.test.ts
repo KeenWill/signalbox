@@ -5,6 +5,7 @@ import { attachmentDescriptorMediaType } from './attachmentMetadata'
 describe('attachment descriptor media types', () => {
   it.each([
     'garbage',
+    String.raw`image/png;x="abc\"`,
     'image/png;',
     'image/png; ',
     'text/plain; charset=utf-8;',
