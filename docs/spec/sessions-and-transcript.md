@@ -648,8 +648,8 @@ independently of the persisted level. Escape inside a continuation reader closes
 that reader and restores its Read more control. Otherwise, Escape collapses the
 focused expanded turn and reveals and focuses a surviving heading for that turn,
 including a retained segment outside the virtual range, before a subsequent
-Escape closes the workspace. Header disclosures handle Escape only while focus
-is inside them. The scrolling transcript owns the conversation focus entry and
+Escape closes the workspace. Header disclosures and the desktop side inspector handle Escape only while
+focus is inside them. The scrolling transcript owns the conversation focus entry and
 command target; the enclosing section adds no focus stop. Invalid event-link
 addresses outside the unsigned 64-bit range are ignored. When a turn is opened,
 retained events without a turn identity are associated only by an exact per-turn
