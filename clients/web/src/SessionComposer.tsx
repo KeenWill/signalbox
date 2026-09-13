@@ -52,8 +52,24 @@ export function SessionComposer({
   useLayoutEffect(() => {
     const field = messageRef.current
     if (!field) return
-    field.style.height = 'auto'
-    field.style.height = `${field.scrollHeight}px`
+    const resize = () => {
+      field.style.height = 'auto'
+      field.style.height = `${field.scrollHeight}px`
+    }
+    resize()
+    let width = 0
+    let frame = 0
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry || width === entry.contentRect.width) return
+      width = entry.contentRect.width
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(resize)
+    })
+    observer.observe(field)
+    return () => {
+      observer.disconnect()
+      cancelAnimationFrame(frame)
+    }
   }, [message])
   useEffect(() => {
     if (notice === 'Message accepted' && activeState != null) setNotice('')

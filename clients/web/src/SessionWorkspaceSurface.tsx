@@ -468,7 +468,14 @@ export function SessionWorkspaceSurface({
       ) : session.isError ? (
         <p className="session-load-state" role="alert">
           <span>Session failed to load.</span>{' '}
-          <button type="button" disabled={session.isFetching} onClick={() => void refetchSession()}>
+          <button
+            type="button"
+            disabled={session.isFetching}
+            onClick={() => {
+              workspaceRef.current?.focus()
+              void refetchSession()
+            }}
+          >
             Retry session
           </button>
         </p>

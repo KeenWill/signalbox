@@ -21,6 +21,10 @@
   min-height: 0;
   overflow: auto;
 }
+.session-conversation .session-transcript-text {
+  padding: var(--product-space);
+  border: 0;
+}
 .session-conversation:has(.session-transcript-scroll) {
   display: flex;
   overflow: hidden;
@@ -83,29 +87,12 @@
   overflow-wrap: anywhere;
 }
 
-.session-conversation .session-transcript-text {
-  padding: var(--product-space);
-  border: 0;
-}
 .session-conversation .session-message-entry {
   padding-block: calc(var(--product-space) / 2);
 }
 .session-conversation .session-message-text {
   margin-block: calc(var(--product-space) / 2);
   line-height: 1.5;
-}
-.session-conversation .session-tool-text {
-  margin-top: calc(var(--product-space) / 2);
-}
-.session-conversation .session-tool-text pre {
-  padding: var(--product-space);
-}
-.session-conversation .session-tool-chips {
-  gap: calc(var(--product-space) / 2);
-  margin-block: calc(var(--product-space) / 2);
-}
-.session-conversation .session-tool-chips button {
-  padding: calc(var(--product-space) / 4) calc(var(--product-space) / 2);
 }
 
 .session-workspace-surface > .session-load-state {
