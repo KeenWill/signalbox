@@ -82,6 +82,8 @@ export async function turnApi(page: Page, turnId = detailTurnId, entries = detai
           supervision: null,
           repository_watch: null,
           workspace_root_kind: null,
+          title_summary: null,
+          last_activity: { kind: 'session', unix_microseconds: '1' },
           sizes: {
             item_count: String(entries.length),
             projected_text_bytes: '300',
