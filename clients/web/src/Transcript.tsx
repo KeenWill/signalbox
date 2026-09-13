@@ -1,4 +1,4 @@
-import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
+import { defaultRangeExtractor, elementScroll, useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, Bot, CheckCircle2, CircleDot, TerminalSquare } from 'lucide-react'
 import {
   type ReactNode,
@@ -246,12 +246,17 @@ export function VirtualTranscript({
   const initialized = useRef(false)
   const atEnd = useRef(initialEnd)
   const restoringLaterAnchor = useRef(false)
+  const restoredOffset = useRef<number | null>(null)
   const previousLast = useRef<string | undefined>(undefined)
   const touchStart = useRef<number | null>(null)
   const virtualizer = useVirtualizer({
     useFlushSync: false,
     count: ids.length,
     getScrollElement: () => parent.current,
+    scrollToFn: (offset, options, instance) => {
+      elementScroll(offset, options, instance)
+      restoredOffset.current = offset + (options.adjustments ?? 0)
+    },
     estimateSize: () => estimateSize,
     overscan: TRANSCRIPT_OVERSCAN_ROWS,
     getItemKey: (index) => ids[index] ?? index,
@@ -285,6 +290,7 @@ export function VirtualTranscript({
       return
     }
     if (!ids.length) return
+    restoredOffset.current = null
     if (!initialized.current) {
       initialized.current = true
       if (initialEnd && selected < 0) virtualizer.scrollToIndex(ids.length - 1, { align: 'end' })
@@ -308,6 +314,7 @@ export function VirtualTranscript({
     }
     restoringLaterAnchor.current = false
     previousLast.current = ids.at(-1)
+    restoredOffset.current ??= parent.current?.scrollTop ?? null
   }, [ids, initialEnd, followEnd, loadingLater, selected, virtualizer, parent])
   const remember = () => {
     const offset = parent.current?.scrollTop ?? 0
@@ -317,12 +324,20 @@ export function VirtualTranscript({
   const edge = (direction?: 'before' | 'after') => {
     const element = parent.current
     if (!element) return
+    // Measuring or evicting rows can clamp a requested scroll before its event arrives.
+    const restored =
+      direction === undefined &&
+      restoredOffset.current !== null &&
+      Math.max(0, Math.min(restoredOffset.current, element.scrollHeight - element.clientHeight)) ===
+        element.scrollTop
+    if (!restored) restoredOffset.current = null
     remember()
     atEnd.current =
       !loadingLater &&
       direction !== 'before' &&
       element.scrollHeight - element.scrollTop - element.clientHeight <= 1
     onEndChange?.(atEnd.current)
+    if (restored) return
     if (element.scrollTop < estimateSize && direction !== 'after') onEdge?.('before')
     else if (
       element.scrollHeight - element.scrollTop - element.clientHeight < estimateSize &&
