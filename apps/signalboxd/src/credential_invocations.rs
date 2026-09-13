@@ -23,7 +23,12 @@ const PROCESS_GROUP_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 pub struct CredentialInvocationProcesses {
     pool: sqlx::PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
-    observed: Arc<Mutex<BTreeMap<ModelCallId, (u32, String)>>>,
+    observed: Arc<Mutex<BTreeMap<ModelCallId, ObservedInvocation>>>,
+}
+
+enum ObservedInvocation {
+    Process(u32, String),
+    UnsentTitle,
 }
 
 impl CredentialInvocationProcesses {
@@ -57,6 +62,18 @@ impl CredentialInvocationProcesses {
     }
 
     pub async fn recover(&self) -> Result<(), ModelCallRepositoryError> {
+        let unsent_titles = self
+            .observed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter_map(|(call, observation)| {
+                matches!(observation, ObservedInvocation::UnsentTitle).then_some(*call)
+            })
+            .collect::<Vec<_>>();
+        for call in unsent_titles {
+            self.finish_registered_title(call).await?;
+        }
         credential_invocations::release_unregistered_terminal_calls(&self.pool).await?;
         for (call, group, start_time) in
             credential_invocations::active_processes(&self.pool).await?
@@ -66,6 +83,40 @@ impl CredentialInvocationProcesses {
             }
         }
         self.nudge_eligible_waits().await
+    }
+
+    pub(crate) async fn finish_unsent_title(&self, call: ModelCallId) -> Result<(), sqlx::Error> {
+        self.observed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(call, ObservedInvocation::UnsentTitle);
+        self.finish_registered_title(call).await
+    }
+
+    async fn finish_registered_title(&self, call: ModelCallId) -> Result<(), sqlx::Error> {
+        let result =
+            signalbox_persistence::session_titles::SessionTitleRepository::new(self.pool.clone())
+                .finish(
+                    call,
+                    None,
+                    signalbox_application::UsageTokenAxes {
+                        input: None,
+                        output: None,
+                        cache_creation_input: None,
+                        cache_read_input: None,
+                    },
+                )
+                .await;
+        match result {
+            Ok(()) | Err(sqlx::Error::RowNotFound) => {
+                self.observed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&call);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn nudge_eligible_waits(&self) -> Result<(), ModelCallRepositoryError> {
@@ -115,7 +166,7 @@ impl InvocationProcessObserver for CredentialInvocationProcesses {
             self.observed
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(call, (group, start_time.clone()));
+                .insert(call, ObservedInvocation::Process(group, start_time.clone()));
         }
         Box::pin(async move {
             let Some(start_time) = start_time else {
@@ -140,8 +191,12 @@ impl InvocationProcessObserver for CredentialInvocationProcesses {
         Box::pin(async move {
             let result = async {
                 let group = match observed {
-                    Some(group) => Some(group),
-                    None => credential_invocations::process_group(&self.pool, call).await?,
+                    Some(ObservedInvocation::Process(group, start_time)) => {
+                        Some((group, start_time))
+                    }
+                    Some(ObservedInvocation::UnsentTitle) | None => {
+                        credential_invocations::process_group(&self.pool, call).await?
+                    }
                 };
                 if group
                     .as_ref()
@@ -161,5 +216,122 @@ impl InvocationProcessObserver for CredentialInvocationProcesses {
                 tracing::error!(%error, "invocation reservation release failed");
             }
         })
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod tests {
+    use super::*;
+    use signalbox_domain::{
+        CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
+        ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
+        SessionCreationCause, SessionCreationProvenance, TranscriptAncestry,
+    };
+    use signalbox_persistence::{
+        create_session::CreateSessionRepository,
+        scheduler::PostgresEligibilitySweep,
+        session_titles::{SessionTitleCall, SessionTitleRepository},
+    };
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn periodic_recovery_retries_failed_unsent_title_cleanup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let models =
+            crate::HubModelConfiguration::parse(crate::configuration::tests::CONFIGURATION)?;
+        let session = SessionId::from_uuid(uuid::Uuid::now_v7());
+        let selection =
+            DirectModelSelection::from_uuid(uuid::uuid!("10000000-0000-4000-8000-000000000001"));
+        let creation = CreateSession::new(
+            DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            SessionCreationProvenance::new(
+                SessionCreationCause::Interactive,
+                TranscriptAncestry::None,
+            ),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )
+        .prepare(session)
+        .map_err(|_| "test session creation rejected")?;
+        CreateSessionRepository::new(pool.clone(), models.session_credential_pin())
+            .handle(creation)
+            .await?;
+        let profile = "codex-title-recovery-fixture";
+        credential_invocations::replace_registrations(
+            &pool,
+            &[(profile.to_owned(), std::num::NonZeroU32::new(1))],
+        )
+        .await?;
+        let titles = SessionTitleRepository::new(pool.clone());
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let mut observer = CredentialInvocationProcesses::new(pool.clone(), nudge);
+        let unavailable = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with((*pool.connect_options()).clone());
+        unavailable.close().await;
+
+        for (authorize, cleanup_committed) in [(false, false), (true, false), (false, true)] {
+            let mut call = SessionTitleCall {
+                call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+                session,
+                selection,
+                target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                    uuid::Uuid::now_v7(),
+                )),
+                credential_reference: profile.to_owned(),
+                input_includes_cache_tokens: false,
+                initial_for_turn: None,
+            };
+            assert!(titles.prepare(&mut call, &Default::default()).await?);
+            observer.recover().await?;
+            let prepared: bool = sqlx::query_scalar(
+                "SELECT state_kind = 'prepared' FROM session_title_model_call WHERE model_call_id = $1",
+            )
+            .bind(call.call.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+            assert!(prepared, "recovery leaves active preparations alone");
+            if authorize {
+                titles.authorize(call.call).await?;
+            }
+            observer.pool = unavailable.clone();
+            assert!(matches!(
+                observer.finish_unsent_title(call.call).await,
+                Err(sqlx::Error::PoolClosed)
+            ));
+            assert!(observer.recover().await.is_err());
+            if cleanup_committed {
+                titles
+                    .finish(
+                        call.call,
+                        None,
+                        signalbox_application::UsageTokenAxes {
+                            input: None,
+                            output: None,
+                            cache_creation_input: None,
+                            cache_read_input: None,
+                        },
+                    )
+                    .await?;
+            }
+            observer.pool = pool.clone();
+            observer.recover().await?;
+            observer.recover().await?;
+            let recovered: (bool, bool, bool) = sqlx::query_as(
+                "SELECT call.state_kind = 'terminal', reservation.released_at IS NOT NULL,
+                    call.title IS NULL AND call.input_tokens IS NULL AND call.output_tokens IS NULL
+                    AND call.cache_creation_input_tokens IS NULL AND call.cache_read_input_tokens IS NULL
+                 FROM session_title_model_call call JOIN credential_invocation_reservation reservation USING (model_call_id)
+                 WHERE model_call_id = $1",
+            )
+            .bind(call.call.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(recovered, (true, true, true));
+        }
+        pool.close().await;
+        Ok(())
     }
 }

@@ -100,9 +100,7 @@ impl SessionTitles {
 
     async fn close_before_send(&self, call: ModelCallId, error: TitleError) -> TitleError {
         // Execution has not begun; a committed preparation/authorization can safely close.
-        let _ = SessionTitleRepository::new(self.pool.clone())
-            .finish(call, None, usage_axes(TokenUsage::unreported()))
-            .await;
+        let _ = self.processes.finish_unsent_title(call).await;
         error
     }
 
