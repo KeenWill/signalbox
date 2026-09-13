@@ -553,6 +553,9 @@ function TurnSummary({
                       const item = candidate.items.at(-1)
                       return (
                         cursor?.type === 'more_body' &&
+                        ['tool_arguments', 'tool_result', 'tool_failure'].includes(
+                          cursor.body.field,
+                        ) &&
                         !advancesToolMember(candidate) &&
                         ((item?.body.type === 'tool_batch' &&
                           item.body.tools.some(

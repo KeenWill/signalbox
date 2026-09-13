@@ -733,3 +733,43 @@ test('automatically scans past goal-only batch windows to earlier conversation',
   await expect(transcript.getByRole('region', { name: 'Tools used' })).toHaveCount(0)
   expect(Number(await transcript.getAttribute('data-total-loaded'))).toBeLessThanOrEqual(24)
 })
+
+test('does not offer a goal-text continuation inside a tool disclosure', async ({ page }) => {
+  const item = detailItems[1]
+  if (item?.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+  const tool = {
+    ...item,
+    body: {
+      ...item.body,
+      tools: item.body.tools.map((entry) => ({
+        ...entry,
+        evidence: { type: 'request_only' as const },
+      })),
+    },
+  }
+  await turnApi(
+    page,
+    undefined,
+    [detailItems[0], tool].filter((entry) => entry !== undefined),
+  )
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.searchParams.get('first') !== '2') return route.fallback()
+    return route.fulfill({
+      json: detailPage([tool], {
+        ...resultCursor,
+        body: { ...resultCursor.body, field: 'goal_text' },
+      }),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await transcript.getByRole('button', { name: 'exec_command', exact: true }).click()
+  await expect(transcript.getByRole('region', { name: 'exec_command details' })).toContainText(
+    'release status',
+  )
+  await expect(transcript.getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+  await expect(
+    transcript.getByRole('button', { name: 'Show more tools', exact: true }),
+  ).toHaveCount(0)
+})

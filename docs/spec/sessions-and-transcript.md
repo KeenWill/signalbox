@@ -581,10 +581,11 @@ message when its completed-turn closure is not loaded. Distinct physical tool
 attempts remain independently inspectable in event order even when they share
 one request. Later batch members load on demand at the batch position as
 separate tool chips. A cursor advancing to another member is exposed outside the
-preceding tool disclosure; same-member fields remain inside that disclosure.
-Repeated terminal outcomes for the same turn and cause appear once. Bookkeeping
-is hidden until Events is selected. Raw detail pages remain available to
-validate body continuations.
+preceding tool disclosure; same-member argument, output and failure fields
+remain inside that disclosure. Goal-text cursors do not belong to tool
+disclosures. Repeated terminal outcomes for the same turn and cause appear once
+at their first chronological position. Bookkeeping is hidden until Events is
+selected. Raw detail pages remain available to validate body continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

@@ -112,7 +112,7 @@ export function groupTranscriptTurns(
         item.body.lifecycle === 'terminalized' &&
         item.body.cause_code !== 'completed')
     ) {
-      group.outcome = item
+      group.outcome ??= item
     }
     if (item.body.type === 'user_input') group.messages.push(item)
     if (
