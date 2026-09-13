@@ -84,7 +84,7 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
     facts: ['keyset import catalog pages', 'bounded imported-entry windows'],
   },
   usage: {
-    kind: 'committed-unimplemented',
+    kind: 'server-backed',
     owningTrack: '#994 search and usage reads',
     facts: ['usage aggregation reads'],
   },

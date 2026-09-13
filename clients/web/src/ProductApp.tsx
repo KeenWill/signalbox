@@ -65,6 +65,7 @@ import { SearchSurface } from './SearchSurface'
 import { SessionCatalogSurface } from './SessionCatalogSurface'
 import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
+import { UsageSurface } from './search-usage/UsageSurface'
 import { hasValidSessionTimelineContract } from './session-timeline/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
@@ -968,6 +969,14 @@ export function ProductApp({
           </div>
         </section>
       </div>
+    ) : surface === 'usage' && bootstrap.isSuccess ? (
+      <div className="surface-body">
+        <UsageSurface bootstrap={bootstrap.data} />
+      </div>
+    ) : surface === 'usage' ? (
+      <p role={bootstrap.isError ? 'alert' : 'status'}>
+        {bootstrap.isError ? 'Usage could not load.' : 'Loading usage…'}
+      </p>
     ) : surface === 'reviews' ? (
       <DeferredSurface surface="reviews" />
     ) : (
