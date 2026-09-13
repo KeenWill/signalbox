@@ -18,6 +18,7 @@
 | response | 6 | 0 | 1 | [response](response.md) |
 | review | 33 | 0 | 0 | [review](review.md) |
 | runner | 15 | 0 | 0 | [runner](runner.md) |
+| runner_placement | 5 | 0 | 0 | [runner_placement](runner_placement.md) |
 | runner_status | 9 | 0 | 0 | [runner_status](runner_status.md) |
 | scalars | 28 | 0 | 3 | [scalars](scalars.md) |
 | session | 14 | 0 | 0 | [session](session.md) |

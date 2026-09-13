@@ -43,6 +43,7 @@ impl error::Error for create_session::CreateSessionCorruption {
 
 ```rust
 pub enum CreateSessionRepositoryError {
+    RunnerPlacementRejected,
     Database(error::Error),
     CommitAmbiguous(error::Error),
     DifferentCommandKind {
@@ -74,6 +75,7 @@ pub struct CreateSessionRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl create_session::CreateSessionRepository {
     pub fn new(pool: sqlx_postgres::PgPool, credential_pin: SessionCredentialPin) -> Self;
+    pub fn with_runner_placement_catalog(self, catalog: signalbox_domain::RunnerCatalog) -> Self;
     pub fn with_principal(self, principal: signalbox_domain::CommandPrincipal) -> Self;
     pub fn with_checkout_provisioning(self) -> Self;
     pub async fn handle(

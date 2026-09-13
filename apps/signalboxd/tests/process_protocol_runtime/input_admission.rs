@@ -42,6 +42,7 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
         base_branch: String::from("main"),
     };
     let request = ClientRequest::CommissionSession {
+        runner_placement: None,
         command_id: commission_command,
         template_name: String::from("merge-forward"),
         fence: fence.clone(),
@@ -73,6 +74,7 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
         .request(
             4,
             ClientRequest::CommissionSession {
+                runner_placement: None,
                 command_id: command()?,
                 template_name: String::from("merge-forward"),
                 fence: fence.clone(),
@@ -92,6 +94,7 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
         .request(
             5,
             ClientRequest::CommissionSession {
+                runner_placement: None,
                 command_id: commission_command,
                 template_name: String::from("merge-forward"),
                 fence: CommissionedSessionFence::Branch {
@@ -141,6 +144,7 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
         .request(
             8,
             ClientRequest::CommissionSession {
+                runner_placement: None,
                 command_id: command()?,
                 template_name: String::from("merge-forward"),
                 fence,

@@ -44,13 +44,26 @@ export const nextResolutionSequence = (): number => {
 export const inspectedArtifact = (
   descriptor: WebBlobDescriptor,
   sequence: number,
+  presentationKind?: 'image' | 'document',
 ): ArtifactItem => {
   const identity = {
     id: artifactResolutionId({ digest: descriptor.digest, sequence }),
     displayName:
-      descriptor.display_filename[0] ?? attachmentTypeLabel(descriptor.declared_media_type),
+      descriptor.display_filename[0] ??
+      attachmentTypeLabel(descriptor.declared_media_type, presentationKind),
   }
-  return selectImageView(descriptor) !== undefined ||
+  if (presentationKind === 'document')
+    return {
+      ...identity,
+      kind: 'document',
+      source: { kind: 'signalbox_blob', descriptor },
+      documentKind:
+        descriptor.declared_media_type.split(';', 1)[0]?.toLowerCase() === 'application/pdf'
+          ? 'pdf'
+          : 'document',
+    }
+  return presentationKind === 'image' ||
+    selectImageView(descriptor) !== undefined ||
     selectBoundedOriginalView(descriptor) !== undefined
     ? { ...identity, kind: 'image', source: { kind: 'signalbox_blob', descriptor } }
     : { ...identity, kind: 'blob', descriptor }
@@ -70,9 +83,11 @@ export function ArtifactInspector({
   commandContext,
   onClose,
   request,
+  presentationKind,
   expectedByteLength,
 }: {
   available: boolean
+  presentationKind?: 'image' | 'document'
   expectedByteLength?: string
   commandContext: CommandContext
   onClose: () => void
@@ -83,8 +98,8 @@ export function ArtifactInspector({
   const resolved = descriptor.data
   const sequence = request?.sequence ?? 0
   const artifact = useMemo(
-    () => (resolved === undefined ? null : inspectedArtifact(resolved, sequence)),
-    [resolved, sequence],
+    () => (resolved === undefined ? null : inspectedArtifact(resolved, sequence, presentationKind)),
+    [resolved, sequence, presentationKind],
   )
   // The registry gates original loading on the invoking context, so the inspector admits exactly
   // the artifact it resolved, and only when the descriptor proves a bounded original.

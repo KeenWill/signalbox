@@ -8,6 +8,33 @@ import {
 import { attachmentTypeLabel } from './labels'
 
 describe('artifact inspector resolution identity', () => {
+  it('keeps the retained presentation kind independent of declared MIME', () => {
+    const image = inspectedArtifact(
+      { ...fallbackDescriptor, display_filename: [], declared_media_type: 'application/pdf' },
+      nextResolutionSequence(),
+      'image',
+    )
+    expect(image.kind).toBe('image')
+    expect(image.displayName).toBe('Image')
+    const document = inspectedArtifact(
+      { ...imageArtifact, display_filename: [], declared_media_type: 'image/png' },
+      nextResolutionSequence(),
+      'document',
+    )
+    expect(document.kind).toBe('document')
+    expect(document).toMatchObject({ documentKind: 'document', source: { kind: 'signalbox_blob' } })
+    expect(document.displayName).toBe('Document')
+  })
+
+  it('projects PDF tool results into the document renderer', () => {
+    const descriptor = { ...fallbackDescriptor, declared_media_type: 'APPLICATION/PDF;x=y' }
+    expect(inspectedArtifact(descriptor, nextResolutionSequence(), 'document')).toMatchObject({
+      kind: 'document',
+      documentKind: 'pdf',
+      source: { kind: 'signalbox_blob', descriptor },
+    })
+  })
+
   it('labels MIME types case-insensitively', () => {
     expect(attachmentTypeLabel('IMAGE/PNG')).toBe('Image')
     expect(attachmentTypeLabel('APPLICATION/PDF')).toBe('PDF')

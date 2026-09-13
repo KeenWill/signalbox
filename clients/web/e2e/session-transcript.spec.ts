@@ -899,7 +899,9 @@ test('keeps an empty detail continuation available without retrying it automatic
   expect(cursors).toEqual([null, '100000'])
 })
 
-test('follows workspace navigation and restores its saved transcript anchor', async ({ page }) => {
+test('scrolls forward in the workspace and restores its saved transcript anchor', async ({
+  page,
+}) => {
   await page.route('**/api/**', (route) => {
     const url = new URL(route.request().url())
     if (url.pathname.endsWith('/follow'))
@@ -915,10 +917,15 @@ test('follows workspace navigation and restores its saved transcript anchor', as
   await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: /^First/ }).click()
   await expect(transcript.getByText('Message 1', { exact: true })).toBeVisible()
-  await page.getByText('Session details', { exact: true }).click()
-  await page.getByRole('button', { name: 'Next', exact: true }).click()
-  await page.keyboard.press('Escape')
-  await expect(transcript.getByText('Message 81', { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Transcript text', exact: true })).toHaveAttribute(
+    'aria-busy',
+    'false',
+  )
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: 900, bubbles: true }))
+  })
+  await expect(transcript.getByText('Message 9', { exact: true })).toBeVisible()
   await page.evaluate((sessionId) => {
     const preferences = JSON.parse(localStorage.getItem('signalbox.web.preferences.v1') ?? '{}')
     preferences.lastLogicalPositions = { ...preferences.lastLogicalPositions, [sessionId]: '500' }

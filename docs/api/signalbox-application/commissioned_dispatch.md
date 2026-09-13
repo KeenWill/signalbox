@@ -58,6 +58,14 @@ impl CommissionDispatchRequest {
         context: signalbox_domain::UserContent,
     ) -> result::Result<Self, InvalidDurableCommandId>;
     #[must_use]
+    pub fn with_runner_placement(
+        self,
+        placement: option::Option<signalbox_domain::SessionRunnerPlacementRequest>,
+    ) -> Self;
+    pub const fn runner_placement(
+        &self,
+    ) -> option::Option<&signalbox_domain::SessionRunnerPlacementRequest>;
+    #[must_use]
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     #[must_use]
     pub const fn template(&self) -> &signalbox_domain::SessionTemplateName;
