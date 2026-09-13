@@ -544,14 +544,16 @@ position even when that window reaches the actual tail; it does not
 automatically request the remaining history. Following live growth resumes when
 the reader scrolls to that tail. Session and anchor changes reset the view;
 observation refreshes retain visible text while rereading loaded windows, or
-refresh from latest when following the confirmed actual timeline tail.
-User-driven backward navigation clears that tail intent; automatic scans through
-hidden tail records preserve it. Refreshes continue retaining current text
-through a failed reread. The session-scoped reader compares immutable detail
-facts, including identities, attachment references and excerpt byte totals and
-overlapping excerpt content, across initial reads. It retains facts for at most
-24 recently read event addresses; changed excerpt lengths under different read
-budgets preserve compatible prefixes and retain the longest checked excerpt.
+refresh from latest when following the confirmed actual timeline tail. Following
+continues when a refresh replaces the entire retained window, even if the prior
+tail row is absent. User-driven backward navigation clears that tail intent;
+automatic scans through hidden tail records preserve it. Refreshes continue
+retaining current text through a failed reread. The session-scoped reader
+compares immutable detail facts, including identities, attachment references and
+excerpt byte totals and overlapping excerpt content, across initial reads. It
+retains facts for at most 24 recently read event addresses; changed excerpt
+lengths under different read budgets preserve compatible prefixes and retain the
+longest checked excerpt.
 
 Windows advance past metadata-only detail records in the requested direction
 automatically within the workspace record budget and projected-byte budget. All

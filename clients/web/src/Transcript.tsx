@@ -247,7 +247,6 @@ export function VirtualTranscript({
   const atEnd = useRef(initialEnd)
   const restoringLaterAnchor = useRef(false)
   const restoredOffset = useRef<number | null>(null)
-  const previousLast = useRef<string | undefined>(undefined)
   const touchStart = useRef<number | null>(null)
   const virtualizer = useVirtualizer({
     useFlushSync: false,
@@ -308,12 +307,7 @@ export function VirtualTranscript({
     if (!initialized.current) {
       initialized.current = true
       if (initialEnd && selected < 0) virtualizer.scrollToIndex(ids.length - 1, { align: 'end' })
-    } else if (
-      followEnd &&
-      atEnd.current &&
-      previousLast.current &&
-      ids.includes(previousLast.current)
-    ) {
+    } else if (followEnd && atEnd.current) {
       virtualizer.scrollToIndex(ids.length - 1, { align: 'end' })
     } else if (anchor.current) {
       const index = ids.indexOf(anchor.current.id)
@@ -327,7 +321,6 @@ export function VirtualTranscript({
       }
     }
     restoringLaterAnchor.current = false
-    previousLast.current = ids.at(-1)
     restoredOffset.current ??= parent.current?.scrollTop ?? null
   }, [ids, initialEnd, followEnd, loadingLater, selected, virtualizer, parent])
   const remember = () => {
