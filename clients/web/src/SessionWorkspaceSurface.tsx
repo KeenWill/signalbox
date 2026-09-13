@@ -205,14 +205,15 @@ function SessionActions({
     if (!action) {
       const command_id = createSessionActionCommandId()
       if ((choice === 'approve' || choice === 'deny') && chosenRequest) {
+        // Strip only the POSIX edge whitespace forbidden by ToolDenialReason.
+        const note = text.replace(/^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g, '')
         action = {
           kind: 'approval',
           requestId: chosenRequest,
           input: {
             command_id,
             decision: choice,
-            // ToolDenialReason preserves non-POSIX whitespace, including NBSP.
-            note: choice === 'deny' && /[^ \t\n\v\f\r]/.test(text) ? text : null,
+            note: choice === 'deny' && note.length > 0 ? note : null,
           },
         }
       } else if (choice === 'cancel' && chosenTurn && text.length > 0) {

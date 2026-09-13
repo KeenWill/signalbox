@@ -63,6 +63,17 @@ for (const denial of [
   },
   { name: 'preserves NBSP only', text: '\u00a0', note: '\u00a0' },
   { name: 'omits POSIX whitespace only', text: ' \t\n\v\f', note: null },
+  { name: 'strips ordinary trailing whitespace', text: 'Outside scope ', note: 'Outside scope' },
+  {
+    name: 'strips POSIX edges and preserves interior lines',
+    text: ' \t\n\v\f\rFirst line\n  Second line\r\f\v\n\t ',
+    note: 'First line\n  Second line',
+  },
+  {
+    name: 'preserves NBSP inside POSIX edges',
+    text: ' \t\u00a0Outside scope\u00a0\r\n ',
+    note: '\u00a0Outside scope\u00a0',
+  },
 ]) {
   test(`denial submission ${denial.name}`, async ({ page }) => {
     const api = await sessionApi(page, true)
