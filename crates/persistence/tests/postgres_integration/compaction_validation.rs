@@ -2,9 +2,9 @@
 
 use crate::*;
 
-/// Records one or two valid compactions over a completed fixture turn.
+/// Records valid compactions at the requested physical boundaries.
 async fn completed_compactions(
-    count: u64,
+    boundaries: &[u64],
 ) -> Result<(TestDatabase, PgPool, ContextCompactionId), Box<dyn Error>> {
     const FIXTURE_SEED: u128 = 0x134900;
     let (container, pool, _) = migrated_postgres().await?;
@@ -32,7 +32,7 @@ async fn completed_compactions(
         .await?;
     let repository = ContextCompactionRepository::new(pool.clone());
     let mut last = None;
-    for through in 1..=count {
+    for &through in boundaries {
         let PrepareContextCompactionOutcome::Prepared(prepared) = repository
             .prepare(PrepareContextCompactionRequest {
                 command: DurableCommandId::from_uuid(Uuid::now_v7()),
@@ -75,17 +75,39 @@ async fn completed_compactions(
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn title_context_excludes_prefixes_replaced_by_compaction() -> Result<(), Box<dyn Error>> {
-    let (_container, pool, compaction) = completed_compactions(2).await?;
-    let session: Uuid = sqlx::query_scalar(
-        "SELECT session_id FROM context_compaction WHERE context_compaction_id = $1",
-    )
-    .bind(compaction.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    let text = signalbox_persistence::session_titles::SessionTitleRepository::new(pool)
-        .conversation(SessionId::from_uuid(session), 4096)
+    for (boundaries, expected) in [
+        (
+            &[1][..],
+            "compacted fixture summary\ncompaction fixture response",
+        ),
+        (&[1, 2][..], "compacted fixture summary"),
+        // Position 4 is the first summary, appended after the three original members.
+        (
+            &[1, 4][..],
+            "compacted fixture summary\ncompaction fixture response",
+        ),
+    ] {
+        let (_container, pool, compaction) = completed_compactions(boundaries).await?;
+        let session: Uuid = sqlx::query_scalar(
+            "SELECT session_id FROM context_compaction WHERE context_compaction_id = $1",
+        )
+        .bind(compaction.into_uuid())
+        .fetch_one(&pool)
         .await?;
-    assert_eq!(text, "compacted fixture summary");
+        let repository = signalbox_persistence::session_titles::SessionTitleRepository::new(pool);
+        assert_eq!(
+            repository
+                .conversation(SessionId::from_uuid(session), 4096)
+                .await?,
+            expected
+        );
+        assert_eq!(
+            repository
+                .conversation(SessionId::from_uuid(session), 12)
+                .await?,
+            &expected.rsplit('\n').next().expect("visible text")[..12]
+        );
+    }
     Ok(())
 }
 
@@ -107,7 +129,7 @@ async fn create_compaction_probe(connection: &mut sqlx::PgConnection) -> Result<
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn compaction_result_missing_its_summary_cannot_commit() -> Result<(), Box<dyn Error>> {
-    let (_container, pool, compaction) = completed_compactions(1).await?;
+    let (_container, pool, compaction) = completed_compactions(&[1]).await?;
     const OTHER_SOURCE_SEED: u128 = 0x134a00;
     let (other, _, _) = authorize_checkpointed_model_call(&pool, OTHER_SOURCE_SEED).await?;
     let alternate = Uuid::now_v7();
@@ -184,7 +206,7 @@ async fn compaction_member_lookup_terminates_on_a_missing_member_in_cyclic_prefi
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn compaction_predecessor_cycle_is_rejected_at_commit() -> Result<(), Box<dyn Error>> {
-    let (_container, pool, compaction) = completed_compactions(2).await?;
+    let (_container, pool, compaction) = completed_compactions(&[1, 2]).await?;
     let mut transaction = pool.begin().await?;
     // Supply malformed stored ancestry while leaving the new successor's
     // dedicated call, summary, source and result evidence intact.
