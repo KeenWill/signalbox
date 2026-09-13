@@ -1,5 +1,6 @@
 import {
   type QueryClient,
+  skipToken,
   useMutation,
   useMutationState,
   useQuery,
@@ -48,6 +49,8 @@ import {
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MAX_CACHED_SESSION_WORKSPACES = 4
+const SESSION_ACTION_DRAFTS_KEY = ['session-action-drafts'] as const
+type SessionActionDrafts = Record<string, { action: SessionAction; error: Error }>
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
 
 function createSessionActionCommandId() {
@@ -82,6 +85,36 @@ function SessionActions({
   const inFlight = useRef(false)
   const actionOpener = useRef<HTMLButtonElement>(null)
   const queryClient = useQueryClient()
+  const { data: rejectedDrafts = {} } = useQuery({
+    queryKey: SESSION_ACTION_DRAFTS_KEY,
+    queryFn: skipToken,
+    initialData: {} as SessionActionDrafts,
+    gcTime: Number.POSITIVE_INFINITY,
+  })
+  const [draftError, setDraftError] = useState<Error | null>(null)
+  const rejectedDraft = rejectedDrafts[sessionId]
+  useEffect(() => {
+    if (!rejectedDraft) return
+    const { action, error } = rejectedDraft
+    setChoice(action.kind === 'approval' ? action.input.decision : action.kind)
+    setText(
+      action.kind === 'cancel'
+        ? action.input.message
+        : action.kind === 'set-goal'
+          ? action.input.statement
+          : action.kind === 'approval'
+            ? (action.input.note ?? '')
+            : '',
+    )
+    setChosenRequest(action.kind === 'approval' ? action.requestId : null)
+    setChosenTurn(action.kind === 'cancel' ? action.input.expected_active_turn_id : null)
+    setDraftError(error)
+    queryClient.setQueryData<SessionActionDrafts>(SESSION_ACTION_DRAFTS_KEY, (drafts) => {
+      const remaining = { ...drafts }
+      delete remaining[sessionId]
+      return remaining
+    })
+  }, [queryClient, rejectedDraft, sessionId])
   const pendingActions = useMutationState({
     filters: { mutationKey: ['session-action'] },
     select: (mutation) => ({
@@ -107,7 +140,12 @@ function SessionActions({
           ? (retained.input.note ?? '')
           : ''
   const sending = pending?.status === 'pending'
-  const capacityReached = retained === null && pendingActions.length >= MAX_PENDING_SESSION_INPUTS
+  const capacityReached =
+    retained === null &&
+    new Set([...pendingActions.map((action) => action.sessionId), ...Object.keys(rejectedDrafts)])
+      .size >= MAX_PENDING_SESSION_INPUTS
+  const approvalBlocksAction =
+    pendingRequest !== null && (choice === 'cancel' || choice === 'clear-goal')
   const [notice, setNotice] = useState('')
   const mutation = useMutation({
     mutationKey: ['session-action', sessionId],
@@ -128,19 +166,11 @@ function SessionActions({
         (error instanceof ProductRequestError && error.status < 500)
       ) {
         if (error) {
-          // A definitive refusal releases the command identity, but keeps an editable draft.
-          setChoice(action.kind === 'approval' ? action.input.decision : action.kind)
-          setText(
-            action.kind === 'cancel'
-              ? action.input.message
-              : action.kind === 'set-goal'
-                ? action.input.statement
-                : action.kind === 'approval'
-                  ? (action.input.note ?? '')
-                  : '',
-          )
-          setChosenRequest(action.kind === 'approval' ? action.requestId : null)
-          setChosenTurn(action.kind === 'cancel' ? action.input.expected_active_turn_id : null)
+          // Settlement can happen after this workspace unmounts.
+          queryClient.setQueryData<SessionActionDrafts>(SESSION_ACTION_DRAFTS_KEY, (drafts) => ({
+            ...drafts,
+            [sessionId]: { action, error },
+          }))
         }
         for (const mutation of queryClient
           .getMutationCache()
@@ -154,7 +184,7 @@ function SessionActions({
       }
     },
   })
-  const error = pending?.error ?? mutation.error
+  const error = pending?.error ?? mutation.error ?? draftError
   const choose = (next: typeof choice, opener?: HTMLButtonElement) => {
     if (opener) actionOpener.current = opener
     setChoice(next)
@@ -162,6 +192,7 @@ function SessionActions({
     setChosenTurn(activeTurn)
     setText('')
     setNotice('')
+    setDraftError(null)
     mutation.reset()
   }
   const dismiss = () => {
@@ -169,7 +200,7 @@ function SessionActions({
     actionOpener.current?.focus()
   }
   const confirm = () => {
-    if (inFlight.current || sending || capacityReached) return
+    if (inFlight.current || sending || capacityReached || approvalBlocksAction) return
     let action = retained
     if (!action) {
       const command_id = createSessionActionCommandId()
@@ -197,6 +228,7 @@ function SessionActions({
     }
     if (!action) return
     inFlight.current = true
+    setDraftError(null)
     for (const previous of queryClient
       .getMutationCache()
       .findAll({ mutationKey: ['session-action', sessionId] })) {
@@ -299,6 +331,7 @@ function SessionActions({
             disabled={
               sending ||
               capacityReached ||
+              approvalBlocksAction ||
               (!retained && (choice === 'set-goal' || choice === 'cancel') && text.length === 0)
             }
           >
@@ -312,7 +345,7 @@ function SessionActions({
         </form>
       )}
       {capacityReached && (
-        <p role="status">Resolve an unconfirmed session action before starting another.</p>
+        <p role="status">Return to an unfinished session action before starting another.</p>
       )}
       {error && (
         <p role="alert">

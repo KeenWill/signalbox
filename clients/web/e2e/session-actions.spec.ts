@@ -1,5 +1,11 @@
 import { expect, test } from './fontTest'
-import { openSession, sessionApi, sessionId, turnId } from './session-fixture'
+import {
+  openSession,
+  openSessionFromCatalog,
+  sessionApi,
+  sessionId,
+  turnId,
+} from './session-fixture'
 
 const requestId = '20000000-0000-4000-8000-000000000001'
 const goalStatement = '  Finish the review\n'
@@ -193,6 +199,62 @@ for (const action of [
     payload: { note: '\u00a0Outside the requested work\u00a0', decision: 'deny' },
   },
 ]) {
+  test(`a rejected ${action.button} draft survives settlement after unmount`, async ({ page }) => {
+    const api = await sessionApi(page, true)
+    if (action.button === 'Deny') {
+      api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
+    }
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const requests: Record<string, unknown>[] = []
+    await page.route(`**/api/sessions/${sessionId}/${action.path}`, async (route) => {
+      requests.push(route.request().postDataJSON())
+      if (requests.length === 1) {
+        await held
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: {
+              kind: 'application',
+              code: 'action_refused',
+              message: 'The action was refused.',
+            },
+          },
+        })
+      }
+      return route.fulfill({ status: 204 })
+    })
+    await openSession(page)
+    await page.getByRole('button', { name: action.button, exact: true }).click()
+    const field = page.getByRole('textbox', { name: action.field, exact: true })
+    const originalText = action.payload[action.contentKey as keyof typeof action.payload] as string
+    await field.fill(originalText)
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+    await expect.poll(() => requests.length).toBe(1)
+    await page.getByRole('link', { name: 'Settings', exact: true }).click()
+    await expect(page).toHaveURL(/\/settings$/)
+    const refused = page.waitForResponse((response) => response.status() === 409)
+    release()
+    await refused
+    await page.goBack()
+    await expect(page.getByRole('alert')).toContainText('action_refused: The action was refused.')
+    await expect(field).toHaveValue(originalText)
+    await expect(field).toBeEnabled()
+    const revisedText = 'Revised after returning'
+    await field.fill(revisedText)
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+    await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toEqual({
+      ...action.payload,
+      [action.contentKey]: revisedText,
+      command_id: expect.any(String),
+    })
+    expect(requests[1]?.command_id).not.toBe(requests[0]?.command_id)
+  })
+
   test(`a rejected ${action.button} retry restores the editable draft after navigation`, async ({
     page,
   }) => {
@@ -255,6 +317,98 @@ test('an idle session does not offer cancel', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Clear goal', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Cancel turn', exact: true })).toHaveCount(0)
 })
+
+test('rejected drafts share the four-action capacity and are recovered without eviction', async ({
+  page,
+}) => {
+  // Four retained actions fill the existing capacity; the fifth session must wait.
+  const sessions = [
+    sessionId,
+    ...Array.from(
+      { length: 4 },
+      (_, index) => `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    ),
+  ]
+  for (const id of sessions) await sessionApi(page, false, id)
+  await openSession(page)
+  for (const [index, id] of sessions.slice(0, 4).entries()) {
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await page.route(`**/api/sessions/${id}/goal`, async (route) => {
+      await held
+      return route.fulfill({
+        status: 409,
+        json: {
+          error: {
+            kind: 'application',
+            code: 'action_refused',
+            message: 'The action was refused.',
+          },
+        },
+      })
+    })
+    await page.getByRole('button', { name: 'Set goal', exact: true }).click()
+    await page.getByRole('textbox', { name: 'Goal', exact: true }).fill(goalStatement)
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Sending…', exact: true })).toBeDisabled()
+    await page.getByRole('link', { name: 'Settings', exact: true }).click()
+    await expect(page).toHaveURL(/\/settings$/)
+    const refused = page.waitForResponse(
+      (response) => response.url().endsWith(`${id}/goal`) && response.status() === 409,
+    )
+    release()
+    await refused
+    const next = sessions[index + 1]
+    if (!next) throw new Error('Missing next session fixture')
+    await openSessionFromCatalog(page, next)
+  }
+  await expect(page.getByRole('button', { name: 'Set goal', exact: true })).toBeDisabled()
+  await expect(
+    page.getByText('Return to an unfinished session action before starting another.'),
+  ).toBeVisible()
+  await openSessionFromCatalog(page, sessionId)
+  await expect(page.getByRole('textbox', { name: 'Goal', exact: true })).toHaveValue(goalStatement)
+  await page.getByRole('button', { name: 'Keep unchanged', exact: true }).click()
+  const fifth = sessions[4]
+  if (!fifth) throw new Error('Missing fifth session fixture')
+  await openSessionFromCatalog(page, fifth)
+  await expect(page.getByRole('button', { name: 'Set goal', exact: true })).toBeEnabled()
+})
+
+for (const action of ['Cancel turn', 'Clear goal']) {
+  test(`an open ${action} confirmation stops submitting when approval waiting begins`, async ({
+    page,
+  }) => {
+    const api = await sessionApi(page, true)
+    const requests: string[] = []
+    page.on('request', (request) => {
+      if (['POST', 'PUT', 'DELETE'].includes(request.method())) requests.push(request.url())
+    })
+    await openSession(page)
+    await page.getByRole('button', { name: action, exact: true }).click()
+    if (action === 'Cancel turn') {
+      await page.getByRole('textbox', { name: 'Message to continue with' }).fill(successorMessage)
+    }
+    const confirm = page.getByRole('button', { name: 'Confirm', exact: true })
+    await expect(confirm).toBeEnabled()
+    api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
+    api.advanceObservation()
+    await expect(page.getByRole('button', { name: 'Approve', exact: true })).toBeVisible()
+    await expect(confirm).toBeDisabled()
+    await confirm.evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) throw new Error('Confirm must be a button')
+      button.form?.requestSubmit()
+    })
+    expect(requests).toEqual([])
+    if (action === 'Cancel turn') {
+      await expect(page.getByRole('textbox', { name: 'Message to continue with' })).toHaveValue(
+        successorMessage,
+      )
+    }
+  })
+}
 
 test('two synchronous confirmations send one command', async ({ page }) => {
   await sessionApi(page, true)
