@@ -1,6 +1,26 @@
 import { expect, test } from './fontTest'
 import { excerpt, openSession, sessionApi, sessionId, turnId } from './session-fixture'
 
+test('composer fits an unchanged draft after the window narrows and widens', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await sessionApi(page)
+  await openSession(page)
+  const message = page.getByRole('textbox', { name: 'Message', exact: true })
+  const draft = 'Keep this draft while resizing the window. '.repeat(8)
+  await message.fill(draft)
+  const wideHeight = (await message.boundingBox())?.height ?? 0
+  await page.setViewportSize({ width: 390, height: 900 })
+  await expect
+    .poll(async () => (await message.boundingBox())?.height ?? 0)
+    .toBeGreaterThan(wideHeight)
+  await expect(message).toHaveValue(draft)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await expect.poll(async () => (await message.boundingBox())?.height).toBe(wideHeight)
+  expect(errors).toEqual([])
+})
+
 for (const width of [1440, 390]) {
   test(`long conversation keeps its header and composer visible at ${width}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 })
