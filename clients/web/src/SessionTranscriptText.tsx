@@ -133,6 +133,7 @@ function TranscriptWindow({
   )
   const queries = useQueryClient()
   const readerAtEnd = useRef(initialAnchor.kind === 'latest')
+  const followLatest = useRef(false)
   const automaticLimits = useRef<SessionTranscriptLimits | undefined>(undefined)
   const transcript = useInfiniteQuery({
     queryKey,
@@ -164,10 +165,7 @@ function TranscriptWindow({
   useEffect(() => {
     if (previousObservation.current !== observed) {
       previousObservation.current = observed
-      if (
-        readerAtEnd.current &&
-        (initialAnchor.kind === 'latest' || !pages?.at(-1)?.window.continuation_after)
-      )
+      if (readerAtEnd.current && followLatest.current)
         queries.setQueryData<typeof transcript.data>(queryKey, (data) =>
           data
             ? {
@@ -230,6 +228,10 @@ function TranscriptWindow({
     [visible, pending],
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
+  useEffect(() => {
+    if (readerAtEnd.current && pages && !pages.at(-1)?.window.continuation_after)
+      followLatest.current = true
+  }, [pages])
   const selectedSequence =
     eventSequence ?? (initialAnchor.kind === 'around' ? initialAnchor.eventSequence : undefined)
   const selectedId = rows.find((row) => row.sequence === selectedSequence)?.id
@@ -308,6 +310,8 @@ function TranscriptWindow({
         initialEnd={initialAnchor.kind === 'latest'}
         onEndChange={(atEnd) => {
           readerAtEnd.current = atEnd
+          if (atEnd && pages && !pages.at(-1)?.window.continuation_after)
+            followLatest.current = true
         }}
         followEnd={
           !pages?.at(-1)?.window.continuation_after &&
@@ -323,6 +327,7 @@ function TranscriptWindow({
         onEdge={(direction) => {
           if (transcript.isFetching || transcript.isError) return
           if (direction === 'before' && transcript.hasPreviousPage) {
+            followLatest.current = false
             emptyScanned.current = { headers: 0, items: 0, bytes: 0, first: '' }
             void transcript.fetchPreviousPage()
           }

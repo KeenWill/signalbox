@@ -747,9 +747,67 @@ const immutableDetailFacts = (value: unknown, retainExcerptTotals = false): stri
     )
   })
 
+interface InitialExcerptFacts {
+  path: string
+  offsetBytes: string
+  text: string
+  totalBytes: string
+}
+
+export interface InitialDetailFacts {
+  immutable: string
+  excerpts: readonly InitialExcerptFacts[]
+}
+
+const initialExcerptFacts = (value: unknown): InitialExcerptFacts[] => {
+  const excerpts: InitialExcerptFacts[] = []
+  const visit = (child: unknown, path: readonly (string | number)[]) => {
+    if (child == null || typeof child !== 'object') return
+    if (
+      !Array.isArray(child) &&
+      'text' in child &&
+      'offset_bytes' in child &&
+      'total_bytes' in child &&
+      typeof child.text === 'string' &&
+      typeof child.offset_bytes === 'string' &&
+      typeof child.total_bytes === 'string'
+    ) {
+      excerpts.push({
+        path: JSON.stringify(path),
+        offsetBytes: child.offset_bytes,
+        text: child.text,
+        totalBytes: child.total_bytes,
+      })
+      return
+    }
+    for (const [key, nested] of Object.entries(child)) visit(nested, [...path, key])
+  }
+  visit(value, [])
+  return excerpts
+}
+
 // Initial projections can vary in excerpt length while identifying the same durable facts.
-export const initialDetailFacts = (item: WebSessionTimelineDetailPage['items'][number]): string =>
-  immutableDetailFacts({ kind: item.kind, body: item.body }, true) ?? ''
+export const initialDetailFacts = (
+  item: WebSessionTimelineDetailPage['items'][number],
+): InitialDetailFacts => ({
+  immutable: immutableDetailFacts({ kind: item.kind, body: item.body }, true) ?? '',
+  excerpts: initialExcerptFacts(item.body),
+})
+
+export const sameInitialDetailFacts = (
+  previous: InitialDetailFacts,
+  current: InitialDetailFacts,
+): boolean =>
+  previous.immutable === current.immutable &&
+  current.excerpts.every((next) => {
+    const prior = previous.excerpts.find((excerpt) => excerpt.path === next.path)
+    return (
+      prior === undefined ||
+      (prior.offsetBytes === next.offsetBytes &&
+        prior.totalBytes === next.totalBytes &&
+        (prior.text.startsWith(next.text) || next.text.startsWith(prior.text)))
+    )
+  })
 
 const bodyFacts = (body: DetailBody) =>
   immutableDetailFacts(

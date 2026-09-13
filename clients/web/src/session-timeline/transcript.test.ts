@@ -131,7 +131,13 @@ it('reserves a valid detail read for every header under small advertised budgets
   expect(reads.filter((url) => url.pathname.endsWith('/timeline-detail'))).toHaveLength(1)
 })
 
-it.each(['turn identity', 'attachments', 'tool request', 'excerpt total'] as const)(
+it.each([
+  'turn identity',
+  'attachments',
+  'tool request',
+  'excerpt total',
+  'excerpt contents',
+] as const)(
   'rejects changed %s across overlapping initial detail reads',
   async (changed) => {
     const { detailItems, detailPage, resultCursor } = await import(
@@ -181,7 +187,12 @@ it.each(['turn identity', 'attachments', 'tool request', 'excerpt total'] as con
         const page = payload as import('../generated/web-contract.mjs').WebSessionTimelineDetailPage
         const item = page.items[0]
         if (item?.body.type !== 'user_input') throw new Error('Input fixture missing')
-        const text = item.body.text.text + (conflict && changed === 'excerpt total' ? '!' : '')
+        const text =
+          conflict && changed === 'excerpt total'
+            ? `${item.body.text.text}!`
+            : conflict && changed === 'excerpt contents'
+              ? `!${item.body.text.text.slice(1)}`
+              : item.body.text.text
         return Response.json({
           ...page,
           projected_body_bytes: 128 + text.length,
