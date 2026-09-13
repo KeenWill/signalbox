@@ -525,7 +525,9 @@ issued it and is rejected under the other order. The catalog keeps only sessions
 carrying every required tag, excludes archived sessions unless they are
 requested, and searches by an exact case-sensitive substring of the title or the
 canonical session UUID. A catalog page, its exact total, and its cursor are read
-in one snapshot.
+in one snapshot. Catalog summaries require `repository_watch`, with null for a
+non-watch session; provenance requires nullable `head_branch` and `base_branch`
+members.
 
 The follow stream subscribes to the daemon's browser monitor fanout before
 reading the session state and its observed cursor from one repeatable-read

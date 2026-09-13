@@ -489,6 +489,11 @@ retain accepted transport pages. A completed reconciliation removes untraversed
 resources and terminal pull-request pages; unchanged responses retain their
 traversed pages.
 
+The web session catalog resolves retained creation provenance with one
+module-store batch per page, using core creation references. Catalog and
+timeline provenance include the head and base branches from the dispatched
+pull-request context.
+
 Reading a session's retained dispatch provenance does not wait for
 repository-watch dispatch processing.
 
