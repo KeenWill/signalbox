@@ -35,10 +35,9 @@ the owner and lives outside the daemon unless the task says otherwise. Removing
 a mechanism the behavior does not need is a better change than adding one. List
 what you chose not to build.
 
-In review, a finding that a mechanism can be removed is valid. A finding that
-asks for a guard, handler, or check the task does not name is declined ("not
-enforced; deferred") unless the gap corrupts stored data or breaks a committed
-contract.
+A finding that asks for a guard, handler, or check the task does not name is
+declined ("not enforced; deferred") unless the gap corrupts stored data or
+breaks a committed contract.
 
 ## Pre-alpha compatibility
 
