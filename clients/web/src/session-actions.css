@@ -1,5 +1,6 @@
 .session-actions {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--product-space);
   font-size: 0.75rem;
 }
@@ -80,4 +81,8 @@
 
 .session-actions .session-header-line {
   gap: 4px;
+}
+
+.session-actions .session-header-context {
+  flex: 1;
 }

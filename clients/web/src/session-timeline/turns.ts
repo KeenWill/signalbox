@@ -1,0 +1,282 @@
+import type {
+  WebSessionTimelineDetail,
+  WebTimelineBodyContinuation,
+  WebTimelineToolAttempt,
+} from '../generated/web-contract.mjs'
+
+export interface TranscriptTurn {
+  id: string
+  turnId: string | null
+  events: WebSessionTimelineDetail[]
+  messages: WebSessionTimelineDetail[]
+  result: WebSessionTimelineDetail | undefined
+  tools: WebTimelineToolAttempt[]
+  warnings: WebSessionTimelineDetail[]
+  outcome?: WebSessionTimelineDetail
+}
+
+export function detailTurnId(item: WebSessionTimelineDetail): string | null {
+  const body = item.body
+  if ('turn_id' in body) return body.turn_id ?? null
+  if (body.type === 'model_settings' && body.detail.type === 'turn_resolved')
+    return body.detail.turn_id
+  return null
+}
+
+export function toolEvidenceKey(tool: WebTimelineToolAttempt): string {
+  return tool.evidence.type === 'physical_attempt'
+    ? `${tool.request_id}:${tool.evidence.attempt_id}`
+    : tool.request_id
+}
+
+export function toolDisclosureKeys(
+  tools: readonly WebTimelineToolAttempt[],
+  previous: ReadonlyMap<string, string>,
+): ReadonlyMap<string, string> {
+  const keys = new Map<string, string>()
+  const claimedRequests = new Set<string>()
+  for (const tool of tools) {
+    const evidence = toolEvidenceKey(tool)
+    const pending = claimedRequests.has(tool.request_id) ? undefined : previous.get(tool.request_id)
+    keys.set(evidence, previous.get(evidence) ?? pending ?? evidence)
+    claimedRequests.add(tool.request_id)
+  }
+  return keys
+}
+
+export function isToolBodyContinuation(continuation: WebTimelineBodyContinuation): boolean {
+  return (
+    continuation.field === 'tool_arguments' ||
+    continuation.field === 'tool_result' ||
+    continuation.field === 'tool_failure'
+  )
+}
+
+function projectedTool(tools: WebTimelineToolAttempt[], evidence: WebTimelineToolAttempt) {
+  return tools.find((tool) =>
+    evidence.evidence.type === 'request_only'
+      ? tool.request_id === evidence.request_id
+      : toolEvidenceKey(tool) === toolEvidenceKey(evidence),
+  )
+}
+
+export function groupTranscriptTurns(
+  items: readonly WebSessionTimelineDetail[],
+  windowStarts?: ReadonlySet<string>,
+  toolSegments?: ReadonlyMap<string, string>,
+): TranscriptTurn[] {
+  const groups = new Map<string, TranscriptTurn>()
+  for (const item of items) {
+    const turnId = detailTurnId(item)
+    const id = turnId ?? `event-${item.address.event_sequence}`
+    let group = groups.get(id)
+    if (!group) {
+      group = {
+        id,
+        turnId,
+        events: [],
+        messages: [],
+        result: undefined,
+        tools: [],
+        warnings: [],
+      }
+      groups.set(id, group)
+    }
+    group.events.push(item)
+    if (item.body.type === 'model_call' && item.body.provider_failure_cause && !item.body.response)
+      group.warnings.push(item)
+    if (item.body.type === 'tool_batch') {
+      for (const tool of item.body.tools) {
+        const index = group.tools.findIndex(
+          (known) =>
+            known.request_id === tool.request_id &&
+            (known.evidence.type === 'request_only' ||
+              tool.evidence.type === 'request_only' ||
+              toolEvidenceKey(known) === toolEvidenceKey(tool)),
+        )
+        const previous = group.tools[index]
+        if (!previous)
+          group.tools.push({
+            ...tool,
+            arguments:
+              tool.arguments ??
+              group.tools.find((known) => known.request_id === tool.request_id)?.arguments ??
+              null,
+          })
+        else
+          group.tools[index] = {
+            ...tool,
+            arguments: tool.arguments ?? previous.arguments,
+            evidence: tool.evidence.type === 'request_only' ? previous.evidence : tool.evidence,
+          }
+      }
+    }
+    if (
+      !group.outcome &&
+      (item.body.type === 'reconciliation' ||
+        (item.body.type === 'event_fact' &&
+          (item.body.kind === 'goal_turn_retired' ||
+            item.body.kind === 'automatic_reconciliation_exhausted')) ||
+        (item.body.type === 'turn_lifecycle' &&
+          item.body.lifecycle === 'terminalized' &&
+          item.body.cause_code !== 'completed'))
+    ) {
+      group.outcome = item
+    }
+    if (item.body.type === 'user_input') group.messages.push(item)
+    if (
+      item.body.type === 'model_call' &&
+      item.body.response &&
+      item.body.state.type === 'terminal' &&
+      item.body.state.disposition === 'completed'
+    )
+      group.result = item
+  }
+  for (const group of groups.values()) {
+    for (const event of group.events) {
+      const body = event.body
+      if (
+        body.type === 'model_call' &&
+        body.response &&
+        group.events.some(
+          (candidate) =>
+            candidate.body.type === 'tool_batch' &&
+            candidate.body.producing_model_call_id === body.model_call_id,
+        )
+      )
+        group.messages.push(event)
+    }
+    if (
+      !group.events.some(
+        (event) =>
+          event.body.type === 'turn_lifecycle' &&
+          event.body.lifecycle === 'terminalized' &&
+          event.body.cause_code === 'completed' &&
+          BigInt(event.address.event_sequence) >
+            BigInt(group.result?.address.event_sequence ?? '0'),
+      )
+    ) {
+      if (group.result && !group.messages.includes(group.result)) group.messages.push(group.result)
+      group.result = undefined
+    }
+    // A tool-producing model response is intermediate conversation, not the turn's final text.
+    if (group.result?.body.type === 'model_call') {
+      const callId = group.result.body.model_call_id
+      if (
+        group.events.some(
+          (event) =>
+            event.body.type === 'tool_batch' && event.body.producing_model_call_id === callId,
+        )
+      )
+        group.result = undefined
+    }
+  }
+  const segments: TranscriptTurn[] = []
+  const toolCandidates = new Map<WebTimelineToolAttempt, TranscriptTurn[]>()
+  for (const item of items) {
+    const turnId = detailTurnId(item)
+    const group = groups.get(turnId ?? `event-${item.address.event_sequence}`)
+    if (!group) continue
+    let segment = segments.at(-1)
+    if (
+      !segment ||
+      (windowStarts?.has(item.address.event_sequence) &&
+        segment.events.at(-1)?.address.event_sequence !== item.address.event_sequence) ||
+      segment.turnId !== turnId ||
+      (turnId === null && segment.events[0]?.address.event_sequence !== item.address.event_sequence)
+    ) {
+      segment = {
+        id: `${group.id}:${item.address.event_sequence}`,
+        turnId,
+        events: [],
+        messages: [],
+        result: undefined,
+        tools: [],
+        warnings: [],
+      }
+      segments.push(segment)
+    }
+    segment.events.push(item)
+    if (group.messages.includes(item)) segment.messages.push(item)
+    if (group.result === item) segment.result = item
+    if (group.warnings.includes(item)) segment.warnings.push(item)
+    if (group.outcome === item) segment.outcome = item
+    if (item.body.type === 'tool_batch') {
+      for (const evidence of item.body.tools) {
+        const tool = projectedTool(group.tools, evidence)
+        if (!tool) continue
+        const candidates = toolCandidates.get(tool) ?? []
+        if (candidates.at(-1) !== segment) candidates.push(segment)
+        toolCandidates.set(tool, candidates)
+      }
+    }
+  }
+  for (const [tool, candidates] of toolCandidates) {
+    const retained = toolSegments?.get(toolEvidenceKey(tool)) ?? toolSegments?.get(tool.request_id)
+    const target = candidates.find((segment) => segment.id === retained) ?? candidates[0]
+    target?.tools.push(tool)
+  }
+  return segments
+}
+
+export function isVisibleTurnEvent(
+  turn: TranscriptTurn,
+  item: WebSessionTimelineDetail,
+  includeIntermediate = true,
+): boolean {
+  return (
+    (turn.messages.includes(item) && (includeIntermediate || item.body.type === 'user_input')) ||
+    turn.result === item ||
+    turn.warnings.includes(item) ||
+    turn.outcome === item ||
+    (turn.events.includes(item) &&
+      item.body.type === 'tool_batch' &&
+      item.body.tools.some((evidence) => projectedTool(turn.tools, evidence) !== undefined))
+  )
+}
+
+export type TurnSummaryPart =
+  | { kind: 'message' | 'intermediate'; item: WebSessionTimelineDetail }
+  | { kind: 'tools'; tools: WebTimelineToolAttempt[] }
+
+export function turnSummaryParts(turn: TranscriptTurn): TurnSummaryPart[] {
+  const parts: TurnSummaryPart[] = []
+  const seen = new Set<string>()
+  for (const item of turn.events) {
+    if (turn.messages.includes(item) || item === turn.result || turn.warnings.includes(item))
+      parts.push({
+        kind:
+          turn.messages.includes(item) && item.body.type === 'model_call'
+            ? 'intermediate'
+            : 'message',
+        item,
+      })
+    if (item.body.type !== 'tool_batch') continue
+    for (const evidence of item.body.tools) {
+      const tool = projectedTool(turn.tools, evidence)
+      if (!tool || seen.has(toolEvidenceKey(tool))) continue
+      seen.add(toolEvidenceKey(tool))
+      const last = parts.at(-1)
+      if (last?.kind === 'tools') last.tools.push(tool)
+      else parts.push({ kind: 'tools', tools: [tool] })
+    }
+  }
+  return parts
+}
+
+export interface ToolContinuation {
+  field: 'arguments' | 'output' | 'failure'
+  continuation: WebTimelineBodyContinuation
+}
+
+export function toolContinuations(tool: WebTimelineToolAttempt): ToolContinuation[] {
+  const evidence = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
+  const continuations: ToolContinuation[] = []
+  if (tool.arguments?.continuation)
+    continuations.push({ field: 'arguments', continuation: tool.arguments.continuation })
+  if (evidence?.result?.continuation)
+    continuations.push({ field: 'output', continuation: evidence.result.continuation })
+  if (evidence?.failure?.continuation)
+    continuations.push({ field: 'failure', continuation: evidence.failure.continuation })
+  return continuations
+}
