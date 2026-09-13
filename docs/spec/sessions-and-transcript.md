@@ -511,7 +511,8 @@ boundary's not-found response.
 payloads that carry an actor. `SubmitInput` and the process-facing metadata
 request fix the user actor, and a separate constructor accepts only the tool
 actor for the exact executing tool request. Title generation fixes the core
-actor.
+actor. Public metadata replacement handling rejects core commands; only title
+settlement installs core metadata.
 
 When `session_titles.selection_id` names a configured model selection, a
 completed assistant turn claims one title call if the title is unset and no
