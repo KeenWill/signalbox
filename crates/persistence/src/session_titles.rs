@@ -177,7 +177,8 @@ impl SessionTitleRepository {
              WHERE member.owning_session_id = $1 AND member.context_frontier_id = $4
                AND (COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value) IS NOT NULL
                 OR imported.content_encoding IS NOT NULL)
-             ORDER BY member.member_position DESC, part.position DESC NULLS LAST")
+             ORDER BY member.member_position DESC, part.position DESC NULLS LAST
+             LIMIT $2")
             .bind(session.into_uuid()).bind(max_utf8_bytes)
             .bind(max_utf8_bytes.saturating_add(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES))
             .bind(source.frontier.into_uuid()).fetch(&mut *tx);
