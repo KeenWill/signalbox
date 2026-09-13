@@ -211,6 +211,7 @@ test("generated bootstrap decoder rejects the previous contract version", () => 
           imported_continuations: true,
           bounded_session_timeline: true,
           bounded_session_live: true,
+          session_title_generation: true,
         },
         limits: {
           max_json_body_bytes: 65536,
@@ -243,6 +244,7 @@ test("generated bootstrap decoder rejects a disabled required capability", () =>
           bounded_session_timeline: true,
           bounded_session_timeline_detail: true,
           bounded_session_live: true,
+          session_title_generation: true,
           bounded_usage_cost: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
@@ -1286,6 +1288,7 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
           bounded_session_timeline: true,
           bounded_session_timeline_detail: true,
           bounded_session_live: true,
+          session_title_generation: true,
         },
         limits: {
           max_json_body_bytes: 1,
