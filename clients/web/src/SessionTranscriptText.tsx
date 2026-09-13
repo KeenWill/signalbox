@@ -482,10 +482,10 @@ function ToolSummary({ tool }: { tool: WebTimelineToolAttempt }) {
   return (
     <section aria-label={`${tool.tool_name} details`}>
       <strong>{tool.tool_name}</strong>
-      <small>Argument and output summaries</small>
-      {tool.arguments && <p className="session-tool-summary">{tool.arguments.text}</p>}
-      {evidence?.result && <p className="session-tool-summary">{evidence.result.text}</p>}
-      {evidence?.failure && <p className="session-tool-summary">{evidence.failure.text}</p>}
+      <small>Tool summaries</small>
+      {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
+      {evidence?.result && <ToolText label="Output" excerpt={evidence.result} />}
+      {evidence?.failure && <ToolText label="Failure" excerpt={evidence.failure} />}
       {[tool.arguments, evidence?.result, evidence?.failure].some(
         (excerpt) => excerpt && (excerpt.offset_bytes !== '0' || excerpt.continuation != null),
       ) && <small>Excerpt · more text available</small>}
