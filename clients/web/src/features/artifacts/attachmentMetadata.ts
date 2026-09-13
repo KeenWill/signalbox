@@ -2,7 +2,7 @@
 const mimeToken = "[!#$%&'*+.^_`|~0-9A-Za-z-]+"
 const mimeQuotedValue = '"(?:[\\x20-\\x21\\x23-\\x5b\\x5d-\\x7e]|\\x5c[\\x20-\\x7e])+"'
 const mimeLabel = new RegExp(
-  `^${mimeToken}/${mimeToken}(?:; *${mimeToken}=(?:${mimeToken}|${mimeQuotedValue}) *)*$`,
+  `^${mimeToken}/${mimeToken}(?: *; *${mimeToken}=(?:${mimeToken}|${mimeQuotedValue}) *)*$`,
   'u',
 )
 

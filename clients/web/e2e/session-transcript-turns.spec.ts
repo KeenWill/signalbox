@@ -133,20 +133,19 @@ test('persists levels and reads bounded turn detail', async ({ page }, testInfo)
   await page.reload()
   await expect(page.getByRole('radio', { name: 'Tools', exact: true })).toBeChecked()
   await expect(
-    transcript.getByRole('button', { name: 'Open turn details for exec_command', exact: true }),
+    transcript.getByRole('button', {
+      name: /^Open turn details for exec_command(?: · .+)?$/,
+      exact: true,
+    }),
   ).not.toHaveAttribute('aria-expanded')
   await page.getByRole('radio', { name: 'All details', exact: true }).check()
   await expect.poll(() => turnReads.length).toBeGreaterThan(0)
   await expect(
-    transcript.getByText('Publishing needs an operator decision during the release window.', {
-      exact: false,
-    }),
+    transcript.getByRole('region', { name: 'Approval rationale', exact: true }),
   ).toBeVisible()
   await page.getByRole('radio', { name: 'Summary', exact: true }).check()
   await expect(
-    transcript.getByText('Publishing needs an operator decision during the release window.', {
-      exact: false,
-    }),
+    transcript.getByRole('region', { name: 'Approval rationale', exact: true }),
   ).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('turn-levels.png') })
 })
@@ -159,7 +158,7 @@ test('restores the selected Tools level after collapsing a tool-opened turn', as
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   const summary = transcript.getByRole('region', { name: 'exec_command details', exact: true })
   const openTool = transcript.getByRole('button', {
-    name: 'Open turn details for exec_command',
+    name: /^Open turn details for exec_command(?: · .+)?$/,
     exact: true,
   })
   const heading = transcript.getByRole('button', { name: 'Open turn details', exact: true })
@@ -252,11 +251,14 @@ test('reads later tool members on demand in Tools mode', async ({ page }) => {
     'passed',
   )
   expect(members).toEqual([])
-  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
   const details = transcript.getByRole('region', { name: 'More message text' })
   await transcript.getByRole('button', { name: 'Show more tools', exact: true }).click()
   await expect(
-    transcript.getByRole('button', { name: 'Open turn details for verify_release', exact: true }),
+    transcript.getByRole('button', {
+      name: /^Open turn details for verify_release(?: · .+)?$/,
+      exact: true,
+    }),
   ).toBeVisible()
   await expect(
     transcript.getByRole('region', { name: 'verify_release details', exact: true }),
@@ -326,6 +328,34 @@ test('Escape collapses the focused turn before closing the product workspace', a
   await expect(transcript).toHaveCount(0)
   await expect(page).not.toHaveURL(/workspace=true/)
 })
+
+for (const level of ['Summary', 'Tools', 'All details']) {
+  test(`Escape collapses the focused ${level} turn while session details stays open`, async ({
+    page,
+  }) => {
+    await turnApi(page)
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    await page.getByRole('radio', { name: level, exact: true }).check()
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    if (level !== 'All details')
+      await transcript.getByRole('button', { name: 'Open turn details', exact: true }).click()
+    const details = page.getByText('Session details', { exact: true })
+    const telemetry = page.getByText('Up to date as of', { exact: true })
+    await details.click()
+    await expect(telemetry).toBeVisible()
+    await transcript.getByRole('button', { name: 'Collapse turn', exact: true }).focus()
+    await page.keyboard.press('Escape')
+    await expect(
+      transcript.getByRole('button', { name: 'Open turn details', exact: true }),
+    ).toBeFocused()
+    await expect(telemetry).toBeVisible()
+    await expect(page.getByRole('radio', { name: level, exact: true })).toBeChecked()
+    await details.press('Escape')
+    await expect(telemetry).toBeHidden()
+    await expect(details).toBeFocused()
+    await expect(transcript).toBeVisible()
+  })
+}
 
 test('Escape collapses a focused turn while All details is selected', async ({ page }) => {
   await turnApi(page)
@@ -593,6 +623,7 @@ for (const level of ['All details', 'Summary', 'Tools']) {
       'third chunk',
     ])
 
+    await transcript.focus()
     await transcript.evaluate((element) => {
       element.scrollTop = element.scrollHeight
       element.dispatchEvent(new Event('scroll'))
@@ -610,7 +641,7 @@ for (const level of ['All details', 'Summary', 'Tools']) {
     if (level !== 'All details') {
       await input.getByRole('button', { name: 'Close details', exact: true }).click()
       await expect(input.locator('.session-message-text')).toHaveText(['first chunk'])
-      await input.getByRole('button', { name: 'Read more', exact: true }).click()
+      await input.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
       await expect(input.locator('.session-message-text')).toHaveText([
         'first chunk',
         'second chunk',
@@ -765,14 +796,24 @@ test('keeps a failed physical attempt inspectable after the same request succeed
   await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   const chips = transcript.getByRole('button', {
-    name: 'Open turn details for exec_command',
+    name: /^Open turn details for exec_command(?: · .+)?$/,
     exact: true,
   })
   await expect(chips).toHaveCount(2)
+  await expect(chips.first()).toHaveText('exec_command · Failed')
+  await expect(chips.first()).toHaveAccessibleName('Open turn details for exec_command · Failed')
+  await expect(chips.last()).toHaveText('exec_command · Completed')
+  await expect(chips.last()).toHaveAccessibleName('Open turn details for exec_command · Completed')
   const slots = transcript.locator('.session-tool-slot')
   await expect(slots.first().getByText('Failure · Attempt lost on restart')).toBeVisible()
-  await slots.first().getByRole('button', { name: 'Read more', exact: true }).click()
-  await slots.last().getByRole('button', { name: 'Read more', exact: true }).click()
+  await slots
+    .first()
+    .getByRole('button', { name: /^Read more(?: .+)?$/ })
+    .click()
+  await slots
+    .last()
+    .getByRole('button', { name: /^Read more(?: .+)?$/ })
+    .click()
   await expect(
     slots
       .first()
@@ -904,10 +945,11 @@ for (const level of ['Tools']) {
         })
         .toBe(true)
     }
-    await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+    await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
     const reader = transcript.getByRole('region', { name: 'More message text', exact: true })
     await reader.getByRole('button', { name: 'Continue reading', exact: true }).click()
     await expect(reader.locator('pre')).toHaveText(['second chunk', 'third chunk'])
+    await transcript.focus()
     await transcript.evaluate((element) => {
       element.scrollTop = element.scrollHeight
       element.dispatchEvent(new Event('scroll'))
@@ -920,7 +962,7 @@ for (const level of ['Tools']) {
     await expect(reader.locator('pre')).toHaveText(['second chunk', 'third chunk'])
     await reader.getByRole('button', { name: 'Close details', exact: true }).click()
     await expect(reader).toHaveCount(0)
-    await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+    await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
     await expect(reader.locator('pre')).toHaveText(['second chunk'])
   })
 }
@@ -1197,8 +1239,16 @@ for (const around of ['18446744073709551616', '99999999999999999999']) {
   })
 }
 
-for (const open of ['Summary', 'Tools', 'turn link']) {
-  test(`includes a turn-associated compaction without turn_id from ${open}`, async ({
+for (const [open, close, collapseFrom] of [
+  ['Summary', 'button', 'compaction'],
+  ['Tools', 'Escape', 'compaction'],
+  ['turn link', 'button', 'compaction'],
+  ['All details', 'button', 'input'],
+  ['All details', 'Escape', 'input'],
+  ['All details', 'button', 'compaction'],
+  ['All details', 'Escape', 'compaction'],
+] as const) {
+  test(`includes a turn-associated compaction without turn_id from ${open} and collapses from ${collapseFrom} by ${close}`, async ({
     page,
   }, testInfo) => {
     const input = detailItems[0]
@@ -1274,10 +1324,11 @@ for (const open of ['Summary', 'Tools', 'turn link']) {
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
     if (open !== 'turn link') {
       await page.getByRole('radio', { name: open, exact: true }).check()
-      await transcript
-        .getByRole('button', { name: 'Open turn details', exact: true })
-        .first()
-        .click()
+      if (open !== 'All details')
+        await transcript
+          .getByRole('button', { name: 'Open turn details', exact: true })
+          .first()
+          .click()
     }
     const event = transcript.locator('[data-event-sequence="2"]')
     if (unavailable) {
@@ -1294,24 +1345,42 @@ for (const open of ['Summary', 'Tools', 'turn link']) {
         .locator('[data-turn-id]')
         .filter({ has: page.locator('[data-event-sequence="2"]') }),
     ).toHaveAttribute('data-turn-id', turnId)
-    await expect(transcript.locator('[data-event-sequence="3"]')).toHaveCount(0)
+    await expect(transcript.locator('[data-event-sequence="3"]')).toHaveCount(
+      open === 'All details' ? 1 : 0,
+    )
     expect(membership.filter((address) => address === '3')).toHaveLength(1)
     expect(membership.filter((address) => address === '2').length).toBeLessThanOrEqual(
       open === 'Summary' ? 3 : 2,
     )
     await page.screenshot({ path: testInfo.outputPath('associated-compaction.png') })
-    const collapse = transcript
-      .locator('[data-transcript-turn]')
-      .filter({ has: page.locator('[data-event-sequence="2"]') })
-      .getByRole('button', { name: 'Collapse turn', exact: true })
-    if (open === 'Tools') {
-      await collapse.focus()
-      await page.keyboard.press('Escape')
-    } else await collapse.click()
+    const segment = transcript.locator('[data-transcript-turn]').filter({
+      has: page.locator(`[data-event-sequence="${collapseFrom === 'input' ? '1' : '2'}"]`),
+    })
+    const segmentId = await segment.getAttribute('data-transcript-turn')
+    const collapse = segment.getByRole('button', { name: 'Collapse turn', exact: true })
+    if (close === 'Escape') await collapse.press('Escape')
+    else await collapse.click()
     await expect(event).toHaveCount(0)
-    await expect(
-      transcript.getByRole('button', { name: 'Open turn details', exact: true }).first(),
-    ).toBeFocused()
+    if (open === 'All details') {
+      await expect(page.getByRole('radio', { name: 'All details', exact: true })).toBeChecked()
+      await expect(transcript.locator('[data-event-sequence="3"]')).toBeVisible()
+      await expect(
+        transcript.locator(`[data-turn-id="${turnId}"]`).getByRole('button', {
+          name: 'Collapse turn',
+          exact: true,
+        }),
+      ).toHaveCount(0)
+      await expect(
+        transcript.locator(`[data-transcript-turn="${segmentId}"]`).getByRole('button', {
+          name: 'Open turn details',
+          exact: true,
+        }),
+      ).toBeFocused()
+    } else {
+      await expect(
+        transcript.getByRole('button', { name: 'Open turn details', exact: true }).first(),
+      ).toBeFocused()
+    }
   })
 }
 
@@ -1409,14 +1478,17 @@ for (const afterOutput of [false, true]) {
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
     const chips = transcript.getByRole('region', { name: 'Tools used' })
     await expect(
-      chips.getByRole('button', { name: 'Open turn details for exec_command', exact: true }),
+      chips.getByRole('button', {
+        name: /^Open turn details for exec_command(?: · .+)?$/,
+        exact: true,
+      }),
     ).toBeVisible()
     if (afterOutput) {
       await expect(
         chips.getByRole('region', { name: 'exec_command details', exact: true }),
       ).toContainText('First tool output')
       expect(reads).toEqual([0])
-      await chips.getByRole('button', { name: 'Read more', exact: true }).click()
+      await chips.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
       await expect(
         chips
           .getByRole('region', { name: 'More message text', exact: true })
@@ -1428,7 +1500,7 @@ for (const afterOutput of [false, true]) {
     unavailable = false
     await chips.getByRole('button', { name: 'Retry more tools', exact: true }).click()
     const second = chips.getByRole('button', {
-      name: 'Open turn details for read_file',
+      name: /^Open turn details for read_file(?: · .+)?$/,
       exact: true,
     })
     await expect(second).toBeVisible()
@@ -1437,7 +1509,7 @@ for (const afterOutput of [false, true]) {
     ).toContainText('Arguments for tool 1')
     await chips.getByRole('button', { name: 'Show more tools', exact: true }).click()
     const third = chips.getByRole('button', {
-      name: 'Open turn details for apply_patch',
+      name: /^Open turn details for apply_patch(?: · .+)?$/,
       exact: true,
     })
     await expect(third).toBeVisible()
@@ -1554,7 +1626,7 @@ for (const close of ['button', 'Escape']) {
     await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
     const message = transcript.locator('[data-event-sequence="1"]')
-    await message.getByRole('button', { name: 'Read more', exact: true }).click()
+    await message.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
     await message.getByRole('button', { name: 'Continue reading', exact: true }).click()
     await expect(message.locator('.session-message-text')).toHaveText(['a', 'b', 'c'])
     await transcript.getByRole('button', { name: 'Open turn details', exact: true }).last().click()
@@ -1572,7 +1644,7 @@ for (const close of ['button', 'Escape']) {
     } else await collapse.click()
     await expect(transcript.getByRole('region', { name: 'More message text' })).toHaveCount(0)
     await expect(message.locator('.session-message-text')).toHaveText(['a'])
-    await message.getByRole('button', { name: 'Read more', exact: true }).click()
+    await message.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
     await expect(message.locator('.session-message-text')).toHaveText(['a', 'b'])
     await transcript.getByRole('button', { name: 'Open turn details', exact: true }).last().click()
     await expect(message.locator('.session-message-text')).toHaveText(['a'])
@@ -1585,11 +1657,11 @@ for (const level of ['Summary', 'Tools']) {
     await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
     await page.getByRole('radio', { name: level, exact: true }).check()
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-    await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+    await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
     await expect(transcript.locator('.session-message-text')).toHaveText(['a', 'b'])
     await transcript.getByRole('button', { name: 'Close details', exact: true }).click()
     state.failContinuation = true
-    await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+    await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
     await expect(transcript.getByRole('alert')).toContainText('Details could not be loaded.')
     await expect(transcript.locator('.session-message-text')).toHaveText(['a'])
   })
@@ -1600,7 +1672,7 @@ test('releases the Tools reader after stopping before a goal member', async ({ p
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
   const reader = transcript.getByRole('region', { name: 'More message text', exact: true })
   await expect(reader).toContainText('passed')
   await expect(reader.getByRole('button', { name: 'Continue reading', exact: true })).toHaveCount(0)
@@ -1608,73 +1680,89 @@ test('releases the Tools reader after stopping before a goal member', async ({ p
   await expect(reader).not.toContainText(suffix)
   await reader.getByRole('button', { name: 'Close details', exact: true }).click()
   await expect(reader).toHaveCount(0)
-  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
   await expect(reader).toContainText('passed')
   await expect(reader).not.toContainText(prefix)
   await expect(reader).not.toContainText(suffix)
 })
 
-test('automatically scans past goal-only batch windows to earlier conversation', async ({
-  page,
-}) => {
-  const reads: string[] = []
-  const goal = detailExcerpt('Earlier goal outcome')
-  const batch = detailItems[1]
-  if (batch?.body.type !== 'tool_batch') throw new Error('Batch fixture missing')
-  await page.route('**/api/**', (route) => {
-    const url = new URL(route.request().url())
-    if (url.pathname.endsWith('/follow'))
-      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
-    if (url.pathname === '/api/attention')
-      return route.fulfill({
-        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
-      })
-    const payload = transcriptFixture(url)
-    if (url.pathname.endsWith('/timeline')) {
-      if (url.searchParams.get('max_items') === '8')
-        reads.push(url.searchParams.get('anchor') ?? '')
-      const window = payload as WebSessionTimelineWindow
-      const items = window.items.map((item) => {
-        const kind = Number(item.address.event_sequence) > 99984 ? batch.kind : item.kind
-        return { ...item, kind, projected_structured_bytes: 64 + kind.length }
-      })
-      return route.fulfill({
-        json: {
-          ...window,
-          items,
-          projected_structured_bytes: items.reduce(
-            (sum, item) => sum + item.projected_structured_bytes,
-            0,
-          ),
-        },
-      })
-    }
-    if (
-      url.pathname.endsWith('/timeline-detail') &&
-      Number(url.searchParams.get('first')) > 99984
-    ) {
-      const item = {
-        ...batch,
-        address: { event_sequence: url.searchParams.get('first') ?? '' },
-        projected_body_bytes: 128 + Number(goal.total_bytes),
-        body: {
-          ...batch.body,
-          tools: [],
-          goal_events: [{ type: 'achieved' as const, generation: '1', text: goal }],
-        },
+for (const continuedGoal of [false, true]) {
+  test(`automatically scans past goal-only batch windows${continuedGoal ? ' with goal continuations' : ''} to earlier conversation`, async ({
+    page,
+  }) => {
+    const reads: string[] = []
+    const goal = detailExcerpt('Earlier goal outcome')
+    const batch = detailItems[1]
+    if (batch?.body.type !== 'tool_batch') throw new Error('Batch fixture missing')
+    await page.route('**/api/**', (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname.endsWith('/follow'))
+        return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+      if (url.pathname === '/api/attention')
+        return route.fulfill({
+          json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+        })
+      const payload = transcriptFixture(url)
+      if (url.pathname.endsWith('/timeline')) {
+        if (url.searchParams.get('max_items') === '8')
+          reads.push(url.searchParams.get('anchor') ?? '')
+        const window = payload as WebSessionTimelineWindow
+        const items = window.items.map((item) => {
+          const kind = Number(item.address.event_sequence) > 99984 ? batch.kind : item.kind
+          return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+        })
+        return route.fulfill({
+          json: {
+            ...window,
+            items,
+            projected_structured_bytes: items.reduce(
+              (sum, item) => sum + item.projected_structured_bytes,
+              0,
+            ),
+          },
+        })
       }
-      const detail = detailPage([item])
-      return route.fulfill({ json: { ...detail, session_id: transcriptSessionId } })
-    }
-    return route.fulfill({ json: payload })
+      if (
+        url.pathname.endsWith('/timeline-detail') &&
+        Number(url.searchParams.get('first')) > 99984
+      ) {
+        const address = { event_sequence: url.searchParams.get('first') ?? '' }
+        const continuation = continuedGoal
+          ? {
+              type: 'more_body' as const,
+              body: { address, field: 'goal_text' as const, member_index: 0, offset_bytes: '8' },
+            }
+          : null
+        const text = continuation
+          ? {
+              ...goal,
+              text: goal.text.slice(0, 8),
+              continuation: continuation.body,
+            }
+          : goal
+        const item = {
+          ...batch,
+          address,
+          projected_body_bytes: 128 + text.text.length,
+          body: {
+            ...batch.body,
+            tools: [],
+            goal_events: [{ type: 'achieved' as const, generation: '1', text }],
+          },
+        }
+        const detail = detailPage([item], continuation)
+        return route.fulfill({ json: { ...detail, session_id: transcriptSessionId } })
+      }
+      return route.fulfill({ json: payload })
+    })
+    await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    await expect(transcript.getByText('Message 99984', { exact: true })).toBeVisible()
+    expect(reads).toEqual(['latest', 'before', 'before'])
+    await expect(transcript.getByRole('region', { name: 'Tools used' })).toHaveCount(0)
+    expect(Number(await transcript.getAttribute('data-total-loaded'))).toBeLessThanOrEqual(24)
   })
-  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
-  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  await expect(transcript.getByText('Message 99984', { exact: true })).toBeVisible()
-  expect(reads).toEqual(['latest', 'before', 'before'])
-  await expect(transcript.getByRole('region', { name: 'Tools used' })).toHaveCount(0)
-  expect(Number(await transcript.getAttribute('data-total-loaded'))).toBeLessThanOrEqual(24)
-})
+}
 
 test('keeps an open request disclosure and its continued text when physical attempts arrive', async ({
   page,
@@ -1820,10 +1908,10 @@ test('keeps an open request disclosure and its continued text when physical atte
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   const chips = transcript.getByRole('button', {
-    name: 'Open turn details for exec_command',
+    name: /^Open turn details for exec_command(?: · .+)?$/,
     exact: true,
   })
-  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
   const continued = transcript.getByRole('region', { name: 'More message text', exact: true })
   await expect(continued).toContainText(text.slice(split))
   const retained = await continued.elementHandle()
@@ -1932,7 +2020,7 @@ test('does not offer a goal-text continuation inside a tool disclosure', async (
   await expect(transcript.getByRole('region', { name: 'exec_command details' })).toContainText(
     'release status',
   )
-  await expect(transcript.getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+  await expect(transcript.getByRole('button', { name: /^Read more(?: .+)?$/ })).toHaveCount(0)
   await expect(
     transcript.getByRole('button', { name: 'Show more tools', exact: true }),
   ).toHaveCount(0)
@@ -2004,7 +2092,7 @@ test('stops nested tool output reading before the next goal', async ({ page }, t
   await expect(
     chips.getByRole('region', { name: 'exec_command details', exact: true }),
   ).toContainText('tool')
-  await chips.getByRole('button', { name: 'Read more', exact: true }).click()
+  await chips.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
   const reader = chips.getByRole('region', { name: 'More message text', exact: true })
   await expect(reader.getByText('tool', { exact: true })).toBeVisible()
   await chips.getByRole('button', { name: 'Continue reading', exact: true }).click()
@@ -2016,7 +2104,7 @@ test('stops nested tool output reading before the next goal', async ({ page }, t
   expect(problems).toEqual([])
 })
 
-test('identifies a failed physical attempt without detail text after a successful retry', async ({
+test('identifies payload-free physical attempt states after a successful retry', async ({
   page,
 }, testInfo) => {
   const problems: string[] = []
@@ -2027,8 +2115,20 @@ test('identifies a failed physical attempt without detail text after a successfu
   const items = retriedToolItems().map((item) => {
     if (item.body.type !== 'tool_batch') return item
     const tool = item.body.tools[0]
-    if (tool?.evidence.type !== 'physical_attempt' || tool.evidence.state !== 'known_failed')
-      return item
+    if (tool?.evidence.type !== 'physical_attempt') return item
+    const evidence =
+      tool.evidence.state === 'known_failed'
+        ? {
+            ...tool.evidence,
+            cause: 'crash_lost' as const,
+            failure_present: false,
+            failure: null,
+          }
+        : {
+            ...tool.evidence,
+            result_present: false,
+            result: null,
+          }
     return {
       ...item,
       projected_body_bytes: 128 + Number(tool.arguments?.total_bytes ?? '0'),
@@ -2037,12 +2137,7 @@ test('identifies a failed physical attempt without detail text after a successfu
         tools: [
           {
             ...tool,
-            evidence: {
-              ...tool.evidence,
-              cause: 'crash_lost' as const,
-              failure_present: false,
-              failure: null,
-            },
+            evidence,
           },
         ],
       },
@@ -2091,24 +2186,655 @@ test('identifies a failed physical attempt without detail text after a successfu
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   const chips = transcript.getByRole('button', {
-    name: 'Open turn details for exec_command',
+    name: /^Open turn details for exec_command(?: · .+)?$/,
     exact: true,
   })
   await expect(chips).toHaveCount(2)
+  await expect(chips.first()).toHaveText('exec_command · Failed')
+  await expect(chips.first()).toHaveAccessibleName('Open turn details for exec_command · Failed')
+  await expect(chips.last()).toHaveText('exec_command · Completed')
+  await expect(chips.last()).toHaveAccessibleName('Open turn details for exec_command · Completed')
   const slots = transcript.locator('.session-tool-slot')
   await expect(slots.first().locator('.session-turn-outcome')).toHaveText(
     'Failure · Attempt lost on restart',
   )
-  await expect(slots.first().getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
-  await slots.last().getByRole('button', { name: 'Read more', exact: true }).click()
-  await expect(
-    slots
-      .last()
-      .getByRole('region', { name: 'More message text', exact: true })
-      .getByRole('region', { name: 'Output', exact: true }),
-  ).toContainText('passed')
-  await expect(slots.last().locator('.session-turn-outcome')).toHaveCount(0)
+  await expect(slots.first().getByRole('button', { name: /^Read more(?: .+)?$/ })).toHaveCount(0)
+  await expect(slots.last().locator('.session-turn-outcome')).toHaveText('Completed')
+  await expect(slots.last().getByRole('button', { name: /^Read more(?: .+)?$/ })).toHaveCount(0)
   await slots.first().locator('.session-turn-outcome').scrollIntoViewIfNeeded()
   await page.screenshot({ path: testInfo.outputPath('textless-tool-failure.png') })
+  expect(problems).toEqual([])
+})
+
+for (const level of ['Summary', 'Tools']) {
+  for (const control of ['Continue reading', 'Close details']) {
+    test(`Escape closes the ${level} continuation from ${control} and restores its opener`, async ({
+      page,
+    }) => {
+      const state = await continuedMessageApi(page)
+      await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+      await page.getByRole('radio', { name: level, exact: true }).check()
+      const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+      const opener = transcript.getByRole('button', { name: /^Read more(?: .+)?$/ })
+      await opener.click()
+      const reader = transcript.getByRole('region', { name: 'More message text', exact: true })
+      await expect(reader).toContainText('b')
+      await reader.getByRole('button', { name: control, exact: true }).press('Escape')
+      await expect(reader).toHaveCount(0)
+      await expect(opener).toBeFocused()
+      await expect(transcript).toBeVisible()
+      await expect(page).toHaveURL(/workspace=true/)
+      state.failContinuation = true
+      await opener.click()
+      await expect(transcript.getByRole('alert')).toContainText('Details could not be loaded.')
+      await expect(transcript.locator('.session-message-text')).toHaveText(['a'])
+    })
+  }
+}
+
+test('Escape closes the focused tool reader and restores Read more', async ({ page }) => {
+  await toolGoalApi(page, 'blocked')
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const opener = transcript.getByRole('button', { name: /^Read more(?: .+)?$/ })
+  await opener.click()
+  const reader = transcript.getByRole('region', { name: 'More message text', exact: true })
+  await expect(reader).toContainText('passed')
+  await reader.getByRole('button', { name: 'Close details', exact: true }).press('Escape')
+  await expect(reader).toHaveCount(0)
+  await expect(opener).toBeFocused()
+  await expect(transcript.getByRole('region', { name: 'exec_command details' })).toBeVisible()
+  await expect(page).toHaveURL(/workspace=true/)
+})
+for (const [state, label] of [
+  ['ambiguous', 'Outcome unknown'],
+  ['awaiting_child', 'Waiting for child session'],
+] as const) {
+  test(`shows the ${state} physical attempt state without payload text`, async ({
+    page,
+  }, testInfo) => {
+    const item = toolResultItem()
+    const input = detailItems[0]
+    if (item.body.type !== 'tool_batch' || !input) throw new Error('Tool fixture missing')
+    const tool = item.body.tools[0]
+    if (tool?.evidence.type !== 'physical_attempt') throw new Error('Physical attempt missing')
+    const args = detailExcerpt('{"cmd":"check status"}')
+    const physical: WebSessionTimelineDetail = {
+      ...item,
+      projected_body_bytes: 128 + Number(args.total_bytes),
+      body: {
+        ...item.body,
+        tools: [
+          {
+            ...tool,
+            arguments: args,
+            evidence: {
+              ...tool.evidence,
+              state,
+              effect_posture: 'external_effect',
+              cause: null,
+              result: null,
+              result_present: false,
+              failure: null,
+              failure_present: false,
+            },
+          },
+        ],
+      },
+    }
+    await turnApi(page, undefined, [input, physical])
+    await page.route('**/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      return url.searchParams.get('first') === physical.address.event_sequence
+        ? route.fulfill({ json: detailPage([physical]) })
+        : route.fallback()
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+    const details = transcript.getByRole('region', { name: 'exec_command details', exact: true })
+    await expect(details.getByRole('region', { name: 'Arguments', exact: true })).toContainText(
+      'check status',
+    )
+    await expect(details.getByText(label, { exact: true })).toBeVisible()
+    await expect(details.getByRole('region', { name: 'Failure', exact: true })).toHaveCount(0)
+    await expect(transcript.getByRole('button', { name: /^Read more(?: .+)?$/ })).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath(`${state}-tool-state.png`) })
+  })
+}
+
+for (const close of ['button', 'Escape']) {
+  test(`restores an unmounted turn heading after collapsing a distant segment by ${close}`, async ({
+    page,
+  }) => {
+    const source = detailItems[0]
+    const tool = detailItems[1]
+    if (source?.body.type !== 'user_input' || !tool) throw new Error('Turn fixture missing')
+    const originalTurnId = source.body.turn_id
+    const entries = Array.from({ length: 24 }, (_, index) => {
+      const address = { event_sequence: String(index + 1) }
+      if (index === 23) return { ...tool, address }
+      const text = detailExcerpt(`Message ${index + 1}`)
+      return {
+        ...source,
+        address,
+        projected_body_bytes: 128 + Number(text.total_bytes),
+        body: {
+          ...source.body,
+          turn_id:
+            index === 0
+              ? originalTurnId
+              : `00000000-0000-0000-0000-${String(index).padStart(12, '0')}`,
+          text,
+          attachments: [],
+        },
+      }
+    })
+    await turnApi(page, undefined, entries)
+    await page.route('**/timeline?**', (route) => {
+      const window = transcriptFixture(
+        new URL(route.request().url()),
+        24,
+      ) as WebSessionTimelineWindow
+      const items = window.items.map((item) => {
+        const kind = item.address.event_sequence === '24' ? tool.kind : item.kind
+        return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+      })
+      return route.fulfill({
+        json: {
+          ...window,
+          session_id: detailSessionId,
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
+          ),
+        },
+      })
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    for (const expected of ['Message 9', 'Message 1']) {
+      await expect
+        .poll(async () => {
+          await transcript.evaluate((element) => {
+            element.scrollTop = 0
+            element.dispatchEvent(new Event('scroll'))
+          })
+          return transcript.getByText(expected, { exact: true }).isVisible()
+        })
+        .toBe(true)
+    }
+    const first = transcript
+      .locator('[data-transcript-turn]')
+      .filter({ has: page.getByText('Message 1', { exact: true }) })
+    await first.getByRole('button', { name: 'Open turn details', exact: true }).click()
+    await transcript.evaluate((element) => {
+      element.scrollTop = element.scrollHeight
+    })
+    const last = transcript
+      .locator('[data-transcript-turn]')
+      .filter({ has: page.locator('[data-event-sequence="24"]') })
+    const collapse = last.getByRole('button', { name: 'Collapse turn', exact: true })
+    await expect(collapse).toBeVisible()
+    await collapse.focus()
+    await expect(first).toHaveCount(0)
+    if (close === 'Escape') await collapse.press('Escape')
+    else await collapse.click()
+    await expect(
+      first.getByRole('button', { name: 'Open turn details', exact: true }),
+    ).toBeFocused()
+    await expect(first).toBeInViewport()
+    await expect(last).toHaveCount(0)
+    await expect(page.getByRole('radio', { name: 'Summary', exact: true })).toBeChecked()
+  })
+}
+
+test('All details renders typed facts and requires explicit raw disclosures', async ({ page }) => {
+  const input = detailItems[0]
+  const approval = detailItems[2]
+  if (input?.body.type !== 'user_input' || !approval) throw new Error('Turn fixture missing')
+  const overlay = {
+    reasoning_level: { kind: 'inherit' },
+    fast_mode: { kind: 'inherit' },
+    service_tier: { kind: 'inherit' },
+  } as const
+  const settings: WebSessionTimelineDetail = {
+    address: { event_sequence: '4' },
+    kind: 'turn_model_settings_resolved',
+    projected_body_bytes: 128,
+    body: {
+      type: 'model_settings',
+      detail: {
+        type: 'turn_resolved',
+        accepted_input_id: detailSessionId,
+        turn_id: input.body.turn_id,
+        defaults_version: '1',
+        requested_model: { kind: 'direct', selection_id: detailSessionId },
+        selected_direct_id: detailSessionId,
+        per_call_override: overlay,
+        settings: {
+          precedence: {
+            per_call: overlay,
+            session: overlay,
+            profile: overlay,
+            global_default: overlay,
+          },
+          effective: { reasoning_level: null, fast_mode: 'disabled', service_tier: null },
+        },
+        adjustments: [],
+      },
+    },
+  }
+  await turnApi(page, undefined, [input, approval, settings])
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const decision = transcript.locator('[data-event-sequence="3"]')
+  await expect(decision.getByText('Decision', { exact: true })).toBeVisible()
+  await expect(decision.getByText('Deny', { exact: true })).toBeVisible()
+  const model = transcript.locator('[data-event-sequence="4"]')
+  await expect(model.getByText('Reasoning level', { exact: true })).toBeVisible()
+  await expect(model.getByText('Disabled', { exact: true })).toBeVisible()
+  await expect(transcript.locator('.session-event-facts:visible, code:visible')).toHaveCount(0)
+  await decision.getByText('Raw event data', { exact: true }).click()
+  await expect(decision.locator('.session-event-facts')).toBeVisible()
+  await expect(decision.locator('.session-event-facts')).toContainText(
+    '"approval_judge_escalated": true',
+  )
+  await decision.getByText('Raw event data', { exact: true }).click()
+  await expect(decision.locator('.session-event-facts')).toBeHidden()
+  const rawSetting = model.getByText('Raw setting data', { exact: true }).first()
+  await rawSetting.click()
+  await expect(model.locator('code:visible')).toHaveCount(1)
+  await rawSetting.click()
+  await expect(transcript.locator('.session-event-facts:visible, code:visible')).toHaveCount(0)
+})
+
+test('All details shows model and failed tool facts without payload text', async ({ page }) => {
+  const input = detailItems[0]
+  const model = detailItems[3]
+  const original = retriedToolItems().find(
+    (item) =>
+      item.body.type === 'tool_batch' &&
+      item.body.tools.some(
+        (tool) =>
+          tool.evidence.type === 'physical_attempt' && tool.evidence.state === 'known_failed',
+      ),
+  )
+  if (!input || model?.body.type !== 'model_call' || original?.body.type !== 'tool_batch')
+    throw new Error('Model and failed-tool fixture missing')
+  const tools = original.body.tools.map((tool) => ({
+    ...tool,
+    arguments: detailExcerpt(''),
+    evidence:
+      tool.evidence.type === 'physical_attempt'
+        ? { ...tool.evidence, failure: null, failure_present: false }
+        : tool.evidence,
+  }))
+  const failed: WebSessionTimelineDetail = {
+    ...original,
+    address: { event_sequence: '2' },
+    projected_body_bytes: 128,
+    body: { ...original.body, tools },
+  }
+  const textless: WebSessionTimelineDetail = {
+    ...model,
+    projected_body_bytes: 128,
+    body: {
+      ...model.body,
+      response: null,
+      usage: {
+        input_tokens: '12',
+        output_tokens: '3',
+        cache_creation_input_tokens: '4',
+        cache_read_input_tokens: '5',
+      },
+    },
+  }
+  const entries = [input, failed, textless]
+  await turnApi(page, undefined, entries)
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    const sequence = url.searchParams.get('cursor_address') ?? url.searchParams.get('first')
+    const item = entries.find((entry) => entry.address.event_sequence === sequence)
+    return item && item !== input ? route.fulfill({ json: detailPage([item]) }) : route.fallback()
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const call = transcript.locator('[data-event-sequence="4"]')
+  const fact = (label: string) =>
+    call
+      .locator('dl > div')
+      .filter({ has: page.getByText(label, { exact: true }) })
+      .locator('dd')
+  await expect(fact('Model')).toHaveText(model.body.model_identity_id)
+  await expect(fact('State')).toHaveText('Finished · Completed')
+  await expect(fact('Input tokens')).toHaveText('12')
+  await expect(fact('Output tokens')).toHaveText('3')
+  await expect(fact('Cache creation input tokens')).toHaveText('4')
+  await expect(fact('Cache read input tokens')).toHaveText('5')
+  const attempt = transcript
+    .locator('[data-event-sequence="2"]')
+    .getByRole('region', { name: 'Tool requests', exact: true })
+  await expect(attempt.getByText('Failed', { exact: true })).toBeVisible()
+  await expect(attempt.getByText('Attempt lost on restart', { exact: true })).toBeVisible()
+  await expect(attempt.getByText('Approval', { exact: true })).toBeVisible()
+  await expect(attempt.getByText('Effect', { exact: true })).toBeVisible()
+  await expect(transcript.locator('.session-event-facts:visible')).toHaveCount(0)
+})
+
+test('All details retains every response chunk with one set of model facts', async ({ page }) => {
+  const input = detailItems[0]
+  const model = detailItems[3]
+  if (!input || model?.body.type !== 'model_call') throw new Error('Model fixture missing')
+  const body = model.body
+  const chunk = (offset: number) => {
+    const continuation =
+      offset < 2
+        ? {
+            address: model.address,
+            field: 'model_response' as const,
+            member_index: 0,
+            offset_bytes: String(offset + 1),
+          }
+        : null
+    return {
+      ...model,
+      projected_body_bytes: 129,
+      body: {
+        ...body,
+        response: {
+          text: 'abc'[offset] ?? '',
+          offset_bytes: String(offset),
+          total_bytes: '3',
+          continuation,
+        },
+      },
+    }
+  }
+  await turnApi(page, undefined, [input, chunk(0)])
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if ((url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) !== '4')
+      return route.fallback()
+    const item = chunk(Number(url.searchParams.get('cursor_offset') ?? '0'))
+    const continuation = item.body.response.continuation
+    return route.fulfill({
+      json: detailPage([item], continuation ? { type: 'more_body', body: continuation } : null),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const call = page
+    .getByRole('region', { name: 'Session transcript', exact: true })
+    .locator('[data-event-sequence="4"]')
+  await expect(call.locator('.session-message-text')).toHaveText(['a'])
+  await call.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await call.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await expect(call.locator('.session-message-text')).toHaveText(['a', 'b', 'c'])
+  await expect(call.getByText('Model', { exact: true })).toHaveCount(1)
+  await expect(call.getByText('Input tokens', { exact: true })).toHaveCount(1)
+})
+
+for (const level of ['Summary', 'Tools', 'All details']) {
+  test(`Escape collapses the focused ${level} turn while the desktop inspector stays open`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await turnApi(page)
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    await page.getByRole('radio', { name: level, exact: true }).check()
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    if (level !== 'All details')
+      await transcript.getByRole('button', { name: 'Open turn details', exact: true }).click()
+    const opener = page.getByRole('button', { name: 'Open artifact inspector', exact: true })
+    await opener.click()
+    const inspector = page.getByRole('complementary', { name: 'Inspector', exact: true })
+    await expect(inspector).toBeVisible()
+    await transcript.getByRole('button', { name: 'Collapse turn', exact: true }).press('Escape')
+    await expect(
+      transcript.getByRole('button', { name: 'Open turn details', exact: true }),
+    ).toBeFocused()
+    await expect(inspector).toBeVisible()
+    await expect(page.getByRole('radio', { name: level, exact: true })).toBeChecked()
+    await inspector
+      .getByRole('button', { name: 'Close artifact inspector', exact: true })
+      .press('Escape')
+    await expect(inspector).toHaveCount(0)
+    await expect(opener).toBeFocused()
+    await expect(transcript).toBeVisible()
+  })
+}
+
+test('distinguishes proposal arguments from the continuation that reaches tool output', async ({
+  page,
+}, testInfo) => {
+  const problems: string[] = []
+  page.on('pageerror', (error) => problems.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') problems.push(message.text())
+  })
+  const attempts = retriedToolItems()
+  const pending = attempts[1]
+  const first = attempts[4]
+  if (pending?.body.type !== 'tool_batch' || !first) throw new Error('Attempt fixture missing')
+  const text = '{"cmd":"release status --json --verbose"}'
+  const split = 16
+  const cursor = {
+    type: 'more_body' as const,
+    body: {
+      address: pending.address,
+      field: 'tool_arguments' as const,
+      member_index: 0,
+      offset_bytes: String(split),
+    },
+  }
+  const proposal = {
+    ...pending,
+    projected_body_bytes: 128 + split,
+    body: {
+      ...pending.body,
+      tools: pending.body.tools.map((tool) => ({
+        ...tool,
+        arguments: {
+          text: text.slice(0, split),
+          offset_bytes: '0',
+          total_bytes: String(text.length),
+          continuation: cursor.body,
+        },
+      })),
+    },
+  }
+  const entries = [attempts[0], proposal].filter((item) => item !== undefined)
+  await turnApi(page, undefined, entries)
+  let release = () => {}
+  const growth = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === `/api/sessions/${detailSessionId}/follow`) {
+      await growth
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body:
+          [
+            { kind: 'snapshot', snapshot: { ...detailLive, observed_through: '2' } },
+            {
+              kind: 'durable',
+              cursor: '3',
+              address: { event_sequence: '3' },
+              event_kind: 'tool_batch_transition',
+            },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join('\n') + '\n',
+      })
+    }
+    if (url.pathname.endsWith('/timeline')) {
+      const window = transcriptFixture(url, entries.length) as WebSessionTimelineWindow
+      const items = window.items.map((item) => {
+        const kind =
+          entries.find((entry) => entry.address.event_sequence === item.address.event_sequence)
+            ?.kind ?? item.kind
+        return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+      })
+      return route.fulfill({
+        json: {
+          ...window,
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
+          ),
+        },
+      })
+    }
+    if (
+      url.pathname.endsWith('/timeline-detail') &&
+      (url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) === '2'
+    ) {
+      const continued = url.searchParams.get('cursor_field') === 'tool_arguments'
+      return route.fulfill({
+        json: detailPage(
+          [
+            continued
+              ? {
+                  ...proposal,
+                  projected_body_bytes: 128 + text.length - split,
+                  body: {
+                    ...proposal.body,
+                    tools: proposal.body.tools.map((tool) => ({
+                      ...tool,
+                      arguments: {
+                        text: text.slice(split),
+                        offset_bytes: String(split),
+                        total_bytes: String(text.length),
+                        continuation: null,
+                      },
+                    })),
+                  },
+                }
+              : proposal,
+          ],
+          continued ? null : cursor,
+        ),
+      })
+    }
+    if (url.pathname.endsWith('/timeline-detail') && url.searchParams.get('first') === '3') {
+      const item = entries.find((entry) => entry.address.event_sequence === '3')
+      if (item?.body.type !== 'tool_batch') throw new Error('Result fixture missing')
+      const field = url.searchParams.get('cursor_field')
+      if (field === 'tool_result') {
+        if (first.body.type !== 'tool_batch') throw new Error('Result fixture missing')
+        return route.fulfill({
+          json: detailPage([
+            {
+              ...first,
+              address: item.address,
+              projected_body_bytes: toolResultItem().projected_body_bytes,
+              body: {
+                ...first.body,
+                tools: first.body.tools.map((tool) => ({ ...tool, arguments: null })),
+              },
+            },
+          ]),
+        })
+      }
+      const continued = field === 'tool_arguments'
+      return route.fulfill({
+        json: detailPage(
+          [
+            {
+              ...item,
+              projected_body_bytes: 128 + (continued ? text.length - split : split),
+              body: {
+                ...item.body,
+                tools: item.body.tools.map((tool) => ({
+                  ...tool,
+                  arguments: continued
+                    ? {
+                        text: text.slice(split),
+                        offset_bytes: String(split),
+                        total_bytes: String(text.length),
+                        continuation: null,
+                      }
+                    : tool.arguments,
+                })),
+              },
+            },
+          ],
+          continued
+            ? { ...resultCursor, body: { ...resultCursor.body, address: item.address } }
+            : { ...cursor, body: { ...cursor.body, address: item.address } },
+        ),
+      })
+    }
+    if (url.pathname === `/api/sessions/${detailSessionId}` || url.pathname.endsWith('/live'))
+      return route.fulfill({ json: transcriptFixture(url, entries.length) })
+    return route.fallback()
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+  const chips = transcript.getByRole('button', {
+    name: /^Open turn details for exec_command(?: · .+)?$/,
+  })
+  await expect(
+    transcript.getByRole('button', { name: 'Read more arguments', exact: true }),
+  ).toBeVisible()
+  if (first.body.type !== 'tool_batch') throw new Error('Physical attempt missing')
+  const address = { event_sequence: '3' }
+  entries.push({
+    ...first,
+    address,
+    projected_body_bytes: 128 + split,
+    body: {
+      ...first.body,
+      tools: first.body.tools.map((tool) => ({
+        ...tool,
+        arguments: {
+          text: text.slice(0, split),
+          offset_bytes: '0',
+          total_bytes: String(text.length),
+          continuation: { ...cursor.body, address },
+        },
+        evidence:
+          tool.evidence.type === 'physical_attempt'
+            ? { ...tool.evidence, result: null }
+            : tool.evidence,
+      })),
+    },
+  })
+  release()
+  await expect(chips).toHaveText('exec_command · Completed')
+  const argumentsReader = transcript.getByRole('button', {
+    name: 'Read more arguments',
+    exact: true,
+  })
+  const outputReader = transcript.getByRole('button', {
+    name: 'Read more arguments and output',
+    exact: true,
+  })
+  await expect(argumentsReader).toBeVisible()
+  await expect(outputReader).toBeVisible()
+  await expect(transcript.getByRole('button', { name: /^Read more/ })).toHaveCount(2)
+  await argumentsReader.click()
+  const continued = transcript.getByRole('region', { name: 'More message text', exact: true })
+  await expect(continued).toContainText(text.slice(split))
+  await expect(
+    continued.getByRole('button', { name: 'Continue reading', exact: true }),
+  ).toHaveCount(0)
+  await continued.getByRole('button', { name: 'Close details', exact: true }).click()
+  await outputReader.click()
+  await expect(continued).toContainText(text.slice(split))
+  await continued.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await expect(continued.getByRole('region', { name: 'Output', exact: true })).toContainText(
+    'passed',
+  )
+  await page.screenshot({ path: testInfo.outputPath('distinct-tool-continuations.png') })
   expect(problems).toEqual([])
 })

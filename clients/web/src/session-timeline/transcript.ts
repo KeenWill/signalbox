@@ -54,8 +54,8 @@ export class TranscriptWindowReader {
       signal,
     )
     const details = await Promise.all(
-      window.items.map((item) =>
-        readSessionTranscript(
+      window.items.map(async (item) => {
+        const page = await readSessionTranscript(
           this.sessionId,
           item.address.event_sequence,
           item.address.event_sequence,
@@ -66,8 +66,11 @@ export class TranscriptWindowReader {
             max_timeline_detail_bytes: Math.floor(maxBytes / window.items.length),
           },
           signal,
-        ),
-      ),
+        )
+        if (page.items.some((record) => record.kind !== item.kind))
+          throw new TypeError('Transcript detail kind contradicts its timeline header')
+        return page
+      }),
     )
     const facts = details.flatMap((page) =>
       page.items.map((item) => [item.address.event_sequence, initialDetailFacts(item)] as const),
