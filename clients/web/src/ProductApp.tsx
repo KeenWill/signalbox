@@ -937,6 +937,7 @@ export function ProductApp({
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || app.overlay !== null) return
       const target = event.target
+      if (!(target instanceof Element) || !target.closest('.product-inspector')) return
       if (
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
@@ -1074,8 +1075,14 @@ export function ProductApp({
           </div>
         </section>
       </div>
+    ) : surface === 'usage' && bootstrap.isSuccess ? (
+      <div className="surface-body">
+        <UsageSurface bootstrap={bootstrap.data} />
+      </div>
     ) : surface === 'usage' ? (
-      <UsageSurface />
+      <p role={bootstrap.isError ? 'alert' : 'status'}>
+        {bootstrap.isError ? 'Usage could not load.' : 'Loading usage…'}
+      </p>
     ) : surface === 'reviews' ? (
       <DeferredSurface surface="reviews" />
     ) : (

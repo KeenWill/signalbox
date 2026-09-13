@@ -58,7 +58,10 @@ function AttachmentReference({
     }),
     [attachment.blob_id, attachment.media_type],
   )
-  const descriptor = useArtifactDescriptor(available && visible ? input : null)
+  const descriptor = useArtifactDescriptor(
+    available && visible ? input : null,
+    attachment.length_bytes,
+  )
   const artifact = useMemo(
     () => (descriptor.data ? inspectedArtifact(descriptor.data, sequence) : null),
     [descriptor.data, sequence],
@@ -203,6 +206,7 @@ function AttachmentReference({
         >
           <Dialog.Title className="sr-only">Attachment details</Dialog.Title>
           <ArtifactInspector
+            expectedByteLength={attachment.length_bytes}
             available={available}
             commandContext={context}
             state={state}

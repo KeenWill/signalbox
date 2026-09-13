@@ -1,5 +1,10 @@
-import { expect, it } from 'vitest'
-import { HttpSessionCreationApi, SessionCreationRejected } from './newSession'
+import { afterEach, expect, it } from 'vitest'
+import {
+  HttpSessionCreationApi,
+  readRetainedCreation,
+  retainCreation,
+  SessionCreationRejected,
+} from './newSession'
 import { createdSessionFixture } from './newSession.fixture'
 
 const request = {
@@ -7,6 +12,21 @@ const request = {
   template_name: 'code-review',
   first_input: null,
 }
+
+afterEach(() => sessionStorage.clear())
+
+it('evicts an unreadable retained creation request', () => {
+  sessionStorage.setItem('signalbox.new-session', '{')
+
+  expect(() => readRetainedCreation()).toThrow()
+  expect(readRetainedCreation()).toBeNull()
+})
+
+it('reads a valid retained creation request', () => {
+  retainCreation(request)
+
+  expect(readRetainedCreation()).toEqual(request)
+})
 
 it('posts the exact creation identity and template and admits a committed receipt', async () => {
   const api = new HttpSessionCreationApi(async (path, init) => {

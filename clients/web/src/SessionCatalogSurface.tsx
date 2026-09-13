@@ -144,18 +144,12 @@ const SessionMetadata = ({
     }
   }, [editing, suggestion, suggesting, error])
   useEffect(() => {
-    if (
-      catalogUpdatedAt &&
-      editing &&
-      !saving &&
-      intent.current &&
-      !retainedRename(summary.session_id)
-    ) {
+    if (catalogUpdatedAt && editing && intent.current && !retainedRename(summary.session_id)) {
       intent.current = null
       setTitle(summary.title_truncated ? '' : (summary.title_summary ?? ''))
       setError(null)
     }
-  }, [catalogUpdatedAt, editing, saving, summary])
+  }, [catalogUpdatedAt, editing, summary])
   const provenance = summary.repository_watch
   const repositoryUrl = provenance
     ? `https://github.com/${provenance.repository.split('/').map(encodeURIComponent).join('/')}`

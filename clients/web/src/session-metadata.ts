@@ -20,27 +20,27 @@ export function createRenameCommandId() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
-const unresolvedRenames = new Map<string, WebSessionTitleRequest>()
-const acknowledgedRenames = new Map<string, WebSessionTitleRequest>()
+const retainedRenames = new Map<
+  string,
+  { request: WebSessionTitleRequest; acknowledged: boolean }
+>()
 
-export const renameNeedsReadback = (sessionId: string) => acknowledgedRenames.has(sessionId)
+export const renameNeedsReadback = (sessionId: string) =>
+  retainedRenames.get(sessionId)?.acknowledged === true
 
 export async function readRenameCatalog(read: () => Promise<WebSessionCatalogSnapshot>) {
-  const pending = new Map(acknowledgedRenames)
+  const pending = new Map(retainedRenames)
   const snapshot = await read()
   for (const row of snapshot.summaries) {
-    const request = pending.get(row.session_id)
-    if (request && acknowledgedRenames.get(row.session_id) === request) {
-      acknowledgedRenames.delete(row.session_id)
-      if (unresolvedRenames.get(row.session_id) === request) {
-        unresolvedRenames.delete(row.session_id)
-      }
+    const intent = pending.get(row.session_id)
+    if (intent?.acknowledged && retainedRenames.get(row.session_id) === intent) {
+      retainedRenames.delete(row.session_id)
     }
   }
   return snapshot
 }
 
-export const retainedRename = (sessionId: string) => unresolvedRenames.get(sessionId) ?? null
+export const retainedRename = (sessionId: string) => retainedRenames.get(sessionId)?.request ?? null
 
 export async function renameSession(sessionId: string, request: WebSessionTitleRequest) {
   const retained = retainedRename(sessionId)
@@ -51,7 +51,7 @@ export async function renameSession(sessionId: string, request: WebSessionTitleR
     throw new Error('Retry the unconfirmed rename before changing its title.')
   }
   const body = JSON.stringify(decodeWebSessionTitleRequest(request))
-  unresolvedRenames.set(sessionId, request)
+  if (!retained) retainedRenames.set(sessionId, { request, acknowledged: false })
   const controller = new AbortController()
   const deadline = setTimeout(() => controller.abort(), METADATA_PATCH_DEADLINE_MS)
   try {
@@ -63,7 +63,7 @@ export async function renameSession(sessionId: string, request: WebSessionTitleR
       signal: controller.signal,
     })
     if (response.status === 204) {
-      acknowledgedRenames.set(sessionId, request)
+      retainedRenames.set(sessionId, { request, acknowledged: true })
       return
     }
     if (!response.ok) {
@@ -75,8 +75,7 @@ export async function renameSession(sessionId: string, request: WebSessionTitleR
     throw new Error('Rename was not acknowledged. Retry to confirm the same title.')
   } catch (failure) {
     if (failure instanceof ProductRequestError && [400, 404, 409, 413].includes(failure.status)) {
-      unresolvedRenames.delete(sessionId)
-      acknowledgedRenames.delete(sessionId)
+      retainedRenames.delete(sessionId)
     }
     if (controller.signal.aborted) {
       throw new Error('Rename timed out. Retry to confirm the same title.', { cause: failure })
