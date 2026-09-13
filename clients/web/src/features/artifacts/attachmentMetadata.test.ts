@@ -20,6 +20,8 @@ describe('attachment descriptor media types', () => {
   })
   it.each([
     'image/png',
+    'image/png ;x=y',
+    'image/png  ;x=y ;z=t',
     String.raw`image/png;x="a\z"`,
     String.raw`image/png;x="a\"b"`,
     String.raw`image/png;x="a\\z"`,
