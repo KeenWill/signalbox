@@ -120,7 +120,13 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
         <small>In {textField(args.working_directory ?? args.workdir)}</small>
       )}
       {typeof code === 'number' && <strong>Exit {code}</strong>}
-      {typeof outcome.kind === 'string' && <span>{fieldLabel(textField(outcome.kind))}</span>}
+      {typeof outcome.kind === 'string' && (
+        <span>
+          {outcome.kind === 'exited' && outcome.code === null
+            ? 'Terminated by signal'
+            : fieldLabel(outcome.kind)}
+        </span>
+      )}
       {typeof outcome.reason === 'string' && <span>{fieldLabel(outcome.reason)}</span>}
       <TextPreview text={textField(stdout.text ?? result.stdout ?? result.output)} label="Output" />
       <TextPreview text={textField(stderr.text ?? result.stderr)} label="Error output" />
@@ -176,6 +182,7 @@ function FileEdit({ arguments: args, result, resultExcerpt }: RendererProps) {
     <>
       <strong>{textField(args.path ?? args.file_path ?? result.path)}</strong>
       <TextPreview text={patch} label="Proposed changes" diff />
+      {args.content === '' && <strong>Write empty file</strong>}
       {args.replace_all === true && <strong>Replace every match</strong>}
       {(previewText(old).omittedCharacters > 0 ||
         previewText(replacement).omittedCharacters > 0) && (

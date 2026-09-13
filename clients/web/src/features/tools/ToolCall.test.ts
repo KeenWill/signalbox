@@ -11,6 +11,25 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each([null, 0, 7])('distinguishes a signal from exit code %s', (code) => {
+    const markup = render(
+      toolExample('sandboxed_exec', { program: 'tool' }, { outcome: { kind: 'exited', code } }),
+    )
+    expect(markup.includes('Terminated by signal')).toBe(code === null)
+    if (code !== null) expect(markup).toContain(`Exit ${code}`)
+    else expect(markup).not.toContain('<span>Exited</span>')
+  })
+
+  it.each(['', 'contents', undefined])(
+    'identifies explicitly empty write content %s',
+    (content) => {
+      const [tool] = toolExample('write_file', { path: 'file.txt', content }, {})
+      const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))
+      expect(markup.includes('Write empty file')).toBe(content === '')
+      expect(markup).toContain('file.txt')
+    },
+  )
+
   it.each([
     ['spawn_failed', 'not_found', 'Not found'],
     ['spawn_failed', 'permission_denied', 'Permission denied'],
