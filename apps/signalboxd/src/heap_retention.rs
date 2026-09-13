@@ -17,13 +17,17 @@ const COMPLETION: &str = "heap retention verified";
 
 #[test]
 fn freed_buffers_leave_resident_memory_while_allocating_workers_are_idle() {
+    verify_isolated_workload("heap_retention::allocation_workload");
+}
+
+#[test]
+fn freed_native_buffers_leave_resident_memory_while_allocating_workers_are_idle() {
+    verify_isolated_workload("heap_retention::native_allocation_workload");
+}
+
+fn verify_isolated_workload(workload: &str) {
     let output = Command::new(std::env::current_exe().expect("daemon test executable"))
-        .args([
-            "--exact",
-            "heap_retention::allocation_workload",
-            "--ignored",
-            "--nocapture",
-        ])
+        .args(["--exact", workload, "--ignored", "--nocapture"])
         .output()
         .expect("isolated daemon allocation test starts");
     assert!(
@@ -106,26 +110,97 @@ impl SparseWorkerBuffers {
             .collect();
         drop(send);
         let buffers = receive.into_iter().collect::<Vec<_>>();
-        let peak_kib = resident_kib();
-        drop(buffers);
-        let start = Instant::now();
-        let mut after_kib = resident_kib();
-        while peak_kib.saturating_sub(after_kib) < minimum_released_kib
-            && start.elapsed() < deadline
-        {
-            // Only the freeing thread stays active; allocating workers remain idle.
-            black_box((0..128).map(|_| vec![PAGE_FILL; 1024]).collect::<Vec<_>>());
-            thread::sleep(Duration::from_millis(1));
-            after_kib = resident_kib();
-        }
-        release_workers.wait();
-        for handle in handles {
-            handle.join().expect("allocation worker completed");
-        }
-        ResidentObservation {
-            peak_kib,
-            after_kib,
-        }
+        observe_freed_buffers(
+            buffers,
+            release_workers,
+            handles,
+            minimum_released_kib,
+            deadline,
+        )
+    }
+}
+
+#[test]
+#[ignore = "invoked by the parent regression in an isolated daemon test process"]
+fn native_allocation_workload() {
+    let workers = 32;
+    let buffers_per_worker = 64;
+    let minimum_released_kib = 96 * 1024;
+    let deadline = Duration::from_secs(30);
+    // A parsed patch owns native libgit2 buffers through its safe Rust API.
+    let line = "x".repeat(65536);
+    let patch = Arc::new(format!(
+        "diff --git a/probe b/probe\n--- a/probe\n+++ b/probe\n@@ -1 +1 @@\n-old\n+{line}\n"
+    ));
+    let release_workers = Arc::new(Barrier::new(workers + 1));
+    let (send, receive) = mpsc::channel();
+    let handles = (0..workers)
+        .map(|_| {
+            let patch = Arc::clone(&patch);
+            let release_workers = Arc::clone(&release_workers);
+            let send = send.clone();
+            thread::spawn(move || {
+                let mut buffers = Vec::new();
+                let mut retained = Vec::new();
+                for _ in 0..buffers_per_worker / 8 {
+                    for _ in 0..8 {
+                        buffers.push(
+                            git2::Diff::from_buffer(patch.as_bytes()).expect("native patch buffer"),
+                        );
+                    }
+                    retained.push(
+                        git2::Diff::from_buffer(patch.as_bytes())
+                            .expect("retained native patch buffer"),
+                    );
+                }
+                send.send(buffers)
+                    .expect("freeing thread receives native buffers");
+                drop(send);
+                release_workers.wait();
+                black_box(retained);
+            })
+        })
+        .collect();
+    drop(send);
+    let buffers = receive.into_iter().collect::<Vec<_>>();
+    let resident = observe_freed_buffers(
+        buffers,
+        release_workers,
+        handles,
+        minimum_released_kib,
+        deadline,
+    );
+    assert!(
+        resident.peak_kib.saturating_sub(resident.after_kib) >= minimum_released_kib,
+        "native buffers stayed resident: {resident:?}"
+    );
+    println!("{COMPLETION}: {resident:?}");
+}
+
+fn observe_freed_buffers<T>(
+    buffers: Vec<T>,
+    release_workers: Arc<Barrier>,
+    handles: Vec<thread::JoinHandle<()>>,
+    minimum_released_kib: usize,
+    deadline: Duration,
+) -> ResidentObservation {
+    let peak_kib = resident_kib();
+    drop(buffers);
+    let start = Instant::now();
+    let mut after_kib = resident_kib();
+    while peak_kib.saturating_sub(after_kib) < minimum_released_kib && start.elapsed() < deadline {
+        // Only the freeing thread stays active; allocating workers remain idle.
+        black_box((0..128).map(|_| vec![PAGE_FILL; 1024]).collect::<Vec<_>>());
+        thread::sleep(Duration::from_millis(1));
+        after_kib = resident_kib();
+    }
+    release_workers.wait();
+    for handle in handles {
+        handle.join().expect("allocation worker completed");
+    }
+    ResidentObservation {
+        peak_kib,
+        after_kib,
     }
 }
 

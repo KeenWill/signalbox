@@ -28,7 +28,9 @@ type Attachments = Extract<WebSessionTimelineDetailBody, { type: 'user_input' }>
 function AttachmentReference({
   attachment,
   available,
+  presentationKind,
 }: {
+  presentationKind?: 'image' | 'document'
   attachment: WebTimelineBlobReference
   available: boolean
 }) {
@@ -65,8 +67,8 @@ function AttachmentReference({
     attachment.length_bytes,
   )
   const artifact = useMemo(
-    () => (descriptor.data ? inspectedArtifact(descriptor.data, sequence) : null),
-    [descriptor.data, sequence],
+    () => (descriptor.data ? inspectedArtifact(descriptor.data, sequence, presentationKind) : null),
+    [descriptor.data, sequence, presentationKind],
   )
   const inlineId = artifact?.id
   const detailId = request ? artifactResolutionId(request) : undefined
@@ -82,7 +84,7 @@ function AttachmentReference({
       store.dispatch(actions.artifactOriginalReleased(detailId))
     }
   }, [detailId, store])
-  const name = artifact?.displayName ?? attachmentTypeLabel(attachment.media_type)
+  const name = artifact?.displayName ?? attachmentTypeLabel(attachment.media_type, presentationKind)
   const download = descriptor.data ? selectBlobView(descriptor.data, 'download') : undefined
   const context: CommandContext = {
     dispatch: store.dispatch,
@@ -206,6 +208,7 @@ function AttachmentReference({
         >
           <Dialog.Title className="sr-only">Attachment details</Dialog.Title>
           <ArtifactInspector
+            presentationKind={presentationKind}
             expectedByteLength={attachment.length_bytes}
             available={available}
             commandContext={context}
@@ -218,7 +221,13 @@ function AttachmentReference({
   )
 }
 
-export function AttachmentReferences({ attachments }: { attachments: Attachments }) {
+export function AttachmentReferences({
+  attachments,
+  presentationKind,
+}: {
+  attachments: Attachments
+  presentationKind?: 'image' | 'document'
+}) {
   const available = useBlobCapability(attachments.length > 0)
   if (attachments.length === 0) return null
   return (
@@ -226,7 +235,11 @@ export function AttachmentReferences({ attachments }: { attachments: Attachments
       {attachments.map((attachment, index) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: Attachment positions are immutable; repeated digests are valid.
         <li key={`${attachment.blob_id}:${index}`}>
-          <AttachmentReference attachment={attachment} available={available} />
+          <AttachmentReference
+            attachment={attachment}
+            available={available}
+            presentationKind={presentationKind}
+          />
         </li>
       ))}
     </ul>

@@ -44,6 +44,11 @@ snapshot. When a user disagrees with a judge denial, the
 proposal of the same command; each delegate denial admits at most one override
 ever, and a second command is rejected.
 
+`POST /api/sessions/{session_id}/approvals/{request_id}` accepts a durable
+command ID, an `approve` or `deny` decision, and an optional denial note through
+the same decision service. The same-origin JSON gate applies; a 204 acknowledges
+the recorded decision, and refusals retain their application error code.
+
 The daemon composes one process-lifetime immutable registry from the implemented
 tool families in `apps/signalboxd/src/daemon_tools/`: basic, blob-read, web,
 code-host, workspace, conversation, plan, session-delegation, goal-declaration,
@@ -404,6 +409,13 @@ session; its Git executor enforces the bound repository's format. Local Git
 requests for a plain bound root return a known tool failure. Configured pushes
 use the same bound workspace.
 
+Local Git status and worktree diff honor repository `.gitignore` files and the
+common Git directory's `info/exclude` when discovering untracked paths. Ignored
+directories are pruned before their contents consume the worktree inspection
+budget; tracked changes remain visible. Nested ignore rules and negations use
+Git precedence. Ignore files are read through pinned, no-follow filesystem
+handles; ambient global excludes are not loaded.
+
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
 correlated with that exact attempt. Delegated turns retain the same recovery
@@ -476,12 +488,14 @@ after the results, derives the exact prefix-preserving frontier extension, and
 creates the next round's `Prepared` model call against that frontier. These
 effects commit or roll back together. An interrupt or crash loss that ends the
 turn appends the result suffix with its terminal marker and prepares no call.
-When at least one request entered execution, the continuation turn attempt
-already entered `Running` during authorization and owns the new call without
-moving backward. An optional configured ceiling bounds the tool rounds one turn
-may complete, and a policy of none sets no ceiling. After the last batch a
-ceiling admits resolves, continuation still projects every result and creates
-its `Prepared` call, and model execution closes that call `KnownFailed` before
+This also closes unattempted siblings when the lost tool and its turn attempt
+are still `Prepared`; the closure frontier cannot prepare a model call. When at
+least one request entered execution, the continuation turn attempt already
+entered `Running` during authorization and owns the new call without moving
+backward. An optional configured ceiling bounds the tool rounds one turn may
+complete, and a policy of none sets no ceiling. After the last batch a ceiling
+admits resolves, continuation still projects every result and creates its
+`Prepared` call, and model execution closes that call `KnownFailed` before
 capability preparation or send.
 
 At most 256 MiB of projected frontier content may be rendered into one call's

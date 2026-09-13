@@ -28,15 +28,18 @@ pub fn deterministic_test_router() -> Router {
 
 pub(super) async fn contract_bootstrap(
     State(state): State<WebHttpState>,
+    reload: Option<axum::Extension<crate::configuration_reload::ConfigurationReload>>,
 ) -> Json<WebContractBootstrap> {
     let image_derivatives = state
         .blobs
         .as_ref()
         .is_some_and(WebBlobRuntime::supports_image_derivatives);
-    Json(WebContractBootstrap::for_runtime(
-        state.blobs.is_some(),
-        image_derivatives,
-    ))
+    let mut bootstrap = WebContractBootstrap::for_runtime(state.blobs.is_some(), image_derivatives);
+    bootstrap.capabilities.session_title_generation = state
+        .pool
+        .and_then(|pool| reload.and_then(|reload| reload.0.session_titles(pool)))
+        .is_some();
+    Json(bootstrap)
 }
 
 async fn deterministic_contract_bootstrap() -> Json<WebContractBootstrap> {

@@ -661,6 +661,9 @@ enum RuntimeDrainOutcome {
     GuardLost,
 }
 
+// Title work shares a small fixed ceiling across credential profiles.
+const MAX_CONCURRENT_TITLE_TASKS: usize = 4;
+
 enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
     FencedPoolFloor,
@@ -674,6 +677,7 @@ enum RuntimeTaskExit {
     LifecycleDeadline,
     LifecycleMetrics,
     SessionSupervision,
+    SessionTitle(tokio::sync::OwnedSemaphorePermit),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1160,6 +1164,17 @@ fn joined_task_defect(error: &JoinError) -> RuntimeTaskDefect {
     }
 }
 
+async fn next_title_task(
+    pending: &mut tokio::sync::mpsc::Receiver<signalboxd::web_http::SessionTitleTask>,
+    slots: &Arc<tokio::sync::Semaphore>,
+) -> Option<(
+    signalboxd::web_http::SessionTitleTask,
+    tokio::sync::OwnedSemaphorePermit,
+)> {
+    let permit = slots.clone().acquire_owned().await.ok()?;
+    Some((pending.recv().await?, permit))
+}
+
 fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> RuntimeTaskCompletion {
     match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
@@ -1173,6 +1188,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::TurnLiveness)
         | Ok(RuntimeTaskExit::LifecycleDeadline)
         | Ok(RuntimeTaskExit::LifecycleMetrics)
+        | Ok(RuntimeTaskExit::SessionTitle(_))
         | Ok(RuntimeTaskExit::SessionSupervision) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
@@ -2102,11 +2118,15 @@ async fn run_hub_incarnation(
         signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(pool.clone()),
         eligibility_nudge.clone(),
     );
+    // One handoff slot; the incarnation task set owns execution and drain.
+    let (title_tasks, mut pending_titles) =
+        tokio::sync::mpsc::channel::<signalboxd::web_http::SessionTitleTask>(1);
     let invocation_processes =
         signalboxd::credential_invocations::CredentialInvocationProcesses::new(
             pool.clone(),
             eligibility_nudge.clone(),
-        );
+        )
+        .with_session_title_tasks(title_tasks.clone());
 
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
@@ -2189,6 +2209,15 @@ async fn run_hub_incarnation(
     let startup = migrate_scan_then_schedule(
         async {
             install_oauth_registrations(&pool, &migration_oauth_registrations).await?;
+            signalbox_persistence::session_titles::SessionTitleRepository::new(pool.clone())
+                .abandon_incomplete()
+                .await
+                .map_err(|_| {
+                    erase_startup_database_cause(
+                        RuntimePhase::StartupScan,
+                        SanitizedStartupCause::Static("session_title_recovery_failed"),
+                    )
+                })?;
             invocation_processes.recover().await.map_err(|_| {
                 erase_startup_database_cause(
                     RuntimePhase::StartupScan,
@@ -2510,6 +2539,7 @@ async fn run_hub_incarnation(
     })?;
     let configuration_reload = configuration_reload
         .with_runtime_factory(runtime_factory.clone())
+        .with_title_invocation_processes(invocation_processes.clone())
         .with_github_tool_credential(configuration.github_token_file())
         .with_integration_credentials(integration_credentials);
     let goal_disposition = PostgresGoalPassDisposition::new(
@@ -2778,6 +2808,7 @@ async fn run_hub_incarnation(
     };
     let web_http_runtime = web_http_listener
         .into_runtime(process_runtime.monitor(), eligibility_nudge.clone())
+        .with_tool_dispatch_gate(tool_dispatch_gate.clone())
         .with_configuration_reload(configuration_reload.clone());
     let runner_recovery = runner_service
         .recovery_store()
@@ -2955,6 +2986,9 @@ async fn run_hub_incarnation(
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
     let (lifecycle_metrics_shutdown, lifecycle_metrics_shutdown_receiver) = watch::channel(false);
+    let web_http_runtime = web_http_runtime.with_session_title_tasks(title_tasks);
+    // Bound title work even when its credential profile has no invocation limit.
+    let title_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TITLE_TASKS));
     let supervision_pool = pool.clone();
     let supervision_nudge = eligibility_nudge.clone();
     let mut supervision_shutdown = process_shutdown.subscribe();
@@ -3026,9 +3060,12 @@ async fn run_hub_incarnation(
                 let invocation_shutdown = turn_liveness_shutdown_receiver.clone();
                 runtime_tasks.spawn(async move {
                     let capacity_shutdown = invocation_shutdown.clone();
-                    tokio::join!(invocation_processes.run(invocation_shutdown), async {
-                        capacity_refresh.run(capacity_shutdown).await;
-                    },);
+                    tokio::join!(
+                        invocation_processes.run(invocation_shutdown, configuration_reload),
+                        async {
+                            capacity_refresh.run(capacity_shutdown).await;
+                        },
+                    );
                     RuntimeTaskExit::CredentialInvocations
                 });
                 runtime_tasks.spawn(async move {
@@ -3054,112 +3091,122 @@ async fn run_hub_incarnation(
                 guard_recovery.runtime_ready();
                 tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
 
-                select! {
-                    listener_failed = shutdown_requested(&mut termination_signals) => {
-                        if listener_failed {
-                            RuntimeStopCause::SignalListenerFailed
-                        } else {
-                            RuntimeStopCause::Requested
+                loop {
+                    break select! {
+                        Some((task, permit)) = next_title_task(&mut pending_titles, &title_slots) => {
+                            runtime_tasks.spawn(async move { task.await; RuntimeTaskExit::SessionTitle(permit) });
+                            continue;
                         }
-                    }
-                    () = fatal_execution.wait_for_process_recovery() => RuntimeStopCause::ExecutionFailed,
-                    completed = runtime_tasks.join_next() => {
-                        match completed {
-                            Some(Ok(RuntimeTaskExit::Workflows(result))) => {
-                                match result {
-                                    Ok(()) => tracing::error!("workflow runtime completed before shutdown"),
-                                    Err(error) => tracing::error!(cause = error.cause_code(), "workflow runtime failed"),
+                        listener_failed = shutdown_requested(&mut termination_signals) => {
+                            if listener_failed {
+                                RuntimeStopCause::SignalListenerFailed
+                            } else {
+                                RuntimeStopCause::Requested
+                            }
+                        }
+                        () = fatal_execution.wait_for_process_recovery() => RuntimeStopCause::ExecutionFailed,
+                        completed = runtime_tasks.join_next() => {
+                            match completed {
+                                Some(Ok(RuntimeTaskExit::SessionTitle(permit))) => {
+                                    drop(permit);
+                                    continue;
                                 }
-                                RuntimeStopCause::RuntimeFailed
-                            }
-                            Some(Ok(RuntimeTaskExit::Process(Err(error)))) => {
-                                report_process_runtime_failure(&error);
-                                RuntimeStopCause::RuntimeFailed
-                            }
-                            Some(Ok(RuntimeTaskExit::FencedPoolFloor)) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::FencedPoolFloorCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::Process(Ok(())))) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::ProcessCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::Runner(Err(error)))) => {
-                                report_runner_runtime_failure(&error);
-                                RuntimeStopCause::RuntimeFailed
-                            }
-                            Some(Ok(RuntimeTaskExit::Runner(Ok(())))) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::RunnerCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
-                                tracing::error!(?error, "repository-watch runtime failed");
-                                RuntimeStopCause::RuntimeFailed
-                            }
-                            Some(Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))) => {
-                                report_runtime_task_defect(RuntimeTaskDefect::RepositoryWatchCompletedBeforeShutdown);
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
-                                report_web_http_runtime_failure(&error);
-                                RuntimeStopCause::RuntimeFailed
-                            }
-                            Some(Ok(RuntimeTaskExit::WebHttp(Ok(())))) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::WebHttpCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::SessionSupervision)) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::SessionSupervisionCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::LifecycleMetrics)) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::LifecycleMetricsCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::CredentialInvocations)) => {
-                                tracing::error!("invocation reservation reconciliation completed before shutdown");
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::TurnLiveness)) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::TurnLivenessCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::LifecycleDeadline)) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::LifecycleDeadlineCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
-                                report_runtime_task_defect(
-                                    RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
-                                );
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            Some(Err(error)) => {
-                                report_runtime_task_defect(joined_task_defect(&error));
-                                RuntimeStopCause::RuntimeDefect
-                            }
-                            None => {
-                                report_runtime_task_defect(RuntimeTaskDefect::TaskSetEmpty);
-                                RuntimeStopCause::RuntimeDefect
+                                Some(Ok(RuntimeTaskExit::Workflows(result))) => {
+                                    match result {
+                                        Ok(()) => tracing::error!("workflow runtime completed before shutdown"),
+                                        Err(error) => tracing::error!(cause = error.cause_code(), "workflow runtime failed"),
+                                    }
+                                    RuntimeStopCause::RuntimeFailed
+                                }
+                                Some(Ok(RuntimeTaskExit::Process(Err(error)))) => {
+                                    report_process_runtime_failure(&error);
+                                    RuntimeStopCause::RuntimeFailed
+                                }
+                                Some(Ok(RuntimeTaskExit::FencedPoolFloor)) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::FencedPoolFloorCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::Process(Ok(())))) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::ProcessCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::Runner(Err(error)))) => {
+                                    report_runner_runtime_failure(&error);
+                                    RuntimeStopCause::RuntimeFailed
+                                }
+                                Some(Ok(RuntimeTaskExit::Runner(Ok(())))) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::RunnerCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
+                                    tracing::error!(?error, "repository-watch runtime failed");
+                                    RuntimeStopCause::RuntimeFailed
+                                }
+                                Some(Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))) => {
+                                    report_runtime_task_defect(RuntimeTaskDefect::RepositoryWatchCompletedBeforeShutdown);
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
+                                    report_web_http_runtime_failure(&error);
+                                    RuntimeStopCause::RuntimeFailed
+                                }
+                                Some(Ok(RuntimeTaskExit::WebHttp(Ok(())))) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::WebHttpCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::SessionSupervision)) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::SessionSupervisionCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::LifecycleMetrics)) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::LifecycleMetricsCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::CredentialInvocations)) => {
+                                    tracing::error!("invocation reservation reconciliation completed before shutdown");
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::TurnLiveness)) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::TurnLivenessCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::LifecycleDeadline)) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::LifecycleDeadlineCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
+                                    report_runtime_task_defect(
+                                        RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
+                                    );
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                Some(Err(error)) => {
+                                    report_runtime_task_defect(joined_task_defect(&error));
+                                    RuntimeStopCause::RuntimeDefect
+                                }
+                                None => {
+                                    report_runtime_task_defect(RuntimeTaskDefect::TaskSetEmpty);
+                                    RuntimeStopCause::RuntimeDefect
+                                }
                             }
                         }
-                    }
+                    };
                 }
             };
             pin!(runtime);
@@ -3170,6 +3217,9 @@ async fn run_hub_incarnation(
             }
         };
 
+        // Unstarted title tasks cannot cross an incarnation boundary.
+        pending_titles.close();
+        while pending_titles.try_recv().is_ok() {}
         let _ = workflow_shutdown.send(());
         let _ = repository_watch_shutdown.send(true);
         if cause == RuntimeStopCause::GuardLost {
@@ -3597,6 +3647,66 @@ mod tests {
         validate_fenced_pool_min_connections,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
+
+    #[tokio::test]
+    async fn title_admission_waits_until_the_runtime_collects_a_completion() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let (tasks, mut pending_titles) = tokio::sync::mpsc::channel(1);
+        let (completed, finished) = oneshot::channel();
+        tasks
+            .send(Box::pin(async move {
+                completed.send(()).expect("fixture observes completion");
+            }) as signalboxd::web_http::SessionTitleTask)
+            .await
+            .expect("first task queued");
+        let (task, permit) = super::next_title_task(&mut pending_titles, &slots)
+            .await
+            .expect("first task admitted");
+        let mut running = JoinSet::new();
+        running.spawn(async move {
+            task.await;
+            RuntimeTaskExit::SessionTitle(permit)
+        });
+        finished.await.expect("first task finished");
+        tasks
+            .send(Box::pin(async {}))
+            .await
+            .expect("second task queued");
+        let mut admission = std::pin::pin!(super::next_title_task(&mut pending_titles, &slots));
+        assert!(
+            admission
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending(),
+            "a completed but uncollected task retains its slot"
+        );
+        let completion = running
+            .join_next()
+            .await
+            .expect("runtime collects completion");
+        assert!(
+            admission
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(
+            super::runtime_task_completion(completion),
+            RuntimeTaskCompletion::Clean
+        );
+        let (task, permit) = admission
+            .await
+            .expect("collecting the completion frees the slot");
+        running.spawn(async move {
+            task.await;
+            RuntimeTaskExit::SessionTitle(permit)
+        });
+        assert_eq!(
+            super::runtime_task_completion(running.join_next().await.expect("second completion")),
+            RuntimeTaskCompletion::Clean
+        );
+        assert_eq!(slots.available_permits(), 1);
+    }
 
     #[test]
     fn database_environment_is_scrubbed_before_the_runtime_starts() {

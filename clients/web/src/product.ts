@@ -115,6 +115,7 @@ export interface ProductSearchState {
 }
 
 export interface ProductSessionState {
+  needsAttention?: boolean
   around?: string
   q?: string
   sort?: 'activity' | 'identity'
@@ -253,6 +254,7 @@ export const readProductSessionState = (value: Record<string, unknown>): Product
     q: value.queryParameterIsValid === false ? undefined : admittedSessionSearch(value.q),
     sort,
     archived: value.archived === true ? true : undefined,
+    needsAttention: value.needsAttention === true ? true : undefined,
     afterSession: validContinuation ? afterSession : undefined,
     afterActivity: validContinuation && sort !== 'identity' ? afterActivity : undefined,
     session: admittedSessionIdentity(value.session),

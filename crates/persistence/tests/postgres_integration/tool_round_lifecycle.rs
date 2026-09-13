@@ -7658,3 +7658,109 @@ async fn startup_recovers_an_in_flight_active_turn_compaction() -> Result<(), Bo
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_closes_a_prepared_tool_before_unattempted_siblings() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool, _) = migrated_postgres().await?;
+    // Supplies distinct identities; recovery depends on the prepared state and remaining request.
+    const FIXTURE_SEED: u128 = 0x473_5000;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        FIXTURE_SEED,
+        &[("git_diff", "{}"), ("read_file", "{}")],
+        InitialToolApproval::PolicyAuto,
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let closure_entries = [
+        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+    ];
+    let result_frontier = ContextFrontierId::from_uuid(Uuid::now_v7());
+    let failure_entry = SemanticTranscriptEntryId::from_uuid(Uuid::now_v7());
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::now_v7());
+    let mut ids = FixedStartupScanIds::new(closure_entries, [result_frontier]);
+    let outcome = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.session,
+            signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                failure_entry,
+                terminal_frontier,
+            ),
+            &mut ids,
+        )
+        .await?;
+    assert!(
+        matches!(outcome, StartupScanSessionOutcome::RecoveredToolAttempt(ended) if matches!(*ended, ToolAttemptCrashOutcome::KnownFailed(_)))
+    );
+    #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+    struct AttemptEnd {
+        state_kind: String,
+        error_kind: String,
+    }
+    let lost: AttemptEnd =
+        sqlx::query_as("SELECT state_kind, error_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(attempt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        lost,
+        AttemptEnd {
+            state_kind: "terminal".to_owned(),
+            error_kind: "crash_lost".to_owned()
+        }
+    );
+    let sibling_attempts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tool_attempt WHERE request_id = $1")
+            .bind(requests[1].into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(sibling_attempts, 0);
+    let closed_request: Uuid = sqlx::query_scalar(
+        "SELECT tool_result_request_id FROM semantic_transcript_entry WHERE semantic_entry_id = $1",
+    )
+    .bind(closure_entries[1].into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(closed_request, requests[1].into_uuid());
+    #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+    struct TurnEnd {
+        state_kind: String,
+        terminal_cause_kind: String,
+        terminal_frontier_id: Uuid,
+    }
+    let terminal: TurnEnd = sqlx::query_as("SELECT state_kind,terminal_cause_kind,terminal_frontier_id FROM turn_lifecycle WHERE turn_id = $1")
+        .bind(fixture.turn.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(
+        terminal,
+        TurnEnd {
+            state_kind: "terminal".to_owned(),
+            terminal_cause_kind: "tool_attempt_lost".to_owned(),
+            terminal_frontier_id: terminal_frontier.into_uuid()
+        }
+    );
+    let mut repeated_ids = FixedStartupScanIds::new([], []);
+    let repeated = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.session,
+            signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            &mut repeated_ids,
+        )
+        .await?;
+    assert_eq!(repeated, StartupScanSessionOutcome::NoActiveTurn);
+    Ok(())
+}

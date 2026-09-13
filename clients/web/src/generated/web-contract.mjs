@@ -59,6 +59,51 @@ const schemas = {
     "title": "WebApiErrorResponse",
     "type": "object"
   },
+  "WebApprovalRequest": {
+    "$defs": {
+      "WebApprovalDecision": {
+        "description": "Human decisions admitted by the ordinary tool decision command.",
+        "oneOf": [
+          {
+            "const": "approve",
+            "description": "Permit this request.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Refuse this request.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "A durable human decision for the request named by the route.",
+    "properties": {
+      "command_id": {
+        "description": "Durable command identity, retained on retry.",
+        "type": "string"
+      },
+      "decision": {
+        "$ref": "#/$defs/WebApprovalDecision",
+        "description": "Human approval or denial."
+      },
+      "note": {
+        "description": "Optional denial explanation.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "command_id",
+      "decision"
+    ],
+    "title": "WebApprovalRequest",
+    "type": "object"
+  },
   "WebAttentionSnapshot": {
     "$defs": {
       "WebAttentionAction": {
@@ -752,6 +797,32 @@ const schemas = {
     "title": "WebBlobDescriptor",
     "type": "object"
   },
+  "WebCancelTurnRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Stops the named turn by accepting a successor message with session defaults.",
+    "properties": {
+      "command_id": {
+        "description": "Durable command identity, retained on retry.",
+        "type": "string"
+      },
+      "expected_active_turn_id": {
+        "description": "Active turn observed when the action was chosen.",
+        "type": "string"
+      },
+      "message": {
+        "description": "User message for the immediate successor turn.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "expected_active_turn_id",
+      "message"
+    ],
+    "title": "WebCancelTurnRequest",
+    "type": "object"
+  },
   "WebContractBootstrap": {
     "$defs": {
       "WebContractCapabilities": {
@@ -809,11 +880,16 @@ const schemas = {
           "same_origin_json_mutations": {
             "description": "JSON mutations validate a supplied browser origin against authority.",
             "type": "boolean"
+          },
+          "session_title_generation": {
+            "description": "This runtime has configured model-backed session name generation.",
+            "type": "boolean"
           }
         },
         "required": [
           "bounded_json",
           "same_origin_json_mutations",
+          "session_title_generation",
           "ndjson_streaming",
           "immutable_blob_content",
           "blob_derivations",
@@ -1444,6 +1520,27 @@ const schemas = {
       "summary"
     ],
     "title": "WebCreateSessionResponse",
+    "type": "object"
+  },
+  "WebGoalRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Attaches a goal through the ordinary user goal command.",
+    "properties": {
+      "command_id": {
+        "description": "Durable command identity, retained on retry.",
+        "type": "string"
+      },
+      "statement": {
+        "description": "Immutable statement of work.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "statement"
+    ],
+    "title": "WebGoalRequest",
     "type": "object"
   },
   "WebImportContinuationRequest": {
@@ -2775,6 +2872,22 @@ const schemas = {
       "continuation"
     ],
     "title": "WebSearchPage",
+    "type": "object"
+  },
+  "WebSessionActionRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Identity of a durable session action with no additional payload.",
+    "properties": {
+      "command_id": {
+        "description": "Durable command identity, retained on retry.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id"
+    ],
+    "title": "WebSessionActionRequest",
     "type": "object"
   },
   "WebSessionCatalogSnapshot": {
@@ -7688,6 +7801,24 @@ const schemas = {
     "title": "WebSessionTitleRequest",
     "type": "object"
   },
+  "WebSessionTitleSuggestion": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "A generated session name awaiting user acceptance.",
+    "properties": {
+      "title": {
+        "description": "Generated title of at most 256 UTF-8 bytes, saved only after acceptance.",
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "title"
+    ],
+    "title": "WebSessionTitleSuggestion",
+    "type": "object"
+  },
   "WebSubmitInputRequest": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
@@ -8193,7 +8324,7 @@ const schemas = {
           "turn_id": {
             "anyOf": [
               {
-                "description": "Owning turn, present-but-null exactly for context compaction.",
+                "description": "Owning turn, present-but-null for context compaction and session title calls.",
                 "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
                 "type": "string"
               },
@@ -8223,7 +8354,8 @@ const schemas = {
         "enum": [
           "model_call",
           "approval_judge",
-          "context_compaction"
+          "context_compaction",
+          "session_title"
         ],
         "type": "string"
       },
@@ -8504,7 +8636,8 @@ const schemas = {
         "enum": [
           "model_call",
           "approval_judge",
-          "context_compaction"
+          "context_compaction",
+          "session_title"
         ],
         "type": "string"
       },
@@ -10562,11 +10695,11 @@ export function decodeWebUsageCallPage(value, order) {
     if (profileBytes === 0 || profileBytes > 256) {
       fail(`usage_call_page.calls[${index}].profile_id`, "1 through 256 UTF-8 bytes");
     }
-    const isCompaction = call.call_kind === "context_compaction";
-    if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {
+    const isSessionLevel = call.call_kind === "context_compaction" || call.call_kind === "session_title";
+    if (!Object.hasOwn(call, "turn_id") || isSessionLevel !== (call.turn_id === null)) {
       fail(
         `usage_call_page.calls[${index}].turn_id`,
-        "null exactly for context compaction calls",
+        "null exactly for session-level calls",
       );
     }
     const key = { recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id };
@@ -10668,6 +10801,26 @@ export function decodeWebSubmitInputRequest(value) {
   return value;
 }
 
+export function decodeWebCancelTurnRequest(value) {
+  assertSchema(schemas.WebCancelTurnRequest, schemas.WebCancelTurnRequest, value, "webcancelturnrequest");
+  return value;
+}
+
+export function decodeWebApprovalRequest(value) {
+  assertSchema(schemas.WebApprovalRequest, schemas.WebApprovalRequest, value, "webapprovalrequest");
+  return value;
+}
+
+export function decodeWebGoalRequest(value) {
+  assertSchema(schemas.WebGoalRequest, schemas.WebGoalRequest, value, "webgoalrequest");
+  return value;
+}
+
+export function decodeWebSessionActionRequest(value) {
+  assertSchema(schemas.WebSessionActionRequest, schemas.WebSessionActionRequest, value, "websessionactionrequest");
+  return value;
+}
+
 export function decodeWebCreateSessionRequest(value) {
   assertSchema(schemas.WebCreateSessionRequest, schemas.WebCreateSessionRequest, value, "webcreatesessionrequest");
   return value;
@@ -10675,6 +10828,14 @@ export function decodeWebCreateSessionRequest(value) {
 
 export function decodeWebCreateSessionResponse(value) {
   assertSchema(schemas.WebCreateSessionResponse, schemas.WebCreateSessionResponse, value, "webcreatesessionresponse");
+  return value;
+}
+
+export function decodeWebSessionTitleSuggestion(value) {
+  assertSchema(schemas.WebSessionTitleSuggestion, schemas.WebSessionTitleSuggestion, value, "websessiontitlesuggestion");
+  if (new TextEncoder().encode(value.title).length > 256) {
+    fail("session_title_suggestion.title", "at most 256 UTF-8 bytes");
+  }
   return value;
 }
 

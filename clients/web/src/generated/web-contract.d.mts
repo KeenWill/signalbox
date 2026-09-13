@@ -9,6 +9,8 @@ export type WebApiError = {
 
 export type WebApiErrorKind = "transport" | "application";
 
+export type WebApprovalDecision = "approve" | "deny";
+
 export type WebAttentionAction = "provide_goal_need" | "decide_approval" | "reconcile_turn";
 
 export type WebAttentionActivity = {
@@ -97,6 +99,7 @@ export type WebContractCapabilities = {
   readonly imported_continuations: boolean;
   readonly ndjson_streaming: boolean;
   readonly same_origin_json_mutations: boolean;
+  readonly session_title_generation: boolean;
 };
 
 export type WebContractIdentity = {
@@ -960,7 +963,7 @@ export type WebUsageCall = {
 
 export type WebUsageCallCount = string;
 
-export type WebUsageCallKind = "model_call" | "approval_judge" | "context_compaction";
+export type WebUsageCallKind = "model_call" | "approval_judge" | "context_compaction" | "session_title";
 
 export type WebUsageCost = {
   readonly amount_usd: WebDollarAmount;
@@ -1013,6 +1016,27 @@ export type WebSubmitInputRequest = {
   readonly message: string;
 };
 
+export type WebCancelTurnRequest = {
+  readonly command_id: string;
+  readonly expected_active_turn_id: string;
+  readonly message: string;
+};
+
+export type WebApprovalRequest = {
+  readonly command_id: string;
+  readonly decision: WebApprovalDecision;
+  readonly note?: string | null;
+};
+
+export type WebGoalRequest = {
+  readonly command_id: string;
+  readonly statement: string;
+};
+
+export type WebSessionActionRequest = {
+  readonly command_id: string;
+};
+
 export type WebCreateSessionRequest = {
   readonly command_id: string;
   readonly first_input?: WebSubmitInputRequest | null;
@@ -1022,6 +1046,10 @@ export type WebCreateSessionRequest = {
 export type WebCreateSessionResponse = {
   readonly session_id: WebSessionId;
   readonly summary: WebSessionCatalogSummary;
+};
+
+export type WebSessionTitleSuggestion = {
+  readonly title: string;
 };
 
 export type WebSessionTitleRequest = {
@@ -1284,8 +1312,13 @@ export type WebUsageCallPage = {
 
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
 export function decodeWebSubmitInputRequest(value: unknown): WebSubmitInputRequest;
+export function decodeWebCancelTurnRequest(value: unknown): WebCancelTurnRequest;
+export function decodeWebApprovalRequest(value: unknown): WebApprovalRequest;
+export function decodeWebGoalRequest(value: unknown): WebGoalRequest;
+export function decodeWebSessionActionRequest(value: unknown): WebSessionActionRequest;
 export function decodeWebCreateSessionRequest(value: unknown): WebCreateSessionRequest;
 export function decodeWebCreateSessionResponse(value: unknown): WebCreateSessionResponse;
+export function decodeWebSessionTitleSuggestion(value: unknown): WebSessionTitleSuggestion;
 export function decodeWebSessionTitleRequest(value: unknown): WebSessionTitleRequest;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;

@@ -16,6 +16,7 @@ pub(super) struct ParsedStartup {
     pub(super) tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
     pub(super) approval_wait_timeout: Option<std::time::Duration>,
     pub(super) approval_judge_selection: Option<DirectModelSelection>,
+    pub(super) session_title_selection: Option<DirectModelSelection>,
     pub(super) convergence: Option<signalbox_convergence::ConvergencePolicy>,
     pub(super) workspace_instructions: WorkspaceInstructionConfiguration,
     pub(super) tool_proposal_limits: signalbox_application::ToolProposalLimits,
@@ -70,6 +71,7 @@ fn parse_startup_with_credential_home_admission(
             "tool_approval_postures",
             "tool_settings",
             "approval_judge",
+            "session_titles",
             "convergence",
             "repository_watch",
             "blob_storage",
@@ -85,6 +87,19 @@ fn parse_startup_with_credential_home_admission(
     let global_model_settings = parse_model_settings_overlay(document.get("model_settings"))?;
     let model_settings_profiles =
         parse_model_settings_profiles(document.get("model_settings_profiles"))?;
+    let session_title_selection = document
+        .get("session_titles")
+        .map(|item| {
+            let table = item
+                .as_table()
+                .ok_or(HubModelConfigurationError::InvalidSessionTitles)?;
+            reject_unknown_fields(table, &["selection_id"])
+                .map_err(|_| HubModelConfigurationError::InvalidSessionTitles)?;
+            required_uuid(table, "selection_id")
+                .map(DirectModelSelection::from_uuid)
+                .map_err(|_| HubModelConfigurationError::InvalidSessionTitles)
+        })
+        .transpose()?;
     let compaction = document
         .get("compaction")
         .and_then(|item| item.as_table())
@@ -386,6 +401,7 @@ fn parse_startup_with_credential_home_admission(
         tool_approval_postures,
         approval_wait_timeout,
         approval_judge_selection,
+        session_title_selection,
         convergence,
         workspace_instructions,
         tool_proposal_limits,

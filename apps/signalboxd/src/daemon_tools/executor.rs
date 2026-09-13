@@ -6,7 +6,7 @@ use super::{
 use crate::{
     blob_tools::{
         BLOB_METADATA_NAME, BLOB_READ_NAME, BlobToolExecutor, FINDING_TEXT_NAME,
-        REVIEW_THREAD_TEXT_NAME,
+        REVIEW_THREAD_LIST_NAME, REVIEW_THREAD_TEXT_NAME,
     },
     goal_mode::{GOAL_DECLARE_NAME, GoalDeclarationExecutor},
     session_delegation::DaemonSessionDelegationPort,
@@ -301,6 +301,7 @@ where
                 || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
                 || LOCAL_GIT_TOOL_NAMES.contains(&name)
                 || name == signalbox_tools_git::GIT_PUSH_CONFIGURED_NAME
+                || name == super::review_diff::NAME
                 || matches!(
                     name,
                     SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
@@ -352,14 +353,17 @@ where
                     .execute(invocation)
                     .await
             }
-            BLOB_METADATA_NAME | BLOB_READ_NAME | FINDING_TEXT_NAME | REVIEW_THREAD_TEXT_NAME => {
-                self.blob
-                    .as_mut()
-                    .ok_or_else(DaemonToolExecutorError::unknown_tool)?
-                    .execute(invocation)
-                    .await
-                    .map_err(|error| DaemonToolExecutorError::from_error(&error))
-            }
+            BLOB_METADATA_NAME
+            | BLOB_READ_NAME
+            | FINDING_TEXT_NAME
+            | REVIEW_THREAD_TEXT_NAME
+            | REVIEW_THREAD_LIST_NAME => self
+                .blob
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             _ => Err(DaemonToolExecutorError::unknown_tool()),
         }
     }

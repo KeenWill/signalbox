@@ -59,6 +59,8 @@ mod activation;
 mod check_dispatch;
 #[path = "repo_watch_v2/checkout.rs"]
 mod checkout;
+#[path = "repo_watch_v2/cooldown_reviews.rs"]
+mod cooldown_reviews;
 #[path = "repo_watch_v2/evaluation.rs"]
 mod evaluation;
 #[path = "repo_watch_v2/observations.rs"]
@@ -293,6 +295,89 @@ async fn module_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
         })
         .connect_with(options)
         .await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_large_unchanged_frontier_finishes_with_a_generic_query_plan()
+-> Result<(), Box<dyn Error>> {
+    let (_database, _core_pool, database_url) = postgres().await?;
+    let options = local_test_connection_options(&database_url)?.username("mod_repo_watch");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                sqlx::query("SET search_path = mod_repo_watch, pg_catalog")
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query("SET plan_cache_mode = force_generic_plan")
+                    .execute(&mut *connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(options)
+        .await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("owner/repository".into())?;
+    let default_branch = BranchName::try_new("main".into())?;
+    let default_head = CommitSha::try_new("1111111111111111111111111111111111111111".into())?;
+    let observed_at = OffsetDateTime::UNIX_EPOCH;
+    let observation = RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())?,
+    );
+    let projection = RepositoryProjection {
+        repository: RepositoryState {
+            repository: &repository,
+            default_branch: &default_branch,
+            default_head: &default_head,
+            observed_at,
+        },
+        pull_requests: Vec::new(),
+        comparison_baseline: &observation,
+        merged_baselines: &[],
+    };
+    // Many retained streams exercise the generic plan's cardinality estimate.
+    let frontier = (0_u64..32_768)
+        .map(|index| {
+            RepoWatchEventIdentityFrontierEntryV1::new(
+                Sha256::digest(index.to_be_bytes()).into(),
+                NonZeroU64::MIN,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &projection,
+                0,
+                &frontier,
+                &[],
+                EventProducer::Poll,
+                observed_at,
+            )
+            .await?,
+        FrontierEventAdmission::Committed {
+            generation: 1,
+            events: Box::new([])
+        }
+    );
+    sqlx::query("ANALYZE frontier").execute(&pool).await?;
+    let admission = tokio::time::timeout(
+        Duration::from_secs(5),
+        store.commit_frontier_candidate(
+            &projection,
+            1,
+            &frontier,
+            &[],
+            EventProducer::Poll,
+            observed_at,
+        ),
+    )
+    .await??;
+    assert_eq!(admission, FrontierEventAdmission::Unchanged);
+    Ok(())
 }
 
 #[tokio::test]
@@ -6133,5 +6218,118 @@ async fn a_head_change_during_required_check_observation_restarts_the_partial_pu
         baseline.state().pull_requests()[0].required_check_conclusions(),
         Some([].as_slice())
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn inconsistent_branch_pages_are_refetched_after_a_partial_poll() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_module_repo_watch_v2::{poll_cache::poll_with_cache, provider::ObservationError};
+    let (_database, _core, url) = postgres().await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("example/project".to_owned())?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    let mut io = ConditionalPollFixture::new();
+    let first_page = "/repos/example/project/branches?per_page=100&page=1";
+    let second_page = "/repos/example/project/branches?per_page=100&page=2";
+    let head = io.pages[first_page].0[0]["commit"]["sha"].clone();
+    io.pages.insert(
+        first_page.to_owned(),
+        (
+            serde_json::json!([
+                {"name":"main","commit":{"sha":head}},
+                {"name":"topic","commit":{"sha":head}},
+            ]),
+            true,
+        ),
+    );
+    io.pages.insert(
+        second_page.to_owned(),
+        (
+            serde_json::json!([
+                {"name":"other","commit":{"sha":head}},
+            ]),
+            false,
+        ),
+    );
+    // Rate limit, repository metadata, and the first branch page fill this attempt.
+    assert!(
+        !poll_with_cache(
+            &io,
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(3).expect("three-request fixture budget")
+        )
+        .await?
+    );
+
+    // Provider pagination shifts while the saved first page still contains topic.
+    io.changed = true;
+    io.pages.insert(
+        first_page.to_owned(),
+        (
+            serde_json::json!([
+                {"name":"main","commit":{"sha":head}},
+            ]),
+            true,
+        ),
+    );
+    io.pages.insert(
+        second_page.to_owned(),
+        (
+            serde_json::json!([
+                {"name":"topic","commit":{"sha":head}},
+            ]),
+            false,
+        ),
+    );
+    let complete_budget = std::num::NonZeroUsize::new(100).expect("complete fixture budget");
+    assert!(matches!(
+        poll_with_cache(
+            &io,
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            complete_budget
+        )
+        .await,
+        Err(ObservationError::InvalidState { .. })
+    ));
+    assert!(
+        store
+            .ingest_baseline(&repository)
+            .await?
+            .observation
+            .is_none()
+    );
+
+    assert!(
+        poll_with_cache(
+            &io,
+            &RepoWatchStore::new(pool.clone()),
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            complete_budget
+        )
+        .await?
+    );
+    let observed = store
+        .ingest_baseline(&repository)
+        .await?
+        .observation
+        .expect("refetched state");
+    let branches = observed
+        .state()
+        .branch_heads()
+        .iter()
+        .map(|branch| branch.branch().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(branches, ["main", "topic"]);
     Ok(())
 }

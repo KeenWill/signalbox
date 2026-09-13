@@ -879,7 +879,9 @@ impl ModelCallExecution {
     }
 
     fn attempt_accepts_prepared_call(&self) -> bool {
-        self.current_attempt.state() == &CurrentTurnAttemptState::Prepared
+        (self.current_attempt.state() == &CurrentTurnAttemptState::Prepared
+            && (!frontier_contains_tool_round(&self.starting_snapshot, &self.frontier_entries)
+                || self.tool_continuation_frontier))
             || self.is_running_tool_continuation()
     }
 
@@ -1900,8 +1902,8 @@ fn reconstitute(
         ),
         (CurrentTurnAttemptState::Prepared, None)
             if !running_tool_round
-                || (running_tool_continuation
-                    && (uncommitted_tool_result_projection || input.availability_successor))
+                || uncommitted_tool_result_projection
+                || (running_tool_continuation && input.availability_successor)
     ) || matches!(
         (
             current_attempt.state(),
