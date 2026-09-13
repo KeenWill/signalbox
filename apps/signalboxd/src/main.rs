@@ -2989,7 +2989,6 @@ async fn run_hub_incarnation(
     let web_http_runtime = web_http_runtime.with_session_title_tasks(title_tasks);
     // Bound title work even when its credential profile has no invocation limit.
     let title_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TITLE_TASKS));
-    let mut runtime_tasks = JoinSet::new();
     let supervision_pool = pool.clone();
     let supervision_nudge = eligibility_nudge.clone();
     let mut supervision_shutdown = process_shutdown.subscribe();
@@ -3002,6 +3001,28 @@ async fn run_hub_incarnation(
             let runtime = async {
                 if guarded_admission.await.is_err() {
                     return RuntimeStopCause::GuardLost;
+                }
+                if let Some(completed) = runtime_tasks.try_join_next() {
+                    return match completed {
+                        Ok(RuntimeTaskExit::Runner(Err(error))) => {
+                            report_runner_runtime_failure(&error);
+                            RuntimeStopCause::RuntimeFailed
+                        }
+                        Ok(RuntimeTaskExit::Runner(Ok(()))) => {
+                            report_runtime_task_defect(
+                                RuntimeTaskDefect::RunnerCompletedBeforeShutdown,
+                            );
+                            RuntimeStopCause::RuntimeDefect
+                        }
+                        Err(error) => {
+                            report_runtime_task_defect(joined_task_defect(&error));
+                            RuntimeStopCause::RuntimeDefect
+                        }
+                        Ok(_) => {
+                            report_runtime_task_defect(RuntimeTaskDefect::TaskSetEmpty);
+                            RuntimeStopCause::RuntimeDefect
+                        }
+                    };
                 }
                 runner_service.enable_ordinary_enrollment();
                 runtime_tasks.spawn(async move {
