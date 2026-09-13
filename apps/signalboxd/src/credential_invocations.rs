@@ -634,6 +634,31 @@ mod tests {
                 fixture_path.to_str().expect("fixture path"),
             );
         }
+        let disabled_configuration = crate::configuration_reload::ConfigurationReload::new(
+            pool.clone(),
+            crate::HubModelConfiguration::parse(crate::configuration::tests::CONFIGURATION)?,
+            crate::SessionTemplateConfiguration::default(),
+            directory.path().join("models.toml"),
+            directory.path().join("templates.toml"),
+            None,
+        )
+        .map_err(|_| "fixture reload configuration rejected")?
+        .with_runtime_factory(crate::model_catalog_runtime::ModelRuntimeFactory::new(
+            None, None, None,
+        ))
+        .with_title_invocation_processes(processes.clone());
+        disabled_configuration
+            .start_initial_title(pool.clone(), session, turn)
+            .await;
+        disabled_configuration.recover().await?;
+        assert!(
+            processes
+                .pending_titles
+                .lock()
+                .expect("pending titles")
+                .is_empty(),
+            "disabled title generation neither retains completed turns nor reconstructs retries"
+        );
         let unavailable_configuration = crate::configuration_reload::ConfigurationReload::new(
             pool.clone(),
             crate::HubModelConfiguration::parse(&reload_source.replace(

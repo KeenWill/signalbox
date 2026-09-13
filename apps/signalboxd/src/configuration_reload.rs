@@ -315,6 +315,9 @@ impl ConfigurationReload {
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
     ) {
+        if self.catalogs().models.session_title_selection().is_none() {
+            return;
+        }
         if let Some(titles) = self.session_titles(pool) {
             titles.start_initial(session, turn).await;
         } else if let Some(processes) = &self.title_invocation_processes {
@@ -463,6 +466,9 @@ impl ConfigurationReload {
     }
 
     async fn restore_pending_titles(&self) -> Result<(), sqlx::Error> {
+        if self.catalogs().models.session_title_selection().is_none() {
+            return Ok(());
+        }
         if let Some(processes) = &self.title_invocation_processes {
             processes.restore_pending_titles().await?;
         }
