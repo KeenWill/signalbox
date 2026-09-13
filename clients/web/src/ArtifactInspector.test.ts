@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { attachmentTypeLabel, inspectedArtifact, nextResolutionSequence } from './ArtifactInspector'
+import { inspectedArtifact, nextResolutionSequence } from './ArtifactInspector'
 import {
   fallbackDescriptor,
   imageArtifact,
   jpegDescriptor,
 } from './features/artifacts/artifactScenario'
+import { attachmentTypeLabel } from './labels'
 
 describe('artifact inspector resolution identity', () => {
   it('labels MIME types case-insensitively', () => {

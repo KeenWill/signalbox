@@ -219,9 +219,13 @@ export function groupTranscriptTurns(
   return segments
 }
 
-export function isVisibleTurnEvent(turn: TranscriptTurn, item: WebSessionTimelineDetail): boolean {
+export function isVisibleTurnEvent(
+  turn: TranscriptTurn,
+  item: WebSessionTimelineDetail,
+  includeIntermediate = true,
+): boolean {
   return (
-    turn.messages.includes(item) ||
+    (turn.messages.includes(item) && (includeIntermediate || item.body.type === 'user_input')) ||
     turn.result === item ||
     turn.warnings.includes(item) ||
     turn.outcome === item ||
@@ -232,7 +236,7 @@ export function isVisibleTurnEvent(turn: TranscriptTurn, item: WebSessionTimelin
 }
 
 export type TurnSummaryPart =
-  | { kind: 'message'; item: WebSessionTimelineDetail }
+  | { kind: 'message' | 'intermediate'; item: WebSessionTimelineDetail }
   | { kind: 'tools'; tools: WebTimelineToolAttempt[] }
 
 export function turnSummaryParts(turn: TranscriptTurn): TurnSummaryPart[] {
@@ -240,7 +244,13 @@ export function turnSummaryParts(turn: TranscriptTurn): TurnSummaryPart[] {
   const seen = new Set<string>()
   for (const item of turn.events) {
     if (turn.messages.includes(item) || item === turn.result || turn.warnings.includes(item))
-      parts.push({ kind: 'message', item })
+      parts.push({
+        kind:
+          turn.messages.includes(item) && item.body.type === 'model_call'
+            ? 'intermediate'
+            : 'message',
+        item,
+      })
     if (item.body.type !== 'tool_batch') continue
     for (const evidence of item.body.tools) {
       const tool = projectedTool(turn.tools, evidence)

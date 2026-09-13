@@ -23,8 +23,7 @@
 .new-session-form p {
   margin: 0;
 }
-.new-session-form button,
-.new-session-button {
+.new-session-form button {
   padding: 0.4rem 0.5rem;
   border: 1px solid var(--border-strong);
   background: var(--surface-2);
@@ -32,4 +31,15 @@
 }
 .new-session-form button {
   min-height: 32px;
+}
+
+.product-navigation .new-session-button {
+  width: 100%;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  text-align: left;
+}
+.product-navigation .new-session-button:hover {
+  background: var(--surface-2);
 }
