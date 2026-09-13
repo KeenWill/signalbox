@@ -41,12 +41,13 @@ submissions and new thread openings retain their source review ID with
 `gh_event`; matching native receipts exclude them from `gh_readable_event`.
 Startup and reload pause repository event evaluation until observation resolves
 its authenticated GitHub account. Identity resolution consumes one bounded
-partial attempt; subsequent attempts use that identity until reload. Review
-submissions by that account are permanently marked at ingestion and excluded
-from rule evaluation and retries. Credential rotation does not reclassify
-already observed reviews. Subsequent thread reopenings remain eligible. Receipts
-are permanent; writes without a retained acknowledgement have no receipt
-provenance.
+partial attempt, then immediately observes the same triggering producer in a
+separate bounded attempt. Subsequent attempts use that identity until reload.
+Review submissions by that account are permanently marked at ingestion and
+excluded from rule evaluation and retries. Credential rotation does not
+reclassify already observed reviews. Subsequent thread reopenings remain
+eligible. Receipts are permanent; writes without a retained acknowledgement have
+no receipt provenance.
 
 Rules are versioned `RepoWatchRule` values. Fields within one matcher are
 conjunctive and rules are evaluated independently. The checked matcher owns the

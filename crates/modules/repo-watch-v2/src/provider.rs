@@ -293,26 +293,37 @@ where
     }
 }
 
+enum ObservationStep {
+    IdentityPrepared,
+    Observed(crate::measurements::PollOutcome),
+}
+
 impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
-    /// Runs the existing bounded attempt and retains its measured outcome.
+    /// Resolves identity, then observes the same producer in a separate bounded attempt.
     pub async fn poll_outcome(
         &mut self,
         producer: EventProducer,
     ) -> Result<crate::measurements::PollOutcome, RepositoryAttemptError<Loader::Error>> {
-        let attempt = crate::measurements::AttemptGuard::start(
-            self.store.measurements.clone(),
-            self.repository.clone(),
-        );
-        let result = self.observe(producer).await;
-        use crate::measurements::PollOutcome;
-        attempt.finish(match &result {
-            Ok(outcome) => *outcome,
-            Err(RepositoryAttemptError::Client(_)) => PollOutcome::ClientFailed,
-            Err(RepositoryAttemptError::Observation(_)) => PollOutcome::ObservationFailed,
-            Err(RepositoryAttemptError::Store(_)) => PollOutcome::StoreFailed,
-            Err(RepositoryAttemptError::FrontierConflict) => PollOutcome::FrontierConflict,
-        });
-        result
+        loop {
+            let attempt = crate::measurements::AttemptGuard::start(
+                self.store.measurements.clone(),
+                self.repository.clone(),
+            );
+            let result = self.observe(producer).await;
+            use crate::measurements::PollOutcome;
+            attempt.finish(match &result {
+                Ok(ObservationStep::IdentityPrepared) => PollOutcome::Partial,
+                Ok(ObservationStep::Observed(outcome)) => *outcome,
+                Err(RepositoryAttemptError::Client(_)) => PollOutcome::ClientFailed,
+                Err(RepositoryAttemptError::Observation(_)) => PollOutcome::ObservationFailed,
+                Err(RepositoryAttemptError::Store(_)) => PollOutcome::StoreFailed,
+                Err(RepositoryAttemptError::FrontierConflict) => PollOutcome::FrontierConflict,
+            });
+            match result? {
+                ObservationStep::IdentityPrepared => continue,
+                ObservationStep::Observed(outcome) => return Ok(outcome),
+            }
+        }
     }
 }
 
@@ -320,7 +331,7 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
     async fn observe(
         &mut self,
         producer: EventProducer,
-    ) -> Result<crate::measurements::PollOutcome, RepositoryAttemptError<Loader::Error>> {
+    ) -> Result<ObservationStep, RepositoryAttemptError<Loader::Error>> {
         let client = self
             .clients
             .load_client()
@@ -355,7 +366,7 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
                 requests = 1_u64,
                 "repository-watch observer identity prepared"
             );
-            return Ok(crate::measurements::PollOutcome::Partial);
+            return Ok(ObservationStep::IdentityPrepared);
         }
         if producer == EventProducer::Webhook {
             return crate::poll_cache::observe_webhook_pulls(
@@ -366,6 +377,7 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
                 self.subject_retention,
             )
             .await
+            .map(ObservationStep::Observed)
             .map_err(|error| match error {
                 ObservationError::Cache(error) => RepositoryAttemptError::Store(error),
                 error => RepositoryAttemptError::Observation(error),
@@ -387,6 +399,7 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
                 crate::measurements::PollOutcome::Partial
             }
         })
+        .map(ObservationStep::Observed)
         .map_err(|error| match error {
             ObservationError::Cache(error) => RepositoryAttemptError::Store(error),
             error => RepositoryAttemptError::Observation(error),
