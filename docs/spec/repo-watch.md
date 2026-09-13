@@ -292,6 +292,11 @@ Retries use the current pull-request context, retain their preceding dispatch
 and evaluated event context, and pass through the existing singleton and
 dispatch admission limits; they do not create GitHub change events.
 
+For `labeled-review-response`, completed check runs and suites admit at most one
+initial dispatch per provisioned pull-request head within a rule revision, using
+the existing cooldown. Later check completions on that head are consumed without
+dispatch; new review findings and unfinished-work retries remain eligible.
+
 An ordinary dispatch closes nonsticky after its turn ends and no accepted work
 remains. The closure rechecks that condition under the session lock; a goal,
 active or queued turn, or pending steering prevents it. Reconciliation includes

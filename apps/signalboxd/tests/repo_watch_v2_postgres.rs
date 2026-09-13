@@ -55,6 +55,8 @@ use uuid::Uuid;
 
 #[path = "repo_watch_v2/activation.rs"]
 mod activation;
+#[path = "repo_watch_v2/check_dispatch.rs"]
+mod check_dispatch;
 #[path = "repo_watch_v2/checkout.rs"]
 mod checkout;
 #[path = "repo_watch_v2/observations.rs"]
