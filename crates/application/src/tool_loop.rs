@@ -131,6 +131,7 @@ pub struct ToolDefinition {
     input_schema: ToolInputSchema,
     permission_default: ToolPermissionDefault,
     approval_posture: Option<ToolApprovalPosture>,
+    judge_required_argument: Option<String>,
     effect_class: ToolEffectClass,
 }
 
@@ -149,6 +150,7 @@ impl ToolDefinition {
             input_schema,
             permission_default,
             approval_posture: None,
+            judge_required_argument: None,
             effect_class,
         }
     }
@@ -184,6 +186,24 @@ impl ToolDefinition {
     /// per-tool posture is configured.
     pub const fn approval_posture(&self) -> Option<ToolApprovalPosture> {
         self.approval_posture
+    }
+
+    /// Requires a fresh judge decision when this optional argument is supplied.
+    pub fn with_judge_required_argument(mut self, argument: String) -> Self {
+        self.judge_required_argument = Some(argument);
+        self
+    }
+
+    /// Whether this request declares authority requiring the approval judge.
+    pub fn requires_approval_judge(&self, arguments: &NormalizedToolArguments) -> bool {
+        self.judge_required_argument
+            .as_ref()
+            .is_some_and(|argument| {
+                serde_json::from_str::<serde_json::Value>(arguments.as_str())
+                    .ok()
+                    .and_then(|value| value.get(argument).cloned())
+                    .is_some_and(|value| !value.is_null())
+            })
     }
 
     /// Returns the crash-relevant effect class.

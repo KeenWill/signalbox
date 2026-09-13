@@ -44,3 +44,46 @@
     gap: 0.5rem;
   }
 }
+
+.search-results ol > li {
+  padding: 0;
+}
+
+.search-result-link {
+  display: grid;
+  gap: var(--product-space);
+  padding: var(--product-space-large);
+  color: inherit;
+  text-decoration: none;
+}
+
+.search-result-link > p {
+  font-size: 0.75rem;
+  line-height: 1.55;
+}
+
+.search-result-link:hover {
+  background: var(--surface-3);
+}
+
+@media (max-width: 760px) {
+  .catalog-list li > button > time {
+    display: block;
+    grid-column: 1 / 3;
+  }
+}
+
+.catalog-session-copy strong {
+  display: flex;
+  align-items: baseline;
+}
+
+.catalog-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.catalog-title-truncated {
+  flex-shrink: 0;
+}

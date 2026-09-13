@@ -32,7 +32,15 @@ test('loads session and turn chips through the HTTP usage client', async ({ page
     const url = new URL(route.request().url())
     requests.push(url)
     if (url.pathname === '/api/bootstrap')
-      return route.fulfill({ json: webContractBootstrapFixture })
+      return route.fulfill({
+        json: {
+          ...webContractBootstrapFixture,
+          capabilities: {
+            ...webContractBootstrapFixture.capabilities,
+            bounded_lexical_search: false,
+          },
+        },
+      })
     if (url.pathname === '/api/usage/calls') return route.fulfill({ json: calls })
     if (url.pathname === '/api/usage/summary')
       return route.fulfill({ json: await source.usageSummary({}) })
