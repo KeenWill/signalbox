@@ -154,6 +154,8 @@ test('requires reconciling a refreshed definition before saving an edited draft'
   await page.getByText('Edit template', { exact: true }).click()
   const editor = page.getByRole('textbox', { name: 'Template definition (TOML)' })
   await expect(editor).toHaveValue(detailFixture.definition_toml)
+  await editor.fill('An edit that will be reverted.')
+  await editor.fill(detailFixture.definition_toml)
   const refreshedPrompt = 'Instructions updated in another browser.'
   current = {
     ...detailFixture,
@@ -195,6 +197,7 @@ test('requires reconciling a refreshed definition before saving an edited draft'
   })
   await page.getByRole('button', { name: 'Discard edits and use latest' }).click()
   await expect(editor).toHaveValue(current.definition_toml)
+  await expect(editor).toBeFocused()
   await expect(page.getByRole('alert')).toHaveCount(0)
   await expect(save).toBeEnabled()
   await save.click()

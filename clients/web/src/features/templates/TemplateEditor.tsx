@@ -1,10 +1,11 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useId, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import type { WebTemplateDetail } from '../../generated/web-contract.mjs'
 import type { TemplateApi } from './api'
 
 export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebTemplateDetail }) {
   const id = useId()
+  const editor = useRef<HTMLTextAreaElement>(null)
   const [draft, setDraft] = useState<{ source: string; original: string } | null>(null)
   const source = draft?.source ?? detail.definition_toml
   const conflict = draft !== null && draft.original !== detail.definition_toml
@@ -35,6 +36,7 @@ export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebT
         <label htmlFor={id}>Template definition (TOML)</label>
         <textarea
           id={id}
+          ref={editor}
           value={source}
           spellCheck={false}
           disabled={save.isPending}
@@ -42,10 +44,11 @@ export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebT
           aria-describedby={conflict ? `${id}-conflict` : save.isError ? `${id}-error` : undefined}
           onChange={(event) => {
             const source = event.target.value
-            setDraft((previous) => ({
-              source,
-              original: previous?.original ?? detail.definition_toml,
-            }))
+            setDraft((previous) =>
+              source === detail.definition_toml
+                ? null
+                : { source, original: previous?.original ?? detail.definition_toml },
+            )
             save.reset()
           }}
         />
@@ -72,6 +75,7 @@ export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebT
               onClick={() => {
                 setDraft(null)
                 save.reset()
+                editor.current?.focus()
               }}
             >
               Discard edits and use latest
