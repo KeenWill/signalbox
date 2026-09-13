@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { WebTemplateDetail } from '../../generated/web-contract.mjs'
 import type { TemplateApi } from './api'
 
@@ -7,9 +7,11 @@ export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebT
   const id = useId()
   const editor = useRef<HTMLTextAreaElement>(null)
   const [draft, setDraft] = useState<{ source: string; original: string } | null>(null)
-  if (draft?.source === detail.definition_toml) setDraft(null)
   const source = draft?.source ?? detail.definition_toml
-  const conflict = draft !== null && draft.original !== detail.definition_toml
+  const conflict =
+    draft !== null &&
+    draft.source !== detail.definition_toml &&
+    draft.original !== detail.definition_toml
   const queries = useQueryClient()
   const save = useMutation({
     mutationFn: (definition: string) =>
@@ -21,6 +23,12 @@ export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebT
       void queries.invalidateQueries({ queryKey: ['template', api] })
     },
   })
+  useEffect(() => {
+    if (draft?.source === detail.definition_toml && !save.isPending) {
+      setDraft(null)
+      save.reset()
+    }
+  }, [draft, detail.definition_toml, save.isPending, save.reset])
   return (
     <details className="template-editor">
       <summary>Edit template</summary>

@@ -205,9 +205,25 @@ test('requires reconciling a refreshed definition before saving an edited draft'
   expect(saves).toEqual([current.definition_toml])
 })
 
-test('follows refreshes after another browser saves the local draft', async ({ page }) => {
+test('clears a failed save and follows refreshes when another browser saves the draft', async ({
+  page,
+}) => {
   let current = detailFixture
-  await page.route('**/api/templates/code-review', (route) => route.fulfill({ json: current }))
+  await page.route('**/api/templates/code-review', (route) => {
+    if (route.request().method() === 'PUT') {
+      return route.fulfill({
+        status: 503,
+        json: {
+          error: {
+            kind: 'application',
+            code: 'configuration_unavailable',
+            message: 'Configuration service is unavailable',
+          },
+        },
+      })
+    }
+    return route.fulfill({ json: current })
+  })
   await page.goto(scenario)
   await page.getByRole('button', { name: /code-review/ }).click()
   await page.getByText('Edit template', { exact: true }).click()
@@ -219,6 +235,8 @@ test('follows refreshes after another browser saves the local draft', async ({ p
     matchingPrompt,
   )
   await editor.fill(matchingSource)
+  await page.getByRole('button', { name: 'Save template', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveText('Configuration service is unavailable')
   current = {
     ...detailFixture,
     summary: { ...detailFixture.summary, digest: '2'.repeat(64) },
@@ -229,6 +247,7 @@ test('follows refreshes after another browser saves the local draft', async ({ p
   await expect(page.getByText(matchingPrompt, { exact: true })).toBeVisible()
   await expect(editor).toHaveValue(matchingSource)
   await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(editor).toHaveAttribute('aria-invalid', 'false')
   await expect(page.getByRole('button', { name: 'Save template', exact: true })).toBeEnabled()
   const laterPrompt = 'A later change after the matching save.'
   current = {
