@@ -268,7 +268,6 @@ export function Workspace({
 
   const shellStyle = {
     '--workspace-navigation-width': `${app.paneSizes.navigation}px`,
-    '--workspace-inspector-width': `${app.paneSizes.inspector}px`,
   } as CSSProperties
 
   return (

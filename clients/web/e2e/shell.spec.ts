@@ -107,6 +107,7 @@ const platformModifier = (page: Page) =>
 test('keeps a six-figure timeline bounded', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto(largeTimelineFixture.path)
+  await page.getByRole('button', { name: 'Condensed', exact: true }).click()
 
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
   await expect(timeline).toBeVisible()
@@ -124,6 +125,7 @@ test('keeps a six-figure timeline bounded', async ({ page }) => {
 test('browses an enormous production-shaped session from its bounded tail', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto(sessionFoundationFixture.path)
+  await page.getByRole('button', { name: 'Condensed', exact: true }).click()
 
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
   await expect(timeline).toBeVisible()
@@ -148,6 +150,7 @@ test('browses an enormous production-shaped session from its bounded tail', asyn
 test('exposes logical positions for virtualized timeline options', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto(largeTimelineFixture.path)
+  await page.getByRole('button', { name: 'Condensed', exact: true }).click()
 
   const firstItem = page.getByTestId(largeTimelineFixture.firstItemTestId)
   await expect(firstItem).toHaveAttribute('aria-posinset', largeTimelineFixture.firstItemPosition)
@@ -567,6 +570,7 @@ test('returns from the scenario studio through the command palette', async ({ pa
 test('reveals a lexical hit far outside the loaded timeline window', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto(searchUsageFixture.searchPath)
+  await page.getByRole('button', { name: 'Condensed', exact: true }).click()
 
   const results = page.getByRole('listbox', { name: 'Search results' })
   await expect(results).toHaveAttribute('data-total-loaded', searchUsageFixture.searchLoadedItems)
