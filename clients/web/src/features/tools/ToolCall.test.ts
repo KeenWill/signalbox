@@ -11,6 +11,27 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it('retains generic arguments when a familiar tool name is unknown to the catalog', () => {
+    const [tool] = toolExample('read_file', { resource: 'x' }, {})
+    if (tool.evidence.type !== 'physical_attempt') throw new Error('Physical fixture required')
+    const markup = renderToStaticMarkup(
+      createElement(ToolCall, {
+        tool: {
+          ...tool,
+          evidence: {
+            ...tool.evidence,
+            state: 'known_failed',
+            cause: 'unknown_tool',
+            result_present: false,
+            failure_present: true,
+          },
+        },
+      }),
+    )
+    expect(markup).toContain('<dt>Resource</dt><dd>x</dd>')
+    expect(markup).toContain('Unknown tool')
+  })
+
   it.each(['missing', 'unusable'])('identifies %s sandbox availability', (availability) => {
     const [, tool] = toolExample(
       'sandboxed_exec',
