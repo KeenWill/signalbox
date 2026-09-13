@@ -50,23 +50,45 @@ test('loads session and turn chips through the HTTP usage client', async ({ page
   await expect(page.getByRole('region', { name: 'Recent turn costs' })).toContainText('partial')
   await expect(page.getByRole('link')).toHaveCount(0)
   const attention = page.getByRole('region', { name: 'Attention row' })
-  await expect(attention.getByTitle(/unpriced/)).toBeVisible()
+  await expect(attention.getByRole('button', { name: /unpriced/ })).toBeVisible()
   await expect(attention.getByRole('button', { name: 'Example session' })).toBeEnabled()
 
+  const session = page.getByRole('region', { name: 'Session cost', exact: true })
+  const toggle = session.getByRole('button')
+  const pricing = session.getByText(/Reported · Metered cost · rates-2026-08-a/)
+  await expect(pricing).toBeHidden()
+  await toggle.focus()
+  await page.keyboard.press('Enter')
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(pricing).toBeVisible()
+  await expect(pricing).toContainText('Estimated · Equivalent metered cost · rates-2026-08-b')
+  await page.keyboard.press('Space')
+  await expect(pricing).toBeHidden()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await toggle.click()
+  await expect(pricing).toBeVisible()
+  expect(await session.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('cost-details-phone.png'), fullPage: true })
+  await toggle.click()
+  await page.setViewportSize({ width: 1280, height: 844 })
   await page.screenshot({ path: testInfo.outputPath('cost-chips.png') })
-  for (const width of [761, 390]) {
+  for (const width of [1280, 761, 390]) {
     await page.setViewportSize({ width, height: 844 })
     const sessionBox = await attention
       .getByRole('button', { name: 'Example session' })
       .boundingBox()
-    const costBox = await attention.getByTitle(/unpriced/).boundingBox()
+    const costBox = await attention.getByRole('button', { name: /unpriced/ }).boundingBox()
     if (!sessionBox || !costBox)
       throw new Error('The session action and cost display must be visible')
-    expect(costBox.y).toBeGreaterThanOrEqual(sessionBox.y + sessionBox.height)
+    if (width > 1259) expect(costBox.x).toBeGreaterThanOrEqual(sessionBox.x + sessionBox.width)
+    else expect(costBox.y).toBeGreaterThanOrEqual(sessionBox.y + sessionBox.height)
+    await attention.getByRole('button', { name: /unpriced/ }).click()
+    await expect(attention.getByText(/Reported · Metered cost · rates-2026-08-a/)).toBeVisible()
     expect(await attention.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
       true,
     )
     await attention.screenshot({ path: testInfo.outputPath(`attention-cost-${width}.png`) })
+    await attention.getByRole('button', { name: /unpriced/ }).click()
   }
   expect(requests.filter((url) => url.pathname === '/api/bootstrap')).toHaveLength(1)
   expect(
@@ -104,5 +126,5 @@ test('retries the connection when a session cost refresh follows bootstrap failu
   await expect(session).toHaveText('Cost unavailable')
   unavailable = false
   await page.getByRole('button', { name: 'Refresh costs' }).click()
-  await expect(session).toHaveText('$0')
+  await expect(session.getByRole('button')).toHaveText('$0')
 })
