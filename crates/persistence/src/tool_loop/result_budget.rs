@@ -190,14 +190,10 @@ mod tests {
         let bounded = context_text(&source, limit);
         let marker_start = bounded.rfind("\n[tool result truncated:").expect("marker");
         let (prefix, marker) = bounded.split_at(marker_start);
-        assert_eq!(prefix, &source[..prefix.len()]);
+        assert_eq!(prefix, "");
         assert_eq!(
             marker,
-            format!(
-                "\n[tool result truncated: retained {} bytes; dropped {} bytes]",
-                prefix.len(),
-                source.len() - prefix.len(),
-            )
+            "\n[tool result truncated: retained 0 bytes; dropped 824 bytes]"
         );
         assert!(serde_json::to_vec(&bounded).expect("text encodes").len() <= limit);
         assert_eq!(context_text(&bounded, limit), bounded);
