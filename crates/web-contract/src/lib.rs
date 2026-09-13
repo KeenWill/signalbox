@@ -1045,6 +1045,12 @@ pub struct WebSessionSupervision {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDescriptor {
+    /// Current human title projected by the session catalog.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_title_summary_schema")]
+    pub title_summary: Option<String>,
+    /// Current catalog activity, including its timestamp and category.
+    pub last_activity: WebSessionCatalogActivity,
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub supervision: Option<WebSessionSupervision>,
@@ -1341,6 +1347,27 @@ pub enum WebTimelineToolFailureCause {
     CrashLost,
 }
 
+/// Presentation supported by retained tool-result media evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineMediaPresentationKind {
+    Image,
+    Document,
+}
+
+/// Immutable presented bytes. Images use the blob content route; documents use
+/// the download view in the blob descriptor.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineToolMediaReference {
+    pub digest: WebBlobId,
+    /// Canonical media types use the domain media identity's 255-byte bound.
+    #[schemars(length(max = 255))]
+    pub media_type: String,
+    pub presentation_kind: WebTimelineMediaPresentationKind,
+    pub length_bytes: WebPositiveU64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 #[allow(
@@ -1351,6 +1378,8 @@ pub enum WebTimelineToolAttemptEvidence {
     RequestOnly {},
     PhysicalAttempt {
         attempt_id: WebSessionId,
+        /// Present only for completed media results in the frozen transition.
+        result_media_reference: Option<WebTimelineToolMediaReference>,
         result: Option<WebTimelineTextExcerpt>,
         failure: Option<WebTimelineTextExcerpt>,
         /// Whether the frozen transition snapshot recorded a result payload,
@@ -3869,6 +3898,18 @@ function assertTimelineDetailPage(value) {{
             );
           }}
           if (physical !== null) {{
+            if (physical.result_media_reference !== undefined && physical.result_media_reference !== null) {{
+              const media = physical.result_media_reference;
+              const mediaPath = `${{path}}.body.tools[0].evidence.result_media_reference`;
+              assertCanonicalMediaType(
+                media.media_type,
+                `${{mediaPath}}.media_type`,
+              );
+              assertCanonicalU64(media.length_bytes, `${{mediaPath}}.length_bytes`);
+              if (media.presentation_kind === "document" && media.media_type !== "application/pdf") {{
+                fail(`${{mediaPath}}.media_type`, "application/pdf for document presentation");
+              }}
+            }}
             const terminalFailure = physical.state === "known_failed";
             if (physical.result_present && physical.state !== "completed") {{
               fail(
@@ -3883,8 +3924,8 @@ function assertTimelineDetailPage(value) {{
               );
             }}
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               !physical.result_present
             ) {{
               fail(
@@ -3909,8 +3950,8 @@ function assertTimelineDetailPage(value) {{
               );
             }}
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               physical.state !== "completed"
             ) {{
               fail(
@@ -4788,6 +4829,13 @@ function assertMediaType(value, path) {{
   }}
 }}
 
+function assertCanonicalMediaType(value, path) {{
+  assertMediaType(value, path);
+  if (!/^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+$/u.test(value)) {{
+    fail(path, "a canonical lowercase MIME type without parameters");
+  }}
+}}
+
 function assertBlobDigest(value, path) {{
   if (!/^sha256:[0-9a-f]{{64}}$/.test(value)) {{
     fail(path, "a tagged lowercase SHA-256 digest");
@@ -5613,6 +5661,40 @@ mod tests {
             .expect("summary object")
             .remove("repository_watch");
         assert!(serde_json::from_value::<super::WebSessionCatalogSummary>(missing).is_err());
+    }
+
+    #[test]
+    fn descriptor_header_facts_require_nullable_title_and_non_null_activity() {
+        let descriptor = serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "title_summary": null,
+            "last_activity": { "kind": "session", "unix_microseconds": "1" },
+            "supervision": null, "workspace_root_kind": null, "repository_watch": null,
+            "sizes": { "item_count": "1", "projected_text_bytes": "0",
+                "projected_structured_bytes": "96", "referenced_blob_count": "0",
+                "referenced_blob_bytes": "0" },
+            "first_address": { "event_sequence": "1" }, "latest_address": { "event_sequence": "1" },
+            "work": { "active_turn_count": "0", "queued_turn_count": "0" }, "observed_through": "1",
+        });
+        assert!(
+            serde_json::from_value::<super::WebSessionTimelineDescriptor>(descriptor.clone())
+                .is_ok()
+        );
+        for field in ["title_summary", "last_activity"] {
+            let mut missing = descriptor.clone();
+            missing
+                .as_object_mut()
+                .expect("descriptor object")
+                .remove(field);
+            assert!(
+                serde_json::from_value::<super::WebSessionTimelineDescriptor>(missing).is_err()
+            );
+        }
+        let mut null_activity = descriptor;
+        null_activity["last_activity"] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<super::WebSessionTimelineDescriptor>(null_activity).is_err()
+        );
     }
 
     #[test]

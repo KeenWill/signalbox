@@ -42,9 +42,11 @@ import {
 } from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext } from './commands'
+import { Field } from './Field'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import { loadRetainedCommand } from './imports/retainedCommand'
+import { NewSessionDialog } from './NewSessionDialog'
 import {
   ProductContractError,
   type ProductRouteId,
@@ -70,6 +72,7 @@ import { SearchSurface } from './SearchSurface'
 import { SessionCatalogSurface } from './SessionCatalogSurface'
 import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
+import { UsageSurface } from './search-usage/UsageSurface'
 import { hasValidSessionTimelineContract } from './session-timeline/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
@@ -122,7 +125,6 @@ export function ProductNavigation({
   context: ProductCommandContext
   onActivate?: () => void
 }) {
-  const scenarioDisabled = !productCommandAvailable('navigate.scenario', context)
   return (
     <div className={`product-navigation ${collapsed ? 'navigation-collapsed' : ''}`}>
       <div className="product-brand-row">
@@ -206,22 +208,6 @@ export function ProductNavigation({
           )
         })}
       </nav>
-      <Link
-        className="scenario-entry"
-        to="/scenario/$scenarioId"
-        params={{ scenarioId: 'streaming' }}
-        aria-disabled={scenarioDisabled || undefined}
-        tabIndex={scenarioDisabled ? -1 : undefined}
-        onClick={(event) => {
-          if (scenarioDisabled) {
-            event.preventDefault()
-            return
-          }
-          onActivate?.()
-        }}
-      >
-        Scenario studio <span aria-hidden="true">↗</span>
-      </Link>
     </div>
   )
 }
@@ -397,8 +383,8 @@ function OpenSessionDialog({
               })
             }}
           >
-            <label htmlFor="palette-session-id">Session ID</label>
-            <input
+            <Field
+              label="Session ID"
               id="palette-session-id"
               ref={entryRef}
               value={sessionId}
@@ -629,6 +615,12 @@ export function ProductApp({
   const registerSurfaceEscape = useCallback((handler: (() => boolean) | null) => {
     surfaceEscapeRef.current = handler
   }, [])
+  const registerTranscriptUnwind = useCallback((handler: () => boolean) => {
+    surfaceEscapeRef.current = handler
+    return () => {
+      if (surfaceEscapeRef.current === handler) surfaceEscapeRef.current = null
+    }
+  }, [])
   const [artifactOpen, setArtifactOpen] = useState(false)
   const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
   const artifactRequest = artifactInspectorState.request
@@ -756,6 +748,7 @@ export function ProductApp({
           if (isEditableTarget(document.activeElement)) mainRef.current?.focus()
         }),
       unwindSurface: () => {
+        if (surfaceEscapeRef.current?.()) return true
         if (surface === 'sessions' && (sessionState.workspace || sessionState.session)) {
           updateSessionSearch(
             { ...sessionState, workspace: undefined, session: undefined },
@@ -763,7 +756,7 @@ export function ProductApp({
           )
           return true
         }
-        return surfaceEscapeRef.current?.() ?? false
+        return false
       },
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
       loadTimelineWindow:
@@ -788,10 +781,6 @@ export function ProductApp({
       sidebarAvailable: !narrowNavigation && app.layout === 'workbench',
       navigationLocked: navigationDisabled,
       navigate: (path) => {
-        if (path === '/scenario/streaming') {
-          void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } })
-          return
-        }
         void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
           requestAnimationFrame(() => mainRef.current?.focus())
         })
@@ -987,6 +976,7 @@ export function ProductApp({
       bootstrap.isSuccess &&
       (sessionState.workspace || sessionState.session) ? (
       <SessionWorkspaceSurface
+        usageSource={productTransport}
         key={sessionState.session ?? 'unselected'}
         onSessionOpen={(session) =>
           updateSessionSearch(
@@ -995,6 +985,7 @@ export function ProductApp({
           )
         }
         focusEntry={sessionState.session === undefined}
+        registerTranscriptUnwind={registerTranscriptUnwind}
         onReturnToCatalog={() => context.unwindSurface?.()}
         initialSessionId={sessionState.session}
         initialAround={sessionState.around}
@@ -1071,6 +1062,8 @@ export function ProductApp({
           </div>
         </section>
       </div>
+    ) : surface === 'usage' ? (
+      <UsageSurface />
     ) : surface === 'reviews' ? (
       <DeferredSurface surface="reviews" />
     ) : (
@@ -1097,6 +1090,17 @@ export function ProductApp({
           <h1>{title}</h1>
           <div className="product-header-actions">
             <div className="surface-header-actions" ref={setHeaderTarget} />
+            <button
+              type="button"
+              className="new-session-button"
+              disabled={context.navigationLocked}
+              onClick={(event) => {
+                paletteOpenerRef.current = event.currentTarget
+                invokeProductCommand('session.new', context)
+              }}
+            >
+              New session
+            </button>
             {surface !== 'settings' && !bootstrap.isSuccess && (
               <div className="product-connection">
                 <span
@@ -1169,6 +1173,7 @@ export function ProductApp({
           />
         </aside>
       )}
+      <NewSessionDialog context={context} openerRef={paletteOpenerRef} fallbackRef={mainRef} />
       <OpenSessionDialog context={context} openerRef={paletteOpenerRef} fallbackRef={mainRef} />
       <CommandPalette
         context={context}

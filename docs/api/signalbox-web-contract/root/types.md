@@ -752,6 +752,8 @@ pub struct WebSessionSupervision {
 
 ```rust
 pub struct WebSessionTimelineDescriptor {
+    pub title_summary: option::Option<string::String>,
+    pub last_activity: WebSessionCatalogActivity,
     pub supervision: option::Option<WebSessionSupervision>,
     pub workspace_root_kind: option::Option<WebSessionWorkspaceRootKind>,
     pub repository_watch: option::Option<WebRepositoryWatchProvenance>,
@@ -1045,6 +1047,28 @@ pub enum WebTimelineToolFailureCause {
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebTimelineMediaPresentationKind
+
+```rust
+pub enum WebTimelineMediaPresentationKind {
+    Image,
+    Document,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineToolMediaReference
+
+```rust
+pub struct WebTimelineToolMediaReference {
+    pub digest: WebBlobId,
+    pub media_type: string::String,
+    pub presentation_kind: WebTimelineMediaPresentationKind,
+    pub length_bytes: WebPositiveU64,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebTimelineToolAttemptEvidence
 
 ```rust
@@ -1052,6 +1076,7 @@ pub enum WebTimelineToolAttemptEvidence {
     RequestOnly {},
     PhysicalAttempt {
         attempt_id: WebSessionId,
+        result_media_reference: option::Option<WebTimelineToolMediaReference>,
         result: option::Option<WebTimelineTextExcerpt>,
         failure: option::Option<WebTimelineTextExcerpt>,
         result_present: bool,
@@ -1958,40 +1983,4 @@ pub struct WebSearchCursor {
     pub projection_id: WebSearchProjectionId,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebSearchResult
-
-```rust
-pub struct WebSearchResult {
-    pub session_id: WebSessionId,
-    pub address: WebTimelineAddress,
-    pub projection_id: WebSearchProjectionId,
-    pub source: WebSearchResultSource,
-    pub content_class: WebSearchContentClass,
-    pub snippet: string::String,
-    pub highlights: vec::Vec<WebSearchHighlight>,
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebSearchPage
-
-```rust
-pub struct WebSearchPage {
-    pub results: vec::Vec<WebSearchResult>,
-    pub continuation: option::Option<WebSearchCursor>,
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageCallKind
-
-```rust
-pub enum WebUsageCallKind {
-    ModelCall,
-    ApprovalJudge,
-    ContextCompaction,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

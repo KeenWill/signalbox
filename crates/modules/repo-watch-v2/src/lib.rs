@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 mod activation;
 mod baseline;
+mod check_dispatch;
 
 #[derive(Clone, Copy)]
 enum Reevaluation<'a> {
@@ -50,6 +51,7 @@ mod observation_decode;
 pub mod observation_workflow;
 pub mod poll_cache;
 pub mod provider;
+pub mod required_checks;
 mod retry;
 pub mod workflow;
 
@@ -2422,7 +2424,10 @@ impl RepoWatchStore {
                 .bind(first.rule_id().as_str()).bind(Decimal::from(first.rule_revision().get())).bind(key)
                 .bind(issued_at).bind(Decimal::from(cooldown.as_secs()))
                 .fetch_one(&mut **transaction).await?;
-            if suppressed {
+            let check_head_dispatched = !suppressed
+                && reevaluation.is_none()
+                && check_dispatch::head_was_dispatched(transaction, first).await?;
+            if suppressed || check_head_dispatched {
                 if reevaluation.is_none() {
                     advance_evaluation(transaction, first).await?;
                 }

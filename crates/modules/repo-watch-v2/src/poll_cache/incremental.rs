@@ -15,6 +15,7 @@ struct Cursor {
     pulls: Option<Vec<PullRequestNumber>>,
     pages: BTreeMap<String, Value>,
     threads: BTreeMap<String, Value>,
+    checks: BTreeMap<String, Value>,
     retained: BTreeSet<String>,
 }
 
@@ -32,8 +33,16 @@ impl Cursor {
             },
             pages: serde_json::from_value(value.get("pages")?.clone()).ok()?,
             threads: serde_json::from_value(value.get("threads")?.clone()).ok()?,
+            checks: serde_json::from_value(value.get("checks")?.clone()).ok()?,
             retained: serde_json::from_value(value.get("retained")?.clone()).ok()?,
         };
+        if !cursor
+            .checks
+            .values()
+            .all(|v| crate::required_checks::RequiredCheckPage::decode(v).is_some())
+        {
+            return None;
+        }
         cursor
             .threads
             .values()
@@ -42,7 +51,7 @@ impl Cursor {
     }
     fn encode(&self) -> Value {
         json!({"pulls":self.pulls.as_ref().map(|pulls| pulls.iter().map(|p|p.get()).collect::<Vec<_>>()),
-            "pages":self.pages,"threads":self.threads,"retained":self.retained})
+            "pages":self.pages,"threads":self.threads,"checks":self.checks,"retained":self.retained})
     }
     async fn load(
         store: &RepoWatchStore,
@@ -161,6 +170,21 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for ResumableRead<'_, 
         cursor.threads.insert(key, snapshot.clone());
         Ok(json!({"data":{"repository":{"pullRequest":{"reviewThreads":snapshot}}}}))
     }
+    async fn required_checks(
+        &self,
+        request: Value,
+    ) -> Result<crate::required_checks::RequiredCheckPage, ObservationError> {
+        let key = request["variables"].to_string();
+        let mut cursor = self.cursor.lock().await;
+        if let Some(snapshot) = cursor.checks.get(&key) {
+            return crate::required_checks::RequiredCheckPage::decode(snapshot)
+                .ok_or(ObservationError::Cache(StoreError::InvalidPollCache));
+        }
+        self.reserve()?;
+        let page = self.cached.required_checks(request).await?;
+        cursor.checks.insert(key, page.encode());
+        Ok(page)
+    }
 }
 
 fn snapshot_thread(node: &Value) -> Option<Value> {
@@ -272,6 +296,13 @@ pub async fn poll_with_cache(
                 tracing::info!(repository=repository.as_str(),producer=?EventProducer::Poll,requests=io.requests.load(Ordering::Relaxed),outcome="partial","repository-watch observation completed");
                 return Ok(false);
             }
+            Err(error @ ObservationError::HeadChanged) => {
+                cursor.pages.clear();
+                cursor.threads.clear();
+                cursor.checks.clear();
+                cursor.save(store, repository).await?;
+                return Err(error);
+            }
             Err(error) => return Err(error),
             Ok(step) => {
                 let observed = match &step {
@@ -303,6 +334,7 @@ pub async fn poll_with_cache(
                 }
                 cursor.pages.clear();
                 cursor.threads.clear();
+                cursor.checks.clear();
                 store
                     .retain_poll_pages(
                         repository,
@@ -344,6 +376,7 @@ pub(super) async fn webhook_observed(
         if current {
             cursor.pages.clear();
             cursor.threads.clear();
+            cursor.checks.clear();
         }
         cursor.save(store, repository).await?;
     }

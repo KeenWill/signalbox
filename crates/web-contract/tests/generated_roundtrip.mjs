@@ -2426,6 +2426,8 @@ test("generated descriptor decoder rejects a fact beyond u64", () => {
   assert.throws(
     () =>
       decodeWebSessionTimelineDescriptor({
+        title_summary: null,
+        last_activity: { kind: "session", unix_microseconds: "1" },
         workspace_root_kind: null,
         session_id: "00000000-0000-0000-0000-000000000991",
         supervision: null,
@@ -3085,6 +3087,8 @@ test("generated descriptor decoder rejects an invalid session ID", () => {
   assert.throws(
     () =>
       decodeWebSessionTimelineDescriptor({
+        title_summary: null,
+        last_activity: { kind: "session", unix_microseconds: "1" },
         workspace_root_kind: null,
         session_id: "not-a-uuid",
         supervision: null,
@@ -3398,6 +3402,8 @@ test("delegation messages require distinct sender and recipient sessions", () =>
 
 test("repository watch provenance preserves exact ledger identities and rejects unknown events", () => {
   const descriptor = {
+    title_summary: null,
+    last_activity: { kind: "session", unix_microseconds: "1" },
     workspace_root_kind: null,
     session_id: "00000000-0000-0000-0000-000000000001",
     supervision: null,
@@ -3495,6 +3501,8 @@ test("goal stop accounting fields require explicit presence", () => {
 
 test("session supervision preserves retained evidence and rejects unknown classes", () => {
   const descriptor = {
+    title_summary: null,
+    last_activity: { kind: "session", unix_microseconds: "1" },
     workspace_root_kind: null, repository_watch: null,
     session_id: "00000000-0000-0000-0000-000000000001",
     supervision: { class: "corruption", cause_code: "durable_state_corruption", pending: true },
@@ -3508,4 +3516,111 @@ test("session supervision preserves retained evidence and rejects unknown classe
   assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, supervision: { ...descriptor.supervision, class: "unknown" } }));
   const { supervision, ...missing } = descriptor;
   assert.throws(() => decodeWebSessionTimelineDescriptor(missing));
+});
+
+
+test("descriptor header facts require a nullable title and non-null activity", () => {
+  const descriptor = {
+    session_id: "00000000-0000-0000-0000-000000000001",
+    title_summary: null,
+    last_activity: { kind: "session", unix_microseconds: "1" },
+    supervision: null, workspace_root_kind: null, repository_watch: null,
+    sizes: { item_count: "1", projected_text_bytes: "0", projected_structured_bytes: "96", referenced_blob_count: "0", referenced_blob_bytes: "0" },
+    first_address: { event_sequence: "1" }, latest_address: { event_sequence: "1" },
+    work: { active_turn_count: "0", queued_turn_count: "0" }, observed_through: "1",
+  };
+  assert.deepEqual(decodeWebSessionTimelineDescriptor(descriptor), descriptor);
+  assert.equal(decodeWebSessionTimelineDescriptor({ ...descriptor, title_summary: "Named" }).title_summary, "Named");
+  for (const field of ["title_summary", "last_activity"]) {
+    const missing = { ...descriptor };
+    delete missing[field];
+    assert.throws(() => decodeWebSessionTimelineDescriptor(missing));
+  }
+  assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, last_activity: null }));
+});
+
+function documentToolDetailPage() {
+  const page = userInputDetailPage();
+  page.items[0].kind = "tool_batch_transition";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  const media = {
+    digest: `sha256:${"01".repeat(32)}`, media_type: "application/pdf",
+    presentation_kind: "document", length_bytes: "64",
+  };
+  page.items[0].body = {
+    type: "tool_batch", turn_id: page.session_id,
+    producing_model_call_id: "00000000-0000-0000-0000-000000000993",
+    state: { type: "results_projected", frontier_id: "00000000-0000-0000-0000-000000000996" },
+    projected_member_index: 0, goal_events: [],
+    tools: [{
+      request_id: "00000000-0000-0000-0000-000000000995", tool_name: "file_read",
+      arguments: null, approval_posture: "auto", approval_judge_escalated: false,
+      evidence: {
+        type: "physical_attempt", attempt_id: "00000000-0000-0000-0000-000000000994",
+        result_present: true, failure_present: false, effect_posture: "effect_free",
+        state: "completed", result_media_reference: media,
+        result: { text: "", offset_bytes: "0", total_bytes: "0", continuation: null },
+      },
+    }],
+  };
+  return page;
+}
+
+test("completed tool media preserves document presentation", () => {
+  const page = documentToolDetailPage();
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.items[0].body.tools[0].evidence.result_media_reference.presentation_kind = "unknown";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+});
+
+test("completed tool media requires a MIME type within its UTF-8 byte bound", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  for (const value of ["", "not-a-mime", `application/x; label="${"é".repeat(120)}"`]) {
+    media.media_type = value;
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a MIME value of at most 255 UTF-8 bytes/);
+  }
+  media.presentation_kind = "image";
+  media.media_type = `application/${"x".repeat(243)}`;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+});
+
+test("completed tool media requires canonical MIME spelling", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  for (const value of ["APPLICATION/PDF", "application/pdf; charset=utf-8"]) {
+    media.media_type = value;
+    assert.throws(
+      () => decodeWebSessionTimelineDetailPage(page),
+      /a canonical lowercase MIME type without parameters/,
+    );
+  }
+});
+
+test("completed tool media lengths are positive u64 values", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  for (const value of ["1", "18446744073709551615"]) {
+    media.length_bytes = value;
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+  for (const value of ["0", "01", "-1", "18446744073709551616", "9".repeat(100)]) {
+    media.length_bytes = value;
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+  }
+});
+
+test("completed document media requires PDF while image presentation retains its MIME type", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  for (const value of ["image/png", "text/plain", "application/octet-stream"]) {
+    media.media_type = value;
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page), /application\/pdf for document presentation/);
+  }
+  media.presentation_kind = "image";
+  for (const value of ["image/png", "application/pdf"]) {
+    media.media_type = value;
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
 });
