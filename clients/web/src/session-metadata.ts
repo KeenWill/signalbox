@@ -86,13 +86,12 @@ export async function renameSession(sessionId: string, request: WebSessionTitleR
   }
 }
 
-export async function suggestSessionTitle(sessionId: string, signal: AbortSignal) {
+export async function suggestSessionTitle(sessionId: string) {
   const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/title/suggest`, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: '{}',
-    signal,
   })
   const body = await readBoundedJson(response)
   if (!response.ok) {

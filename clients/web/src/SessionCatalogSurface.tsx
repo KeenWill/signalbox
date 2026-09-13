@@ -121,13 +121,20 @@ const SessionMetadata = ({
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState(false)
   const [suggesting, setSuggesting] = useState(false)
+  const [suggestionPending, setSuggestionPending] = useState(false)
   const [suggestion, setSuggestion] = useState<string | null>(null)
-  const suggestionRequest = useRef<AbortController | null>(null)
+  const suggestionRequest = useRef<{ dismissed: boolean } | null>(null)
   const suggestButton = useRef<HTMLButtonElement>(null)
   const acceptButton = useRef<HTMLButtonElement>(null)
   const cancelButton = useRef<HTMLButtonElement>(null)
   const returnToSuggestion = useRef(false)
-  useEffect(() => () => suggestionRequest.current?.abort(), [])
+  useEffect(
+    () => () => {
+      if (suggestionRequest.current) suggestionRequest.current.dismissed = true
+      suggestionRequest.current = null
+    },
+    [],
+  )
   const [title, setTitle] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -141,7 +148,10 @@ const SessionMetadata = ({
     else if (suggesting) cancelButton.current?.focus()
     else if (returnRenameFocus.current && error === null) {
       returnRenameFocus.current = false
-      const target = returnToSuggestion.current ? suggestButton : renameButton
+      const target =
+        returnToSuggestion.current && suggestionRequest.current === null
+          ? suggestButton
+          : renameButton
       target.current?.focus()
     }
   }, [editing, suggestion, suggesting, error])
@@ -161,8 +171,7 @@ const SessionMetadata = ({
     : undefined
   const close = () => {
     returnRenameFocus.current = true
-    suggestionRequest.current?.abort()
-    suggestionRequest.current = null
+    if (suggestionRequest.current) suggestionRequest.current.dismissed = true
     setSuggesting(false)
     setSuggestion(null)
     setError(null)
@@ -170,24 +179,26 @@ const SessionMetadata = ({
   }
   const suggest = async () => {
     if (suggestionRequest.current) return
-    const request = new AbortController()
+    const request = { dismissed: false }
     suggestionRequest.current = request
     returnToSuggestion.current = true
     setError(null)
     setSuggesting(true)
+    setSuggestionPending(true)
     try {
-      const result = await suggestSessionTitle(summary.session_id, request.signal)
-      if (suggestionRequest.current !== request) return
+      const result = await suggestSessionTitle(summary.session_id)
+      if (suggestionRequest.current !== request || request.dismissed) return
       setTitle(result.title)
       setSuggestion(result.title)
     } catch (failure) {
-      if (request.signal.aborted) return
+      if (request.dismissed) return
       setError(
         failure instanceof Error ? failure.message : 'A name could not be suggested. Try again.',
       )
     } finally {
       if (suggestionRequest.current === request) {
         suggestionRequest.current = null
+        setSuggestionPending(false)
         setSuggesting(false)
       }
     }
@@ -207,7 +218,7 @@ const SessionMetadata = ({
     } else void suggest()
   }
   const canSuggest =
-    titleGenerationAvailable && !editing && !suggesting && suggestion === null && canRename
+    titleGenerationAvailable && !editing && !suggestionPending && suggestion === null && canRename
   const suggestionAction = useRef(beginSuggestion)
   useEffect(() => {
     suggestionAction.current = beginSuggestion

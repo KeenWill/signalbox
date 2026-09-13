@@ -520,16 +520,17 @@ Initial-title installation and terminal call evidence commit atomically.
 `POST /api/sessions/{session_id}/title/suggest` accepts `{}` and returns
 `{ "title": "..." }` without saving; accepting a suggestion uses the metadata
 PATCH route. Generation continues through settlement if the requesting browser
-disconnects or cancels. Title calls record their target, credentials, send
-boundary, completion, and reported token axes as session-level `session_title`
-usage evidence. They use ordinary credential-pool admission and invocation
-capacity. Contended initial work remains with periodic invocation recovery until
-admission or ineligibility; a terminal report naming another call leaves usage
-unreported. Startup closes abandoned title calls and releases their initial
-claims and unregistered invocation reservations. Settlement retries once before
-abandoning the call. Failed title cleanup remains registered with periodic
-invocation recovery until it succeeds; a later completed turn can claim after
-abandonment. Title requests cap output at 256 tokens and half the context
+disconnects or cancels. Dismissing a pending suggestion keeps its row’s Suggest
+action unavailable until the request settles. Title calls record their target,
+credentials, send boundary, completion, and reported token axes as session-level
+`session_title` usage evidence. They use ordinary credential-pool admission and
+invocation capacity. Contended initial work remains with periodic invocation
+recovery until admission or ineligibility; a terminal report naming another call
+leaves usage unreported. Startup closes abandoned title calls and releases their
+initial claims and unregistered invocation reservations. Settlement retries once
+before abandoning the call. Failed title cleanup remains registered with
+periodic invocation recovery until it succeeds; a later completed turn can claim
+after abandonment. Title requests cap output at 256 tokens and half the context
 window, within the configured model limit. A window too small for the fixed
 prompt and conservative framing allowance is rejected before claiming a call.
 Generated titles are at most 256 UTF-8 bytes. Bootstrap advertises runtime

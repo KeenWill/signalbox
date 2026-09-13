@@ -1451,43 +1451,75 @@ test('rejects a malformed suggestion instead of offering to save it', async ({ p
   await expect(page.getByRole('button', { name: /Release verification/ })).toBeVisible()
 })
 
-test('cancels a pending suggestion without reopening the editor when it completes', async ({
-  page,
-}) => {
-  await useCatalogFixture(page)
-  const pending = Promise.withResolvers<void>()
-  const answered = Promise.withResolvers<void>()
-  await page.route(`**/api/sessions/${firstSessionId}/title/suggest`, async (route) => {
-    await pending.promise
-    await route.fulfill({ json: { title: 'Late generated title' } })
-    answered.resolve()
+for (const cancelKey of ['Enter', 'Escape']) {
+  test(`dismisses a pending suggestion with ${cancelKey} while keeping generation gated`, async ({
+    page,
+  }, testInfo) => {
+    await useCatalogFixture(page)
+    const pending = Promise.withResolvers<void>()
+    const answered = Promise.withResolvers<void>()
+    let requests = 0
+    await page.route(`**/api/sessions/${firstSessionId}/title/suggest`, async (route) => {
+      requests += 1
+      const title = requests === 1 ? 'Late generated title' : 'Fresh generated title'
+      await pending.promise
+      await route.fulfill({ json: { title } })
+      answered.resolve()
+    })
+    await page.goto('/sessions')
+    const suggest = page.getByRole('button', {
+      name: `Suggest a name for session ${firstSessionId}`,
+      exact: true,
+    })
+    const rename = page.getByRole('button', {
+      name: `Rename session ${firstSessionId}`,
+      exact: true,
+    })
+    try {
+      await suggest.click()
+      const cancel = page.getByRole('button', { name: 'Cancel', exact: true })
+      await expect(cancel).toBeFocused()
+      await expect(page.getByText('Suggesting a name…', { exact: true })).toBeVisible()
+      await cancel.press(cancelKey)
+      await expect(rename).toBeFocused()
+      await expect(suggest).toBeDisabled()
+      await expect(page.getByText('Suggesting a name…', { exact: true })).toHaveCount(0)
+      await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+      const palette = page.getByRole('dialog', { name: 'Command palette' })
+      await expect(palette.getByRole('button', { name: /Suggest a name/ })).toHaveCount(0)
+      await page.keyboard.press('Escape')
+      expect(requests).toBe(1)
+      const screenshot = testInfo.outputPath('dismissed-suggestion-pending.png')
+      await page.screenshot({ path: screenshot })
+      await testInfo.attach('dismissed-suggestion-pending', {
+        path: screenshot,
+        contentType: 'image/png',
+      })
+      await page.setViewportSize({ width: 390, height: 844 })
+      const phone = testInfo.outputPath('dismissed-suggestion-pending-phone.png')
+      await page.screenshot({ path: phone })
+      await testInfo.attach('dismissed-suggestion-pending-phone', {
+        path: phone,
+        contentType: 'image/png',
+      })
+      pending.resolve()
+      await answered.promise
+      await expect(suggest).toBeEnabled()
+      await rename.click()
+      await expect(page.getByRole('textbox', { name: 'Session title', exact: true })).toHaveValue(
+        'Release verification',
+      )
+      await expect(page.getByText('Late generated title', { exact: true })).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Accept', exact: true })).toHaveCount(0)
+      await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+      await suggest.click()
+      await expect(page.getByText('Fresh generated title', { exact: true })).toBeVisible()
+      expect(requests).toBe(2)
+    } finally {
+      pending.resolve()
+    }
   })
-  await page.goto('/sessions')
-  const suggest = page.getByRole('button', {
-    name: `Suggest a name for session ${firstSessionId}`,
-    exact: true,
-  })
-  try {
-    await suggest.click()
-    const cancel = page.getByRole('button', { name: 'Cancel', exact: true })
-    await expect(cancel).toBeFocused()
-    await expect(page.getByText('Suggesting a name…', { exact: true })).toBeVisible()
-    await cancel.press('Escape')
-    await expect(suggest).toBeFocused()
-    pending.resolve()
-    await answered.promise
-    await page
-      .getByRole('button', { name: `Rename session ${firstSessionId}`, exact: true })
-      .click()
-    await expect(page.getByRole('textbox', { name: 'Session title', exact: true })).toHaveValue(
-      'Release verification',
-    )
-    await expect(page.getByText('Late generated title', { exact: true })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Accept', exact: true })).toHaveCount(0)
-  } finally {
-    pending.resolve()
-  }
-})
+}
 
 test('suggests a name for the keyboard-selected session through the command palette', async ({
   page,
