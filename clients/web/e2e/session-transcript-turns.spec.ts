@@ -532,6 +532,123 @@ test('All details retains goal text chunks with one set of facts per goal member
   await expect(event.getByRole('button', { name: 'Continue reading', exact: true })).toHaveCount(0)
 })
 
+for (const type of [
+  'context_compaction',
+  'tool_approval_decision',
+  'delegation',
+  'goal_event',
+] as const) {
+  test(`All details retains ${type} text chunks with one immutable fact set`, async ({ page }) => {
+    const input = detailItems[0]
+    const approval = detailItems[2]
+    if (!input || approval?.body.type !== 'tool_approval_decision')
+      throw new Error('Detail fixture missing')
+    const approvalBody = approval.body
+    const labels = {
+      context_compaction: 'Compaction summary',
+      tool_approval_decision: 'Approval rationale',
+      delegation: 'Delegation content',
+      goal_event: 'Goal text',
+    }
+    const fields = {
+      context_compaction: 'compaction_summary',
+      tool_approval_decision: 'approval_rationale',
+      delegation: 'delegation_content',
+      goal_event: 'goal_text',
+    } as const
+    const address = { event_sequence: '2' }
+    const chunk = (offset: number) => {
+      const continuation =
+        offset < 2
+          ? { address, field: fields[type], member_index: 0, offset_bytes: String(offset + 1) }
+          : null
+      const text = {
+        text: 'abc'[offset] ?? '',
+        offset_bytes: String(offset),
+        total_bytes: '3',
+        continuation,
+      }
+      const item: WebSessionTimelineDetail = {
+        address,
+        projected_body_bytes: 129,
+        kind:
+          type === 'context_compaction'
+            ? 'context_compacted'
+            : type === 'tool_approval_decision'
+              ? 'tool_approval_decided'
+              : type === 'delegation'
+                ? 'delegation_update'
+                : 'goal_changed',
+        body:
+          type === 'context_compaction'
+            ? {
+                type,
+                compaction_id: detailCallId,
+                model_call_id: detailCallId,
+                result_frontier_id: detailCallId,
+                summary_entry_id: detailCallId,
+                through_position: '1',
+                summary: text,
+              }
+            : type === 'tool_approval_decision'
+              ? { ...approvalBody, rationale: text }
+              : type === 'delegation'
+                ? {
+                    type,
+                    detail: {
+                      type: 'session_message',
+                      relationship_id: detailCallId,
+                      message_id: detailCallId,
+                      sender_session_id: detailCallId,
+                      recipient_session_id: detailSessionId,
+                      message_ordinal: '1',
+                      delivery_sequence: '1',
+                      content: text,
+                    },
+                  }
+                : {
+                    type,
+                    session_id: detailSessionId,
+                    event: {
+                      type: 'blocked',
+                      generation: '1',
+                      reason: 'authorization_required',
+                      text,
+                    },
+                  },
+      }
+      return detailPage([item], continuation ? { type: 'more_body', body: continuation } : null)
+    }
+    await turnApi(page, undefined, [input, ...chunk(0).items])
+    await page.route('**/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      if ((url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) !== '2')
+        return route.fallback()
+      return route.fulfill({ json: chunk(Number(url.searchParams.get('cursor_offset') ?? '0')) })
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    await page.getByRole('radio', { name: 'All details', exact: true }).check()
+    const event = page
+      .getByRole('region', { name: 'Session transcript', exact: true })
+      .locator('[data-event-sequence="2"]')
+    const text = event.getByRole('region', { name: labels[type], exact: true }).locator('pre')
+    await expect(text).toHaveText(['a'])
+    const facts = await event.locator('.session-detail-facts').allTextContents()
+    expect(facts.length).toBeGreaterThan(0)
+    for (const excerpts of [
+      ['a', 'b'],
+      ['a', 'b', 'c'],
+    ]) {
+      await event.getByRole('button', { name: 'Continue reading', exact: true }).click()
+      await expect(text).toHaveText(excerpts)
+      await expect(event.locator('.session-detail-facts')).toHaveText(facts)
+    }
+    await expect(event.getByRole('button', { name: 'Continue reading', exact: true })).toHaveCount(
+      0,
+    )
+  })
+}
+
 test('All details retains earlier message chunks through continuation failures and retries', async ({
   page,
 }) => {

@@ -297,6 +297,23 @@ const unreachableBody = (body: never): never => {
   throw new TypeError(`unhandled generated timeline detail body: ${String(body)}`)
 }
 
+export const detailTextContent = (body: DetailBody): ReactNode => {
+  switch (body.type) {
+    case 'tool_approval_decision':
+      return body.rationale && <TextDetail label="Approval rationale" excerpt={body.rationale} />
+    case 'context_compaction':
+      return <TextDetail label="Compaction summary" excerpt={body.summary} />
+    case 'delegation': {
+      const content = 'content' in body.detail ? body.detail.content : null
+      return content && <TextDetail label="Delegation content" excerpt={content} />
+    }
+    case 'goal_event':
+      return <GoalEventDetail event={body.event} includeFacts={false} />
+    default:
+      return null
+  }
+}
+
 export const detailContent = (body: DetailBody, includeText = true): ReactNode => {
   switch (body.type) {
     case 'session_state':
@@ -509,7 +526,7 @@ export const detailContent = (body: DetailBody, includeText = true): ReactNode =
               ...actorFacts,
             ]}
           />
-          {body.rationale && <TextDetail label="Approval rationale" excerpt={body.rationale} />}
+          {includeText && detailTextContent(body)}
         </>
       )
     }
@@ -527,7 +544,7 @@ export const detailContent = (body: DetailBody, includeText = true): ReactNode =
               ['Up to position', body.through_position],
             ]}
           />
-          <TextDetail label="Compaction summary" excerpt={body.summary} />
+          {includeText && detailTextContent(body)}
         </>
       )
     case 'turn_lifecycle':
@@ -570,11 +587,10 @@ export const detailContent = (body: DetailBody, includeText = true): ReactNode =
       )
     case 'delegation': {
       const detail = body.detail
-      const content = 'content' in detail ? detail.content : null
       return (
         <>
           <Facts facts={delegationFacts(detail)} />
-          {content && <TextDetail label="Delegation content" excerpt={content} />}
+          {includeText && detailTextContent(body)}
         </>
       )
     }

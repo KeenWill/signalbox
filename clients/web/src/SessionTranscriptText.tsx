@@ -26,7 +26,7 @@ import {
   readSessionTranscript,
   type SessionTranscriptLimits,
 } from './product'
-import { detailContent, GoalEventDetail } from './SessionItemDetail'
+import { detailContent, detailTextContent, GoalEventDetail } from './SessionItemDetail'
 import { conversationEntryKey, hasConversationContent } from './session-timeline/conversation'
 import {
   detailExcerptAt,
@@ -1495,7 +1495,7 @@ function EventDetail({
               />
             ) : (
               <>
-                {detailContent(item.body)}
+                {index === 0 ? detailContent(item.body) : detailTextContent(item.body)}
                 <details>
                   <summary>Raw event data</summary>
                   <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>

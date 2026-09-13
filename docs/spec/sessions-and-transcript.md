@@ -646,27 +646,27 @@ shows tool chips with argument and output summaries. All details exposes every
 loaded event, including bookkeeping, independently of the Events control. Model
 identity, call state, token usage, and tool attempt state, approval and failure
 cause remain visible even without payload text. Continued chunks retain one set
-of event facts, including one set of goal facts per batch member while retaining
-every goal-text excerpt. Typed facts and text render by default; raw event and
-setting JSON requires an explicit disclosure. Tool-produced goal events show
-their status and bounded text alongside tools. Turn details use the bounded
-per-turn detail route. Explicit continuation reads retain earlier opened chunks
-until the detail view closes or leaves the retained transcript. The last bounded
-raw detail page remains available to validate each body continuation. Individual
-turns can expand independently of the persisted level. Escape inside a
-continuation reader closes that reader and restores its Read more control.
-Otherwise, Escape collapses the focused expanded turn and reveals and focuses a
-surviving heading for that turn, including a retained segment outside the
-virtual range, before a subsequent Escape closes the workspace. Header
-disclosures and the desktop side inspector handle Escape only while focus is
-inside them. The scrolling transcript owns the conversation focus entry and
-command target; the enclosing section adds no focus stop. Invalid event-link
-addresses outside the unsigned 64-bit range are ignored. When a turn is opened,
-retained events without a turn identity are associated only by an exact per-turn
-route match with unchanged immutable facts; events skipped by that route remain
-outside the selected turn. All details retains these associations for known
-turns so collapsing any segment also collapses associated events without a turn
-identity.
+of event facts, including compaction, approval and delegation facts and one set
+of goal facts per batch member while retaining every goal-text excerpt. Typed
+facts and text render by default; raw event and setting JSON requires an
+explicit disclosure. Tool-produced goal events show their status and bounded
+text alongside tools. Turn details use the bounded per-turn detail route.
+Explicit continuation reads retain earlier opened chunks until the detail view
+closes or leaves the retained transcript. The last bounded raw detail page
+remains available to validate each body continuation. Individual turns can
+expand independently of the persisted level. Escape inside a continuation reader
+closes that reader and restores its Read more control. Otherwise, Escape
+collapses the focused expanded turn and reveals and focuses a surviving heading
+for that turn, including a retained segment outside the virtual range, before a
+subsequent Escape closes the workspace. Header disclosures and the desktop side
+inspector handle Escape only while focus is inside them. The scrolling
+transcript owns the conversation focus entry and command target; the enclosing
+section adds no focus stop. Invalid event-link addresses outside the unsigned
+64-bit range are ignored. When a turn is opened, retained events without a turn
+identity are associated only by an exact per-turn route match with unchanged
+immutable facts; events skipped by that route remain outside the selected turn.
+All details retains these associations for known turns so collapsing any segment
+also collapses associated events without a turn identity.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
