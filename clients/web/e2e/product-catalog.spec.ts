@@ -1382,3 +1382,39 @@ test('cancels a pending suggestion without reopening the editor when it complete
     pending.resolve()
   }
 })
+
+test('suggests a name for the keyboard-selected session through the command palette', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  const suggestions: string[] = []
+  const patches: string[] = []
+  await page.route('**/api/sessions/*/title/suggest', async (route) => {
+    suggestions.push(route.request().url())
+    await route.fulfill({ json: { title: 'Decide the deployment' } })
+  })
+  await page.route('**/api/sessions/*/metadata', async (route) => {
+    patches.push(route.request().url())
+    await route.fulfill({ status: 204 })
+  })
+  await page.goto('/sessions')
+  await page.getByRole('button', { name: /Deployment decision/ }).focus()
+  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await palette.getByRole('button', { name: /Suggest a name/ }).focus()
+  await page.keyboard.press('Enter')
+  await expect(palette).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Accept', exact: true })).toBeFocused()
+  expect(suggestions).toHaveLength(1)
+  expect(suggestions[0]).toContain(`/sessions/${secondSessionId}/title/suggest`)
+  expect(patches).toEqual([])
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(
+    page.getByRole('button', {
+      name: `Suggest a name for session ${secondSessionId}`,
+      exact: true,
+    }),
+  ).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})

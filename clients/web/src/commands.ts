@@ -13,6 +13,7 @@ export interface CommandContext {
   removeAttachment?: () => void
   paneSize?: number
   submitSessionInput?: () => void
+  suggestSessionTitle?: () => void
   sessionId?: string
   timelineWindowAvailable?: boolean
   focusTimeline: () => void
@@ -79,6 +80,15 @@ const setTheme = (theme: ThemeMode) => (context: CommandContext) =>
   context.dispatch(actions.themeSet(theme))
 const artifactInspector = (context: CommandContext) => context.openArtifactInspector !== undefined
 export const commandRegistry = [
+  {
+    id: 'session.title.suggest',
+    title: 'Suggest a name',
+    description: 'Suggest a name for the selected session.',
+    category: 'Surface',
+    bindings: [],
+    available: (context) => context.suggestSessionTitle !== undefined,
+    run: (context) => context.suggestSessionTitle?.(),
+  },
   {
     id: 'artifact.attachment.remove',
     title: 'Remove composer attachment',

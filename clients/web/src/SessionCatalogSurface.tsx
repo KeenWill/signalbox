@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type CommandContext, invokeCommand } from './commands'
 import type { WebSessionCatalogSnapshot } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import {
@@ -100,10 +101,16 @@ const SessionMetadata = ({
   summary,
   canRename,
   onRename,
+  selected,
+  commandContext,
+  onSuggestCommand,
 }: {
   summary: SessionSummary
   canRename: boolean
   onRename: () => void
+  selected: boolean
+  commandContext: CommandContext
+  onSuggestCommand: (command: { run: () => void } | null) => void
 }) => {
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState(false)
@@ -172,6 +179,26 @@ const SessionMetadata = ({
       }
     }
   }
+  const beginSuggestion = () => {
+    onRename()
+    intent.current = retainedRename(summary.session_id)
+    if (intent.current) {
+      returnToSuggestion.current = true
+      setTitle(intent.current.title)
+      setError('A previous rename is unconfirmed. Save retries that title.')
+      setEditing(true)
+    } else void suggest()
+  }
+  const canSuggest = !editing && !suggesting && suggestion === null && canRename
+  const suggestionAction = useRef(beginSuggestion)
+  useEffect(() => {
+    suggestionAction.current = beginSuggestion
+  })
+  useEffect(() => {
+    if (!selected) return
+    onSuggestCommand(canSuggest ? { run: () => suggestionAction.current() } : null)
+    return () => onSuggestCommand(null)
+  }, [selected, canSuggest, onSuggestCommand])
   const save = async (event: FormEvent) => {
     event.preventDefault()
     if (saving || title.length === 0) return
@@ -245,17 +272,13 @@ const SessionMetadata = ({
         type="button"
         ref={suggestButton}
         aria-label={`Suggest a name for session ${summary.session_id}`}
-        onClick={() => {
-          onRename()
-          intent.current = retainedRename(summary.session_id)
-          if (intent.current) {
-            returnToSuggestion.current = true
-            setTitle(intent.current.title)
-            setError('A previous rename is unconfirmed. Save retries that title.')
-            setEditing(true)
-          } else void suggest()
-        }}
-        disabled={editing || suggesting || suggestion !== null || !canRename}
+        onClick={() =>
+          invokeCommand('session.title.suggest', {
+            ...commandContext,
+            suggestSessionTitle: canSuggest ? beginSuggestion : undefined,
+          })
+        }
+        disabled={!canSuggest}
       >
         Suggest a name
       </button>
@@ -314,6 +337,8 @@ const SessionMetadata = ({
 }
 
 export function SessionCatalogSurface({
+  commandContext,
+  onSuggestCommand,
   returnSessionId,
   onReturnFocusConsumed,
   lifecycleFilter,
@@ -324,6 +349,8 @@ export function SessionCatalogSurface({
   onStateChange,
   onTimelineIds,
 }: {
+  commandContext: CommandContext
+  onSuggestCommand: (command: { run: () => void } | null) => void
   returnSessionId?: string
   onReturnFocusConsumed: () => void
   lifecycleFilter: string
@@ -687,6 +714,9 @@ export function SessionCatalogSurface({
                       <ArrowRight aria-hidden="true" />
                     </button>
                     <SessionMetadata
+                      commandContext={commandContext}
+                      onSuggestCommand={onSuggestCommand}
+                      selected={keyboardSelection === summary.session_id}
                       summary={summary}
                       onRename={() => {
                         renameSelection.current =
