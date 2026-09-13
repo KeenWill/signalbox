@@ -25,10 +25,16 @@ export function UsageSurface() {
       </p>
     )
   if (!source.data) return <p role="status">Loading usage…</p>
-  return <UsageContent source={source.data} />
+  return <UsageContent source={source.data} authority="http" />
 }
 
-export function UsageContent({ source }: { source: SearchUsageSource }) {
+export function UsageContent({
+  source,
+  authority,
+}: {
+  source: SearchUsageSource
+  authority: 'http' | 'scenario'
+}) {
   const search = useLocation({ select: (location) => location.searchStr })
   const navigate = useNavigate()
   const filters = useMemo(() => {
@@ -43,11 +49,11 @@ export function UsageContent({ source }: { source: SearchUsageSource }) {
   }, [search])
   const [subtotalsOpen, setSubtotalsOpen] = useState(false)
   const summary = useQuery({
-    queryKey: ['search-usage', 'summary', filters],
+    queryKey: ['search-usage', authority, 'summary', filters],
     queryFn: ({ signal }) => source.usageSummary(filters, signal),
   })
   const calls = useInfiniteQuery({
-    queryKey: ['search-usage', 'calls', filters],
+    queryKey: ['search-usage', authority, 'calls', filters],
     initialPageParam: undefined as WebUsageCallPage['continuation'] | undefined,
     queryFn: ({ pageParam, signal }) =>
       source.usageCalls(
