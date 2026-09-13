@@ -194,6 +194,43 @@ async fn title_context_reads_a_bounded_prefix_from_an_imported_seed() -> Result<
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn title_context_skips_empty_imported_entries() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let source = concat!(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Database indexing\"}}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"\"}}"
+    );
+    let conversation = imported(0x180, 0x280, source);
+    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+        ImportedConversationDropFacts::none(),
+    )
+    .await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x480));
+    let mut semantic = 0x680;
+    ImportedSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(
+            imported_command(0x380, &conversation, ImportedSessionRelationship::Resume),
+            session,
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x780)),
+            || {
+                semantic += 1;
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(semantic))
+            },
+        )
+        .await?;
+    assert_eq!(
+        signalbox_persistence::session_titles::SessionTitleRepository::new(pool)
+            .conversation(session, 64)
+            .await?,
+        "Database indexing"
+    );
+    Ok(())
+}
+
 /// first handling commits the exact imported prefix, seed, command result, session, and outbox
 /// event atomically.
 #[tokio::test(flavor = "multi_thread")]

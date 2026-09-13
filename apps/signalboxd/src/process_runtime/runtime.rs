@@ -417,22 +417,7 @@ async fn dispatch_updates_with_titles(
         match outcome {
             Ok(OutboxDispatchOutcome::Delivered { .. }) => {
                 if let Some((titles, session, turn)) = title_work {
-                    match titles.prepare(session, Some(turn)).await {
-                        Ok(Some(prepared)) => {
-                            tokio::spawn(async move {
-                                if let Err(error) = titles.generate_prepared(prepared).await {
-                                    tracing::warn!(session_id = %session.into_uuid(), ?error, "initial session title generation failed");
-                                }
-                            });
-                        }
-                        Ok(None) => {}
-                        Err(crate::session_titles::TitleError::Unavailable) => {
-                            titles.defer_initial(session, turn);
-                        }
-                        Err(error) => {
-                            tracing::warn!(session_id = %session.into_uuid(), ?error, "initial session title preparation failed")
-                        }
-                    }
+                    titles.start_initial(session, turn).await;
                 }
             }
             Ok(OutboxDispatchOutcome::Idle)

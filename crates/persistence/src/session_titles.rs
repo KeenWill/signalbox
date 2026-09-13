@@ -199,6 +199,9 @@ impl SessionTitleRepository {
                     }
                 }
             };
+            if text.is_empty() {
+                continue;
+            }
             let mut text = text;
             text.truncate(text.floor_char_boundary(remaining));
             if text.is_empty() {
