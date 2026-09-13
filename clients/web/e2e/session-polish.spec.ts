@@ -21,6 +21,17 @@ test('composer fits an unchanged draft after the window narrows and widens', asy
   expect(errors).toEqual([])
 })
 
+test('a short viewport can scroll to the complete delivery status', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 160 })
+  await sessionApi(page, true)
+  await page.goto(`/sessions?workspace=true&session=${sessionId}`)
+  const status = page.getByRole('form', { name: 'Message composer' }).getByRole('status')
+  await expect(status).toHaveText('Wait for the current turn to finish · Running')
+  await page.mouse.move(200, 140)
+  await page.mouse.wheel(0, 500)
+  await expect(status).toBeInViewport({ ratio: 1 })
+})
+
 for (const width of [1440, 390]) {
   test(`long conversation keeps its header and composer visible at ${width}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 })
@@ -28,23 +39,34 @@ for (const width of [1440, 390]) {
     const text = Array.from({ length: 80 }, (_, index) => `Conversation line ${index + 1}`).join(
       '\n',
     )
-    await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) =>
-      route.fulfill({
+    await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
+      const url = new URL(route.request().url())
+      const includesMessage =
+        BigInt(url.searchParams.get('first') ?? '0') <= 41n &&
+        BigInt(url.searchParams.get('through') ?? '43') >= 41n
+      return route.fulfill({
         json: {
           session_id: sessionId,
-          projected_body_bytes: 128 + text.length,
-          items: [
-            {
-              address: { event_sequence: '41' },
-              kind: 'input_accepted',
-              projected_body_bytes: 128 + text.length,
-              body: { type: 'user_input', turn_id: turnId, text: excerpt(text), attachments: [] },
-            },
-          ],
+          projected_body_bytes: includesMessage ? 128 + text.length : 0,
+          items: includesMessage
+            ? [
+                {
+                  address: { event_sequence: '41' },
+                  kind: 'input_accepted',
+                  projected_body_bytes: 128 + text.length,
+                  body: {
+                    type: 'user_input',
+                    turn_id: turnId,
+                    text: excerpt(text),
+                    attachments: [],
+                  },
+                },
+              ]
+            : [],
           continuation: null,
         },
-      }),
-    )
+      })
+    })
     await page.goto(`/sessions?workspace=true&session=${sessionId}`)
     const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
     await expect(conversation.getByText(text)).toBeVisible()
@@ -101,8 +123,11 @@ for (const width of [1440, 390]) {
       await expect(conversation).toBeInViewport()
       const composerBox = await composer.boundingBox()
       const conversationBox = await conversation.boundingBox()
+      const workspaceBox = await page
+        .getByRole('region', { name: 'Session workspace', exact: true })
+        .boundingBox()
       expect(composerBox?.height).toBeLessThan(100)
-      expect(conversationBox?.height).toBeGreaterThan(650)
+      expect(conversationBox?.height).toBeGreaterThan((workspaceBox?.height ?? 0) / 2)
       await page.getByText('Session details', { exact: true }).click()
       await expect(page.getByRole('button', { name: 'Previous', exact: true })).toHaveCount(0)
       await expect(page.getByRole('button', { name: 'Next', exact: true })).toHaveCount(0)
