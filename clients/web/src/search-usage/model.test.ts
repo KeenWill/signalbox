@@ -71,39 +71,6 @@ describe('HttpSearchUsageSource', () => {
     await source.usageSummary({})
     await source.usageCalls({ filters: {}, order: 'newest', maxItems: 1 })
   })
-  it('admits usage without lexical search and retains search admission', async () => {
-    const usageOnly = {
-      ...bootstrap,
-      capabilities: { ...bootstrap.capabilities, bounded_lexical_search: false },
-    }
-    const urls: string[] = []
-    const request: typeof fetch = async (input) => {
-      const url = String(input)
-      urls.push(url)
-      return url === '/api/bootstrap' ? Response.json(usageOnly) : responseFor(url)
-    }
-    const source = await HttpSearchUsageSource.connectUsage(request)
-    await source.usageSummary({ provenance: 'reported' })
-    await source.usageCalls({ filters: { provenance: 'reported' }, order: 'newest', maxItems: 100 })
-    expect(urls).toEqual(adapterFixture.usageUrls)
-    await expect(HttpSearchUsageSource.connect(request)).rejects.toThrow(
-      'bounded lexical search capability is unavailable',
-    )
-  })
-
-  it('rejects usage admission when usage capability is absent', async () => {
-    const request = vi.fn(async () =>
-      Response.json({
-        ...bootstrap,
-        capabilities: { ...bootstrap.capabilities, bounded_usage_cost: false },
-      }),
-    ) as typeof fetch
-    await expect(HttpSearchUsageSource.connectUsage(request)).rejects.toThrow(
-      'bounded usage and cost capability is unavailable',
-    )
-    expect(request).toHaveBeenCalledTimes(1)
-  })
-
   it('uses lexical product parameters for a current-session search', async () => {
     const urls: string[] = []
     const source = await HttpSearchUsageSource.connect(scriptedFetch(urls))

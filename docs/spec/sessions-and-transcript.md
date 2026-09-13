@@ -593,13 +593,13 @@ continuation reads retain earlier opened chunks until the detail view closes or
 leaves the retained transcript. The last bounded raw detail page remains
 available to validate each body continuation. Individual turns can expand
 independently of the persisted level. Escape collapses the focused expanded turn
-and restores its heading control before a subsequent Escape closes the
-workspace. The scrolling transcript owns the conversation focus entry and
-command target; the enclosing section adds no focus stop. Invalid event-link
-addresses outside the unsigned 64-bit range are ignored. When a turn is opened,
-retained events without a turn identity are associated only by an exact per-turn
-route match with unchanged immutable facts; events skipped by that route remain
-outside the selected turn.
+and restores a surviving heading control for that turn before a subsequent
+Escape closes the workspace. The scrolling transcript owns the conversation
+focus entry and command target; the enclosing section adds no focus stop.
+Invalid event-link addresses outside the unsigned 64-bit range are ignored. When
+a turn is opened, retained events without a turn identity are associated only by
+an exact per-turn route match with unchanged immutable facts; events skipped by
+that route remain outside the selected turn.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

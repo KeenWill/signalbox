@@ -4,9 +4,14 @@ import { useMemo, useState } from 'react'
 import type { WebUsageCallPage } from '../generated/web-contract.mjs'
 import { costText, tokenSummary, UsageTable, usageGroupIdentity } from '../SearchUsage'
 import { costTotalText, totalCost } from './cost'
-import type { SearchUsageSource, UsageFilters } from './model'
-import { usageSourceOptions } from './queries'
+import { HttpSearchUsageSource, type SearchUsageSource, type UsageFilters } from './model'
 import './usage.css'
+
+export const usageSourceOptions = {
+  queryKey: ['usage-http-source'],
+  queryFn: () => HttpSearchUsageSource.connect(),
+  staleTime: Infinity,
+}
 
 export function UsageSurface() {
   const source = useQuery(usageSourceOptions)
@@ -27,7 +32,7 @@ export function UsageContent({
   source,
   authority,
 }: {
-  source: Pick<SearchUsageSource, 'limits' | 'usageSummary' | 'usageCalls'>
+  source: SearchUsageSource
   authority: 'http' | 'scenario'
 }) {
   const search = useLocation({ select: (location) => location.searchStr })

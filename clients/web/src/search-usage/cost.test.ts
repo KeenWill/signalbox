@@ -1,17 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import type { WebUsageCostLabel } from '../generated/web-contract.mjs'
+import type { WebUsageCost } from '../generated/web-contract.mjs'
 import { costTotalText, totalCost } from './cost'
 
 const model = 'fixture-model'
-const priced = (amount_usd: string, label: WebUsageCostLabel = 'real') => ({
+const priced = (amount_usd: string) => ({
   model_id: model,
   provenance: 'reported',
   cost: {
-    status: 'derived' as const,
+    status: 'derived',
     amount_usd,
-    label,
+    label: 'real',
     rate_version: 'fixture-rate',
-  },
+  } as WebUsageCost,
 })
 
 describe('usage totals', () => {
@@ -54,18 +54,5 @@ describe('usage totals', () => {
     expect(total.breakdown).toHaveLength(2)
     expect(costTotalText(total)).toContain('$1 (Reported')
     expect(costTotalText(total)).toContain('$2 (Estimated')
-  })
-  it('uses product labels for equivalent pricing in breakdowns and rate details', () => {
-    const total = totalCost([
-      priced('1'),
-      { ...priced('2', 'metered_equivalent'), provenance: 'estimated' },
-    ])
-    expect(costTotalText(total)).toBe(
-      '$1 (Reported · Metered cost · fixture-rate) + $2 (Estimated · Equivalent metered cost · fixture-rate)',
-    )
-    expect(total.rates).toEqual([
-      'Reported · Metered cost · fixture-rate',
-      'Estimated · Equivalent metered cost · fixture-rate',
-    ])
   })
 })

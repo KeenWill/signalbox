@@ -42,7 +42,13 @@ export function totalCost(
       ),
     ],
     incomplete,
-    rates: [...rateRows.keys()],
+    rates: [
+      ...new Set(
+        rows.flatMap(({ cost, provenance }) =>
+          cost.status === 'derived' ? [`${provenance} · ${cost.label} · ${cost.rate_version}`] : [],
+        ),
+      ),
+    ],
   }
 }
 

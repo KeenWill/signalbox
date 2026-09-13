@@ -1229,8 +1229,18 @@ for (const open of ['Summary', 'Tools', 'turn link']) {
       open === 'Summary' ? 3 : 2,
     )
     await page.screenshot({ path: testInfo.outputPath('associated-compaction.png') })
-    await transcript.getByRole('button', { name: 'Collapse turn', exact: true }).first().click()
+    const collapse = transcript
+      .locator('[data-transcript-turn]')
+      .filter({ has: page.locator('[data-event-sequence="2"]') })
+      .getByRole('button', { name: 'Collapse turn', exact: true })
+    if (open === 'Tools') {
+      await collapse.focus()
+      await page.keyboard.press('Escape')
+    } else await collapse.click()
     await expect(event).toHaveCount(0)
+    await expect(
+      transcript.getByRole('button', { name: 'Open turn details', exact: true }).first(),
+    ).toBeFocused()
   })
 }
 
@@ -1367,3 +1377,166 @@ for (const afterOutput of [false, true]) {
     await expect(transcript.getByRole('alert')).toHaveCount(0)
   })
 }
+
+async function continuedMessageApi(page: import('./fontTest').Page, interleaved = false) {
+  const input = detailItems[0]
+  const response = detailItems[3]
+  if (input?.body.type !== 'user_input' || !response) throw new Error('Message fixture missing')
+  const state = { failContinuation: false }
+  const chunk = (offset: string) => {
+    const continuation =
+      offset === '2'
+        ? null
+        : {
+            address: input.address,
+            field: 'input_text' as const,
+            member_index: 0,
+            offset_bytes: String(Number(offset) + 1),
+          }
+    return {
+      item: {
+        ...input,
+        projected_body_bytes: 129,
+        body: {
+          ...input.body,
+          text: {
+            text: offset === '0' ? 'a' : offset === '1' ? 'b' : 'c',
+            offset_bytes: offset,
+            total_bytes: '3',
+            continuation,
+          },
+        },
+      },
+      continuation,
+    }
+  }
+  const first = chunk('0').item
+  const otherText = detailExcerpt('An interleaved turn.')
+  const entries = interleaved
+    ? [
+        first,
+        {
+          ...input,
+          address: { event_sequence: '2' },
+          projected_body_bytes: 128 + Number(otherText.total_bytes),
+          body: {
+            ...input.body,
+            turn_id: '00000000-0000-0000-0000-000000000126',
+            text: otherText,
+            attachments: [],
+          },
+        },
+        { ...response, address: { event_sequence: '3' } },
+      ]
+    : [first]
+  await turnApi(page, undefined, entries)
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if ((url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) !== '1')
+      return route.fallback()
+    const offset = url.searchParams.get('cursor_offset') ?? '0'
+    if (offset !== '0' && state.failContinuation) return route.fulfill({ status: 503, body: '' })
+    const { item, continuation } = chunk(offset)
+    return route.fulfill({
+      json: detailPage([item], continuation ? { type: 'more_body', body: continuation } : null),
+    })
+  })
+  return state
+}
+
+for (const level of ['Summary', 'Tools', 'All details']) {
+  test(`renders message attachments once across continued chunks in ${level}`, async ({
+    page,
+  }, testInfo) => {
+    await continuedMessageApi(page)
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    await page.getByRole('radio', { name: level, exact: true }).check()
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    await transcript
+      .getByRole('button', {
+        name: level === 'All details' ? 'Continue reading' : 'Read more',
+        exact: true,
+      })
+      .click()
+    await transcript.getByRole('button', { name: 'Continue reading', exact: true }).click()
+    await expect(transcript.locator('.session-message-text')).toHaveText(['a', 'b', 'c'])
+    await expect(transcript.getByRole('list', { name: 'Attachments' })).toHaveCount(1)
+    await expect(transcript.getByRole('listitem')).toHaveCount(2)
+    await page.screenshot({ path: testInfo.outputPath('continued-message-attachments.png') })
+    if (level === 'Summary') {
+      await page.setViewportSize({ width: 390, height: 844 })
+      await page.screenshot({
+        path: testInfo.outputPath('continued-message-attachments-phone.png'),
+        fullPage: true,
+      })
+    }
+  })
+}
+
+for (const close of ['button', 'Escape']) {
+  test(`clears readers across all interleaved turn segments using ${close}`, async ({ page }) => {
+    await continuedMessageApi(page, true)
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    const message = transcript.locator('[data-event-sequence="1"]')
+    await message.getByRole('button', { name: 'Read more', exact: true }).click()
+    await message.getByRole('button', { name: 'Continue reading', exact: true }).click()
+    await expect(message.locator('.session-message-text')).toHaveText(['a', 'b', 'c'])
+    await transcript.getByRole('button', { name: 'Open turn details', exact: true }).last().click()
+    await expect(
+      transcript.getByRole('button', { name: 'Collapse turn', exact: true }),
+    ).toHaveCount(2)
+    // Read chunks in the other segment while the complete turn is expanded.
+    await message.getByRole('button', { name: 'Continue reading', exact: true }).click()
+    await message.getByRole('button', { name: 'Continue reading', exact: true }).click()
+    await expect(message.locator('.session-message-text')).toHaveText(['a', 'b', 'c'])
+    const collapse = transcript.getByRole('button', { name: 'Collapse turn', exact: true }).last()
+    if (close === 'Escape') {
+      await collapse.focus()
+      await page.keyboard.press('Escape')
+    } else await collapse.click()
+    await expect(transcript.getByRole('region', { name: 'More message text' })).toHaveCount(0)
+    await expect(message.locator('.session-message-text')).toHaveText(['a'])
+    await message.getByRole('button', { name: 'Read more', exact: true }).click()
+    await expect(message.locator('.session-message-text')).toHaveText(['a', 'b'])
+    await transcript.getByRole('button', { name: 'Open turn details', exact: true }).last().click()
+    await expect(message.locator('.session-message-text')).toHaveText(['a'])
+  })
+}
+
+for (const level of ['Summary', 'Tools']) {
+  test(`releases the closed continuation query before reopening in ${level}`, async ({ page }) => {
+    const state = await continuedMessageApi(page)
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    await page.getByRole('radio', { name: level, exact: true }).check()
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+    await expect(transcript.locator('.session-message-text')).toHaveText(['a', 'b'])
+    await transcript.getByRole('button', { name: 'Close details', exact: true }).click()
+    state.failContinuation = true
+    await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+    await expect(transcript.getByRole('alert')).toContainText('Details could not be loaded.')
+    await expect(transcript.locator('.session-message-text')).toHaveText(['a'])
+  })
+}
+
+test('releases the originating tool reader after traversing to a goal member', async ({ page }) => {
+  const { prefix, suffix } = await toolGoalApi(page, 'blocked')
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const chip = transcript.getByRole('button', { name: 'exec_command', exact: true })
+  await chip.click()
+  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  const reader = transcript.getByRole('region', { name: 'More message text', exact: true })
+  await reader.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await reader.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await expect(reader).toContainText(prefix)
+  await expect(reader).toContainText(suffix)
+  await chip.click()
+  await chip.click()
+  await expect(reader).toHaveCount(0)
+  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  await expect(reader).toContainText('passed')
+  await expect(reader).not.toContainText(prefix)
+  await expect(reader).not.toContainText(suffix)
+})
