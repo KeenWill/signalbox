@@ -599,6 +599,11 @@ impl RunnerProtocolStore {
         self.recovery_notifications.clone()
     }
 
+    /// Waits until the store's incarnation-owned connection pool closes.
+    pub async fn closed(&self) {
+        self.pool.close_event().await;
+    }
+
     /// Allocates and durably records the next connection epoch for an enrollment.
     pub async fn open_connection(
         &self,
