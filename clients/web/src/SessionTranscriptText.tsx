@@ -327,7 +327,7 @@ function TranscriptWindow({
           readerAtEnd.current = atEnd
         }}
         followEnd={
-          (initialAnchor.kind === 'latest' || !pages?.at(-1)?.window.continuation_after) &&
+          !pages?.at(-1)?.window.continuation_after &&
           Boolean(
             pages
               ?.at(-1)
