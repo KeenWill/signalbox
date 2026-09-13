@@ -92,6 +92,8 @@ export function SessionCatalogSurface({
   onReturnFocusConsumed,
   needsAttention,
   onNeedsAttentionChange,
+  attentionAfter,
+  onAttentionAfterChange,
   lifecycleFilter,
   pageOrder,
   onLifecycleFilterChange,
@@ -103,6 +105,8 @@ export function SessionCatalogSurface({
   returnSessionId?: string
   onReturnFocusConsumed: () => void
   needsAttention: boolean
+  attentionAfter: string | null
+  onAttentionAfterChange: (value: string | null) => void
   onNeedsAttentionChange: (value: boolean) => void
   lifecycleFilter: string
   pageOrder: string
@@ -202,12 +206,12 @@ export function SessionCatalogSurface({
       sessionButtons.current.get(keyboardSelection)?.focus()
   }, [keyboardSelection, overlay])
   useEffect(() => {
-    if (!sessions.data || overlay !== null || !pendingReturnFocus.current) return
+    if (needsAttention || !sessions.data || overlay !== null || !pendingReturnFocus.current) return
     const target = sessionButtons.current.get(pendingReturnFocus.current)
     pendingReturnFocus.current = undefined
     target?.focus()
     onReturnFocusConsumed()
-  }, [sessions.data, overlay, onReturnFocusConsumed])
+  }, [needsAttention, sessions.data, overlay, onReturnFocusConsumed])
   useEffect(() => {
     if (!sessions.data || !restorePageFocus.current) return
     restorePageFocus.current = false
@@ -277,8 +281,13 @@ export function SessionCatalogSurface({
       <div className="surface-body catalog-surface">
         {attentionFilter}
         <AttentionSessions
+          after={attentionAfter}
+          onAfterChange={onAttentionAfterChange}
           returnSessionId={returnSessionId}
-          onReturnFocusConsumed={onReturnFocusConsumed}
+          onReturnFocusConsumed={() => {
+            pendingReturnFocus.current = undefined
+            onReturnFocusConsumed()
+          }}
           onSessionOpen={(session) => onStateChange({ ...state, session, workspace: true })}
           onTimelineIds={onTimelineIds}
         />

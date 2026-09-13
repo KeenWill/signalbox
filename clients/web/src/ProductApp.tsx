@@ -645,6 +645,7 @@ export function ProductApp({
   const [catalogLifecycleFilter, setCatalogLifecycleFilter] = useState('all')
   const [catalogPageOrder, setCatalogPageOrder] = useState('activity')
   const [catalogNeedsAttention, setCatalogNeedsAttention] = useState(false)
+  const [catalogAttentionAfter, setCatalogAttentionAfter] = useState<string | null>(null)
   const catalogReturnSessionId = useRef<string | undefined>(undefined)
   const consumeCatalogReturnFocus = useCallback(() => {
     catalogReturnSessionId.current = undefined
@@ -998,6 +999,8 @@ export function ProductApp({
         onReturnFocusConsumed={consumeCatalogReturnFocus}
         needsAttention={catalogNeedsAttention}
         onNeedsAttentionChange={setCatalogNeedsAttention}
+        attentionAfter={catalogAttentionAfter}
+        onAttentionAfterChange={setCatalogAttentionAfter}
         lifecycleFilter={catalogLifecycleFilter}
         pageOrder={catalogPageOrder}
         onLifecycleFilterChange={setCatalogLifecycleFilter}

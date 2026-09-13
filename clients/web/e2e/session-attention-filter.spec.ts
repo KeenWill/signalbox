@@ -1,14 +1,15 @@
 import { webContractBootstrapFixture } from '../src/product.fixture'
 import { expect, type Page, test } from './fontTest'
+import { sessionApi } from './session-fixture'
 
 const waitingSession = '10000000-0000-4000-8000-000000000001'
 const idleSession = '10000000-0000-4000-8000-000000000002'
 
-async function installSessions(page: Page) {
+async function installSessions(page: Page, laterPage = false) {
   await page.route('**/api/bootstrap', (route) =>
     route.fulfill({ json: webContractBootstrapFixture }),
   )
-  await page.route('**/api/sessions?**', (route) =>
+  await page.route(/\/api\/sessions\?/, (route) =>
     route.fulfill({
       json: {
         cursor: '10',
@@ -46,11 +47,28 @@ async function installSessions(page: Page) {
       },
     ],
   }
-  await page.route('**/api/attention', (route) => route.fulfill({ json: snapshot }))
+  const firstPageRows = Array.from({ length: 32 }, (_, index) => ({
+    ...snapshot.summaries[1],
+    session_id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+  }))
+  const firstPage = laterPage
+    ? {
+        ...snapshot,
+        summaries: firstPageRows,
+        continuation_after_session_id: firstPageRows.at(-1)?.session_id ?? null,
+      }
+    : snapshot
+  await page.route('**/api/attention{,?*}', (route) =>
+    route.fulfill({
+      json: new URL(route.request().url()).searchParams.has('after_session_id')
+        ? snapshot
+        : firstPage,
+    }),
+  )
   await page.route('**/api/attention/follow', (route) =>
     route.fulfill({
       contentType: 'application/x-ndjson',
-      body: `${JSON.stringify({ kind: 'snapshot', snapshot })}\n`,
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: firstPage })}\n`,
     }),
   )
 }
@@ -108,3 +126,61 @@ test('keyboard selection follows visible attention rows', async ({ page }) => {
   await expect(page.getByRole('checkbox', { name: 'Needs attention', exact: true })).toBeChecked()
   await expect(row).toBeFocused()
 })
+
+for (const laterPage of [false, true]) {
+  for (const returnAction of ['Back', 'Escape']) {
+    test(`attention filter and launching row survive ${returnAction} from ${laterPage ? 'a later' : 'the first'} page`, async ({
+      page,
+    }) => {
+      await sessionApi(page, true, waitingSession)
+      await installSessions(page, laterPage)
+      await page.goto('/sessions')
+      const filter = page.getByRole('checkbox', { name: 'Needs attention', exact: true })
+      await filter.check()
+      if (laterPage) await page.getByRole('button', { name: 'Next', exact: true }).click()
+      const row = page.getByRole('button').filter({ hasText: waitingSession })
+      await row.click()
+      await expect(page.locator('.session-compact-header')).toBeVisible()
+      if (returnAction === 'Back') await page.goBack()
+      else {
+        await page.getByRole('main').focus()
+        await page.keyboard.press('Escape')
+      }
+      await expect(page).toHaveURL(/\/sessions$/)
+      await expect(filter).toBeChecked()
+      await expect(row).toBeFocused()
+      await page.route(/\/api\/sessions\?/, (route) =>
+        route.fulfill({
+          json: {
+            cursor: '10',
+            total: '1',
+            continuation: null,
+            sort: 'last_activity_descending',
+            summaries: [
+              {
+                session_id: waitingSession,
+                title_summary: 'Waiting session',
+                title_truncated: false,
+                state: 'idle',
+                archived: false,
+                action: null,
+                active_turn_count: '0',
+                queued_turn_count: '0',
+                current_turn_id: null,
+                goal_block: null,
+                repository_watch: null,
+                judge: { actionable: '0', completed: '0', escalated: '0', failed: '0' },
+                last_activity: { kind: 'session', unix_microseconds: '1787342400000000' },
+              },
+            ],
+          },
+        }),
+      )
+      if (laterPage)
+        await expect(page.getByRole('button', { name: 'First page', exact: true })).toBeVisible()
+      await filter.uncheck()
+      await expect(page.getByRole('button', { name: /^Waiting session / })).toBeVisible()
+      await expect(filter).toBeFocused()
+    })
+  }
+}

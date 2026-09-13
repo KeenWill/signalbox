@@ -42,11 +42,15 @@ export function AttentionSurface({
 }
 
 export function AttentionSessions({
+  after,
+  onAfterChange,
   returnSessionId,
   onReturnFocusConsumed,
   onSessionOpen,
   onTimelineIds,
 }: {
+  after: string | null
+  onAfterChange: (after: string | null) => void
   returnSessionId?: string
   onReturnFocusConsumed: () => void
   onSessionOpen: (sessionId: string) => void
@@ -57,7 +61,6 @@ export function AttentionSessions({
   const sessionLinks = useRef(new Map<string, HTMLButtonElement>())
   const pendingReturnFocus = useRef(returnSessionId)
   const queryClient = useQueryClient()
-  const [after, setAfter] = useState<string | null>(null)
   const [monitorGeneration, setMonitorGeneration] = useState(0)
   const errorFocus = useRef<HTMLButtonElement>(null)
   const pageHeading = useRef<HTMLHeadingElement>(null)
@@ -160,12 +163,12 @@ export function AttentionSessions({
     if (!continuation || !currentPage) return
     pageCursorFloor.current = currentPage.cursor
     focusReplacement.current = true
-    setAfter(continuation)
+    onAfterChange(continuation)
   }
   const returnToLivePage = () => {
     pageCursorFloor.current = null
     focusReplacement.current = true
-    setAfter(null)
+    onAfterChange(null)
   }
   const restartMonitor = () => {
     focusReplacement.current = true

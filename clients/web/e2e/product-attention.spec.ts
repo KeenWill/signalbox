@@ -491,7 +491,7 @@ test('applies the density preference to Attention rows', async ({ page }) => {
   await page.goto('/sessions')
   await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
 
-  const row = page.getByRole('listitem').first().getByRole('link')
+  const row = page.getByRole('listitem').first().getByRole('button')
   await expect(row).toHaveCSS('min-height', '62px')
   await page.getByRole('main').focus()
   await page.keyboard.press('Shift+D')
@@ -504,7 +504,7 @@ test('uses the available Attention width and keeps arrows inside their rows', as
   await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
   for (const width of [1440, 1024, 390]) {
     await page.setViewportSize({ width, height: 900 })
-    const row = page.getByRole('listitem').first().getByRole('link')
+    const row = page.getByRole('listitem').first().getByRole('button')
     await expect(row).toBeVisible()
     const workbench = await page.locator('.attention-workbench').boundingBox()
     const list = await page.locator('.attention-list').boundingBox()
@@ -527,10 +527,10 @@ test('opens the session from its attention row', async ({ page }) => {
   await installAttentionScenario(page)
   await page.goto('/sessions')
   await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
-  const row = page.getByRole('link', {
+  const row = page.getByRole('button', {
     name: new RegExp(`Approval required.*${approvalSessionId}`),
   })
-  await expect(row).toHaveAttribute('href', new RegExp(`session=${approvalSessionId}`))
+  await expect(row).toBeVisible()
   await row.focus()
   await row.press('Enter')
   await expect(page).toHaveURL(new RegExp(`/sessions\\?.*session=${approvalSessionId}`))
